@@ -1,0 +1,21 @@
+# binary
+orqestra
+
+# Go
+*.test
+*.out
+coverage.txt
+
+# env / secrets
+.env
+*.env
+orqestra.yaml
+clipproxy.yaml
+
+# macOS
+.DS_Store
+
+# editor
+.vscode/
+*.swp
+*.swo
