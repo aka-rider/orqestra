@@ -4,33 +4,31 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
+	"io"
 	"testing"
 
 	"github.com/xiii/orqestra/internal/config"
-	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/planner"
 )
 
-// newTestClient creates a Client backed by a mock HTTP server that returns
-// the given mockOutput as the assistant message content.
-func newTestClient(t *testing.T, mockOutput string) (*harness.Client, func()) {
-	t.Helper()
+// mockCLIRunner is a test double for the CLIRunner interface.
+type mockCLIRunner struct {
+	response string
+	err      error
+}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := map[string]any{
-			"choices": []map[string]any{
-				{"message": map[string]string{"role": "assistant", "content": mockOutput}},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
+func (m *mockCLIRunner) RunPrint(_ context.Context, _, _ string) (string, error) {
+	if m.err != nil {
+		return "", m.err
+	}
+	return m.response, nil
+}
 
-	client := harness.NewClient("test-model", nil)
-	client.BaseURL = srv.URL
-	return client, srv.Close
+func (m *mockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (string, error) {
+	if m.err != nil {
+		return "", m.err
+	}
+	return m.response, nil
 }
 
 func TestPlan_Success(t *testing.T) {
@@ -40,15 +38,14 @@ func TestPlan_Success(t *testing.T) {
 		"acceptance": []string{"Server starts", "GET /health returns 200"},
 	}
 	specJSON, _ := json.Marshal(spec)
-	client, cleanup := newTestClient(t, string(specJSON))
-	defer cleanup()
+	mock := &mockCLIRunner{response: string(specJSON)}
 
 	cfg := &config.PlannerConfig{
 		Model:        "test-model",
 		SystemPrompt: "Plan mode.",
 	}
 
-	p := planner.New(client, cfg)
+	p := planner.New(mock, cfg)
 	result, err := p.Plan(context.Background(), "build a REST API")
 
 	if err != nil {
@@ -73,11 +70,10 @@ func TestPlan_JsonEnvelope(t *testing.T) {
 	}
 	specJSON, _ := json.Marshal(spec)
 	envelope := fmt.Sprintf(`{"type":"result","result":%q}`, string(specJSON))
-	client, cleanup := newTestClient(t, envelope)
-	defer cleanup()
+	mock := &mockCLIRunner{response: envelope}
 
 	cfg := &config.PlannerConfig{Model: "test-model", SystemPrompt: "Plan."}
-	p := planner.New(client, cfg)
+	p := planner.New(mock, cfg)
 	result, err := p.Plan(context.Background(), "refactor auth")
 
 	if err != nil {
@@ -92,11 +88,10 @@ func TestPlan_JsonEnvelope(t *testing.T) {
 }
 
 func TestPlan_InvalidJSON(t *testing.T) {
-	client, cleanup := newTestClient(t, "not json at all")
-	defer cleanup()
+	mock := &mockCLIRunner{response: "not json at all"}
 
 	cfg := &config.PlannerConfig{Model: "test-model", SystemPrompt: "Plan."}
-	p := planner.New(client, cfg)
+	p := planner.New(mock, cfg)
 	result, err := p.Plan(context.Background(), "do something")
 
 	if err != nil {
@@ -110,11 +105,10 @@ func TestPlan_InvalidJSON(t *testing.T) {
 func TestPlan_IncompleteSpec(t *testing.T) {
 	spec := map[string]any{"goal": "Missing steps and acceptance"}
 	specJSON, _ := json.Marshal(spec)
-	client, cleanup := newTestClient(t, string(specJSON))
-	defer cleanup()
+	mock := &mockCLIRunner{response: string(specJSON)}
 
 	cfg := &config.PlannerConfig{Model: "test-model", SystemPrompt: "Plan."}
-	p := planner.New(client, cfg)
+	p := planner.New(mock, cfg)
 	result, err := p.Plan(context.Background(), "incomplete")
 
 	if err != nil {

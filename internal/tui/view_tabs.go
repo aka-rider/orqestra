@@ -50,18 +50,8 @@ func (t tabsView) Update(msg tea.Msg) (tabsView, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "tab":
-			if len(t.tabs) > 0 {
-				t.active = (t.active + 1) % len(t.tabs)
-			}
-			return t, nil
-		case "shift+tab":
-			if len(t.tabs) > 0 {
-				t.active = (t.active - 1 + len(t.tabs)) % len(t.tabs)
-			}
-			return t, nil
-		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
-			idx := int(msg.String()[0] - '1')
+		case "alt+1", "alt+2", "alt+3", "alt+4", "alt+5", "alt+6", "alt+7", "alt+8", "alt+9":
+			idx := int(msg.String()[len(msg.String())-1] - '1')
 			if idx >= 0 && idx < len(t.tabs) {
 				t.active = idx
 			}

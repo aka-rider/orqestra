@@ -6,23 +6,23 @@ import (
 	"fmt"
 
 	"github.com/xiii/orqestra/internal/config"
-	"github.com/xiii/orqestra/internal/llm"
+	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/types"
 )
 
 // PlanValidator independently judges whether a specification is complete,
 // executable, non-contradictory, and testable.
 type PlanValidator struct {
-	provider llm.Provider
-	cfg      *config.ValidatorConfig
+	runner harness.CLIRunner
+	cfg    *config.ValidatorConfig
 }
 
-// NewPlanValidator creates a plan validator using the given LLM provider.
-func NewPlanValidator(provider llm.Provider, cfg *config.ValidatorConfig) *PlanValidator {
-	return &PlanValidator{provider: provider, cfg: cfg}
+// NewPlanValidator creates a plan validator using the given CLIRunner.
+func NewPlanValidator(runner harness.CLIRunner, cfg *config.ValidatorConfig) *PlanValidator {
+	return &PlanValidator{runner: runner, cfg: cfg}
 }
 
-// Validate runs deterministic checks and then an LLM-based validation.
+// Validate runs deterministic checks and then a CLI-based validation.
 func (v *PlanValidator) Validate(ctx context.Context, spec types.Specification) (*types.ValidationReport, error) {
 	// Phase 1: Deterministic pre-checks
 	issues := v.deterministicChecks(spec)
@@ -38,27 +38,21 @@ func (v *PlanValidator) Validate(ctx context.Context, spec types.Specification) 
 		}
 	}
 
-	// Phase 2: LLM-based validation
+	// Phase 2: CLI-based validation
 	specJSON, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal spec for validation: %w", err)
 	}
 
-	resp, err := v.provider.Generate(ctx, &llm.Request{
-		Model:        v.cfg.Model,
-		SystemPrompt: v.cfg.SystemPrompt,
-		Messages: []llm.Message{
-			{Role: "user", Content: "Validate this specification:\n\n" + string(specJSON)},
-		},
-		ResponseJSON: true,
-	})
+	prompt := "Validate this specification:\n\n" + string(specJSON)
+	output, err := v.runner.RunPrint(ctx, prompt, v.cfg.SystemPrompt)
 	if err != nil {
-		return nil, fmt.Errorf("validator LLM call: %w", err)
+		return nil, fmt.Errorf("validator CLI call: %w", err)
 	}
 
 	var report types.ValidationReport
-	if err := json.Unmarshal([]byte(resp.Content), &report); err != nil {
-		return nil, fmt.Errorf("parse validation report: %w (raw: %s)", err, resp.Content)
+	if err := json.Unmarshal([]byte(output), &report); err != nil {
+		return nil, fmt.Errorf("parse validation report: %w (raw: %s)", err, output)
 	}
 
 	// Merge deterministic issues into report

@@ -17,8 +17,8 @@ import (
 // The SessionManager's notify callback is wired to push events into the TUI.
 // Sessions auto-create tabs — planning and execution are both driven as sessions.
 //
-// Returns the final spec and whether the plan was approved.
-func Run(pipeline PipelineFuncs) (types.Specification, bool, error) {
+// Returns only on /quit or ctrl+c. The TUI owns its lifecycle.
+func Run(pipeline PipelineFuncs) error {
 	m := NewModel(pipeline)
 
 	p := tea.NewProgram(
@@ -48,13 +48,12 @@ func Run(pipeline PipelineFuncs) (types.Specification, bool, error) {
 		}
 	}()
 
-	finalModel, err := p.Run()
+	_, err := p.Run()
 	if err != nil {
-		return types.Specification{}, false, fmt.Errorf("TUI error: %w", err)
+		return fmt.Errorf("TUI error: %w", err)
 	}
 
-	result := finalModel.(Model)
-	return result.Spec(), result.IsApproved(), result.Error()
+	return nil
 }
 
 // WireSessionManager connects a SessionManager's event notifications to the

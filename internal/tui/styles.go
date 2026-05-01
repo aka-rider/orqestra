@@ -9,6 +9,8 @@ var (
 	mutedColor     = lipgloss.Color("#6B7280")
 	errorColor     = lipgloss.Color("#EF4444")
 	bgColor        = lipgloss.Color("#1F2937")
+	approveColor   = lipgloss.Color("#10B981")
+	rejectColor    = lipgloss.Color("#EF4444")
 
 	// Heading styles
 	titleStyle = lipgloss.NewStyle().
@@ -70,4 +72,34 @@ var (
 	statusStyle = lipgloss.NewStyle().
 			Foreground(mutedColor).
 			Italic(true)
+
+	// Command bar styles
+	commandBarInputStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#E5E7EB"))
+
+	commandBarHintStyle = lipgloss.NewStyle().
+				Foreground(mutedColor).
+				Italic(true)
+
+	// Autocomplete overlay styles
+	acOverlayStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(primaryColor).
+			Padding(0, 1)
+
+	acItemStyle = lipgloss.NewStyle().
+			Foreground(mutedColor)
+
+	acSelectedStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(primaryColor)
+
+	// Approve/reject key styles
+	approveKeyStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(approveColor)
+
+	rejectKeyStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(rejectColor)
 )

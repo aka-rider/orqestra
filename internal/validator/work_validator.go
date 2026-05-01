@@ -8,7 +8,7 @@ import (
 	"os/exec"
 
 	"github.com/xiii/orqestra/internal/config"
-	"github.com/xiii/orqestra/internal/llm"
+	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/types"
 )
 
@@ -20,16 +20,16 @@ type WorkValidationInput struct {
 
 // WorkValidator independently validates the work output against the specification.
 type WorkValidator struct {
-	provider llm.Provider
-	cfg      *config.WorkValidatorConfig
+	runner harness.CLIRunner
+	cfg    *config.WorkValidatorConfig
 }
 
-// NewWorkValidator creates a work validator using the given LLM provider.
-func NewWorkValidator(provider llm.Provider, cfg *config.WorkValidatorConfig) *WorkValidator {
-	return &WorkValidator{provider: provider, cfg: cfg}
+// NewWorkValidator creates a work validator using the given CLIRunner.
+func NewWorkValidator(runner harness.CLIRunner, cfg *config.WorkValidatorConfig) *WorkValidator {
+	return &WorkValidator{runner: runner, cfg: cfg}
 }
 
-// Validate runs validation commands and then LLM-based assessment.
+// Validate runs validation commands and then CLI-based assessment.
 func (v *WorkValidator) Validate(ctx context.Context, input *WorkValidationInput) (*types.ValidationReport, error) {
 	var issues []types.Issue
 	var cmdResults []types.ValidationCommandResult
@@ -57,7 +57,7 @@ func (v *WorkValidator) Validate(ctx context.Context, input *WorkValidationInput
 		}, nil
 	}
 
-	// Phase 2: LLM-based validation
+	// Phase 2: CLI-based validation
 	specJSON, err := json.MarshalIndent(input.Spec, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal spec: %w", err)
@@ -71,21 +71,14 @@ func (v *WorkValidator) Validate(ctx context.Context, input *WorkValidationInput
 		prompt += fmt.Sprintf("\n\nValidation Command Results:\n%s", string(cmdJSON))
 	}
 
-	resp, err := v.provider.Generate(ctx, &llm.Request{
-		Model:        v.cfg.Model,
-		SystemPrompt: v.cfg.SystemPrompt,
-		Messages: []llm.Message{
-			{Role: "user", Content: prompt},
-		},
-		ResponseJSON: true,
-	})
+	output, err := v.runner.RunPrint(ctx, prompt, v.cfg.SystemPrompt)
 	if err != nil {
-		return nil, fmt.Errorf("work validator LLM call: %w", err)
+		return nil, fmt.Errorf("work validator CLI call: %w", err)
 	}
 
 	var report types.ValidationReport
-	if err := json.Unmarshal([]byte(resp.Content), &report); err != nil {
-		return nil, fmt.Errorf("parse work validation report: %w (raw: %s)", err, resp.Content)
+	if err := json.Unmarshal([]byte(output), &report); err != nil {
+		return nil, fmt.Errorf("parse work validation report: %w (raw: %s)", err, output)
 	}
 
 	// Merge command-failure issues

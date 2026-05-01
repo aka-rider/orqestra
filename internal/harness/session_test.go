@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -77,9 +78,9 @@ func TestSessionManager_SetNotify(t *testing.T) {
 	client := NewClient("test-model", nil)
 	sm := NewSessionManager(client, nil)
 
-	var called bool
+	var called atomic.Bool
 	sm.SetNotify(func(evt SessionEvent) {
-		called = true
+		called.Store(true)
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -90,7 +91,7 @@ func TestSessionManager_SetNotify(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	if !called {
+	if !called.Load() {
 		t.Error("expected notify to be called after SetNotify")
 	}
 }

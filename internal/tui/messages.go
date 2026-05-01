@@ -3,6 +3,7 @@ package tui
 import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/scheduler"
 	"github.com/xiii/orqestra/internal/types"
 )
 
@@ -15,6 +16,36 @@ type PlanReadyMsg struct{}
 type ConfirmMsg struct {
 	Approved bool
 }
+
+// PromptSubmitMsg carries a user-typed prompt from the command bar.
+type PromptSubmitMsg struct {
+	Prompt string
+}
+
+// CommandMsg carries a parsed slash command from the command bar.
+type CommandMsg struct {
+	Name string
+	Args string
+}
+
+// IntentResultMsg carries the rephrased intent from the intent recognizer.
+type IntentResultMsg struct {
+	Rephrased string
+	Outcome   string
+	Err       error
+}
+
+// IntentConfirmMsg signals that the user approved the rephrased intent.
+type IntentConfirmMsg struct{}
+
+// IntentRejectMsg signals that the user rejected the rephrased intent.
+type IntentRejectMsg struct{}
+
+// ToggleLogsMsg signals that the log panel should be toggled.
+type ToggleLogsMsg struct{}
+
+// CycleBackToIdleMsg signals StateDone should transition back to StateIdle.
+type CycleBackToIdleMsg struct{}
 
 // PlanValidatedMsg signals that plan validation completed.
 type PlanValidatedMsg struct {
@@ -60,6 +91,11 @@ type LogMsg struct {
 // SessionEventMsg wraps a harness.SessionEvent for the TUI event loop.
 type SessionEventMsg struct {
 	Event harness.SessionEvent
+}
+
+// SchedulerEventMsg wraps a scheduler event for the TUI.
+type SchedulerEventMsg struct {
+	Event scheduler.Event
 }
 
 // streamChunkCmd creates a tea.Cmd that emits a StreamChunkMsg.

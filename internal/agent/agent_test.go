@@ -7,14 +7,29 @@ import (
 	"testing"
 
 	"github.com/xiii/orqestra/internal/config"
-	"github.com/xiii/orqestra/internal/llm"
+	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/types"
 	"github.com/xiii/orqestra/internal/validator"
 )
 
-// mockPlanner satisfies the planning stage using a pre-built spec.
-type mockPlannerClient struct {
-	spec types.Specification
+// mockCLIRunner is a test double for the CLIRunner interface.
+type mockCLIRunner struct {
+	response string
+	err      error
+}
+
+func (m *mockCLIRunner) RunPrint(_ context.Context, _, _ string) (string, error) {
+	if m.err != nil {
+		return "", m.err
+	}
+	return m.response, nil
+}
+
+func (m *mockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (string, error) {
+	if m.err != nil {
+		return "", m.err
+	}
+	return m.response, nil
 }
 
 func TestBuildExecutionPrompt(t *testing.T) {
@@ -53,19 +68,16 @@ func TestFormatValidationFeedback(t *testing.T) {
 	}
 }
 
-func TestAgent_PlanValidation_SkippedWhenNil(t *testing.T) {
-	// Agent with nil validators should skip validation stages
+func TestAgent_PlanValidation_WithMockRunner(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Retry.PlannerAttempts = 1
 
-	// We can't easily run a full Agent.Run without a real harness,
-	// but we can test the validator components independently
 	reportJSON, _ := json.Marshal(types.ValidationReport{
 		SchemaVersion: "1",
 		Verdict:       types.VerdictPass,
 		Summary:       "ok",
 	})
-	mock := &llm.MockProvider{IDValue: "test", Response: string(reportJSON)}
+	mock := &mockCLIRunner{response: string(reportJSON)}
 	vcfg := &config.ValidatorConfig{Model: "test"}
 	pv := validator.NewPlanValidator(mock, vcfg)
 
@@ -123,5 +135,5 @@ func containsSubstring(s, substr string) bool {
 // Suppress unused import warnings
 var (
 	_ io.Writer
-	_ = (*mockPlannerClient)(nil)
+	_ harness.CLIRunner = (*mockCLIRunner)(nil)
 )

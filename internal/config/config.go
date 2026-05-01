@@ -3,17 +3,43 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
+// ProviderConfig defines a named LLM provider endpoint.
+type ProviderConfig struct {
+	BaseURL string `yaml:"base_url"`
+	APIKey  string `yaml:"api_key"` // supports ${ENV_VAR} interpolation
+	Type    string `yaml:"type"`    // "anthropic" | "openai"
+}
+
+// ModelConfig references a provider and model name.
+type ModelConfig struct {
+	Provider string `yaml:"provider"`
+	Model    string `yaml:"model"`
+}
+
+// ResolvedModel is a fully-resolved model with all connection details.
+type ResolvedModel struct {
+	BaseURL string
+	APIKey  string
+	Model   string
+	Type    string
+}
+
 type Config struct {
-	Planner       PlannerConfig       `yaml:"planner"`
-	Validator     ValidatorConfig     `yaml:"validator"`
-	Worker        WorkerConfig        `yaml:"worker"`
-	WorkValidator WorkValidatorConfig `yaml:"work_validator"`
-	Retry         RetryConfig         `yaml:"retry"`
+	Providers      map[string]ProviderConfig `yaml:"providers"`
+	Models         map[string]ModelConfig    `yaml:"models"`
+	Planner        PlannerConfig             `yaml:"planner"`
+	Validator      ValidatorConfig           `yaml:"validator"`
+	Worker         WorkerConfig              `yaml:"worker"`
+	WorkValidator  WorkValidatorConfig       `yaml:"work_validator"`
+	Retry          RetryConfig               `yaml:"retry"`
+	ExecutionGraph ExecutionGraphConfig      `yaml:"execution_graph"`
+	Intent         IntentConfig              `yaml:"intent"`
 }
 
 type PlannerConfig struct {
@@ -21,6 +47,7 @@ type PlannerConfig struct {
 	BaseURL      string   `yaml:"base_url"`
 	SystemPrompt string   `yaml:"system_prompt"`
 	AllowedTools []string `yaml:"allowed_tools"`
+	ModelRef     string   `yaml:"model_ref"` // optional: references key in models map
 }
 
 type ValidatorConfig struct {
@@ -29,6 +56,7 @@ type ValidatorConfig struct {
 	Model        string `yaml:"model"`
 	APIKey       string `yaml:"api_key"`
 	SystemPrompt string `yaml:"system_prompt"`
+	ModelRef     string `yaml:"model_ref"` // optional: references key in models map
 }
 
 type WorkerConfig struct {
@@ -37,6 +65,7 @@ type WorkerConfig struct {
 	AllowedTools   []string `yaml:"allowed_tools"`
 	PermissionMode string   `yaml:"permission_mode"`
 	Timeout        Duration `yaml:"timeout"`
+	ModelRef       string   `yaml:"model_ref"` // optional: references key in models map
 }
 
 type WorkValidatorConfig struct {
@@ -45,6 +74,7 @@ type WorkValidatorConfig struct {
 	Model        string `yaml:"model"`
 	APIKey       string `yaml:"api_key"`
 	SystemPrompt string `yaml:"system_prompt"`
+	ModelRef     string `yaml:"model_ref"` // optional: references key in models map
 }
 
 type RetryConfig struct {
@@ -56,6 +86,35 @@ type RetryConfig struct {
 // Duration wraps time.Duration for YAML unmarshaling.
 type Duration struct {
 	time.Duration
+}
+
+// ExecutionGraphConfig defines the DAG of agents for multi-agent orchestration.
+type ExecutionGraphConfig struct {
+	Agents      []AgentNodeConfig `yaml:"agents"`
+	Concurrency int               `yaml:"concurrency"`
+}
+
+// AgentNodeConfig defines an agent within the execution graph.
+type AgentNodeConfig struct {
+	Role             string               `yaml:"role"`
+	Model            string               `yaml:"model"`
+	SmallModel       string               `yaml:"small_model"`
+	SystemPromptFile string               `yaml:"system_prompt_file"`
+	DependsOn        []string             `yaml:"depends_on"`
+	Validator        *ValidatorNodeConfig `yaml:"validator"`
+}
+
+// ValidatorNodeConfig defines a validator attached to an agent.
+type ValidatorNodeConfig struct {
+	Role             string `yaml:"role"`
+	Model            string `yaml:"model"`
+	SystemPromptFile string `yaml:"system_prompt_file"`
+}
+
+// IntentConfig configures the intent recognition layer.
+type IntentConfig struct {
+	ModelRef     string `yaml:"model_ref"`
+	SystemPrompt string `yaml:"system_prompt"`
 }
 
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
@@ -141,7 +200,53 @@ func Load(path string) (*Config, error) {
 		cfg.Validator.APIKey = v
 	}
 
+	// Validate: every model's provider key must exist
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
+}
+
+// validate checks that all model references point to existing providers.
+func (c *Config) validate() error {
+	for name, m := range c.Models {
+		if _, ok := c.Providers[m.Provider]; !ok {
+			return fmt.Errorf("model %q references unknown provider %q", name, m.Provider)
+		}
+	}
+	return nil
+}
+
+// envVarPattern matches ${VAR_NAME} for environment variable interpolation.
+var envVarPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
+
+// interpolateEnv expands ${VAR} patterns using os.Getenv.
+func interpolateEnv(s string) string {
+	return envVarPattern.ReplaceAllStringFunc(s, func(match string) string {
+		varName := envVarPattern.FindStringSubmatch(match)[1]
+		return os.Getenv(varName)
+	})
+}
+
+// ResolveModel resolves a model name from the models map into a ResolvedModel.
+func (c *Config) ResolveModel(name string) (ResolvedModel, error) {
+	mc, ok := c.Models[name]
+	if !ok {
+		return ResolvedModel{}, fmt.Errorf("model %q not found in config", name)
+	}
+
+	pc, ok := c.Providers[mc.Provider]
+	if !ok {
+		return ResolvedModel{}, fmt.Errorf("provider %q not found for model %q", mc.Provider, name)
+	}
+
+	return ResolvedModel{
+		BaseURL: pc.BaseURL,
+		APIKey:  interpolateEnv(pc.APIKey),
+		Model:   mc.Model,
+		Type:    pc.Type,
+	}, nil
 }
 
 const planValidatorSystemPrompt = `You are an independent plan validator. Your job is to judge whether a specification is complete, executable, non-contradictory, and testable.

@@ -9,7 +9,6 @@ import (
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
-	"github.com/xiii/orqestra/internal/llm"
 	"github.com/xiii/orqestra/internal/planner"
 	"github.com/xiii/orqestra/internal/types"
 	"github.com/xiii/orqestra/internal/validator"
@@ -38,7 +37,7 @@ type Agent struct {
 	planner       *planner.Planner
 	planValidator *validator.PlanValidator
 	workValidator *validator.WorkValidator
-	workerClient  *harness.Client
+	workerRunner  harness.CLIRunner
 	cfg           *config.Config
 	onStage       func(StageEvent)
 }
@@ -48,14 +47,14 @@ func NewAgent(
 	planner *planner.Planner,
 	planValidator *validator.PlanValidator,
 	workValidator *validator.WorkValidator,
-	workerClient *harness.Client,
+	workerRunner harness.CLIRunner,
 	cfg *config.Config,
 ) *Agent {
 	return &Agent{
 		planner:       planner,
 		planValidator: planValidator,
 		workValidator: workValidator,
-		workerClient:  workerClient,
+		workerRunner:  workerRunner,
 		cfg:           cfg,
 	}
 }
@@ -241,11 +240,11 @@ func (a *Agent) validatePlanWithRepair(ctx context.Context, spec *types.Specific
 // execute runs the worker harness and captures output.
 func (a *Agent) execute(ctx context.Context, spec types.Specification, stdout io.Writer) (string, error) {
 	execPrompt := buildExecutionPrompt(spec)
-	resp, err := a.workerClient.RunStreaming(ctx, execPrompt, "", stdout)
+	output, err := a.workerRunner.RunStreaming(ctx, execPrompt, "", stdout)
 	if err != nil {
 		return "", err
 	}
-	return resp.Content, nil
+	return output, nil
 }
 
 // validateWorkWithRepair validates work and optionally re-executes.
@@ -273,11 +272,11 @@ func (a *Agent) validateWorkWithRepair(ctx context.Context, spec types.Specifica
 			slog.Info("work validation failed, re-executing", "attempt", i+1, "summary", report.Summary)
 			feedback := formatValidationFeedback(report)
 			repairPrompt := fmt.Sprintf("The previous execution was rejected by the validator:\n%s\n\nOriginal spec goal: %s\nPlease fix the issues.", feedback, spec.Goal)
-			resp, err := a.workerClient.RunStreaming(ctx, repairPrompt, "", stdout)
+			output, err := a.workerRunner.RunStreaming(ctx, repairPrompt, "", stdout)
 			if err != nil {
 				return report, nil
 			}
-			currentOutput = resp.Content
+			currentOutput = output
 		} else {
 			return report, nil
 		}
@@ -322,41 +321,51 @@ func formatValidationFeedback(report *types.ValidationReport) string {
 // NewFromConfig creates a fully-wired Agent from the application config.
 // If validator endpoints are unreachable, validators will be nil (skipped).
 func NewFromConfig(cfg *config.Config) *Agent {
-	// Planner client
-	planClient := harness.NewClient(cfg.Planner.Model, cfg.Planner.AllowedTools)
+	// Resolve or build planner runner
+	planRunner := resolveRunner(cfg, cfg.Planner.ModelRef, cfg.Planner.BaseURL, cfg.Planner.Model)
 
-	// Worker client
-	workerClient := harness.NewClient(cfg.Worker.Model, cfg.Worker.AllowedTools)
-	workerClient.PermissionMode = cfg.Worker.PermissionMode
+	// Resolve or build worker runner
+	workerRunner := resolveRunner(cfg, cfg.Worker.ModelRef, cfg.Worker.BaseURL, cfg.Worker.Model)
 
 	// Planner
-	p := planner.New(planClient, &cfg.Planner)
+	p := planner.New(planRunner, &cfg.Planner)
 
-	// Plan Validator (via LLM provider)
+	// Plan Validator
 	var pv *validator.PlanValidator
-	if cfg.Validator.BaseURL != "" {
-		provider := llm.NewOpenAIProvider(
-			"plan-validator",
-			cfg.Validator.BaseURL,
-			cfg.Validator.Model,
-			cfg.Validator.APIKey,
-		)
-		pv = validator.NewPlanValidator(provider, &cfg.Validator)
+	validatorRunner := resolveRunner(cfg, cfg.Validator.ModelRef, cfg.Validator.BaseURL, cfg.Validator.Model)
+	if validatorRunner != nil {
+		pv = validator.NewPlanValidator(validatorRunner, &cfg.Validator)
 	}
 
-	// Work Validator (via LLM provider)
+	// Work Validator
 	var wv *validator.WorkValidator
-	if cfg.WorkValidator.BaseURL != "" {
-		provider := llm.NewOpenAIProvider(
-			"work-validator",
-			cfg.WorkValidator.BaseURL,
-			cfg.WorkValidator.Model,
-			cfg.WorkValidator.APIKey,
-		)
-		wv = validator.NewWorkValidator(provider, &cfg.WorkValidator)
+	workValidatorRunner := resolveRunner(cfg, cfg.WorkValidator.ModelRef, cfg.WorkValidator.BaseURL, cfg.WorkValidator.Model)
+	if workValidatorRunner != nil {
+		wv = validator.NewWorkValidator(workValidatorRunner, &cfg.WorkValidator)
 	}
 
-	return NewAgent(p, pv, wv, workerClient, cfg)
+	return NewAgent(p, pv, wv, workerRunner, cfg)
+}
+
+// resolveRunner creates a CLIRunner from either a model_ref or fallback base_url/model.
+func resolveRunner(cfg *config.Config, modelRef, baseURL, model string) harness.CLIRunner {
+	if modelRef != "" {
+		resolved, err := cfg.ResolveModel(modelRef)
+		if err == nil {
+			return harness.NewClaudeCLI(resolved)
+		}
+		slog.Warn("failed to resolve model_ref, falling back", "ref", modelRef, "err", err)
+	}
+	if baseURL == "" && model == "" {
+		return nil
+	}
+	// Fallback: construct a ResolvedModel from the old-style per-component fields
+	resolved := config.ResolvedModel{
+		BaseURL: baseURL,
+		Model:   model,
+		Type:    "anthropic", // default type for fallback
+	}
+	return harness.NewClaudeCLI(resolved)
 }
 
 // Ensure JSON is imported (used in formatValidationFeedback context).

@@ -17,17 +17,19 @@ import (
 type State int
 
 const (
-	StatePlanning   State = iota // Planning tab active, claude running
-	StateValidating              // Plan validation in progress
-	StateConfirming              // Plan ready, waiting for y/N
-	StateExecuting               // Worker tab active, claude running
-	StateDone                    // Everything finished
+	StateIdle          State = iota // Command bar focused, waiting for input
+	StateIntentConfirm              // Show rephrased intent, [A]pprove/[R]eject
+	StatePlanning                   // Planning tab active, claude running
+	StateValidating                 // Plan validation in progress
+	StateConfirming                 // Plan ready, waiting for [A]pprove/[R]eject
+	StateExecuting                  // Worker tab active, claude running
+	StateDone                       // Everything finished, will cycle back to idle
 )
 
 // PipelineFuncs holds the functions the TUI drives.
 type PipelineFuncs struct {
 	// Plan runs the planner and streams output. Returns the spec.
-	Plan func(ctx context.Context, stdout io.Writer) (types.Specification, error)
+	Plan func(ctx context.Context, prompt string, stdout io.Writer) (types.Specification, error)
 	// ValidatePlan runs plan validation. Returns nil report if validation is disabled.
 	ValidatePlan func(ctx context.Context, spec types.Specification) (*types.ValidationReport, error)
 	// Execute runs the worker and streams output.
@@ -44,10 +46,18 @@ type Model struct {
 	state    State
 	spec     types.Specification
 	approved bool
+	prompt   string // current prompt from command bar
 
 	tabsView    tabsView
 	confirmView confirmView
+	commandBar  commandBarModel
+	registry    *CommandRegistry
 	logPanel    *logPanel
+	showLogs    bool
+
+	// Help/intent ephemeral content displayed in tab area
+	helpContent   string
+	intentContent string
 
 	pipeline PipelineFuncs
 	program  *tea.Program // set after program creation for execution coordination
@@ -61,18 +71,24 @@ type Model struct {
 	planTabIdx int
 	execTabIdx int
 
-	// Session→tab mapping: sessionID → tab index
+	// Session->tab mapping: sessionID -> tab index
 	sessionTabs map[string]int
 }
 
-// NewModel creates the main TUI model.
+// NewModel creates the main TUI model starting at StateIdle.
 func NewModel(pipeline PipelineFuncs) Model {
 	ctx, cancel := context.WithCancel(context.Background())
+	registry := NewCommandRegistry()
+	RegisterBuiltins(registry)
+
 	m := Model{
-		state:       StatePlanning,
+		state:       StateIdle,
 		tabsView:    newTabsView(),
 		confirmView: newConfirmView(),
+		commandBar:  newCommandBar(registry),
+		registry:    registry,
 		logPanel:    newLogPanel(),
+		showLogs:    false,
 		pipeline:    pipeline,
 		ctx:         ctx,
 		cancel:      cancel,
@@ -80,9 +96,6 @@ func NewModel(pipeline PipelineFuncs) Model {
 		execTabIdx:  -1,
 		sessionTabs: make(map[string]int),
 	}
-	// Create the Planner tab immediately so UI renders from the start
-	m.planTabIdx = m.tabsView.AddTab("Planner")
-	m.sessionTabs["plan"] = m.planTabIdx
 	return m
 }
 
@@ -96,11 +109,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-		logHeight := 8
-		tabHeight := m.height - logHeight
+		commandBarHeight := 3
+		logHeight := 0
+		if m.showLogs {
+			logHeight = 8
+		}
+		tabHeight := m.height - commandBarHeight - logHeight
 
-		m.logPanel.SetWidth(m.width)
-		m.logPanel.SetHeight(logHeight)
+		if m.showLogs {
+			m.logPanel.SetWidth(m.width)
+			m.logPanel.SetHeight(logHeight)
+		}
+
+		m.commandBar.SetWidth(m.width)
 
 		tabMsg := tea.WindowSizeMsg{Width: m.width, Height: tabHeight}
 		tv, cmd := m.tabsView.Update(tabMsg)
@@ -108,43 +129,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c":
-			m.cancel()
-			return m, tea.Quit
-		case "q":
-			if m.state == StateDone {
-				return m, tea.Quit
-			}
-		case "ctrl+l":
-			// Toggle log panel focus
-			m.logPanel.SetFocused(!m.logPanel.IsFocused())
-			return m, nil
+		return m.handleKey(msg)
+
+	case PromptSubmitMsg:
+		return m.handlePromptSubmit(msg)
+
+	case CommandMsg:
+		return m.handleCommand(msg)
+
+	case ToggleLogsMsg:
+		m.showLogs = !m.showLogs
+		if m.width > 0 {
+			return m.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
 		}
-		// If log panel is focused, route scroll keys to it
-		if m.logPanel.IsFocused() {
-			switch msg.String() {
-			case "up", "down", "pgup", "pgdown", "home", "end", "j", "k":
-				cmd := m.logPanel.Update(msg)
-				return m, cmd
-			case "esc":
-				m.logPanel.SetFocused(false)
-				return m, nil
-			}
-		}
-		// In confirming state, route keys to confirm view
-		if m.state == StateConfirming {
-			cv, cmd := m.confirmView.Update(msg)
-			m.confirmView = cv
-			return m, cmd
-		}
-		// Otherwise route to tabs (for tab switching)
-		tv, cmd := m.tabsView.Update(msg)
-		m.tabsView = tv
-		return m, cmd
+		return m, nil
+
+	case CycleBackToIdleMsg:
+		m.state = StateIdle
+		m.commandBar.SetState(StateIdle)
+		m.commandBar.Focus()
+		m.confirmView = newConfirmView()
+		m.helpContent = ""
+		m.intentContent = ""
+		return m, nil
 
 	case PlanReadyMsg:
 		m.state = StateConfirming
+		m.commandBar.SetState(StateConfirming)
 		return m, nil
 
 	case addTabMsg:
@@ -158,43 +169,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case planCompleteMsg:
 		m.spec = msg.spec
 		if m.pipeline.ValidatePlan == nil {
-			// No validator configured — go straight to confirm
 			m.state = StateConfirming
+			m.commandBar.SetState(StateConfirming)
 			return m, nil
 		}
 		m.state = StateValidating
-		// Start plan validation in a goroutine
+		m.commandBar.SetState(StateValidating)
 		go m.startPlanValidation()
 		return m, nil
 
 	case PlanValidatedMsg:
 		if msg.Err != nil {
-			// Validation infrastructure error — log and proceed to confirm anyway
 			slog.Warn("plan validation error, proceeding to confirm", "err", msg.Err)
 			m.state = StateConfirming
+			m.commandBar.SetState(StateConfirming)
 			return m, nil
 		}
 		if msg.Report != nil && msg.Report.Verdict == types.VerdictFail {
-			// Plan failed validation
 			m.err = fmt.Errorf("plan validation failed: %s", msg.Report.Summary)
 			m.state = StateDone
-			return m, tea.Quit
+			m.commandBar.SetState(StateDone)
+			return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 		}
-		// Validation passed or warned — proceed to confirm
 		if msg.Report != nil && msg.Report.Verdict == types.VerdictWarn {
 			slog.Warn("plan validation warnings", "summary", msg.Report.Summary)
 		}
 		m.state = StateConfirming
+		m.commandBar.SetState(StateConfirming)
 		return m, nil
 
 	case ConfirmMsg:
 		m.approved = msg.Approved
 		if !msg.Approved {
 			m.state = StateDone
-			return m, tea.Quit
+			m.commandBar.SetState(StateDone)
+			return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 		}
 		m.state = StateExecuting
-		// Start execution — session manager or legacy
+		m.commandBar.SetState(StateExecuting)
 		if m.pipeline.SessionManager != nil && m.program != nil {
 			go StartExecutionSession(m.program, m.ctx, m.pipeline.SessionManager, m.spec, m.pipeline)
 		} else if m.program != nil {
@@ -204,8 +216,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case IntentConfirmMsg:
+		m.state = StatePlanning
+		m.commandBar.SetState(StatePlanning)
+		m.intentContent = ""
+		if m.planTabIdx == -1 {
+			m.planTabIdx = m.tabsView.AddTab("Planner")
+			m.sessionTabs["plan"] = m.planTabIdx
+		}
+		m.tabsView.active = m.planTabIdx
+		go m.startPlanning()
+		return m, nil
+
+	case IntentRejectMsg:
+		m.state = StateIdle
+		m.commandBar.SetState(StateIdle)
+		m.commandBar.Focus()
+		m.intentContent = ""
+		return m, nil
+
 	case StreamChunkMsg:
-		// Resolve session-keyed chunks to tab index
 		if msg.SessionID != "" {
 			if idx, ok := m.sessionTabs[msg.SessionID]; ok {
 				msg.TabIndex = idx
@@ -218,16 +248,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case HarnessDoneMsg:
 		tv, cmd := m.tabsView.Update(msg)
 		m.tabsView = tv
-		// Detect completion: either exec tab finished, or this is the only running harness
 		if msg.TabIndex == m.execTabIdx || (m.state == StateExecuting && m.execTabIdx == -1) {
 			if msg.Err != nil {
 				m.state = StateDone
+				m.commandBar.SetState(StateDone)
 				m.err = msg.Err
 			} else if m.pipeline.ValidateWork != nil && msg.WorkOutput != "" {
-				// Start work validation
 				go m.startWorkValidation(msg.WorkOutput)
 			} else {
 				m.state = StateDone
+				m.commandBar.SetState(StateDone)
+			}
+			if m.state == StateDone {
+				return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 			}
 		}
 		return m, cmd
@@ -235,8 +268,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case WorkValidatedMsg:
 		if msg.Err != nil {
 			slog.Warn("work validation error", "err", msg.Err)
-			m.state = StateDone
-			return m, nil
 		}
 		if msg.Report != nil && msg.Report.Verdict == types.VerdictFail {
 			m.err = fmt.Errorf("work validation failed: %s", msg.Report.Summary)
@@ -244,7 +275,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			slog.Warn("work validation warnings", "summary", msg.Report.Summary)
 		}
 		m.state = StateDone
-		return m, nil
+		m.commandBar.SetState(StateDone)
+		return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 
 	case LogMsg:
 		m.logPanel.Add(msg.Entry)
@@ -256,12 +288,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ErrorMsg:
 		m.err = msg.Err
 		m.state = StateDone
-		return m, tea.Quit
+		m.commandBar.SetState(StateDone)
+		return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 
 	case setProgramMsg:
 		m.program = msg.program
-		// Now that we have the program, kick off planning
-		go m.startPlanning()
 		return m, nil
 
 	case spinner.TickMsg:
@@ -273,11 +304,130 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) View() string {
-	// Top area: tabs with streaming content
-	topView := m.tabsView.View()
+// handleKey routes keystrokes based on state.
+func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
 
-	// Overlay confirm prompt if in confirming state
+	// Global: ctrl+c always quits
+	if key == "ctrl+c" {
+		m.cancel()
+		return m, tea.Quit
+	}
+
+	// Alt+N for tab switching (always available)
+	switch key {
+	case "alt+1", "alt+2", "alt+3", "alt+4", "alt+5", "alt+6", "alt+7", "alt+8", "alt+9":
+		tv, cmd := m.tabsView.Update(msg)
+		m.tabsView = tv
+		return m, cmd
+	}
+
+	// In confirming/intent states, A/R keys take priority
+	if m.state == StateConfirming {
+		switch key {
+		case "a", "A", "y", "Y":
+			cv, cmd := m.confirmView.Update(msg)
+			m.confirmView = cv
+			return m, cmd
+		case "r", "R", "n", "N":
+			cv, cmd := m.confirmView.Update(msg)
+			m.confirmView = cv
+			return m, cmd
+		}
+	}
+
+	if m.state == StateIntentConfirm {
+		switch key {
+		case "a", "A":
+			return m, func() tea.Msg { return IntentConfirmMsg{} }
+		case "r", "R":
+			return m, func() tea.Msg { return IntentRejectMsg{} }
+		}
+	}
+
+	// Everything else goes to command bar
+	cb, cmd := m.commandBar.Update(msg)
+	m.commandBar = cb
+	return m, cmd
+}
+
+// handlePromptSubmit processes a prompt submission from the command bar.
+func (m Model) handlePromptSubmit(msg PromptSubmitMsg) (tea.Model, tea.Cmd) {
+	if m.state != StateIdle {
+		return m, nil
+	}
+
+	m.prompt = msg.Prompt
+	m.helpContent = ""
+
+	// Phase 1: Skip intent recognition, go directly to planning
+	m.state = StatePlanning
+	m.commandBar.SetState(StatePlanning)
+
+	// Create planner tab if needed
+	if m.planTabIdx == -1 {
+		m.planTabIdx = m.tabsView.AddTab("Planner")
+		m.sessionTabs["plan"] = m.planTabIdx
+	} else {
+		// Reset existing planner tab for new run
+		m.tabsView.tabs[m.planTabIdx] = newStreamView(m.planTabIdx)
+		if m.tabsView.width > 0 {
+			m.tabsView.tabs[m.planTabIdx].SetSize(m.tabsView.width, m.tabsView.height-3)
+		}
+		m.tabsView.tabNames[m.planTabIdx] = "Planner"
+	}
+	m.tabsView.active = m.planTabIdx
+
+	if m.program != nil {
+		go m.startPlanning()
+	}
+	return m, nil
+}
+
+// handleCommand processes a slash command.
+func (m Model) handleCommand(msg CommandMsg) (tea.Model, tea.Cmd) {
+	switch msg.Name {
+	case "/help":
+		m.helpContent = renderHelp(m.registry, m.state, msg.Args)
+		return m, nil
+	case "/status":
+		m.helpContent = statusStyle.Render("State: " + stateName(m.state))
+		return m, nil
+	case "/clear":
+		m.helpContent = ""
+		if m.state == StateIdle && len(m.tabsView.tabs) > 0 && m.tabsView.active < len(m.tabsView.tabs) {
+			m.tabsView.tabs[m.tabsView.active] = newStreamView(m.tabsView.active)
+			if m.tabsView.width > 0 {
+				m.tabsView.tabs[m.tabsView.active].SetSize(m.tabsView.width, m.tabsView.height-3)
+			}
+		}
+		return m, nil
+	case "/abort":
+		if m.state == StatePlanning || m.state == StateExecuting {
+			m.cancel()
+			// Create new context for next cycle
+			m.ctx, m.cancel = context.WithCancel(context.Background())
+			m.state = StateIdle
+			m.commandBar.SetState(StateIdle)
+			m.commandBar.Focus()
+		}
+		return m, nil
+	}
+
+	return m, nil
+}
+
+func (m Model) View() string {
+	var topView string
+
+	if m.helpContent != "" {
+		topView = m.tabsView.View() + "\n\n" + m.helpContent
+	} else if m.intentContent != "" {
+		topView = m.intentContent
+	} else {
+		topView = m.tabsView.View()
+	}
+
 	if m.state == StateConfirming {
 		topView += "\n\n" + m.confirmView.View()
 	}
@@ -290,25 +440,40 @@ func (m Model) View() string {
 		if !m.approved {
 			topView += "\n\n" + titleStyle.Render("Plan rejected.")
 		} else if m.err != nil {
-			topView += "\n\n" + errorStyle.Render("✗ Execution failed: "+m.err.Error())
+			topView += "\n\n" + errorStyle.Render("✗ Error: "+m.err.Error())
 		} else {
-			topView += "\n\n" + goalStyle.Render("✓ Execution complete")
+			topView += "\n\n" + goalStyle.Render("✓ Complete")
 		}
-		topView += "\n" + statusStyle.Render("Press q to quit")
 	}
 
-	// Bottom area: log panel
-	logView := m.logPanel.View()
-
-	// Help line
-	var helpLine string
-	if m.logPanel.IsFocused() {
-		helpLine = statusStyle.Render(" ↑/↓/j/k scroll logs • esc unfocus • ctrl+c quit")
-	} else {
-		helpLine = statusStyle.Render(" tab switch • ctrl+l logs • ctrl+c quit")
+	if m.state == StateIdle && len(m.tabsView.tabs) == 0 {
+		topView = titleStyle.Render("orqestra") + "\n\n" +
+			subtitleStyle.Render("Type a prompt to start planning, or /help for commands.")
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, topView, logView, helpLine)
+	// Log panel (only if toggled on)
+	var logView string
+	if m.showLogs {
+		logView = m.logPanel.View()
+	}
+
+	// Autocomplete overlay
+	acView := m.commandBar.ViewAutocomplete()
+
+	// Command bar
+	cmdBarView := m.commandBar.View()
+
+	var parts []string
+	parts = append(parts, topView)
+	if logView != "" {
+		parts = append(parts, logView)
+	}
+	if acView != "" {
+		parts = append(parts, acView)
+	}
+	parts = append(parts, cmdBarView)
+
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 // IsApproved returns whether the user approved the plan.
@@ -332,20 +497,16 @@ func (m *Model) SetSpec(spec types.Specification) {
 }
 
 // handleSessionEvent processes a harness session lifecycle event.
-// Creates tabs for new sessions, updates tab state for existing ones.
 func (m Model) handleSessionEvent(evt harness.SessionEvent) (tea.Model, tea.Cmd) {
 	tabIdx, exists := m.sessionTabs[evt.SessionID]
 
 	switch evt.State {
 	case harness.SessionPending:
-		// If tab already exists (pre-created), skip
 		if exists {
 			return m, nil
 		}
-		// Create a new tab for this session
 		idx := m.tabsView.AddTab(evt.Name)
 		m.sessionTabs[evt.SessionID] = idx
-		// Auto-focus new tabs
 		m.tabsView.active = idx
 		return m, nil
 
@@ -362,9 +523,10 @@ func (m Model) handleSessionEvent(evt harness.SessionEvent) (tea.Model, tea.Cmd)
 				m.tabsView.tabs[tabIdx].done = true
 			}
 		}
-		// If this is an execution session (not planner), we're done
 		if m.state == StateExecuting && evt.SessionID != "plan" {
 			m.state = StateDone
+			m.commandBar.SetState(StateDone)
+			return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 		}
 		return m, nil
 
@@ -376,10 +538,11 @@ func (m Model) handleSessionEvent(evt harness.SessionEvent) (tea.Model, tea.Cmd)
 				m.tabsView.tabs[tabIdx].err = evt.Err
 			}
 		}
-		// If this is an execution session, we're done with error
 		if m.state == StateExecuting && evt.SessionID != "plan" {
 			m.state = StateDone
+			m.commandBar.SetState(StateDone)
 			m.err = evt.Err
+			return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 		}
 		return m, nil
 	}
@@ -402,14 +565,13 @@ func (m Model) startPlanning() {
 	p := m.program
 	pw := &sessionWriter{program: p, sessionID: "plan"}
 
-	// Mark running
 	p.Send(SessionEventMsg{Event: harness.SessionEvent{
 		SessionID: "plan",
 		Name:      "Planner",
 		State:     harness.SessionRunning,
 	}})
 
-	spec, err := m.pipeline.Plan(m.ctx, pw)
+	spec, err := m.pipeline.Plan(m.ctx, m.prompt, pw)
 	if err != nil {
 		p.Send(SessionEventMsg{Event: harness.SessionEvent{
 			SessionID: "plan",
@@ -433,7 +595,6 @@ func (m Model) startPlanning() {
 func (m Model) startPlanValidation() {
 	p := m.program
 	if m.pipeline.ValidatePlan == nil {
-		// No validator configured — skip to confirm
 		p.Send(PlanValidatedMsg{})
 		return
 	}
