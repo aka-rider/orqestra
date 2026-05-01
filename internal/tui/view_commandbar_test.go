@@ -120,3 +120,87 @@ func TestCommandBar_HintShowsApproveReject(t *testing.T) {
 		t.Errorf("expected [A] and [R] in confirming hint, got %q", hint)
 	}
 }
+
+func TestCommandBar_TabCompletesSelectedSuggestion(t *testing.T) {
+	cb := newCommandBar(testRegistry())
+	cb.SetState(StateIdle)
+
+	cb.input.SetValue("/h")
+	cb.updateAutocomplete()
+
+	if !cb.showAC {
+		t.Fatal("expected autocomplete to show")
+	}
+
+	selected := cb.suggestions[cb.acIndex]
+	updated, _ := cb.Update(tea.KeyMsg{Type: tea.KeyTab})
+	cb = updated
+
+	if cb.showAC {
+		t.Error("expected autocomplete dismissed after tab")
+	}
+	expected := selected.Name + " "
+	if cb.Value() != expected {
+		t.Errorf("expected input %q after tab, got %q", expected, cb.Value())
+	}
+}
+
+func TestCommandBar_UpDownNavigatesSuggestions(t *testing.T) {
+	cb := newCommandBar(testRegistry())
+	cb.SetState(StateIdle)
+
+	cb.input.SetValue("/")
+	cb.updateAutocomplete()
+
+	if !cb.showAC || len(cb.suggestions) < 2 {
+		t.Fatal("expected multiple autocomplete suggestions for /")
+	}
+
+	// Down arrow increments
+	updated, _ := cb.Update(tea.KeyMsg{Type: tea.KeyDown})
+	cb = updated
+	if cb.acIndex != 1 {
+		t.Errorf("expected acIndex=1 after down, got %d", cb.acIndex)
+	}
+
+	// Up arrow decrements
+	updated, _ = cb.Update(tea.KeyMsg{Type: tea.KeyUp})
+	cb = updated
+	if cb.acIndex != 0 {
+		t.Errorf("expected acIndex=0 after up, got %d", cb.acIndex)
+	}
+
+	// Up wraps to last
+	updated, _ = cb.Update(tea.KeyMsg{Type: tea.KeyUp})
+	cb = updated
+	if cb.acIndex != len(cb.suggestions)-1 {
+		t.Errorf("expected acIndex=%d after up-wrap, got %d", len(cb.suggestions)-1, cb.acIndex)
+	}
+}
+
+func TestCommandBar_EnterSelectsFromAutocomplete(t *testing.T) {
+	cb := newCommandBar(testRegistry())
+	cb.SetState(StateIdle)
+
+	cb.input.SetValue("/h")
+	cb.updateAutocomplete()
+
+	if !cb.showAC {
+		t.Fatal("expected autocomplete to show")
+	}
+
+	selected := cb.suggestions[cb.acIndex]
+	updated, cmd := cb.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	cb = updated
+
+	if cmd != nil {
+		t.Error("expected no command when enter selects autocomplete item")
+	}
+	if cb.showAC {
+		t.Error("expected autocomplete dismissed after enter")
+	}
+	expected := selected.Name + " "
+	if cb.Value() != expected {
+		t.Errorf("expected input %q after enter-select, got %q", expected, cb.Value())
+	}
+}

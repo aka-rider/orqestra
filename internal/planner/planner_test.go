@@ -118,3 +118,49 @@ func TestPlan_IncompleteSpec(t *testing.T) {
 		t.Fatal("expected failure for incomplete spec")
 	}
 }
+
+func TestPlan_MarkdownFencedJSON(t *testing.T) {
+	spec := map[string]any{
+		"goal":       "Deploy app",
+		"steps":      []string{"Build image", "Push to registry"},
+		"acceptance": []string{"Container runs"},
+	}
+	specJSON, _ := json.Marshal(spec)
+	fenced := "```json\n" + string(specJSON) + "\n```"
+	mock := &mockCLIRunner{response: fenced}
+
+	cfg := &config.PlannerConfig{Model: "test-model", SystemPrompt: "Plan."}
+	p := planner.New(mock, cfg)
+	result, err := p.Plan(context.Background(), "deploy")
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsOk() {
+		t.Fatalf("expected ok for fenced JSON, got: %v", result.Err)
+	}
+	if result.Value.Goal != "Deploy app" {
+		t.Errorf("goal = %q, want %q", result.Value.Goal, "Deploy app")
+	}
+}
+
+func TestParseSpec_MarkdownFencedJSON(t *testing.T) {
+	spec := map[string]any{
+		"goal":       "Test fences",
+		"steps":      []string{"Step one"},
+		"acceptance": []string{"Done"},
+	}
+	specJSON, _ := json.Marshal(spec)
+	fenced := "```json\n" + string(specJSON) + "\n```"
+
+	cfg := &config.PlannerConfig{Model: "test-model", SystemPrompt: "Plan."}
+	p := planner.New(&mockCLIRunner{}, cfg)
+	parsed, err := p.ParseSpec(fenced)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if parsed.Goal != "Test fences" {
+		t.Errorf("goal = %q, want %q", parsed.Goal, "Test fences")
+	}
+}

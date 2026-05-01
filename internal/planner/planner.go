@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
@@ -29,12 +30,13 @@ func (p *Planner) Plan(ctx context.Context, prompt string) (types.Result[types.S
 	}
 
 	// claude --output-format json wraps output in {"type":"result","result":"..."}
-	content := output
+	content := strings.TrimSpace(output)
+	content = stripCodeFences(content)
 	var envelope struct {
 		Result string `json:"result"`
 	}
 	if err := json.Unmarshal([]byte(content), &envelope); err == nil && envelope.Result != "" {
-		content = envelope.Result
+		content = stripCodeFences(strings.TrimSpace(envelope.Result))
 	}
 
 	var spec types.Specification
@@ -65,12 +67,16 @@ func (p *Planner) PlanStreaming(ctx context.Context, prompt string, stdout io.Wr
 // ParseSpec parses a raw claude response into a Specification.
 // Exported for use by the TUI streaming flow.
 func (p *Planner) ParseSpec(raw string) (types.Specification, error) {
-	content := raw
+	content := strings.TrimSpace(raw)
+
+	// Strip markdown code fences if present
+	content = stripCodeFences(content)
+
 	var envelope struct {
 		Result string `json:"result"`
 	}
 	if err := json.Unmarshal([]byte(content), &envelope); err == nil && envelope.Result != "" {
-		content = envelope.Result
+		content = stripCodeFences(strings.TrimSpace(envelope.Result))
 	}
 
 	var spec types.Specification
@@ -83,4 +89,22 @@ func (p *Planner) ParseSpec(raw string) (types.Specification, error) {
 	}
 
 	return spec, nil
+}
+
+// stripCodeFences removes ```json ... ``` or ``` ... ``` wrapping from a string.
+func stripCodeFences(s string) string {
+	if !strings.HasPrefix(s, "```") {
+		return s
+	}
+	// Remove opening fence line
+	idx := strings.Index(s, "\n")
+	if idx == -1 {
+		return s
+	}
+	s = s[idx+1:]
+	// Remove closing fence
+	if last := strings.LastIndex(s, "```"); last >= 0 {
+		s = s[:last]
+	}
+	return strings.TrimSpace(s)
 }

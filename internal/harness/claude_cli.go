@@ -1,8 +1,10 @@
 package harness
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -84,10 +86,10 @@ func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (
 	return stdout.String(), nil
 }
 
-// RunStreaming runs `claude -p <prompt> --system-prompt <systemPrompt> --output-format stream-json`
-// and streams to stdout, returning the full accumulated content.
+// RunStreaming runs `claude -p <prompt> --system-prompt <systemPrompt> --output-format stream-json --verbose`
+// and streams displayable content to stdout. Returns the final result text.
 func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (string, error) {
-	args := []string{"-p", prompt, "--output-format", "stream-json"}
+	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
 	}
@@ -99,31 +101,95 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
-	// Pipe stdout through the writer while also capturing it
-	pr, pw := io.Pipe()
-	cmd.Stdout = pw
-
-	var buf bytes.Buffer
-	done := make(chan error, 1)
-	go func() {
-		_, err := io.Copy(io.MultiWriter(stdout, &buf), pr)
-		done <- err
-	}()
+	cmdStdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("claude CLI stdout pipe error: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
-		pw.Close()
 		return "", fmt.Errorf("claude CLI start error: %w", err)
 	}
 
-	cmdErr := cmd.Wait()
-	pw.Close()
-	<-done
+	var result string
+	scanner := bufio.NewScanner(cmdStdout)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large lines
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
 
+		var event streamEvent
+		if err := json.Unmarshal(line, &event); err != nil {
+			// Not valid JSON — write raw to stdout
+			stdout.Write(line)
+			stdout.Write([]byte("\n"))
+			continue
+		}
+
+		switch event.Type {
+		case "assistant":
+			// Extract text from message content blocks
+			if text := event.extractAssistantText(); text != "" {
+				stdout.Write([]byte(text))
+			}
+		case "content_block_delta":
+			if event.Delta.Text != "" {
+				stdout.Write([]byte(event.Delta.Text))
+			}
+		case "result":
+			result = event.Result
+			// system, tool_use, tool_result, etc. — skip for display
+		}
+	}
+
+	cmdErr := cmd.Wait()
 	if cmdErr != nil {
 		return "", fmt.Errorf("claude CLI error: %w (stderr: %s)", cmdErr, stderr.String())
 	}
 
-	return buf.String(), nil
+	if result == "" {
+		return "", fmt.Errorf("claude CLI produced no result message in stream")
+	}
+
+	return result, nil
+}
+
+// streamEvent represents a parsed event from Claude CLI's stream-json output.
+type streamEvent struct {
+	Type    string          `json:"type"`
+	Subtype string          `json:"subtype,omitempty"`
+	Result  string          `json:"result,omitempty"`
+	Delta   streamDeltaText `json:"delta,omitempty"`
+	Message json.RawMessage `json:"message,omitempty"`
+}
+
+type streamDeltaText struct {
+	Type string `json:"type,omitempty"`
+	Text string `json:"text,omitempty"`
+}
+
+// extractAssistantText pulls text content from an assistant message event.
+func (e *streamEvent) extractAssistantText() string {
+	if e.Message == nil {
+		return ""
+	}
+	var msg struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(e.Message, &msg); err != nil {
+		return ""
+	}
+	var b bytes.Buffer
+	for _, block := range msg.Content {
+		if block.Type == "text" {
+			b.WriteString(block.Text)
+		}
+	}
+	return b.String()
 }
 
 // buildEnv constructs the environment variables for the claude subprocess.

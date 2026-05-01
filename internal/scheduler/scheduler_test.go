@@ -1,5 +1,4 @@
 package scheduler
-package scheduler
 
 import (
 	"context"

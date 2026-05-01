@@ -116,10 +116,27 @@ func (c commandBarModel) Update(msg tea.Msg) (commandBarModel, tea.Cmd) {
 
 		case "tab":
 			if c.showAC && len(c.suggestions) > 0 {
-				c.acIndex = (c.acIndex + 1) % len(c.suggestions)
+				selected := c.suggestions[c.acIndex]
+				c.input.SetValue(selected.Name + " ")
+				c.input.SetCursor(len(selected.Name) + 1)
+				c.showAC = false
+				c.suggestions = nil
+				c.acIndex = 0
 				return c, nil
 			}
 			return c, nil
+
+		case "up":
+			if c.showAC && len(c.suggestions) > 0 {
+				c.acIndex = (c.acIndex - 1 + len(c.suggestions)) % len(c.suggestions)
+				return c, nil
+			}
+
+		case "down":
+			if c.showAC && len(c.suggestions) > 0 {
+				c.acIndex = (c.acIndex + 1) % len(c.suggestions)
+				return c, nil
+			}
 
 		case "shift+tab":
 			if c.showAC && len(c.suggestions) > 0 {
