@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"log/slog"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -16,6 +18,7 @@ type State int
 
 const (
 	StatePlanning   State = iota // Planning tab active, claude running
+	StateValidating              // Plan validation in progress
 	StateConfirming              // Plan ready, waiting for y/N
 	StateExecuting               // Worker tab active, claude running
 	StateDone                    // Everything finished
@@ -25,8 +28,12 @@ const (
 type PipelineFuncs struct {
 	// Plan runs the planner and streams output. Returns the spec.
 	Plan func(ctx context.Context, stdout io.Writer) (types.Specification, error)
+	// ValidatePlan runs plan validation. Returns nil report if validation is disabled.
+	ValidatePlan func(ctx context.Context, spec types.Specification) (*types.ValidationReport, error)
 	// Execute runs the worker and streams output.
 	Execute func(ctx context.Context, spec types.Specification, stdout io.Writer) error
+	// ValidateWork runs work validation. Returns nil report if validation is disabled.
+	ValidateWork func(ctx context.Context, spec types.Specification, workOutput string) (*types.ValidationReport, error)
 	// SessionManager is the shared session manager whose events drive TUI tabs.
 	// If non-nil, sessions auto-create and update tabs.
 	SessionManager *harness.SessionManager
@@ -150,6 +157,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case planCompleteMsg:
 		m.spec = msg.spec
+		if m.pipeline.ValidatePlan == nil {
+			// No validator configured — go straight to confirm
+			m.state = StateConfirming
+			return m, nil
+		}
+		m.state = StateValidating
+		// Start plan validation in a goroutine
+		go m.startPlanValidation()
+		return m, nil
+
+	case PlanValidatedMsg:
+		if msg.Err != nil {
+			// Validation infrastructure error — log and proceed to confirm anyway
+			slog.Warn("plan validation error, proceeding to confirm", "err", msg.Err)
+			m.state = StateConfirming
+			return m, nil
+		}
+		if msg.Report != nil && msg.Report.Verdict == types.VerdictFail {
+			// Plan failed validation
+			m.err = fmt.Errorf("plan validation failed: %s", msg.Report.Summary)
+			m.state = StateDone
+			return m, tea.Quit
+		}
+		// Validation passed or warned — proceed to confirm
+		if msg.Report != nil && msg.Report.Verdict == types.VerdictWarn {
+			slog.Warn("plan validation warnings", "summary", msg.Report.Summary)
+		}
 		m.state = StateConfirming
 		return m, nil
 
@@ -186,10 +220,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tabsView = tv
 		// Detect completion: either exec tab finished, or this is the only running harness
 		if msg.TabIndex == m.execTabIdx || (m.state == StateExecuting && m.execTabIdx == -1) {
-			m.state = StateDone
-			m.err = msg.Err
+			if msg.Err != nil {
+				m.state = StateDone
+				m.err = msg.Err
+			} else if m.pipeline.ValidateWork != nil && msg.WorkOutput != "" {
+				// Start work validation
+				go m.startWorkValidation(msg.WorkOutput)
+			} else {
+				m.state = StateDone
+			}
 		}
 		return m, cmd
+
+	case WorkValidatedMsg:
+		if msg.Err != nil {
+			slog.Warn("work validation error", "err", msg.Err)
+			m.state = StateDone
+			return m, nil
+		}
+		if msg.Report != nil && msg.Report.Verdict == types.VerdictFail {
+			m.err = fmt.Errorf("work validation failed: %s", msg.Report.Summary)
+		} else if msg.Report != nil && msg.Report.Verdict == types.VerdictWarn {
+			slog.Warn("work validation warnings", "summary", msg.Report.Summary)
+		}
+		m.state = StateDone
+		return m, nil
 
 	case LogMsg:
 		m.logPanel.Add(msg.Entry)
@@ -225,6 +280,10 @@ func (m Model) View() string {
 	// Overlay confirm prompt if in confirming state
 	if m.state == StateConfirming {
 		topView += "\n\n" + m.confirmView.View()
+	}
+
+	if m.state == StateValidating {
+		topView += "\n\n" + statusStyle.Render("⟳ Validating plan...")
 	}
 
 	if m.state == StateDone {
@@ -368,4 +427,31 @@ func (m Model) startPlanning() {
 		State:     harness.SessionDone,
 	}})
 	p.Send(planCompleteMsg{spec: spec})
+}
+
+// startPlanValidation runs ValidatePlan in a goroutine and sends the result.
+func (m Model) startPlanValidation() {
+	p := m.program
+	if m.pipeline.ValidatePlan == nil {
+		// No validator configured — skip to confirm
+		p.Send(PlanValidatedMsg{})
+		return
+	}
+
+	slog.Info("validating plan", "goal", m.spec.Goal)
+	report, err := m.pipeline.ValidatePlan(m.ctx, m.spec)
+	p.Send(PlanValidatedMsg{Report: report, Err: err})
+}
+
+// startWorkValidation runs ValidateWork in a goroutine and sends the result.
+func (m Model) startWorkValidation(workOutput string) {
+	p := m.program
+	if m.pipeline.ValidateWork == nil {
+		p.Send(WorkValidatedMsg{})
+		return
+	}
+
+	slog.Info("validating work output")
+	report, err := m.pipeline.ValidateWork(m.ctx, m.spec, workOutput)
+	p.Send(WorkValidatedMsg{Report: report, Err: err})
 }

@@ -18,6 +18,9 @@ Orqestra is an LLM agent orchestration system. It coordinates planning, validati
 3. **Small iterations** — always a working MVP. Every commit should be runnable.
 4. **TDD** — spec first, tests second, implementation third, validation fourth.
 5. **Heavy LLM reliance** — the system orchestrates LLMs; use them for planning and validation.
+6. **Harness over Direct API** — Harnesses (like VS Code Copilot, Opencode, Claude Code, and VS Code Third-Party Agents) define model behavior. A raw model API call loses MCP integrations, memory context (`CLAUDE.md`, `/memory`), reasoning loops, autonomous tool usage, execution hooks (`/hooks`), and prompt polishing logic built securely by the providers.
+   - Orqestra exists to utilize the full power of these intelligent harnesses—in particular their native third-party agentic setups like Anthropic's Claude SDK built into VS Code Copilot—while automating the repetitive human operator back-and-forth interactions required to keep them on task.
+   - Never degrade integration to raw API endpoints when a native, fully-featured agent harness (with workspace editing permissions, built-in debug tooling, and context-awareness) is accessible via `vscode.lm` or local hooks.
 
 ## Architecture
 
@@ -96,6 +99,7 @@ The TUI uses the **Elm architecture** (Model-View-Update) via `charmbracelet/bub
 
 - **Blocking in Update**: Never do IO, sleep, or network calls inside `Update`. Use `tea.Cmd`.
 - **Mutating model from goroutines**: Never. Use `p.Send()` to deliver messages.
+- **Passing Pointers in Messages**: Never pass structs containing mutable pointers in `tea.Msg` (via `p.Send()`) when streaming from goroutines. BubbleTea requires deep immutability to avoid concurrent map read/write panics. Pass copies or values.
 - **Massive switch statements**: Split into sub-model `Update` calls routed by state.
 - **Direct IO in Init**: `Init` should only return a `tea.Cmd`, not perform IO directly.
 - **Ignoring WindowSizeMsg**: Always handle it — viewport and layout depend on terminal size.

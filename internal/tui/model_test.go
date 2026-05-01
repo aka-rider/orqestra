@@ -129,3 +129,76 @@ func TestModel_AddTab(t *testing.T) {
 		t.Errorf("expected 2 tabs, got %d", len(model.tabsView.tabs))
 	}
 }
+
+func TestModel_PlanValidationPass(t *testing.T) {
+	m := NewModel(testPipeline())
+	m.state = StateValidating
+	m.spec = testSpec()
+
+	updated, _ := m.Update(PlanValidatedMsg{
+		Report: &types.ValidationReport{
+			SchemaVersion: "1",
+			Verdict:       types.VerdictPass,
+			Summary:       "looks good",
+		},
+	})
+	model := updated.(Model)
+	if model.state != StateConfirming {
+		t.Errorf("expected StateConfirming after validation pass, got %d", model.state)
+	}
+}
+
+func TestModel_PlanValidationFail(t *testing.T) {
+	m := NewModel(testPipeline())
+	m.state = StateValidating
+	m.spec = testSpec()
+
+	updated, cmd := m.Update(PlanValidatedMsg{
+		Report: &types.ValidationReport{
+			SchemaVersion: "1",
+			Verdict:       types.VerdictFail,
+			Summary:       "plan is bad",
+		},
+	})
+	model := updated.(Model)
+	if model.state != StateDone {
+		t.Errorf("expected StateDone after validation fail, got %d", model.state)
+	}
+	if model.err == nil {
+		t.Error("expected error to be set on validation failure")
+	}
+	if cmd == nil {
+		t.Error("expected quit command on validation failure")
+	}
+}
+
+func TestModel_PlanValidationSkipWhenNoValidator(t *testing.T) {
+	// testPipeline() has no ValidatePlan, so planCompleteMsg should go straight to confirm
+	m := NewModel(testPipeline())
+	updated, _ := m.Update(planCompleteMsg{spec: testSpec()})
+	model := updated.(Model)
+	if model.state != StateConfirming {
+		t.Errorf("expected StateConfirming when no validator, got %d", model.state)
+	}
+}
+
+func TestModel_WorkValidationPass(t *testing.T) {
+	m := NewModel(testPipeline())
+	m.state = StateExecuting
+	m.spec = testSpec()
+
+	updated, _ := m.Update(WorkValidatedMsg{
+		Report: &types.ValidationReport{
+			SchemaVersion: "1",
+			Verdict:       types.VerdictPass,
+			Summary:       "work is good",
+		},
+	})
+	model := updated.(Model)
+	if model.state != StateDone {
+		t.Errorf("expected StateDone after work validation pass, got %d", model.state)
+	}
+	if model.err != nil {
+		t.Errorf("expected no error, got %v", model.err)
+	}
+}

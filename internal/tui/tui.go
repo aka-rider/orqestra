@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xiii/orqestra/internal/harness"
@@ -181,10 +182,29 @@ func (h *tuiLogHandler) WithGroup(_ string) slog.Handler {
 
 // RunExecution is the legacy execution path (no session manager).
 func RunExecution(p *tea.Program, ctx context.Context, pipeline PipelineFuncs, spec types.Specification, tabIndex int) {
-	pw := &programWriter{program: p, tabIndex: tabIndex}
-	err := pipeline.Execute(ctx, spec, pw)
-	p.Send(HarnessDoneMsg{TabIndex: tabIndex, Err: err})
+	cw := &capturingWriter{program: p, tabIndex: tabIndex}
+	err := pipeline.Execute(ctx, spec, cw)
+	p.Send(HarnessDoneMsg{TabIndex: tabIndex, Err: err, WorkOutput: cw.captured.String()})
 }
 
 var _ io.Writer = (*programWriter)(nil)
 var _ io.Writer = (*sessionWriter)(nil)
+var _ io.Writer = (*capturingWriter)(nil)
+
+// capturingWriter wraps programWriter and also captures all output for work validation.
+type capturingWriter struct {
+	program  *tea.Program
+	tabIndex int
+	captured strings.Builder
+}
+
+func (cw *capturingWriter) Write(p []byte) (n int, err error) {
+	if len(p) > 0 {
+		cw.program.Send(StreamChunkMsg{
+			TabIndex: cw.tabIndex,
+			Content:  string(p),
+		})
+		cw.captured.Write(p)
+	}
+	return len(p), nil
+}

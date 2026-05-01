@@ -3,6 +3,7 @@ package tui
 import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/types"
 )
 
 // Custom message types for TUI state transitions.
@@ -15,6 +16,18 @@ type ConfirmMsg struct {
 	Approved bool
 }
 
+// PlanValidatedMsg signals that plan validation completed.
+type PlanValidatedMsg struct {
+	Report *types.ValidationReport
+	Err    error
+}
+
+// WorkValidatedMsg signals that work validation completed.
+type WorkValidatedMsg struct {
+	Report *types.ValidationReport
+	Err    error
+}
+
 // StreamChunkMsg carries incremental output from a harness session.
 type StreamChunkMsg struct {
 	TabIndex  int
@@ -24,8 +37,9 @@ type StreamChunkMsg struct {
 
 // HarnessDoneMsg signals that a harness session completed.
 type HarnessDoneMsg struct {
-	TabIndex int
-	Err      error
+	TabIndex   int
+	Err        error
+	WorkOutput string // captured work output for validation
 }
 
 // ErrorMsg signals an unrecoverable error.
