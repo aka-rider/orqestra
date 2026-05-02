@@ -24,6 +24,7 @@ func Run(pipeline PipelineFuncs) error {
 	p := tea.NewProgram(
 		m,
 		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 		tea.WithOutput(os.Stderr),
 	)
 

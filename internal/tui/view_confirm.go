@@ -1,21 +1,40 @@
 package tui
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/xiii/orqestra/internal/types"
 )
 
 const cursorBlinkInterval = 750 * time.Millisecond
 
-// confirmView renders the confirmation prompt and captures A/R input.
+type confirmFocus int
+
+const (
+	focusPlan  confirmFocus = iota
+	focusInput
+)
+
+// confirmView renders the plan in a scrollable bordered viewport with a
+// separate bordered input pane below it for the y/N decision.
 type confirmView struct {
 	decided       bool
 	cursorVisible bool
+	focus         confirmFocus
+	viewport      viewport.Model
+	ready         bool
+	termWidth     int
+	termHeight    int
+	planText      string
 }
 
 func newConfirmView() confirmView {
-	return confirmView{cursorVisible: true}
+	return confirmView{cursorVisible: true, focus: focusPlan}
 }
 
 func blinkCmd() tea.Cmd {
@@ -30,23 +49,72 @@ func (cv *confirmView) Focus() tea.Cmd {
 	return blinkCmd()
 }
 
-// Blur clears cursor visibility. The blink loop stops naturally: once the
-// parent stops forwarding CursorBlinkMsg (on leaving StateConfirming), the
-// last in-flight tick fires, is dropped, and blinkCmd is never re-armed.
+// Blur clears cursor visibility. The blink loop stops naturally once the
+// parent stops forwarding CursorBlinkMsg.
 func (cv *confirmView) Blur() {
 	cv.cursorVisible = false
 }
 
+// SetPlanText sets the plan content displayed in the scrollable viewport.
+// If the viewport is already initialised, content is updated immediately.
+func (cv *confirmView) SetPlanText(text string) {
+	cv.planText = text
+	if cv.ready {
+		cv.viewport.SetContent(text)
+	}
+}
+
 func (cv confirmView) Update(msg tea.Msg) (confirmView, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		cv.termWidth = msg.Width
+		cv.termHeight = msg.Height
+		planHeight := msg.Height - 7 // reserve 5 lines for input pane + 2 border lines
+		if planHeight < 3 {
+			planHeight = 3
+		}
+		vp := viewport.New(msg.Width-2, planHeight)
+		vp.SetContent(cv.planText)
+		cv.viewport = vp
+		cv.ready = true
+		return cv, nil
+
 	case CursorBlinkMsg:
 		cv.cursorVisible = !cv.cursorVisible
 		return cv, blinkCmd()
+
+	case tea.MouseMsg:
+		if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+			if cv.ready {
+				var cmd tea.Cmd
+				cv.viewport, cmd = cv.viewport.Update(msg)
+				return cv, cmd
+			}
+		}
+		return cv, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
+		case "tab":
+			if cv.focus == focusPlan {
+				cv.focus = focusInput
+			} else {
+				cv.focus = focusPlan
+			}
+			return cv, nil
+
+		case "up", "down", "pgup", "pgdown", "home", "end":
+			if cv.focus == focusPlan && cv.ready {
+				var cmd tea.Cmd
+				cv.viewport, cmd = cv.viewport.Update(msg)
+				return cv, cmd
+			}
+			return cv, nil
+
 		case "a", "A", "y", "Y":
 			cv.decided = true
 			return cv, func() tea.Msg { return ConfirmMsg{Approved: true} }
+
 		case "r", "R", "n", "N":
 			cv.decided = true
 			return cv, func() tea.Msg { return ConfirmMsg{Approved: false} }
@@ -56,14 +124,78 @@ func (cv confirmView) Update(msg tea.Msg) (confirmView, tea.Cmd) {
 }
 
 func (cv confirmView) View() string {
-	if cv.decided {
-		return ""
+	if !cv.ready {
+		return "Loading..."
 	}
+
+	// Plan pane
+	planBorder := stylePlanPane
+	if cv.focus == focusPlan {
+		planBorder = stylePlanPaneFocused
+	}
+
+	total := cv.viewport.TotalLineCount()
+	if total < 1 {
+		total = 1
+	}
+	scrollInfo := dimStyle.Render(fmt.Sprintf(
+		"↑↓ scroll  tab to switch focus  line %d/%d",
+		cv.viewport.YOffset+1, total,
+	))
+
+	planSection := lipgloss.JoinVertical(lipgloss.Left,
+		scrollInfo,
+		planBorder.Width(cv.termWidth-2).Render(cv.viewport.View()),
+	)
+
+	// Input pane
+	inputBorder := InputBoxStyle
+	if cv.focus == focusInput {
+		inputBorder = InputBoxFocusedStyle
+	}
+
 	approve := approveKeyStyle.Render("[A]")
 	reject := rejectKeyStyle.Render("[R]")
 	cursor := " "
 	if cv.cursorVisible {
 		cursor = "▌"
 	}
-	return confirmStyle.Render("Approve this plan? ") + approve + "pprove / " + reject + "eject " + cursor
+	prompt := confirmStyle.Render("Approve this plan? ") + approve + "pprove / " + reject + "eject " + cursor
+	hint := dimStyle.Render("(a/y) approve  (r/n) reject  tab to scroll plan")
+	inputContent := lipgloss.JoinVertical(lipgloss.Left, prompt, hint)
+	inputSection := inputBorder.Width(cv.termWidth - 2).Render(inputContent)
+
+	return lipgloss.JoinVertical(lipgloss.Left, planSection, inputSection)
+}
+
+// renderSpecText renders a Specification to a lipgloss-styled string
+// suitable for display inside the plan viewport.
+func renderSpecText(spec types.Specification) string {
+	var b strings.Builder
+
+	b.WriteString(titleStyle.Render("EXECUTION PLAN"))
+	b.WriteString("\n\n")
+	b.WriteString(goalStyle.Render("Goal: " + spec.Goal))
+	b.WriteString("\n\n")
+
+	if len(spec.Steps) > 0 {
+		b.WriteString(titleStyle.Render("Steps:"))
+		b.WriteString("\n")
+		for i, step := range spec.Steps {
+			b.WriteString(stepStyle.Render(fmt.Sprintf("%d. %s", i+1, step)))
+			b.WriteString("\n")
+		}
+	}
+
+	if len(spec.Acceptance) > 0 {
+		b.WriteString("\n")
+		b.WriteString(titleStyle.Render("Acceptance Criteria:"))
+		b.WriteString("\n")
+		for i, criterion := range spec.Acceptance {
+			b.WriteString(acceptanceStyle.Render(fmt.Sprintf("✓ %d. %s", i+1, criterion)))
+			b.WriteString("\n")
+		}
+	}
+
+	return b.String()
 }

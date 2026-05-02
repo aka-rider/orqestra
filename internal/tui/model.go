@@ -129,7 +129,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		tabMsg := tea.WindowSizeMsg{Width: m.width, Height: tabHeight}
 		tv, cmd := m.tabsView.Update(tabMsg)
 		m.tabsView = tv
+
+		if m.state == StateConfirming {
+			cv, cvCmd := m.confirmView.Update(tabMsg)
+			m.confirmView = cv
+			return m, tea.Batch(cmd, cvCmd)
+		}
 		return m, cmd
+
+	case tea.MouseMsg:
+		if m.state == StateConfirming {
+			cv, cmd := m.confirmView.Update(msg)
+			m.confirmView = cv
+			return m, cmd
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -169,6 +183,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case PlanReadyMsg:
 		m.state = StateConfirming
 		m.commandBar.SetState(StateConfirming)
+		m.confirmView.SetPlanText(renderSpecText(m.spec))
+		m.syncConfirmViewport()
 		return m, m.confirmView.Focus()
 
 	case addTabMsg:
@@ -184,6 +200,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pipeline.ValidatePlan == nil {
 			m.state = StateConfirming
 			m.commandBar.SetState(StateConfirming)
+			m.confirmView.SetPlanText(renderSpecText(m.spec))
+			m.syncConfirmViewport()
 			return m, m.confirmView.Focus()
 		}
 		m.state = StateValidating
@@ -196,6 +214,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			slog.Warn("plan validation error, proceeding to confirm", "err", msg.Err)
 			m.state = StateConfirming
 			m.commandBar.SetState(StateConfirming)
+			m.confirmView.SetPlanText(renderSpecText(m.spec))
+			m.syncConfirmViewport()
 			return m, m.confirmView.Focus()
 		}
 		if msg.Report != nil && msg.Report.Verdict == types.VerdictFail {
@@ -209,6 +229,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.state = StateConfirming
 		m.commandBar.SetState(StateConfirming)
+		m.confirmView.SetPlanText(renderSpecText(m.spec))
+		m.syncConfirmViewport()
 		return m, m.confirmView.Focus()
 
 	case ConfirmMsg:
@@ -353,14 +375,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// In confirming/intent states, A/R keys take priority
+	// In confirming state, forward all relevant keys to confirmView.
 	if m.state == StateConfirming {
 		switch key {
-		case "a", "A", "y", "Y":
-			cv, cmd := m.confirmView.Update(msg)
-			m.confirmView = cv
-			return m, cmd
-		case "r", "R", "n", "N":
+		case "a", "A", "y", "Y", "r", "R", "n", "N",
+			"tab", "up", "down", "pgup", "pgdown", "home", "end":
 			cv, cmd := m.confirmView.Update(msg)
 			m.confirmView = cv
 			return m, cmd
@@ -457,16 +476,14 @@ func (m Model) handleCommand(msg CommandMsg) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	var topView string
 
-	if m.helpContent != "" {
+	if m.state == StateConfirming {
+		topView = m.confirmView.View()
+	} else if m.helpContent != "" {
 		topView = m.tabsView.View() + "\n\n" + m.helpContent
 	} else if m.intentContent != "" {
 		topView = m.intentContent
 	} else {
 		topView = m.tabsView.View()
-	}
-
-	if m.state == StateConfirming {
-		topView += "\n\n" + m.confirmView.View()
 	}
 
 	if m.state == StateValidating {
@@ -585,6 +602,22 @@ func (m Model) handleSessionEvent(evt harness.SessionEvent) (tea.Model, tea.Cmd)
 	}
 
 	return m, nil
+}
+
+// syncConfirmViewport sends the current terminal dimensions to the confirmView
+// so its viewport initialises correctly when entering StateConfirming. Safe to
+// call before the first tea.WindowSizeMsg if m.width == 0 (no-op in that case).
+func (m *Model) syncConfirmViewport() {
+	if m.width == 0 {
+		return
+	}
+	logHeight := 0
+	if m.showLogs {
+		logHeight = 8
+	}
+	tabHeight := m.height - 3 - logHeight // 3 = commandBarHeight
+	cv, _ := m.confirmView.Update(tea.WindowSizeMsg{Width: m.width, Height: tabHeight})
+	m.confirmView = cv
 }
 
 // TabIndexForSession returns the tab index for a given session ID, or -1 if not found.

@@ -106,4 +106,31 @@ var (
 	dimStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#6B7280")).
 			Italic(true)
+
+	// Confirm pane borders — width set dynamically in View, not here.
+	stylePlanPane = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("240"))
+
+	stylePlanPaneFocused = lipgloss.NewStyle().
+				Border(lipgloss.NormalBorder()).
+				BorderForeground(lipgloss.Color("69"))
+
+	styleInputPane = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("240"))
+
+	styleInputPaneFocused = lipgloss.NewStyle().
+				Border(lipgloss.NormalBorder()).
+				BorderForeground(lipgloss.Color("69"))
+
+	// InputBoxStyle and InputBoxFocusedStyle wrap any interactive text-input
+	// widget with a rounded border. Width must be set at render time.
+	InputBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("240"))
+
+	InputBoxFocusedStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(primaryColor)
 )
