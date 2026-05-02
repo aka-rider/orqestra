@@ -37,18 +37,18 @@ type Scope struct {
 
 // ValidationCommand is a shell command used to verify work output.
 type ValidationCommand struct {
-	Command      string `json:"command"`
+	Command      string   `json:"command"`
 	Args         []string `json:"args,omitempty"`
-	Cwd          string `json:"cwd,omitempty"`
-	ExpectedExit int    `json:"expected_exit"`
+	Cwd          string   `json:"cwd,omitempty"`
+	ExpectedExit int      `json:"expected_exit"`
 }
 
 // ValidationReport is the unified result shape for all validators.
 type ValidationReport struct {
-	SchemaVersion string  `json:"schema_version"`
-	Verdict       Verdict `json:"verdict"`
-	Summary       string  `json:"summary"`
-	Issues        []Issue `json:"issues,omitempty"`
+	SchemaVersion string   `json:"schema_version"`
+	Verdict       Verdict  `json:"verdict"`
+	Summary       string   `json:"summary"`
+	Issues        []Issue  `json:"issues,omitempty"`
 	Suggestions   []string `json:"suggestions,omitempty"`
 }
 
@@ -94,30 +94,12 @@ func DeriveVerdict(issues []Issue) Verdict {
 
 // ValidationCommandResult captures the outcome of running a validation command.
 type ValidationCommandResult struct {
-	Command      string `json:"command"`
+	Command      string   `json:"command"`
 	Args         []string `json:"args,omitempty"`
-	Cwd          string `json:"cwd,omitempty"`
-	ExpectedExit int    `json:"expected_exit"`
-	ActualExit   int    `json:"actual_exit"`
-	Stdout       string `json:"stdout,omitempty"`
-	Stderr       string `json:"stderr,omitempty"`
-	Passed       bool   `json:"passed"`
-}
-
-// Result represents either a success value or an error.
-type Result[T any] struct {
-	Value T
-	Err   error
-}
-
-func Ok[T any](v T) Result[T] {
-	return Result[T]{Value: v}
-}
-
-func Fail[T any](err error) Result[T] {
-	return Result[T]{Err: err}
-}
-
-func (r Result[T]) IsOk() bool {
-	return r.Err == nil
+	Cwd          string   `json:"cwd,omitempty"`
+	ExpectedExit int      `json:"expected_exit"`
+	ActualExit   int      `json:"actual_exit"`
+	Stdout       string   `json:"stdout,omitempty"`
+	Stderr       string   `json:"stderr,omitempty"`
+	Passed       bool     `json:"passed"`
 }

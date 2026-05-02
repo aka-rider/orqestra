@@ -7,16 +7,31 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/xiii/orqestra/internal/config"
 )
 
+// TokenUsage captures token consumption from an LLM call.
+type TokenUsage struct {
+	InputTokens  int64
+	OutputTokens int64
+	TotalTokens  int64
+}
+
+// RunResult captures the output and token usage from a CLIRunner invocation.
+type RunResult struct {
+	Output string
+	Usage  *TokenUsage // nil if the harness did not report usage
+}
+
 // CLIRunner is the interface for running claude CLI commands.
 type CLIRunner interface {
-	RunPrint(ctx context.Context, prompt, systemPrompt string) (string, error)
-	RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (string, error)
+	RunPrint(ctx context.Context, prompt, systemPrompt string) (RunResult, error)
+	RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (RunResult, error)
 }
 
 // ClaudeCLI executes the `claude` binary as a subprocess.
@@ -37,6 +52,41 @@ func NewClaudeCLI(resolved config.ResolvedModel, opts ...ClaudeCLIOption) *Claud
 		opt(c)
 	}
 	return c
+}
+
+// NewClaudeCLIFromConfig creates a Claude CLI runner from a model_ref.
+// Returns nil if modelRef is empty or cannot be resolved.
+// Model-level runtime options are applied before caller-supplied options.
+func NewClaudeCLIFromConfig(cfg *config.Config, modelRef string, opts ...ClaudeCLIOption) CLIRunner {
+	if modelRef == "" {
+		return nil
+	}
+	resolved, err := cfg.ResolveModel(modelRef)
+	if err != nil {
+		slog.Warn("failed to resolve model_ref", "ref", modelRef, "err", err)
+		return nil
+	}
+	return NewClaudeCLI(resolved, append(modelOptions(cfg, modelRef), opts...)...)
+}
+
+func modelOptions(cfg *config.Config, modelRef string) []ClaudeCLIOption {
+	runtime, err := cfg.RuntimeOptions(modelRef)
+	if err != nil {
+		return nil
+	}
+	var opts []ClaudeCLIOption
+	if runtime.Binary != "" {
+		opts = append(opts, WithBinary(runtime.Binary))
+	}
+	if runtime.SmallRef != "" {
+		small, err := cfg.ResolveModel(runtime.SmallRef)
+		if err != nil {
+			slog.Warn("failed to resolve small_ref", "ref", runtime.SmallRef, "err", err)
+		} else {
+			opts = append(opts, WithSmallModel(small))
+		}
+	}
+	return opts
 }
 
 // ClaudeCLIOption configures ClaudeCLI.
@@ -65,7 +115,7 @@ func WithBinary(path string) ClaudeCLIOption {
 
 // RunPrint runs `claude --print -p <prompt> --system-prompt <systemPrompt> --output-format json`
 // and returns the output.
-func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (string, error) {
+func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (RunResult, error) {
 	args := []string{"--print", "-p", prompt, "--output-format", "json"}
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
@@ -80,15 +130,15 @@ func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("claude CLI error: %w (stderr: %s)", err, stderr.String())
+		return RunResult{}, fmt.Errorf("claude CLI error: %w (stderr: %s)", err, stderr.String())
 	}
 
-	return stdout.String(), nil
+	return RunResult{Output: stdout.String()}, nil
 }
 
 // RunStreaming runs `claude -p <prompt> --system-prompt <systemPrompt> --output-format stream-json --verbose`
 // and streams displayable content to stdout. Returns the final result text.
-func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (string, error) {
+func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (RunResult, error) {
 	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
@@ -103,14 +153,15 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 
 	cmdStdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return "", fmt.Errorf("claude CLI stdout pipe error: %w", err)
+		return RunResult{}, fmt.Errorf("claude CLI stdout pipe error: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("claude CLI start error: %w", err)
+		return RunResult{}, fmt.Errorf("claude CLI start error: %w", err)
 	}
 
 	var result string
+	var usage *TokenUsage
 	scanner := bufio.NewScanner(cmdStdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large lines
 	for scanner.Scan() {
@@ -121,7 +172,8 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 
 		var event streamEvent
 		if err := json.Unmarshal(line, &event); err != nil {
-			// Not valid JSON — write raw to stdout
+			// Not valid JSON — write raw to stdout and log for diagnostics
+			slog.Debug("non-JSON stream line from claude CLI", "err", err, "line_len", len(line))
 			stdout.Write(line)
 			stdout.Write([]byte("\n"))
 			continue
@@ -139,20 +191,27 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 			}
 		case "result":
 			result = event.Result
+			if event.Usage != nil {
+				usage = &TokenUsage{
+					InputTokens:  event.Usage.InputTokens,
+					OutputTokens: event.Usage.OutputTokens,
+					TotalTokens:  event.Usage.InputTokens + event.Usage.OutputTokens,
+				}
+			}
 			// system, tool_use, tool_result, etc. — skip for display
 		}
 	}
 
 	cmdErr := cmd.Wait()
 	if cmdErr != nil {
-		return "", fmt.Errorf("claude CLI error: %w (stderr: %s)", cmdErr, stderr.String())
+		return RunResult{}, fmt.Errorf("claude CLI error: %w (stderr: %s)", cmdErr, stderr.String())
 	}
 
 	if result == "" {
-		return "", fmt.Errorf("claude CLI produced no result message in stream")
+		return RunResult{}, fmt.Errorf("claude CLI produced no result message in stream")
 	}
 
-	return result, nil
+	return RunResult{Output: result, Usage: usage}, nil
 }
 
 // streamEvent represents a parsed event from Claude CLI's stream-json output.
@@ -162,6 +221,13 @@ type streamEvent struct {
 	Result  string          `json:"result,omitempty"`
 	Delta   streamDeltaText `json:"delta,omitempty"`
 	Message json.RawMessage `json:"message,omitempty"`
+	Usage   *streamUsage    `json:"usage,omitempty"`
+}
+
+// streamUsage captures token usage from the Claude CLI result event.
+type streamUsage struct {
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
 }
 
 type streamDeltaText struct {
@@ -192,42 +258,47 @@ func (e *streamEvent) extractAssistantText() string {
 	return b.String()
 }
 
-// buildEnv constructs the environment variables for the claude subprocess.
-func (c *ClaudeCLI) buildEnv() []string {
-	env := os.Environ()
-
-	switch c.resolved.Type {
+// BuildModelEnv returns the environment variables needed to route the claude binary
+// to the given model. Used by sandbox runners that exec claude inside a container.
+func BuildModelEnv(resolved config.ResolvedModel, small *config.ResolvedModel) []string {
+	var env []string
+	switch resolved.Type {
+	case "native":
+		// no override
 	case "anthropic":
 		env = append(env,
-			"ANTHROPIC_BASE_URL="+c.resolved.BaseURL,
-			"ANTHROPIC_AUTH_TOKEN="+c.resolved.APIKey,
-			"ANTHROPIC_MODEL="+c.resolved.Model,
-			"ANTHROPIC_DEFAULT_SONNET_MODEL="+c.resolved.Model,
+			"ANTHROPIC_BASE_URL="+resolved.BaseURL,
+			"ANTHROPIC_AUTH_TOKEN="+resolved.APIKey,
+			"ANTHROPIC_MODEL="+resolved.Model,
+			"ANTHROPIC_DEFAULT_SONNET_MODEL="+resolved.Model,
 		)
-		if c.small != nil {
+		if small != nil {
 			env = append(env,
-				"ANTHROPIC_SMALL_FAST_MODEL="+c.small.Model,
-				"ANTHROPIC_DEFAULT_HAIKU_MODEL="+c.small.Model,
+				"ANTHROPIC_SMALL_FAST_MODEL="+small.Model,
+				"ANTHROPIC_DEFAULT_HAIKU_MODEL="+small.Model,
 			)
 		}
 	case "openai":
-		baseURL := c.resolved.BaseURL
-		if baseURL != "" && baseURL[len(baseURL)-1] != '/' {
-			baseURL += "/v1"
-		} else {
-			baseURL += "v1"
-		}
+		// Strip trailing /v1 or /v1/ before appending — prevents double-suffix
+		// when BaseURL is already normalised (e.g. http://host/v1).
+		baseURL := strings.TrimRight(resolved.BaseURL, "/")
+		baseURL = strings.TrimSuffix(baseURL, "/v1")
+		baseURL += "/v1"
 		env = append(env,
 			"OPENAI_BASE_URL="+baseURL,
-			"OPENAI_API_KEY="+c.resolved.APIKey,
+			"OPENAI_API_KEY="+resolved.APIKey,
 		)
 	}
-
-	// Always inject operational flags
 	env = append(env,
 		"DISABLE_NON_ESSENTIAL_MODEL_CALLS=1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
 	)
+	return env
+}
 
+// buildEnv constructs the environment variables for the claude subprocess.
+func (c *ClaudeCLI) buildEnv() []string {
+	env := os.Environ()
+	env = append(env, BuildModelEnv(c.resolved, c.small)...)
 	return env
 }

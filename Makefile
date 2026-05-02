@@ -1,4 +1,4 @@
-.PHONY: build run test lint clean
+.PHONY: build run test lint clean sandbox-image sandbox-test
 
 BINARY := orqestra
 
@@ -16,3 +16,9 @@ lint:
 
 clean:
 	rm -f $(BINARY)
+
+sandbox-image:
+	docker build -t orqestra-sandbox:latest -f build/sandbox/Dockerfile .
+
+sandbox-test: sandbox-image
+	go test ./internal/sandbox/ -v -count=1 -run Integration

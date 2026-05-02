@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -39,6 +40,8 @@ type PipelineFuncs struct {
 	// SessionManager is the shared session manager whose events drive TUI tabs.
 	// If non-nil, sessions auto-create and update tabs.
 	SessionManager *harness.SessionManager
+	// Send delivers a tea.Msg into the TUI event loop. Wired after program creation.
+	Send func(tea.Msg)
 }
 
 // Model is the main Bubble Tea model that drives the full pipeline.
@@ -189,7 +192,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = fmt.Errorf("plan validation failed: %s", msg.Report.Summary)
 			m.state = StateDone
 			m.commandBar.SetState(StateDone)
-			return m, func() tea.Msg { return CycleBackToIdleMsg{} }
+			return m, nil
 		}
 		if msg.Report != nil && msg.Report.Verdict == types.VerdictWarn {
 			slog.Warn("plan validation warnings", "summary", msg.Report.Summary)
@@ -253,13 +256,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = StateDone
 				m.commandBar.SetState(StateDone)
 				m.err = msg.Err
+				return m, nil
 			} else if m.pipeline.ValidateWork != nil && msg.WorkOutput != "" {
 				go m.startWorkValidation(msg.WorkOutput)
 			} else {
 				m.state = StateDone
 				m.commandBar.SetState(StateDone)
-			}
-			if m.state == StateDone {
 				return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 			}
 		}
@@ -276,6 +278,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.state = StateDone
 		m.commandBar.SetState(StateDone)
+		if m.err != nil {
+			return m, nil
+		}
 		return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 
 	case LogMsg:
@@ -285,11 +290,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SessionEventMsg:
 		return m.handleSessionEvent(msg.Event)
 
+	case SandboxStateMsg:
+		m.logPanel.Add(LogEntry{
+			Time:    time.Now(),
+			Level:   "INFO",
+			Message: fmt.Sprintf("sandbox %s: %s", msg.SandboxID[:8], msg.State),
+		})
+		return m, nil
+
 	case ErrorMsg:
 		m.err = msg.Err
 		m.state = StateDone
 		m.commandBar.SetState(StateDone)
-		return m, func() tea.Msg { return CycleBackToIdleMsg{} }
+		return m, nil
+
+	case TokenLimitExceededMsg:
+		m.err = msg.Err
+		m.state = StateDone
+		m.commandBar.SetState(StateDone)
+		// Stay visible — don't cycle back to idle so the user sees the budget error
+		return m, nil
 
 	case setProgramMsg:
 		m.program = msg.program
@@ -343,6 +363,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "r", "R":
 			return m, func() tea.Msg { return IntentRejectMsg{} }
 		}
+	}
+
+	// In StateDone with error, any key dismisses back to idle
+	if m.state == StateDone && m.err != nil {
+		m.err = nil
+		return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 	}
 
 	// Everything else goes to command bar
@@ -440,7 +466,7 @@ func (m Model) View() string {
 		if !m.approved {
 			topView += "\n\n" + titleStyle.Render("Plan rejected.")
 		} else if m.err != nil {
-			topView += "\n\n" + errorStyle.Render("✗ Error: "+m.err.Error())
+			topView += "\n\n" + errorStyle.Render("✗ Error: "+m.err.Error()) + "\n" + dimStyle.Render("  press any key to dismiss")
 		} else {
 			topView += "\n\n" + goalStyle.Render("✓ Complete")
 		}

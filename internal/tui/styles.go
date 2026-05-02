@@ -102,4 +102,8 @@ var (
 	rejectKeyStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(rejectColor)
+
+	dimStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#6B7280")).
+			Italic(true)
 )

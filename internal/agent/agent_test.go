@@ -18,18 +18,18 @@ type mockCLIRunner struct {
 	err      error
 }
 
-func (m *mockCLIRunner) RunPrint(_ context.Context, _, _ string) (string, error) {
+func (m *mockCLIRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
 	if m.err != nil {
-		return "", m.err
+		return harness.RunResult{}, m.err
 	}
-	return m.response, nil
+	return harness.RunResult{Output: m.response}, nil
 }
 
-func (m *mockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (string, error) {
+func (m *mockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
 	if m.err != nil {
-		return "", m.err
+		return harness.RunResult{}, m.err
 	}
-	return m.response, nil
+	return harness.RunResult{Output: m.response}, nil
 }
 
 func TestBuildExecutionPrompt(t *testing.T) {
@@ -78,7 +78,7 @@ func TestAgent_PlanValidation_WithMockRunner(t *testing.T) {
 		Summary:       "ok",
 	})
 	mock := &mockCLIRunner{response: string(reportJSON)}
-	vcfg := &config.ValidatorConfig{Model: "test"}
+	vcfg := &config.ValidatorConfig{ModelRef: "test"}
 	pv := validator.NewPlanValidator(mock, vcfg)
 
 	spec := types.Specification{

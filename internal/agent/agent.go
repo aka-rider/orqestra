@@ -186,17 +186,13 @@ func (a *Agent) planWithRetries(ctx context.Context, prompt string) (types.Speci
 
 	var lastErr error
 	for i := 0; i < attempts; i++ {
-		result, err := a.planner.Plan(ctx, prompt)
+		spec, err := a.planner.Plan(ctx, prompt)
 		if err != nil {
 			lastErr = err
 			slog.Warn("planner attempt failed", "attempt", i+1, "err", err)
 			continue
 		}
-		if result.IsOk() {
-			return result.Value, nil
-		}
-		lastErr = result.Err
-		slog.Warn("planner produced invalid spec", "attempt", i+1, "err", result.Err)
+		return spec, nil
 	}
 	return types.Specification{}, fmt.Errorf("planner exhausted %d attempts: %w", attempts, lastErr)
 }
@@ -240,11 +236,11 @@ func (a *Agent) validatePlanWithRepair(ctx context.Context, spec *types.Specific
 // execute runs the worker harness and captures output.
 func (a *Agent) execute(ctx context.Context, spec types.Specification, stdout io.Writer) (string, error) {
 	execPrompt := buildExecutionPrompt(spec)
-	output, err := a.workerRunner.RunStreaming(ctx, execPrompt, "", stdout)
+	result, err := a.workerRunner.RunStreaming(ctx, execPrompt, "", stdout)
 	if err != nil {
 		return "", err
 	}
-	return output, nil
+	return result.Output, nil
 }
 
 // validateWorkWithRepair validates work and optionally re-executes.
@@ -272,11 +268,11 @@ func (a *Agent) validateWorkWithRepair(ctx context.Context, spec types.Specifica
 			slog.Info("work validation failed, re-executing", "attempt", i+1, "summary", report.Summary)
 			feedback := formatValidationFeedback(report)
 			repairPrompt := fmt.Sprintf("The previous execution was rejected by the validator:\n%s\n\nOriginal spec goal: %s\nPlease fix the issues.", feedback, spec.Goal)
-			output, err := a.workerRunner.RunStreaming(ctx, repairPrompt, "", stdout)
+			result, err := a.workerRunner.RunStreaming(ctx, repairPrompt, "", stdout)
 			if err != nil {
 				return report, nil
 			}
-			currentOutput = output
+			currentOutput = result.Output
 		} else {
 			return report, nil
 		}
@@ -321,51 +317,35 @@ func formatValidationFeedback(report *types.ValidationReport) string {
 // NewFromConfig creates a fully-wired Agent from the application config.
 // If validator endpoints are unreachable, validators will be nil (skipped).
 func NewFromConfig(cfg *config.Config) *Agent {
-	// Resolve or build planner runner
-	planRunner := resolveRunner(cfg, cfg.Planner.ModelRef, cfg.Planner.BaseURL, cfg.Planner.Model)
+	// Resolve or build planner runner (tools disabled for pure JSON output)
+	planRunner := harness.NewClaudeCLIFromConfig(cfg, cfg.Planner.ModelRef,
+		harness.WithExtraArgs("--tools", ""))
 
-	// Resolve or build worker runner
-	workerRunner := resolveRunner(cfg, cfg.Worker.ModelRef, cfg.Worker.BaseURL, cfg.Worker.Model)
+	// Resolve or build worker runner. Permission flags derived from worker config permission_mode.
+	var workerOpts []harness.ClaudeCLIOption
+	if cfg.Worker.PermissionMode == "full" {
+		workerOpts = append(workerOpts, harness.WithExtraArgs("--dangerously-skip-permissions"))
+	}
+	workerRunner := harness.NewClaudeCLIFromConfig(cfg, cfg.Worker.ModelRef, workerOpts...)
 
 	// Planner
 	p := planner.New(planRunner, &cfg.Planner)
 
 	// Plan Validator
 	var pv *validator.PlanValidator
-	validatorRunner := resolveRunner(cfg, cfg.Validator.ModelRef, cfg.Validator.BaseURL, cfg.Validator.Model)
+	validatorRunner := harness.NewClaudeCLIFromConfig(cfg, cfg.Validator.ModelRef)
 	if validatorRunner != nil {
 		pv = validator.NewPlanValidator(validatorRunner, &cfg.Validator)
 	}
 
 	// Work Validator
 	var wv *validator.WorkValidator
-	workValidatorRunner := resolveRunner(cfg, cfg.WorkValidator.ModelRef, cfg.WorkValidator.BaseURL, cfg.WorkValidator.Model)
+	workValidatorRunner := harness.NewClaudeCLIFromConfig(cfg, cfg.WorkValidator.ModelRef)
 	if workValidatorRunner != nil {
 		wv = validator.NewWorkValidator(workValidatorRunner, &cfg.WorkValidator)
 	}
 
 	return NewAgent(p, pv, wv, workerRunner, cfg)
-}
-
-// resolveRunner creates a CLIRunner from either a model_ref or fallback base_url/model.
-func resolveRunner(cfg *config.Config, modelRef, baseURL, model string) harness.CLIRunner {
-	if modelRef != "" {
-		resolved, err := cfg.ResolveModel(modelRef)
-		if err == nil {
-			return harness.NewClaudeCLI(resolved)
-		}
-		slog.Warn("failed to resolve model_ref, falling back", "ref", modelRef, "err", err)
-	}
-	if baseURL == "" && model == "" {
-		return nil
-	}
-	// Fallback: construct a ResolvedModel from the old-style per-component fields
-	resolved := config.ResolvedModel{
-		BaseURL: baseURL,
-		Model:   model,
-		Type:    "anthropic", // default type for fallback
-	}
-	return harness.NewClaudeCLI(resolved)
 }
 
 // Ensure JSON is imported (used in formatValidationFeedback context).

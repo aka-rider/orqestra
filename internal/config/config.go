@@ -2,8 +2,11 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -18,8 +21,11 @@ type ProviderConfig struct {
 
 // ModelConfig references a provider and model name.
 type ModelConfig struct {
-	Provider string `yaml:"provider"`
-	Model    string `yaml:"model"`
+	Provider   string `yaml:"provider"`
+	Model      string `yaml:"model"`
+	SmallRef   string `yaml:"small_ref"`
+	Binary     string `yaml:"binary"`
+	TokenLimit string `yaml:"token_limit"` // e.g. "300K", "1M", "1.5M", "unlimited", or ""
 }
 
 // ResolvedModel is a fully-resolved model with all connection details.
@@ -30,51 +36,42 @@ type ResolvedModel struct {
 	Type    string
 }
 
+// ModelRuntimeOptions captures non-connection settings for a model-backed CLI harness.
+type ModelRuntimeOptions struct {
+	SmallRef string
+	Binary   string
+}
+
 type Config struct {
 	Providers      map[string]ProviderConfig `yaml:"providers"`
 	Models         map[string]ModelConfig    `yaml:"models"`
 	Planner        PlannerConfig             `yaml:"planner"`
 	Validator      ValidatorConfig           `yaml:"validator"`
 	Worker         WorkerConfig              `yaml:"worker"`
-	WorkValidator  WorkValidatorConfig       `yaml:"work_validator"`
+	WorkValidator  ValidatorConfig           `yaml:"work_validator"`
 	Retry          RetryConfig               `yaml:"retry"`
 	ExecutionGraph ExecutionGraphConfig      `yaml:"execution_graph"`
 	Intent         IntentConfig              `yaml:"intent"`
+	Sandbox        SandboxConfig             `yaml:"sandbox"`
 }
 
 type PlannerConfig struct {
-	Model        string   `yaml:"model"`
-	BaseURL      string   `yaml:"base_url"`
+	ModelRef     string   `yaml:"model_ref"`
 	SystemPrompt string   `yaml:"system_prompt"`
 	AllowedTools []string `yaml:"allowed_tools"`
-	ModelRef     string   `yaml:"model_ref"` // optional: references key in models map
 }
 
+// ValidatorConfig is used for both plan and work validation.
 type ValidatorConfig struct {
-	Provider     string `yaml:"provider"`
-	BaseURL      string `yaml:"base_url"`
-	Model        string `yaml:"model"`
-	APIKey       string `yaml:"api_key"`
+	ModelRef     string `yaml:"model_ref"`
 	SystemPrompt string `yaml:"system_prompt"`
-	ModelRef     string `yaml:"model_ref"` // optional: references key in models map
 }
 
 type WorkerConfig struct {
-	Model          string   `yaml:"model"`
-	BaseURL        string   `yaml:"base_url"`
+	ModelRef       string   `yaml:"model_ref"`
 	AllowedTools   []string `yaml:"allowed_tools"`
 	PermissionMode string   `yaml:"permission_mode"`
 	Timeout        Duration `yaml:"timeout"`
-	ModelRef       string   `yaml:"model_ref"` // optional: references key in models map
-}
-
-type WorkValidatorConfig struct {
-	Provider     string `yaml:"provider"`
-	BaseURL      string `yaml:"base_url"`
-	Model        string `yaml:"model"`
-	APIKey       string `yaml:"api_key"`
-	SystemPrompt string `yaml:"system_prompt"`
-	ModelRef     string `yaml:"model_ref"` // optional: references key in models map
 }
 
 type RetryConfig struct {
@@ -96,18 +93,32 @@ type ExecutionGraphConfig struct {
 
 // AgentNodeConfig defines an agent within the execution graph.
 type AgentNodeConfig struct {
+	ID               string               `yaml:"id"`
 	Role             string               `yaml:"role"`
+	Kind             string               `yaml:"kind"`
 	Model            string               `yaml:"model"`
+	ModelRef         string               `yaml:"model_ref"`
 	SmallModel       string               `yaml:"small_model"`
+	SmallModelRef    string               `yaml:"small_model_ref"`
+	PromptFile       string               `yaml:"prompt_file"`
 	SystemPromptFile string               `yaml:"system_prompt_file"`
 	DependsOn        []string             `yaml:"depends_on"`
+	InputsFrom       []string             `yaml:"inputs_from"`
+	Permissions      string               `yaml:"permissions"`
+	Timeout          Duration             `yaml:"timeout"`
+	MaxAttempts      int                  `yaml:"max_attempts"`
+	OnFailure        string               `yaml:"on_failure"`
 	Validator        *ValidatorNodeConfig `yaml:"validator"`
+	Sandbox          *SandboxConfig       `yaml:"sandbox"` // per-agent sandbox override
 }
 
 // ValidatorNodeConfig defines a validator attached to an agent.
 type ValidatorNodeConfig struct {
+	ID               string `yaml:"id"`
 	Role             string `yaml:"role"`
+	ModelRef         string `yaml:"model_ref"`
 	Model            string `yaml:"model"`
+	PromptFile       string `yaml:"prompt_file"`
 	SystemPromptFile string `yaml:"system_prompt_file"`
 }
 
@@ -115,6 +126,30 @@ type ValidatorNodeConfig struct {
 type IntentConfig struct {
 	ModelRef     string `yaml:"model_ref"`
 	SystemPrompt string `yaml:"system_prompt"`
+}
+
+// SandboxConfig configures Docker-based agent sandboxing.
+type SandboxConfig struct {
+	Enabled            bool             `yaml:"enabled"`
+	Image              string           `yaml:"image"`
+	Memory             string           `yaml:"memory"`       // e.g. "4g"
+	CPUs               float64          `yaml:"cpus"`         // e.g. 2.0
+	PidsLimit          int64            `yaml:"pids_limit"`   // max PIDs in container
+	MaxLifetime        Duration         `yaml:"max_lifetime"` // hard kill after this
+	ReadOnlyMounts     []SandboxMount   `yaml:"read_only_mounts"`
+	AllowedExecutables []string         `yaml:"allowed_executables"` // glob patterns
+	MCP                SandboxMCPConfig `yaml:"mcp"`
+}
+
+// SandboxMount describes a host path to mount read-only inside the sandbox.
+type SandboxMount struct {
+	Host      string `yaml:"host"`
+	Container string `yaml:"container"`
+}
+
+// SandboxMCPConfig configures MCP server access from within sandboxes.
+type SandboxMCPConfig struct {
+	SocketPath string `yaml:"socket_path"` // Docker MCP gateway socket path on host
 }
 
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
@@ -133,8 +168,7 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 func DefaultConfig() *Config {
 	return &Config{
 		Planner: PlannerConfig{
-			Model:        "qwen36",
-			BaseURL:      "http://192.168.50.212:11434",
+			ModelRef:     "qwen3.6",
 			AllowedTools: []string{"Read", "Write"},
 			SystemPrompt: `You are Claude operating in /plan mode.
 
@@ -149,22 +183,17 @@ Output a JSON object with exactly these fields:
 Respond ONLY with valid JSON. No markdown fences, no commentary.`,
 		},
 		Validator: ValidatorConfig{
-			Provider:     "ollama",
-			BaseURL:      "http://192.168.50.212:11434",
-			Model:        "qwen36",
+			ModelRef:     "qwen3.6",
 			SystemPrompt: planValidatorSystemPrompt,
 		},
 		Worker: WorkerConfig{
-			Model:          "qwen36",
-			BaseURL:        "http://192.168.50.212:11434",
+			ModelRef:       "qwen3.6",
 			AllowedTools:   []string{"Read", "Write", "Bash"},
 			PermissionMode: "full",
 			Timeout:        Duration{10 * time.Minute},
 		},
-		WorkValidator: WorkValidatorConfig{
-			Provider:     "ollama",
-			BaseURL:      "http://192.168.50.212:11434",
-			Model:        "qwen36",
+		WorkValidator: ValidatorConfig{
+			ModelRef:     "qwen3.6",
 			SystemPrompt: workValidatorSystemPrompt,
 		},
 		Retry: RetryConfig{
@@ -180,24 +209,18 @@ func Load(path string) (*Config, error) {
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("reading config: %w", err)
-		}
-	} else {
-		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return nil, fmt.Errorf("parsing config: %w", err)
-		}
+		return nil, fmt.Errorf("reading config %q: %w", path, err)
+	}
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parsing config %q: %w", path, err)
 	}
 
 	// Override from environment (always applied)
-	if v := os.Getenv("ORQESTRA_VALIDATOR_URL"); v != "" {
-		cfg.Validator.BaseURL = v
+	if v := os.Getenv("ORQESTRA_VALIDATOR_MODEL_REF"); v != "" {
+		cfg.Validator.ModelRef = v
 	}
-	if v := os.Getenv("ORQESTRA_VALIDATOR_MODEL"); v != "" {
-		cfg.Validator.Model = v
-	}
-	if v := os.Getenv("ORQESTRA_VALIDATOR_API_KEY"); v != "" {
-		cfg.Validator.APIKey = v
+	if v := os.Getenv("ORQESTRA_WORK_VALIDATOR_MODEL_REF"); v != "" {
+		cfg.WorkValidator.ModelRef = v
 	}
 
 	// Validate: every model's provider key must exist
@@ -214,8 +237,59 @@ func (c *Config) validate() error {
 		if _, ok := c.Providers[m.Provider]; !ok {
 			return fmt.Errorf("model %q references unknown provider %q", name, m.Provider)
 		}
+		if m.SmallRef != "" {
+			if _, ok := c.Models[m.SmallRef]; !ok {
+				return fmt.Errorf("model %q references unknown small_ref %q", name, m.SmallRef)
+			}
+		}
+		if m.TokenLimit != "" {
+			if _, err := ParseTokenLimit(m.TokenLimit); err != nil {
+				return fmt.Errorf("model %q: %w", name, err)
+			}
+		}
+	}
+	// Check for conflicting limits on the same underlying model
+	if _, err := c.ResolvedTokenLimits(); err != nil {
+		return err
+	}
+	for _, node := range c.ExecutionGraph.Agents {
+		if node.ModelRef != "" {
+			if _, ok := c.Models[node.ModelRef]; !ok {
+				return fmt.Errorf("execution graph node %q references unknown model_ref %q", node.identity(), node.ModelRef)
+			}
+		}
+		if node.SmallModelRef != "" {
+			if _, ok := c.Models[node.SmallModelRef]; !ok {
+				return fmt.Errorf("execution graph node %q references unknown small_model_ref %q", node.identity(), node.SmallModelRef)
+			}
+		}
+		if node.Validator != nil && node.Validator.ModelRef != "" {
+			if _, ok := c.Models[node.Validator.ModelRef]; !ok {
+				return fmt.Errorf("execution graph validator %q references unknown model_ref %q", node.Validator.identity(), node.Validator.ModelRef)
+			}
+		}
 	}
 	return nil
+}
+
+func (n AgentNodeConfig) identity() string {
+	if n.ID != "" {
+		return n.ID
+	}
+	if n.Role != "" {
+		return n.Role
+	}
+	return "<unnamed>"
+}
+
+func (n ValidatorNodeConfig) identity() string {
+	if n.ID != "" {
+		return n.ID
+	}
+	if n.Role != "" {
+		return n.Role
+	}
+	return "<unnamed>"
 }
 
 // envVarPattern matches ${VAR_NAME} for environment variable interpolation.
@@ -247,6 +321,91 @@ func (c *Config) ResolveModel(name string) (ResolvedModel, error) {
 		Model:   mc.Model,
 		Type:    pc.Type,
 	}, nil
+}
+
+// RuntimeOptions returns CLI harness options stored next to a named model.
+func (c *Config) RuntimeOptions(name string) (ModelRuntimeOptions, error) {
+	mc, ok := c.Models[name]
+	if !ok {
+		return ModelRuntimeOptions{}, fmt.Errorf("model %q not found in config", name)
+	}
+
+	return ModelRuntimeOptions{
+		SmallRef: mc.SmallRef,
+		Binary:   mc.Binary,
+	}, nil
+}
+
+// TokenLimitUnlimited is the sentinel value representing no cap.
+const TokenLimitUnlimited int64 = -1
+
+// ParseTokenLimit parses a human-friendly token limit string.
+// Accepted formats: "300K", "1M", "1.5M", "500000", "unlimited", "".
+// Returns 0 for empty (unconfigured), -1 for unlimited, positive value otherwise.
+func ParseTokenLimit(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	if strings.EqualFold(s, "unlimited") {
+		return TokenLimitUnlimited, nil
+	}
+
+	lower := strings.ToLower(s)
+	var multiplier float64
+	var numStr string
+
+	switch {
+	case strings.HasSuffix(lower, "k"):
+		multiplier = 1_000
+		numStr = s[:len(s)-1]
+	case strings.HasSuffix(lower, "m"):
+		multiplier = 1_000_000
+		numStr = s[:len(s)-1]
+	default:
+		multiplier = 1
+		numStr = s
+	}
+
+	val, err := strconv.ParseFloat(numStr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid token_limit %q: %w", s, err)
+	}
+	if val <= 0 {
+		return 0, fmt.Errorf("invalid token_limit %q: must be positive", s)
+	}
+
+	result := int64(math.Round(val * multiplier))
+	if result <= 0 {
+		return 0, fmt.Errorf("invalid token_limit %q: resolved to non-positive value", s)
+	}
+	return result, nil
+}
+
+// ResolvedTokenLimits returns a map of underlying model string → parsed token limit
+// for all models that have a non-empty token_limit configured.
+// Returns only models with active limits (excludes unlimited and unconfigured).
+func (c *Config) ResolvedTokenLimits() (map[string]int64, error) {
+	limits := make(map[string]int64)
+	for name, mc := range c.Models {
+		if mc.TokenLimit == "" {
+			continue
+		}
+		parsed, err := ParseTokenLimit(mc.TokenLimit)
+		if err != nil {
+			return nil, fmt.Errorf("model %q: %w", name, err)
+		}
+		if parsed == TokenLimitUnlimited || parsed == 0 {
+			continue
+		}
+		existing, exists := limits[mc.Model]
+		if exists && existing != parsed {
+			return nil, fmt.Errorf("conflicting token_limit for model %q: %d vs %d (from config entry %q)",
+				mc.Model, existing, parsed, name)
+		}
+		limits[mc.Model] = parsed
+	}
+	return limits, nil
 }
 
 const planValidatorSystemPrompt = `You are an independent plan validator. Your job is to judge whether a specification is complete, executable, non-contradictory, and testable.

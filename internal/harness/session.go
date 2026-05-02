@@ -43,6 +43,12 @@ type Session struct {
 	Err       error
 	Response  *Response
 
+	// Sandbox fields (populated when running in a sandboxed environment).
+	Sandboxed   bool   // true if this session runs inside a Docker sandbox
+	SandboxID   string // sandbox identifier for display
+	ContainerID string // short container hash for display
+	SandboxInfo string // human-readable sandbox state (e.g. "running | 2m14s")
+
 	client *Client
 	prompt string
 	system string
@@ -50,10 +56,11 @@ type Session struct {
 
 // SessionEvent is emitted when a session's state changes.
 type SessionEvent struct {
-	SessionID string
-	Name      string
-	State     SessionState
-	Err       error
+	SessionID    string
+	Name         string
+	State        SessionState
+	Err          error
+	SandboxState string // optional: sandbox lifecycle state for TUI display
 }
 
 // SessionManager manages multiple concurrent harness sessions and notifies
@@ -129,20 +136,34 @@ func (sm *SessionManager) run(ctx context.Context, sess *Session, stdout io.Writ
 }
 
 // GetSession returns a snapshot of a session by ID.
-func (sm *SessionManager) GetSession(id string) (*Session, bool) {
+func (sm *SessionManager) GetSession(id string) (Session, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	s, ok := sm.sessions[id]
-	return s, ok
+	if !ok {
+		return Session{}, false
+	}
+	copy := *s
+	if s.Response != nil {
+		r := *s.Response
+		copy.Response = &r
+	}
+	return copy, true
 }
 
 // Sessions returns all sessions in creation order.
-func (sm *SessionManager) Sessions() []*Session {
+func (sm *SessionManager) Sessions() []Session {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	result := make([]*Session, 0, len(sm.order))
+	result := make([]Session, 0, len(sm.order))
 	for _, id := range sm.order {
-		result = append(result, sm.sessions[id])
+		s := sm.sessions[id]
+		copy := *s
+		if s.Response != nil {
+			r := *s.Response
+			copy.Response = &r
+		}
+		result = append(result, copy)
 	}
 	return result
 }
@@ -161,7 +182,11 @@ func (sm *SessionManager) Response(id string) (*Response, error) {
 	if s.Err != nil {
 		return nil, s.Err
 	}
-	return s.Response, nil
+	if s.Response == nil {
+		return nil, nil
+	}
+	r := *s.Response
+	return &r, nil
 }
 
 func (sm *SessionManager) emit(evt SessionEvent) {

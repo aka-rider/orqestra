@@ -269,8 +269,8 @@ func TestModel_PlanValidationFail(t *testing.T) {
 	if model.err == nil {
 		t.Error("expected error to be set on validation failure")
 	}
-	if cmd == nil {
-		t.Error("expected cycle-back command on validation failure")
+	if cmd != nil {
+		t.Error("expected nil command (error held on screen until key dismiss)")
 	}
 }
 

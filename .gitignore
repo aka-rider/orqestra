@@ -19,3 +19,8 @@ clipproxy.yaml
 .vscode/
 *.swp
 *.swo
+
+# local state
+.orqestra/
+node_modules/
+copilot-data

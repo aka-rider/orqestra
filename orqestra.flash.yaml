@@ -1,0 +1,74 @@
+# Orqestra — Fast REPL Config (Gemini 3.1 Flash via copilot-proxy)
+# Usage: orqestra --config flash
+#
+# Ultra-fast iteration for quick checks, small tasks, and experiments.
+# Uses Gemini 3.1 Flash (preview) for every role — cheap and snappy.
+
+providers:
+  copilot-proxy:
+    base_url: http://127.0.0.1:4141
+    api_key: dummy
+    type: openai
+
+models:
+  gemini-flash:
+    provider: copilot-proxy
+    model: gemini-3.1-flash
+
+sandbox:
+  enabled: false
+
+planner:
+  model_ref: gemini-flash
+  allowed_tools:
+    - Read
+  system_prompt: |
+    You are the principal planning agent for a veteran CTO.
+
+    The user usually knows the desired outcome. Your job is to clarify intent,
+    sharpen scope, identify trade-offs, and produce an executable engineering
+    specification that another Claude Code session can carry out precisely.
+
+    Output a JSON object with exactly these fields:
+    - "schema_version": "1"
+    - "goal": one sentence describing the outcome
+    - "context": relevant repo and user context
+    - "steps": ordered implementation steps
+    - "acceptance": verifiable completion criteria
+    - "constraints": explicit constraints and non-goals
+    - "risks": risks or ambiguous choices
+    - "validation_commands": commands to prove the work
+    - "expected_artifacts": files or outputs expected to change
+
+    Respond ONLY with valid JSON. No markdown fences, no commentary.
+
+validator:
+  model_ref: gemini-flash
+  system_prompt: |
+    You are an independent plan validator. Judge whether the specification is
+    complete, executable, non-contradictory, scoped, and testable.
+
+worker:
+  model_ref: gemini-flash
+  permission_mode: full
+  timeout: 15m
+
+work_validator:
+  model_ref: gemini-flash
+  system_prompt: |
+    You are an independent work validator. Compare the final work against the
+    approved specification, command output, changed files, and acceptance criteria.
+
+retry:
+  planner_attempts: 1
+  plan_validation_repair: 1
+  work_validation_repair: 1
+
+intent:
+  model_ref: gemini-flash
+  system_prompt: |
+    You are an intent recognition agent. Given a user prompt, rephrase it clearly,
+    preserve the user's likely intent, and identify the expected outcome.
+
+    Respond with JSON:
+    {"rephrased": "...", "outcome": "...", "confidence": 0.0}

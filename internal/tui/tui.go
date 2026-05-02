@@ -36,6 +36,9 @@ func Run(pipeline PipelineFuncs) error {
 		WireSessionManager(p, pipeline.SessionManager)
 	}
 
+	// Wire Send so sandbox callbacks can push state into the TUI.
+	pipeline.Send = p.Send
+
 	// Send program reference so model can start execution later.
 	// Must be in a goroutine — Send blocks on unbuffered channel until Run starts.
 	go p.Send(setProgramMsg{program: p})

@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -10,13 +12,14 @@ import (
 
 // streamView displays streaming output for a single harness session.
 type streamView struct {
-	tabIndex int
-	viewport viewport.Model
-	spinner  spinner.Model
-	content  *strings.Builder
-	done     bool
-	err      error
-	ready    bool
+	tabIndex  int
+	viewport  viewport.Model
+	spinner   spinner.Model
+	content   *strings.Builder
+	done      bool
+	err       error
+	ready     bool
+	startedAt time.Time
 }
 
 func newStreamView(tabIndex int) streamView {
@@ -39,6 +42,9 @@ func (s streamView) Update(msg tea.Msg) (streamView, tea.Cmd) {
 	switch msg := msg.(type) {
 	case StreamChunkMsg:
 		if msg.TabIndex == s.tabIndex {
+			if s.startedAt.IsZero() {
+				s.startedAt = time.Now()
+			}
 			s.content.WriteString(msg.Content)
 			if s.ready {
 				s.viewport.SetContent(s.content.String())
@@ -81,7 +87,12 @@ func (s streamView) View() string {
 			status = goalStyle.Render("✓ Complete")
 		}
 	} else {
-		status = s.spinner.View() + " Running..."
+		elapsed := ""
+		if !s.startedAt.IsZero() {
+			d := time.Since(s.startedAt).Truncate(time.Second)
+			elapsed = fmt.Sprintf(" (%s)", d)
+		}
+		status = s.spinner.View() + " Running..." + elapsed
 	}
 
 	if !s.ready {

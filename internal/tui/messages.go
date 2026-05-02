@@ -4,6 +4,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/scheduler"
+	"github.com/xiii/orqestra/internal/tokenlimit"
 	"github.com/xiii/orqestra/internal/types"
 )
 
@@ -96,6 +97,17 @@ type SessionEventMsg struct {
 // SchedulerEventMsg wraps a scheduler event for the TUI.
 type SchedulerEventMsg struct {
 	Event scheduler.Event
+}
+
+// TokenLimitExceededMsg signals that a model's token budget was exhausted.
+type TokenLimitExceededMsg struct {
+	Err *tokenlimit.ErrBudgetExhausted
+}
+
+// SandboxStateMsg signals a sandbox lifecycle state change.
+type SandboxStateMsg struct {
+	SandboxID string
+	State     string // "pending", "provisioning", "ready", "running", "stopped", "extracting", "destroyed"
 }
 
 // streamChunkCmd creates a tea.Cmd that emits a StreamChunkMsg.

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"testing"
+
+	"github.com/xiii/orqestra/internal/harness"
 )
 
 // mockRunner is a test double for harness.CLIRunner.
@@ -13,12 +15,12 @@ type mockRunner struct {
 	err    error
 }
 
-func (m *mockRunner) RunPrint(_ context.Context, _, _ string) (string, error) {
-	return m.output, m.err
+func (m *mockRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
+	return harness.RunResult{Output: m.output}, m.err
 }
 
-func (m *mockRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (string, error) {
-	return m.output, m.err
+func (m *mockRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
+	return harness.RunResult{Output: m.output}, m.err
 }
 
 func TestRecognize_ValidJSON(t *testing.T) {

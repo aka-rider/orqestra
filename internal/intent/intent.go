@@ -35,13 +35,13 @@ func New(runner harness.CLIRunner, cfg *IntentConfig) *Recognizer {
 
 // Recognize sends the raw prompt to the LLM and parses the structured response.
 func (r *Recognizer) Recognize(ctx context.Context, rawPrompt string) (Intent, error) {
-	output, err := r.runner.RunPrint(ctx, rawPrompt, r.cfg.SystemPrompt)
+	result, err := r.runner.RunPrint(ctx, rawPrompt, r.cfg.SystemPrompt)
 	if err != nil {
 		return Intent{}, fmt.Errorf("intent recognition failed: %w", err)
 	}
 
 	var intent Intent
-	if err := json.Unmarshal([]byte(output), &intent); err != nil {
+	if err := json.Unmarshal([]byte(result.Output), &intent); err != nil {
 		return Intent{}, fmt.Errorf("parsing intent response: %w", err)
 	}
 

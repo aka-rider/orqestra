@@ -73,6 +73,47 @@ func TestBuildEnv_OperationalFlags_OpenAI(t *testing.T) {
 	assertEnvContains(t, env, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")
 }
 
+func TestNewClaudeCLIFromConfig_AppliesModelRuntimeOptions(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"local": {BaseURL: "http://localhost:11434", APIKey: "key", Type: "openai"},
+		},
+		Models: map[string]config.ModelConfig{
+			"fast": {Provider: "local", Model: "qwen36-fast"},
+			"worker": {
+				Provider: "local",
+				Model:    "qwen36",
+				SmallRef: "fast",
+				Binary:   "claude-test",
+			},
+		},
+	}
+
+	runner := NewClaudeCLIFromConfig(cfg, "worker", WithExtraArgs("--verbose-mode"))
+	cli, ok := runner.(*ClaudeCLI)
+	if !ok {
+		t.Fatalf("runner = %T, want *ClaudeCLI", runner)
+	}
+	if cli.binary != "claude-test" {
+		t.Errorf("binary = %q, want claude-test", cli.binary)
+	}
+	if cli.small == nil || cli.small.Model != "qwen36-fast" {
+		t.Fatalf("small model = %+v, want qwen36-fast", cli.small)
+	}
+	expectedArgs := []string{"--verbose-mode"}
+	if strings.Join(cli.extraArgs, ",") != strings.Join(expectedArgs, ",") {
+		t.Errorf("extraArgs = %v, want %v", cli.extraArgs, expectedArgs)
+	}
+}
+
+func TestNewClaudeCLIFromConfig_EmptyModelRef(t *testing.T) {
+	cfg := &config.Config{}
+	runner := NewClaudeCLIFromConfig(cfg, "")
+	if runner != nil {
+		t.Fatalf("expected nil runner for empty model_ref, got %T", runner)
+	}
+}
+
 func assertEnvContains(t *testing.T, env []string, expected string) {
 	t.Helper()
 	for _, e := range env {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os/exec"
 
 	"github.com/xiii/orqestra/internal/config"
@@ -18,15 +19,45 @@ type WorkValidationInput struct {
 	WorkOutput string
 }
 
+// defaultAllowedCommands is the allowlist of commands permitted for validation execution.
+// Only these commands may be invoked from LLM-generated ValidationCommands.
+var defaultAllowedCommands = map[string]bool{
+	"go":     true,
+	"make":   true,
+	"npm":    true,
+	"npx":    true,
+	"yarn":   true,
+	"pnpm":   true,
+	"cargo":  true,
+	"python": true,
+	"pytest": true,
+	"true":   true,
+	"false":  true,
+	"test":   true,
+	"diff":   true,
+	"grep":   true,
+	"cat":    true,
+	"ls":     true,
+	"find":   true,
+	"wc":     true,
+	"head":   true,
+	"tail":   true,
+}
+
 // WorkValidator independently validates the work output against the specification.
 type WorkValidator struct {
-	runner harness.CLIRunner
-	cfg    *config.WorkValidatorConfig
+	runner          harness.CLIRunner
+	cfg             *config.ValidatorConfig
+	allowedCommands map[string]bool
 }
 
 // NewWorkValidator creates a work validator using the given CLIRunner.
-func NewWorkValidator(runner harness.CLIRunner, cfg *config.WorkValidatorConfig) *WorkValidator {
-	return &WorkValidator{runner: runner, cfg: cfg}
+func NewWorkValidator(runner harness.CLIRunner, cfg *config.ValidatorConfig) *WorkValidator {
+	return &WorkValidator{
+		runner:          runner,
+		cfg:             cfg,
+		allowedCommands: defaultAllowedCommands,
+	}
 }
 
 // Validate runs validation commands and then CLI-based assessment.
@@ -36,7 +67,7 @@ func (v *WorkValidator) Validate(ctx context.Context, input *WorkValidationInput
 
 	// Phase 1: Run validation commands
 	for i, vc := range input.Spec.ValidationCommands {
-		result := runValidationCommand(ctx, vc)
+		result := v.runValidationCommand(ctx, vc)
 		cmdResults = append(cmdResults, result)
 		if !result.Passed {
 			issues = append(issues, types.Issue{
@@ -71,14 +102,14 @@ func (v *WorkValidator) Validate(ctx context.Context, input *WorkValidationInput
 		prompt += fmt.Sprintf("\n\nValidation Command Results:\n%s", string(cmdJSON))
 	}
 
-	output, err := v.runner.RunPrint(ctx, prompt, v.cfg.SystemPrompt)
+	result, err := v.runner.RunPrint(ctx, prompt, v.cfg.SystemPrompt)
 	if err != nil {
 		return nil, fmt.Errorf("work validator CLI call: %w", err)
 	}
 
 	var report types.ValidationReport
-	if err := json.Unmarshal([]byte(output), &report); err != nil {
-		return nil, fmt.Errorf("parse work validation report: %w (raw: %s)", err, output)
+	if err := json.Unmarshal([]byte(result.Output), &report); err != nil {
+		return nil, fmt.Errorf("parse work validation report: %w (raw: %s)", err, result.Output)
 	}
 
 	// Merge command-failure issues
@@ -89,12 +120,22 @@ func (v *WorkValidator) Validate(ctx context.Context, input *WorkValidationInput
 }
 
 // runValidationCommand executes a single validation command and captures the result.
-func runValidationCommand(ctx context.Context, vc types.ValidationCommand) types.ValidationCommandResult {
+// It enforces the command allowlist to prevent execution of arbitrary commands from LLM output.
+func (v *WorkValidator) runValidationCommand(ctx context.Context, vc types.ValidationCommand) types.ValidationCommandResult {
 	result := types.ValidationCommandResult{
 		Command:      vc.Command,
 		Args:         vc.Args,
 		Cwd:          vc.Cwd,
 		ExpectedExit: vc.ExpectedExit,
+	}
+
+	// Security gate: reject commands not in the allowlist
+	if !v.allowedCommands[vc.Command] {
+		slog.Warn("validation command blocked by allowlist", "command", vc.Command)
+		result.ActualExit = -1
+		result.Stderr = fmt.Sprintf("command %q blocked: not in validation allowlist", vc.Command)
+		result.Passed = false
+		return result
 	}
 
 	args := vc.Args

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/xiii/orqestra/internal/config"
+	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/types"
 )
 
@@ -17,25 +18,25 @@ type mockCLIRunner struct {
 	callCount int
 }
 
-func (m *mockCLIRunner) RunPrint(_ context.Context, _, _ string) (string, error) {
+func (m *mockCLIRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
 	m.callCount++
 	if m.err != nil {
-		return "", m.err
+		return harness.RunResult{}, m.err
 	}
-	return m.response, nil
+	return harness.RunResult{Output: m.response}, nil
 }
 
-func (m *mockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (string, error) {
+func (m *mockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
 	m.callCount++
 	if m.err != nil {
-		return "", m.err
+		return harness.RunResult{}, m.err
 	}
-	return m.response, nil
+	return harness.RunResult{Output: m.response}, nil
 }
 
 func TestPlanValidator_DeterministicCheck_MissingGoal(t *testing.T) {
 	mock := &mockCLIRunner{response: `{"schema_version":"1","verdict":"pass","summary":"ok"}`}
-	cfg := &config.ValidatorConfig{Model: "test"}
+	cfg := &config.ValidatorConfig{ModelRef: "test"}
 	v := NewPlanValidator(mock, cfg)
 
 	report, err := v.Validate(context.Background(), types.Specification{
@@ -56,7 +57,7 @@ func TestPlanValidator_DeterministicCheck_MissingGoal(t *testing.T) {
 
 func TestPlanValidator_DeterministicCheck_NoSteps(t *testing.T) {
 	mock := &mockCLIRunner{response: `{}`}
-	cfg := &config.ValidatorConfig{Model: "test"}
+	cfg := &config.ValidatorConfig{ModelRef: "test"}
 	v := NewPlanValidator(mock, cfg)
 
 	report, err := v.Validate(context.Background(), types.Specification{
@@ -79,7 +80,7 @@ func TestPlanValidator_CLIValidation_Pass(t *testing.T) {
 	})
 	mock := &mockCLIRunner{response: string(reportJSON)}
 	cfg := &config.ValidatorConfig{
-		Model:        "test-model",
+		ModelRef:     "test-model",
 		SystemPrompt: "validate",
 	}
 	v := NewPlanValidator(mock, cfg)
@@ -112,7 +113,7 @@ func TestPlanValidator_CLIValidation_Fail(t *testing.T) {
 		},
 	})
 	mock := &mockCLIRunner{response: string(reportJSON)}
-	cfg := &config.ValidatorConfig{Model: "test"}
+	cfg := &config.ValidatorConfig{ModelRef: "test"}
 	v := NewPlanValidator(mock, cfg)
 
 	spec := types.Specification{

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -25,6 +26,7 @@ type Client struct {
 type Response struct {
 	Content string
 	Latency time.Duration
+	Usage   *TokenUsage
 }
 
 // NewClient creates a harness client targeting an OpenAI-compatible server.
@@ -64,7 +66,15 @@ type chatChoice struct {
 
 // chatResponse is an OpenAI-compatible chat completion response.
 type chatResponse struct {
-	Choices []chatChoice `json:"choices"`
+	Choices []chatChoice    `json:"choices"`
+	Usage   *chatUsageField `json:"usage,omitempty"`
+}
+
+// chatUsageField captures token usage from OpenAI-compatible responses.
+type chatUsageField struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
 }
 
 // streamDelta is the delta in a streaming chunk.
@@ -124,10 +134,18 @@ func (c *Client) Run(ctx context.Context, prompt, systemPrompt string) (*Respons
 		return nil, fmt.Errorf("llm returned no choices")
 	}
 
-	return &Response{
+	result := &Response{
 		Content: chatResp.Choices[0].Message.Content,
 		Latency: time.Since(start),
-	}, nil
+	}
+	if chatResp.Usage != nil {
+		result.Usage = &TokenUsage{
+			InputTokens:  chatResp.Usage.PromptTokens,
+			OutputTokens: chatResp.Usage.CompletionTokens,
+			TotalTokens:  chatResp.Usage.TotalTokens,
+		}
+	}
+	return result, nil
 }
 
 // RunStreaming calls the chat completions endpoint with streaming, writing
@@ -170,6 +188,7 @@ func (c *Client) RunStreaming(ctx context.Context, prompt, systemPrompt string, 
 	}
 
 	var content strings.Builder
+	var parseFailures int
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -185,8 +204,14 @@ func (c *Client) RunStreaming(ctx context.Context, prompt, systemPrompt string, 
 
 		var chunk streamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue // skip malformed chunks
+			parseFailures++
+			slog.Debug("malformed SSE chunk", "err", err, "data", truncateForLog(data, 200))
+			if parseFailures >= 5 {
+				return nil, fmt.Errorf("aborting: %d consecutive malformed SSE chunks (last: %s)", parseFailures, truncateForLog(data, 200))
+			}
+			continue
 		}
+		parseFailures = 0 // reset on successful parse
 
 		for _, choice := range chunk.Choices {
 			if choice.Delta.Content != "" {
@@ -204,6 +229,13 @@ func (c *Client) RunStreaming(ctx context.Context, prompt, systemPrompt string, 
 		Content: content.String(),
 		Latency: time.Since(start),
 	}, nil
+}
+
+func truncateForLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 func (c *Client) buildMessages(prompt, systemPrompt string) []chatMessage {

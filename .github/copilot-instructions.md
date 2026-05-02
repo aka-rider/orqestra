@@ -21,6 +21,22 @@ Orqestra is an LLM agent orchestration system. It coordinates planning, validati
 6. **Harness over Direct API** — Harnesses (like VS Code Copilot, Opencode, Claude Code, and VS Code Third-Party Agents) define model behavior. A raw model API call loses MCP integrations, memory context (`CLAUDE.md`, `/memory`), reasoning loops, autonomous tool usage, execution hooks (`/hooks`), and prompt polishing logic built securely by the providers.
    - Orqestra exists to utilize the full power of these intelligent harnesses—in particular their native third-party agentic setups like Anthropic's Claude SDK built into VS Code Copilot—while automating the repetitive human operator back-and-forth interactions required to keep them on task.
    - Never degrade integration to raw API endpoints when a native, fully-featured agent harness (with workspace editing permissions, built-in debug tooling, and context-awareness) is accessible via `vscode.lm` or local hooks.
+7. **Fail fast on corruption** — If data looks inconsistent, abort immediately with a clear error. Never propagate suspect state. Silent failures are bugs.
+8. **No silent errors** — Every error must be logged, surfaced, or returned. `_ = err` is banned unless the operation is truly fire-and-forget AND documented why.
+9. **User sees truth** — The TUI must never show stale state. If something is running, show what and for how long. If something failed, show why and hold it visible until acknowledged. Errors are specific, actionable, never "something went wrong". Activity is always observable.
+10. **Security boundary at LLM output** — LLM-generated content (specs, commands, file paths) is untrusted input. Validate, sanitize, or gate before execution. Never exec() LLM output without human approval.
+11. **Idiomatic Go** — `(T, error)` over Result types. Value receivers in Bubble Tea models. No generics where interfaces suffice. Blend into the ecosystem; no surprises.
+
+## Banned Patterns
+
+These are concrete code patterns that violate the core principles. Reject them in code review and never generate them:
+
+1. **Silent fallback on missing user input** — If the user explicitly specifies a file path, URL, model name, or any resource identifier, its absence is ALWAYS an error. Never fall back to defaults when the user expressed intent. `--config foo.yaml` → file must exist or fatal.
+2. **`if os.IsNotExist(err) { /* use defaults */ }`** — This is the canonical silent-failure footgun. The only acceptable use is for truly optional files that are auto-discovered (not user-specified).
+3. **`_ = err` without `// fire-and-forget: <reason>`** — Banned without explicit doc comment explaining why.
+4. **`err != nil` followed by `log` but no `return`** — Log-and-continue is silent degradation. If you log an error, you must also return it or surface it to the user.
+5. **Default values that mask misconfiguration** — If a config field is required for operation, its zero value must cause a clear error at startup, not silently produce broken behavior at runtime.
+6. **Fallback model/provider resolution** — If `model_ref` doesn't resolve, fail. Don't silently try a different resolution path or return a degraded runner.
 
 ## Architecture
 

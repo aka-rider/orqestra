@@ -45,14 +45,14 @@ func (v *PlanValidator) Validate(ctx context.Context, spec types.Specification) 
 	}
 
 	prompt := "Validate this specification:\n\n" + string(specJSON)
-	output, err := v.runner.RunPrint(ctx, prompt, v.cfg.SystemPrompt)
+	result, err := v.runner.RunPrint(ctx, prompt, v.cfg.SystemPrompt)
 	if err != nil {
 		return nil, fmt.Errorf("validator CLI call: %w", err)
 	}
 
 	var report types.ValidationReport
-	if err := json.Unmarshal([]byte(output), &report); err != nil {
-		return nil, fmt.Errorf("parse validation report: %w (raw: %s)", err, output)
+	if err := json.Unmarshal([]byte(result.Output), &report); err != nil {
+		return nil, fmt.Errorf("parse validation report: %w (raw: %s)", err, result.Output)
 	}
 
 	// Merge deterministic issues into report
