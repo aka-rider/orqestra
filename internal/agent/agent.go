@@ -177,6 +177,83 @@ func (a *Agent) Run(ctx context.Context, prompt string, gate GateFunc, stdout io
 	return result, nil
 }
 
+// RunFromSpec runs the pipeline starting from an already-constructed Specification,
+// skipping the planning phase. It proceeds through:
+// Plan Validation → Human Gate → Execution → Work Validation.
+func (a *Agent) RunFromSpec(ctx context.Context, spec types.Specification, gate GateFunc, stdout io.Writer) (*RunResult, error) {
+	result := &RunResult{Spec: spec}
+
+	// --- Stage: Plan Validation ---
+	if a.planValidator != nil {
+		a.emit(StagePlanValidation, nil)
+		report, err := a.planValidator.Validate(ctx, spec)
+		if err != nil {
+			result.Stage = StagePlanValidation
+			result.Err = err
+			a.emit(StagePlanValidation, err)
+			return result, err
+		}
+		result.PlanReport = report
+		if report.Verdict == types.VerdictFail {
+			result.Stage = StagePlanValidation
+			result.Err = fmt.Errorf("plan validation failed: %s", report.Summary)
+			a.emit(StagePlanValidation, result.Err)
+			return result, result.Err
+		}
+		slog.Info("plan validation passed", "verdict", report.Verdict)
+	}
+
+	// --- Stage: Human Gate ---
+	a.emit(StageHumanGate, nil)
+	approved, err := gate(spec)
+	if err != nil {
+		result.Stage = StageHumanGate
+		result.Err = err
+		return result, err
+	}
+	result.Approved = approved
+	if !approved {
+		result.Stage = StageHumanGate
+		return result, nil
+	}
+
+	// --- Stage: Execution ---
+	a.emit(StageExecution, nil)
+	workOutput, err := a.execute(ctx, spec, stdout)
+	if err != nil {
+		result.Stage = StageExecution
+		result.Err = err
+		a.emit(StageExecution, err)
+		return result, err
+	}
+	result.WorkOutput = workOutput
+	slog.Info("execution complete")
+
+	// --- Stage: Work Validation ---
+	if a.workValidator != nil {
+		a.emit(StageWorkValidation, nil)
+		workReport, err := a.validateWorkWithRepair(ctx, spec, workOutput, stdout)
+		if err != nil {
+			result.Stage = StageWorkValidation
+			result.Err = err
+			a.emit(StageWorkValidation, err)
+			return result, err
+		}
+		result.WorkReport = workReport
+		if workReport.Verdict == types.VerdictFail {
+			result.Stage = StageWorkValidation
+			result.Err = fmt.Errorf("work validation failed: %s", workReport.Summary)
+			a.emit(StageWorkValidation, result.Err)
+			return result, result.Err
+		}
+		slog.Info("work validation passed", "verdict", workReport.Verdict)
+	}
+
+	result.Stage = StageComplete
+	a.emit(StageComplete, nil)
+	return result, nil
+}
+
 // planWithRetries attempts planning with the configured retry budget.
 func (a *Agent) planWithRetries(ctx context.Context, prompt string) (types.Specification, error) {
 	attempts := a.cfg.Retry.PlannerAttempts

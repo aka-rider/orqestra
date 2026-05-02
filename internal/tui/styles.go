@@ -11,6 +11,7 @@ var (
 	bgColor        = lipgloss.Color("#1F2937")
 	approveColor   = lipgloss.Color("#10B981")
 	rejectColor    = lipgloss.Color("#EF4444")
+	editColor      = lipgloss.Color("#F59E0B")
 
 	// Heading styles
 	titleStyle = lipgloss.NewStyle().
@@ -102,6 +103,10 @@ var (
 	rejectKeyStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(rejectColor)
+
+	editKeyStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(editColor)
 
 	dimStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#6B7280")).

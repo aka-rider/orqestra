@@ -113,11 +113,15 @@ func (cv confirmView) Update(msg tea.Msg) (confirmView, tea.Cmd) {
 
 		case "a", "A", "y", "Y":
 			cv.decided = true
-			return cv, func() tea.Msg { return ConfirmMsg{Approved: true} }
+			return cv, func() tea.Msg { return ConfirmMsg{Choice: ConfirmAccept} }
 
 		case "r", "R", "n", "N":
 			cv.decided = true
-			return cv, func() tea.Msg { return ConfirmMsg{Approved: false} }
+			return cv, func() tea.Msg { return ConfirmMsg{Choice: ConfirmReject} }
+
+		case "e", "E":
+			cv.decided = true
+			return cv, func() tea.Msg { return ConfirmMsg{Choice: ConfirmEdit} }
 		}
 	}
 	return cv, nil
@@ -156,12 +160,13 @@ func (cv confirmView) View() string {
 
 	approve := approveKeyStyle.Render("[A]")
 	reject := rejectKeyStyle.Render("[R]")
+	edit := editKeyStyle.Render("[E]")
 	cursor := " "
 	if cv.cursorVisible {
 		cursor = "▌"
 	}
-	prompt := confirmStyle.Render("Approve this plan? ") + approve + "pprove / " + reject + "eject " + cursor
-	hint := dimStyle.Render("(a/y) approve  (r/n) reject  tab to scroll plan")
+	prompt := confirmStyle.Render("Approve this plan? ") + approve + "pprove / " + reject + "eject / " + edit + "dit " + cursor
+	hint := dimStyle.Render("(a/y) approve  (r/n) reject  (e) edit  tab to scroll plan")
 	inputContent := lipgloss.JoinVertical(lipgloss.Left, prompt, hint)
 	inputSection := inputBorder.Width(cv.termWidth - 2).Render(inputContent)
 

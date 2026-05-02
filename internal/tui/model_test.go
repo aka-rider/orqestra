@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"testing"
 
@@ -85,7 +86,7 @@ func TestModel_ConfirmApproved(t *testing.T) {
 	m.state = StateConfirming
 	m.spec = testSpec()
 
-	updated, _ := m.Update(ConfirmMsg{Approved: true})
+	updated, _ := m.Update(ConfirmMsg{Choice: ConfirmAccept})
 	model := updated.(Model)
 	if model.state != StateExecuting {
 		t.Errorf("expected StateExecuting, got %d", model.state)
@@ -99,7 +100,7 @@ func TestModel_ConfirmRejected_TransitionsToIdle(t *testing.T) {
 	m := NewModel(testPipeline())
 	m.state = StateConfirming
 
-	updated, cmd := m.Update(ConfirmMsg{Approved: false})
+	updated, cmd := m.Update(ConfirmMsg{Choice: ConfirmReject})
 	model := updated.(Model)
 	if model.state != StateDone {
 		t.Errorf("expected StateDone, got %d", model.state)
@@ -147,7 +148,7 @@ func TestModel_StateDoneTransitionsToIdle(t *testing.T) {
 	}
 
 	// Reject
-	updated, cmd := model.Update(ConfirmMsg{Approved: false})
+	updated, cmd := model.Update(ConfirmMsg{Choice: ConfirmReject})
 	model = updated.(Model)
 	if model.state != StateDone {
 		t.Fatalf("expected StateDone, got %d", model.state)
@@ -302,5 +303,146 @@ func TestModel_WorkValidationPass(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Error("expected cycle-back command")
+	}
+}
+
+// TestModel_HarnessDoneWithValidateWorkResult_TransitionsToWorkValidating verifies
+// that when ValidateWorkResult is configured, HarnessDoneMsg transitions to
+// StateWorkValidating (not StateDone).
+func TestModel_HarnessDoneWithValidateWorkResult_TransitionsToWorkValidating(t *testing.T) {
+	pipeline := testPipeline()
+	pipeline.ValidateWorkResult = func(_ context.Context, _ types.Specification, _ types.WorkOutput) (types.ValidationResult, error) {
+		return types.ValidationResult{Passed: true, Score: 1.0}, nil
+	}
+
+	m := NewModel(pipeline)
+	m.state = StateExecuting
+	m.spec = testSpec()
+	m.execTabIdx = m.tabsView.AddTab("Worker")
+
+	updated, _ := m.Update(HarnessDoneMsg{TabIndex: m.execTabIdx, Err: nil, WorkOutput: "done\n"})
+	model := updated.(Model)
+
+	if model.state != StateWorkValidating {
+		t.Errorf("expected StateWorkValidating, got %d", model.state)
+	}
+}
+
+// TestModel_ValidationResultMsg_PassedTransitionsToDone verifies a passing
+// ValidationResultMsg transitions to StateDone with no error stored.
+func TestModel_ValidationResultMsg_PassedTransitionsToDone(t *testing.T) {
+	m := NewModel(testPipeline())
+	m.state = StateWorkValidating
+
+	updated, _ := m.Update(ValidationResultMsg{
+		Result: types.ValidationResult{Passed: true, Score: 1.0},
+	})
+	model := updated.(Model)
+
+	if model.state != StateDone {
+		t.Errorf("expected StateDone, got %d", model.state)
+	}
+	if model.err != nil {
+		t.Errorf("expected nil error for passed validation, got %v", model.err)
+	}
+	if !model.validateView.done {
+		t.Error("expected validateView.done=true")
+	}
+}
+
+// TestModel_ValidationResultMsg_FailedTransitionsToDone verifies that a failing
+// ValidationResultMsg transitions to StateDone with an error that describes
+// how many criteria were not met.
+func TestModel_ValidationResultMsg_FailedTransitionsToDone(t *testing.T) {
+	m := NewModel(testPipeline())
+	m.state = StateWorkValidating
+
+	updated, _ := m.Update(ValidationResultMsg{
+		Result: types.ValidationResult{
+			Passed: false,
+			Score:  0.0,
+			FailedCriteria: []types.FailedCriterion{
+				{Criterion: "Criterion 1", Reason: "not implemented"},
+			},
+		},
+	})
+	model := updated.(Model)
+
+	if model.state != StateDone {
+		t.Errorf("expected StateDone, got %d", model.state)
+	}
+	if model.err == nil {
+		t.Error("expected non-nil error for failed validation")
+	}
+	if !model.validateView.done {
+		t.Error("expected validateView.done=true")
+	}
+}
+
+// TestModel_ValidationResultMsg_ErrTransitionsToDone verifies that a
+// ValidationResultMsg with a non-nil Err stores the exact error on the model.
+func TestModel_ValidationResultMsg_ErrTransitionsToDone(t *testing.T) {
+	m := NewModel(testPipeline())
+	m.state = StateWorkValidating
+
+	expectedErr := fmt.Errorf("network error: connection refused")
+	updated, _ := m.Update(ValidationResultMsg{Err: expectedErr})
+	model := updated.(Model)
+
+	if model.state != StateDone {
+		t.Errorf("expected StateDone, got %d", model.state)
+	}
+	if model.err != expectedErr {
+		t.Errorf("expected error %v, got %v", expectedErr, model.err)
+	}
+	if !model.validateView.done {
+		t.Error("expected validateView.done=true")
+	}
+}
+
+// TestModel_StateWorkValidating_FullSequence exercises the state machine path:
+// StateExecuting → StateWorkValidating → StateDone.
+func TestModel_StateWorkValidating_FullSequence(t *testing.T) {
+	pipeline := testPipeline()
+	pipeline.ValidateWorkResult = func(_ context.Context, _ types.Specification, _ types.WorkOutput) (types.ValidationResult, error) {
+		return types.ValidationResult{Passed: true, Score: 1.0}, nil
+	}
+
+	m := NewModel(pipeline)
+
+	// Simulate: submit prompt → plan completes → confirm → execution starts
+	updated, _ := m.Update(PromptSubmitMsg{Prompt: "build it"})
+	m = updated.(Model)
+	if m.state != StatePlanning {
+		t.Fatalf("expected StatePlanning, got %d", m.state)
+	}
+
+	updated, _ = m.Update(planCompleteMsg{spec: testSpec()})
+	m = updated.(Model)
+	if m.state != StateConfirming {
+		t.Fatalf("expected StateConfirming, got %d", m.state)
+	}
+
+	updated, _ = m.Update(ConfirmMsg{Choice: ConfirmAccept})
+	m = updated.(Model)
+	if m.state != StateExecuting {
+		t.Fatalf("expected StateExecuting, got %d", m.state)
+	}
+
+	// Worker finishes — should move to StateWorkValidating
+	m.execTabIdx = 0
+	updated, _ = m.Update(HarnessDoneMsg{TabIndex: 0, WorkOutput: "done"})
+	m = updated.(Model)
+	if m.state != StateWorkValidating {
+		t.Fatalf("expected StateWorkValidating, got %d", m.state)
+	}
+
+	// Validation result arrives
+	updated, _ = m.Update(ValidationResultMsg{
+		Result: types.ValidationResult{Passed: true, Score: 1.0},
+	})
+	m = updated.(Model)
+	if m.state != StateDone {
+		t.Errorf("expected StateDone, got %d", m.state)
 	}
 }

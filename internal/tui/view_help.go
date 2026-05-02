@@ -115,8 +115,12 @@ func stateName(s State) string {
 		return "validating"
 	case StateConfirming:
 		return "confirming"
+	case StateSaved:
+		return "saved"
 	case StateExecuting:
 		return "executing"
+	case StateWorkValidating:
+		return "work-validating"
 	case StateDone:
 		return "done"
 	default:

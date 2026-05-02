@@ -53,6 +53,9 @@ type Config struct {
 	ExecutionGraph ExecutionGraphConfig      `yaml:"execution_graph"`
 	Intent         IntentConfig              `yaml:"intent"`
 	Sandbox        SandboxConfig             `yaml:"sandbox"`
+	// LlamaEndpoint is the base URL of a running llama-server OpenAI-compatible
+	// endpoint used by the HTTP work validator. Required for work validation.
+	LlamaEndpoint string `yaml:"llama_endpoint"`
 }
 
 type PlannerConfig struct {

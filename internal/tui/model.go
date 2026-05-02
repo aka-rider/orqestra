@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/plan"
 	"github.com/xiii/orqestra/internal/types"
 )
 
@@ -18,13 +20,15 @@ import (
 type State int
 
 const (
-	StateIdle          State = iota // Command bar focused, waiting for input
-	StateIntentConfirm              // Show rephrased intent, [A]pprove/[R]eject
-	StatePlanning                   // Planning tab active, claude running
-	StateValidating                 // Plan validation in progress
-	StateConfirming                 // Plan ready, waiting for [A]pprove/[R]eject
-	StateExecuting                  // Worker tab active, claude running
-	StateDone                       // Everything finished, will cycle back to idle
+	StateIdle            State = iota // Command bar focused, waiting for input
+	StateIntentConfirm                // Show rephrased intent, [A]pprove/[R]eject
+	StatePlanning                     // Planning tab active, claude running
+	StateValidating                   // Plan validation in progress
+	StateConfirming                   // Plan ready, waiting for [A]pprove/[R]eject/[E]dit
+	StateSaved                        // Plan saved to file; showing path + resume command
+	StateExecuting                    // Worker tab active, claude running
+	StateWorkValidating               // HTTP work validation in progress
+	StateDone                         // Everything finished, will cycle back to idle
 )
 
 // PipelineFuncs holds the functions the TUI drives.
@@ -35,13 +39,19 @@ type PipelineFuncs struct {
 	ValidatePlan func(ctx context.Context, spec types.Specification) (*types.ValidationReport, error)
 	// Execute runs the worker and streams output.
 	Execute func(ctx context.Context, spec types.Specification, stdout io.Writer) error
-	// ValidateWork runs work validation. Returns nil report if validation is disabled.
+	// ValidateWork runs CLI-based work validation. Returns nil report if validation is disabled.
 	ValidateWork func(ctx context.Context, spec types.Specification, workOutput string) (*types.ValidationReport, error)
+	// ValidateWorkResult runs HTTP-based work validation against acceptance criteria.
+	// When set, this takes precedence over ValidateWork in the TUI pipeline.
+	ValidateWorkResult func(ctx context.Context, spec types.Specification, output types.WorkOutput) (types.ValidationResult, error)
 	// SessionManager is the shared session manager whose events drive TUI tabs.
 	// If non-nil, sessions auto-create and update tabs.
 	SessionManager *harness.SessionManager
 	// Send delivers a tea.Msg into the TUI event loop. Wired after program creation.
 	Send func(tea.Msg)
+	// InitialSpec, when non-nil, skips the planning phase and starts directly at
+	// plan validation / confirmation with the pre-loaded spec.
+	InitialSpec *types.Specification
 }
 
 // Model is the main Bubble Tea model that drives the full pipeline.
@@ -51,12 +61,18 @@ type Model struct {
 	approved bool
 	prompt   string // current prompt from command bar
 
-	tabsView    tabsView
-	confirmView confirmView
-	commandBar  commandBarModel
-	registry    *CommandRegistry
-	logPanel    *logPanel
-	showLogs    bool
+	tabsView     tabsView
+	confirmView  confirmView
+	savedView    savedView
+	validateView validateView
+	commandBar   commandBarModel
+	registry     *CommandRegistry
+	logPanel     *logPanel
+	showLogs     bool
+
+	// saveErr holds a transient error from a failed plan-save attempt.
+	// Displayed inline in StateConfirming; cleared on next successful transition.
+	saveErr error
 
 	// Help/intent ephemeral content displayed in tab area
 	helpContent   string
@@ -79,13 +95,20 @@ type Model struct {
 }
 
 // NewModel creates the main TUI model starting at StateIdle.
+// If pipeline.InitialSpec is non-nil the model begins in StatePlanning and
+// Init() immediately emits planCompleteMsg, skipping the prompt/planner phase.
 func NewModel(pipeline PipelineFuncs) Model {
 	ctx, cancel := context.WithCancel(context.Background())
 	registry := NewCommandRegistry()
 	RegisterBuiltins(registry)
 
+	state := StateIdle
+	if pipeline.InitialSpec != nil {
+		state = StatePlanning
+	}
+
 	m := Model{
-		state:       StateIdle,
+		state:       state,
 		tabsView:    newTabsView(),
 		confirmView: newConfirmView(),
 		commandBar:  newCommandBar(registry),
@@ -99,11 +122,19 @@ func NewModel(pipeline PipelineFuncs) Model {
 		execTabIdx:  -1,
 		sessionTabs: make(map[string]int),
 	}
+	if pipeline.InitialSpec != nil {
+		m.commandBar.SetState(StatePlanning)
+	}
 	return m
 }
 
 func (m Model) Init() tea.Cmd {
-	return spinner.New().Tick
+	cmds := []tea.Cmd{spinner.New().Tick}
+	if m.pipeline.InitialSpec != nil {
+		spec := *m.pipeline.InitialSpec
+		cmds = append(cmds, func() tea.Msg { return planCompleteMsg{spec: spec} })
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -134,6 +165,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cv, cvCmd := m.confirmView.Update(tabMsg)
 			m.confirmView = cv
 			return m, tea.Batch(cmd, cvCmd)
+		}
+		if m.state == StateSaved {
+			sv, svCmd := m.savedView.Update(tabMsg)
+			m.savedView = sv
+			return m, tea.Batch(cmd, svCmd)
 		}
 		return m, cmd
 
@@ -235,22 +271,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ConfirmMsg:
 		m.confirmView.Blur()
-		m.approved = msg.Approved
-		if !msg.Approved {
+		switch msg.Choice {
+		case ConfirmEdit:
+			return m.handleConfirmEdit()
+		case ConfirmAccept:
+			m.saveErr = nil
+			m.approved = true
+			m.state = StateExecuting
+			m.commandBar.SetState(StateExecuting)
+			if m.pipeline.SessionManager != nil && m.program != nil {
+				go StartExecutionSession(m.program, m.ctx, m.pipeline.SessionManager, m.spec, m.pipeline)
+			} else if m.program != nil {
+				m.execTabIdx = m.tabsView.AddTab("Worker")
+				m.tabsView.active = m.execTabIdx
+				go RunExecution(m.program, m.ctx, m.pipeline, m.spec, m.execTabIdx)
+			}
+			return m, nil
+		default: // ConfirmReject
+			m.saveErr = nil
 			m.state = StateDone
 			m.commandBar.SetState(StateDone)
 			return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 		}
-		m.state = StateExecuting
-		m.commandBar.SetState(StateExecuting)
-		if m.pipeline.SessionManager != nil && m.program != nil {
-			go StartExecutionSession(m.program, m.ctx, m.pipeline.SessionManager, m.spec, m.pipeline)
-		} else if m.program != nil {
-			m.execTabIdx = m.tabsView.AddTab("Worker")
-			m.tabsView.active = m.execTabIdx
-			go RunExecution(m.program, m.ctx, m.pipeline, m.spec, m.execTabIdx)
-		}
-		return m, nil
 
 	case IntentConfirmMsg:
 		m.state = StatePlanning
@@ -281,6 +323,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tabsView = tv
 		return m, cmd
 
+	case ValidationStartedMsg:
+		// Signal consumed; spinner is already ticking via validateView.Init().
+		return m, nil
+
+	case ValidationResultMsg:
+		vv, vCmd := m.validateView.Update(msg)
+		m.validateView = vv
+		m.state = StateDone
+		m.commandBar.SetState(StateDone)
+		if msg.Err != nil {
+			m.err = msg.Err
+		} else if !msg.Result.Passed {
+			m.err = fmt.Errorf("work validation: %d acceptance criteria not met", len(msg.Result.FailedCriteria))
+		}
+		return m, vCmd
+
 	case HarnessDoneMsg:
 		tv, cmd := m.tabsView.Update(msg)
 		m.tabsView = tv
@@ -290,6 +348,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.commandBar.SetState(StateDone)
 				m.err = msg.Err
 				return m, nil
+			} else if m.pipeline.ValidateWorkResult != nil {
+				workOutput := types.WorkOutput{Stdout: msg.WorkOutput}
+				m.state = StateWorkValidating
+				m.commandBar.SetState(StateWorkValidating)
+				m.validateView = newValidateView(m.spec.Acceptance)
+				return m, tea.Batch(cmd, m.validateView.Init(), m.makeValidateWorkCmd(workOutput))
 			} else if m.pipeline.ValidateWork != nil && msg.WorkOutput != "" {
 				go m.startWorkValidation(msg.WorkOutput)
 			} else {
@@ -349,9 +413,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
-		tv, cmd := m.tabsView.Update(msg)
+		tv, tvCmd := m.tabsView.Update(msg)
 		m.tabsView = tv
-		return m, cmd
+		if m.state == StateWorkValidating {
+			vv, vvCmd := m.validateView.Update(msg)
+			m.validateView = vv
+			return m, tea.Batch(tvCmd, vvCmd)
+		}
+		return m, tvCmd
 	}
 
 	return m, nil
@@ -375,10 +444,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// In StateSaved, any key exits cleanly.
+	if m.state == StateSaved {
+		sv, cmd := m.savedView.Update(msg)
+		m.savedView = sv
+		return m, cmd
+	}
+
 	// In confirming state, forward all relevant keys to confirmView.
 	if m.state == StateConfirming {
 		switch key {
-		case "a", "A", "y", "Y", "r", "R", "n", "N",
+		case "a", "A", "y", "Y", "r", "R", "n", "N", "e", "E",
 			"tab", "up", "down", "pgup", "pgdown", "home", "end":
 			cv, cmd := m.confirmView.Update(msg)
 			m.confirmView = cv
@@ -476,8 +552,13 @@ func (m Model) handleCommand(msg CommandMsg) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	var topView string
 
-	if m.state == StateConfirming {
+	if m.state == StateSaved {
+		topView = m.savedView.View()
+	} else if m.state == StateConfirming {
 		topView = m.confirmView.View()
+		if m.saveErr != nil {
+			topView += "\n" + errorStyle.Render("✗ Save failed: "+m.saveErr.Error())
+		}
 	} else if m.helpContent != "" {
 		topView = m.tabsView.View() + "\n\n" + m.helpContent
 	} else if m.intentContent != "" {
@@ -490,9 +571,18 @@ func (m Model) View() string {
 		topView += "\n\n" + statusStyle.Render("⟳ Validating plan...")
 	}
 
+	if m.state == StateWorkValidating {
+		topView += "\n\n" + m.validateView.View()
+	}
+
 	if m.state == StateDone {
 		if !m.approved {
 			topView += "\n\n" + titleStyle.Render("Plan rejected.")
+		} else if m.validateView.done {
+			topView += "\n\n" + m.validateView.View()
+			if m.err != nil {
+				topView += "\n" + dimStyle.Render("  press any key to dismiss")
+			}
 		} else if m.err != nil {
 			topView += "\n\n" + errorStyle.Render("✗ Error: "+m.err.Error()) + "\n" + dimStyle.Render("  press any key to dismiss")
 		} else {
@@ -604,6 +694,36 @@ func (m Model) handleSessionEvent(evt harness.SessionEvent) (tea.Model, tea.Cmd)
 	return m, nil
 }
 
+// handleConfirmEdit saves the current spec to a markdown file in cwd.
+// On success it transitions to StateSaved; on failure it stays in StateConfirming
+// with m.saveErr set for display.
+func (m Model) handleConfirmEdit() (tea.Model, tea.Cmd) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		m.saveErr = fmt.Errorf("cannot determine working directory: %w", err)
+		return m, m.confirmView.Focus()
+	}
+	s := plan.FromSpecification(m.spec)
+	filePath, err := plan.SaveToFile(s, cwd)
+	if err != nil {
+		m.saveErr = err
+		return m, m.confirmView.Focus()
+	}
+	m.saveErr = nil
+	m.state = StateSaved
+	m.commandBar.SetState(StateSaved)
+	m.savedView = newSavedView(filePath)
+	if m.width > 0 {
+		tabHeight := m.height - 3
+		if m.showLogs {
+			tabHeight -= 8
+		}
+		sv, _ := m.savedView.Update(tea.WindowSizeMsg{Width: m.width, Height: tabHeight})
+		m.savedView = sv
+	}
+	return m, nil
+}
+
 // syncConfirmViewport sends the current terminal dimensions to the confirmView
 // so its viewport initialises correctly when entering StateConfirming. Safe to
 // call before the first tea.WindowSizeMsg if m.width == 0 (no-op in that case).
@@ -672,6 +792,14 @@ func (m Model) startPlanValidation() {
 	slog.Info("validating plan", "goal", m.spec.Goal)
 	report, err := m.pipeline.ValidatePlan(m.ctx, m.spec)
 	p.Send(PlanValidatedMsg{Report: report, Err: err})
+}
+
+// makeValidateWorkCmd returns a tea.Cmd that calls ValidateWorkResult asynchronously.
+func (m Model) makeValidateWorkCmd(output types.WorkOutput) tea.Cmd {
+	return func() tea.Msg {
+		result, err := m.pipeline.ValidateWorkResult(m.ctx, m.spec, output)
+		return ValidationResultMsg{Result: result, Err: err}
+	}
 }
 
 // startWorkValidation runs ValidateWork in a goroutine and sends the result.

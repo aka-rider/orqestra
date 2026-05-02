@@ -13,9 +13,23 @@ import (
 // PlanReadyMsg signals that planning completed successfully.
 type PlanReadyMsg struct{}
 
-// ConfirmMsg carries the user's approval decision.
+// ConfirmChoice represents the user's decision at the Human Gate.
+type ConfirmChoice int
+
+const (
+	ConfirmAccept ConfirmChoice = iota // user approved the plan
+	ConfirmReject                      // user rejected the plan
+	ConfirmEdit                        // user chose to save the plan for editing
+)
+
+// ConfirmMsg carries the user's gate decision.
 type ConfirmMsg struct {
-	Approved bool
+	Choice ConfirmChoice
+}
+
+// PlanSavedMsg is sent after the plan is successfully written to disk.
+type PlanSavedMsg struct {
+	FilePath string
 }
 
 // PromptSubmitMsg carries a user-typed prompt from the command bar.
@@ -112,6 +126,15 @@ type SandboxStateMsg struct {
 
 // CursorBlinkMsg is fired by the cursor blink tick loop in confirmView.
 type CursorBlinkMsg struct{}
+
+// ValidationStartedMsg signals that the HTTP work validator has started (triggers spinner).
+type ValidationStartedMsg struct{}
+
+// ValidationResultMsg carries the structured result from the HTTP work validator.
+type ValidationResultMsg struct {
+	Result types.ValidationResult
+	Err    error
+}
 
 // streamChunkCmd creates a tea.Cmd that emits a StreamChunkMsg.
 func streamChunkCmd(tabIndex int, content string) tea.Cmd {

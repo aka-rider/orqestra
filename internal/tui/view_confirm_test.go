@@ -181,8 +181,8 @@ func TestConfirmView_ApproveKey(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected ConfirmMsg, got %T", msg)
 	}
-	if !cm.Approved {
-		t.Error("'y' key should produce ConfirmMsg{Approved: true}")
+	if cm.Choice != ConfirmAccept {
+		t.Errorf("'y' key should produce ConfirmMsg{Choice: ConfirmAccept}, got %v", cm.Choice)
 	}
 }
 
@@ -197,8 +197,8 @@ func TestConfirmView_RejectKey(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected ConfirmMsg, got %T", msg)
 	}
-	if cm.Approved {
-		t.Error("'n' key should produce ConfirmMsg{Approved: false}")
+	if cm.Choice != ConfirmReject {
+		t.Errorf("'n' key should produce ConfirmMsg{Choice: ConfirmReject}, got %v", cm.Choice)
 	}
 }
 
