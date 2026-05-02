@@ -136,19 +136,48 @@ func parseFlexibleSpec(content string) (types.Specification, error) {
 }
 
 // stripCodeFences removes ```json ... ``` or ``` ... ``` wrapping from a string.
+// Also handles the case where text commentary precedes the code fence.
 func stripCodeFences(s string) string {
-	if !strings.HasPrefix(s, "```") {
-		return s
+	// If it starts with a code fence, strip directly.
+	if strings.HasPrefix(s, "```") {
+		idx := strings.Index(s, "\n")
+		if idx == -1 {
+			return s
+		}
+		s = s[idx+1:]
+		if last := strings.LastIndex(s, "```"); last >= 0 {
+			s = s[:last]
+		}
+		return strings.TrimSpace(s)
 	}
-	// Remove opening fence line
-	idx := strings.Index(s, "\n")
-	if idx == -1 {
-		return s
+
+	// Look for a code fence anywhere in the string (text + ```json\n...\n```)
+	fenceStart := strings.Index(s, "```json")
+	if fenceStart == -1 {
+		fenceStart = strings.Index(s, "```JSON")
 	}
-	s = s[idx+1:]
-	// Remove closing fence
-	if last := strings.LastIndex(s, "```"); last >= 0 {
-		s = s[:last]
+	if fenceStart == -1 {
+		fenceStart = strings.Index(s, "```\n{")
 	}
-	return strings.TrimSpace(s)
+	if fenceStart >= 0 {
+		rest := s[fenceStart:]
+		idx := strings.Index(rest, "\n")
+		if idx >= 0 {
+			rest = rest[idx+1:]
+			if last := strings.LastIndex(rest, "```"); last >= 0 {
+				rest = rest[:last]
+			}
+			return strings.TrimSpace(rest)
+		}
+	}
+
+	// No code fence found — try to extract raw JSON object.
+	// Find the first '{' and last '}' to extract the JSON payload.
+	first := strings.Index(s, "{")
+	last := strings.LastIndex(s, "}")
+	if first >= 0 && last > first {
+		return s[first : last+1]
+	}
+
+	return s
 }

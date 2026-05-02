@@ -156,10 +156,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.intentContent = ""
 		return m, nil
 
+	case CursorBlinkMsg:
+		if m.state == StateConfirming {
+			cv, cmd := m.confirmView.Update(msg)
+			m.confirmView = cv
+			return m, cmd
+		}
+		// Not in StateConfirming: drop the message. blinkCmd is not re-armed,
+		// so the tick loop terminates after this last in-flight message.
+		return m, nil
+
 	case PlanReadyMsg:
 		m.state = StateConfirming
 		m.commandBar.SetState(StateConfirming)
-		return m, nil
+		return m, m.confirmView.Focus()
 
 	case addTabMsg:
 		idx := m.tabsView.AddTab(msg.name)
@@ -174,7 +184,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pipeline.ValidatePlan == nil {
 			m.state = StateConfirming
 			m.commandBar.SetState(StateConfirming)
-			return m, nil
+			return m, m.confirmView.Focus()
 		}
 		m.state = StateValidating
 		m.commandBar.SetState(StateValidating)
@@ -186,7 +196,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			slog.Warn("plan validation error, proceeding to confirm", "err", msg.Err)
 			m.state = StateConfirming
 			m.commandBar.SetState(StateConfirming)
-			return m, nil
+			return m, m.confirmView.Focus()
 		}
 		if msg.Report != nil && msg.Report.Verdict == types.VerdictFail {
 			m.err = fmt.Errorf("plan validation failed: %s", msg.Report.Summary)
@@ -199,9 +209,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.state = StateConfirming
 		m.commandBar.SetState(StateConfirming)
-		return m, nil
+		return m, m.confirmView.Focus()
 
 	case ConfirmMsg:
+		m.confirmView.Blur()
 		m.approved = msg.Approved
 		if !msg.Approved {
 			m.state = StateDone

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"strings"
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
@@ -138,8 +139,16 @@ func (v *WorkValidator) runValidationCommand(ctx context.Context, vc types.Valid
 		return result
 	}
 
-	args := vc.Args
-	cmd := exec.CommandContext(ctx, vc.Command, args...)
+	// Detect shell operators in args — if present, run via sh -c
+	var cmd *exec.Cmd
+	fullArgs := append([]string{vc.Command}, vc.Args...)
+	fullCmdStr := strings.Join(fullArgs, " ")
+	if containsShellOperator(fullCmdStr) {
+		cmd = exec.CommandContext(ctx, "sh", "-c", fullCmdStr)
+	} else {
+		cmd = exec.CommandContext(ctx, vc.Command, vc.Args...)
+	}
+
 	if vc.Cwd != "" {
 		cmd.Dir = vc.Cwd
 	}
@@ -162,6 +171,14 @@ func (v *WorkValidator) runValidationCommand(ctx context.Context, vc types.Valid
 
 	result.Passed = result.ActualExit == vc.ExpectedExit
 	return result
+}
+
+// containsShellOperator returns true if the string contains shell metacharacters
+// that require interpretation by sh.
+func containsShellOperator(s string) bool {
+	return strings.Contains(s, "&&") || strings.Contains(s, "||") ||
+		strings.Contains(s, "|") || strings.Contains(s, ";") ||
+		strings.Contains(s, ">") || strings.Contains(s, "<")
 }
 
 // truncate limits a string to maxLen characters.

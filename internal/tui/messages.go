@@ -110,6 +110,9 @@ type SandboxStateMsg struct {
 	State     string // "pending", "provisioning", "ready", "running", "stopped", "extracting", "destroyed"
 }
 
+// CursorBlinkMsg is fired by the cursor blink tick loop in confirmView.
+type CursorBlinkMsg struct{}
+
 // streamChunkCmd creates a tea.Cmd that emits a StreamChunkMsg.
 func streamChunkCmd(tabIndex int, content string) tea.Cmd {
 	return func() tea.Msg {
