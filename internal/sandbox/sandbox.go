@@ -84,6 +84,7 @@ type Config struct {
 	MaxLifetime        time.Duration `yaml:"max_lifetime"` // hard kill after this duration
 	Network            string        `yaml:"network"`      // Docker network mode (e.g. "host", "bridge")
 	ReadOnlyMounts     []MountConfig `yaml:"read_only_mounts"`
+	BindMounts         []MountConfig `yaml:"bind_mounts"`         // read-write bind mounts
 	AllowedExecutables []string      `yaml:"allowed_executables"` // glob patterns for allowed executable files
 	MCP                MCPConfig     `yaml:"mcp"`
 }

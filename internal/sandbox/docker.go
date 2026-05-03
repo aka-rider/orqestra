@@ -294,6 +294,12 @@ func (d *DockerSandbox) buildCreateArgs() []string {
 			fmt.Sprintf("type=bind,source=%s,target=%s,readonly", m.HostPath, m.ContainerPath))
 	}
 
+	// Read-write bind mounts (e.g. credentials that need token refresh).
+	for _, m := range d.cfg.BindMounts {
+		args = append(args, "--mount",
+			fmt.Sprintf("type=bind,source=%s,target=%s", m.HostPath, m.ContainerPath))
+	}
+
 	// Docker MCP gateway socket — exposes host MCP servers inside the container.
 	// Only mount if the socket actually exists on the host.
 	if d.cfg.MCP.SocketPath != "" {

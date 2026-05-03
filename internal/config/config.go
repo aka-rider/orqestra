@@ -138,6 +138,7 @@ type SandboxConfig struct {
 	MaxLifetime        Duration         `yaml:"max_lifetime"` // hard kill after this
 	Network            string           `yaml:"network"`      // Docker network mode (e.g. "host", "bridge")
 	ReadOnlyMounts     []SandboxMount   `yaml:"read_only_mounts"`
+	BindMounts         []SandboxMount   `yaml:"bind_mounts"`         // read-write bind mounts
 	AllowedExecutables []string         `yaml:"allowed_executables"` // glob patterns
 	MCP                SandboxMCPConfig `yaml:"mcp"`
 }

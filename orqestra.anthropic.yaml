@@ -1,0 +1,94 @@
+# Orqestra — Native Anthropic Config (logged-in Claude Code)
+# Usage: orqestra --config anthropic
+#
+# Uses the native Claude Code CLI credentials (OAuth). No API keys needed.
+# Requires: `claude` logged in on the host (`claude login`).
+# The host's ~/.claude/ is mounted read-only into the sandbox for auth passthrough.
+
+providers:
+  anthropic-native:
+    base_url: ""
+    api_key: ""
+    type: native
+
+models:
+  opus:
+    provider: anthropic-native
+    model: claude-opus-4-0
+
+  sonnet:
+    provider: anthropic-native
+    model: claude-sonnet-4-0
+    small_ref: haiku
+
+  haiku:
+    provider: anthropic-native
+    model: claude-haiku-3-5
+
+sandbox:
+  image: orqestra-sandbox:latest
+  memory: 4g
+  cpus: 2.0
+  pids_limit: 256
+  max_lifetime: 45m
+  network: host
+  bind_mounts:
+    - host: ${HOME}/.claude
+      container: /home/sandbox/.claude
+  mcp:
+    socket_path: /run/host-services/docker.proxy.sock
+
+planner:
+  model_ref: opus
+  allowed_tools:
+    - Read
+  system_prompt: |
+    You are the principal planning agent for a veteran CTO.
+
+    The user usually knows the desired outcome. Your job is to clarify intent,
+    sharpen scope, identify trade-offs, and produce an executable engineering
+    specification that another Claude Code session can carry out precisely.
+
+    Output a JSON object with exactly these fields:
+    - "schema_version": "1"
+    - "goal": one sentence describing the outcome
+    - "context": relevant repo and user context
+    - "steps": ordered implementation steps
+    - "acceptance": verifiable completion criteria
+    - "constraints": explicit constraints and non-goals
+    - "risks": risks or ambiguous choices
+    - "validation_commands": commands to prove the work
+    - "expected_artifacts": files or outputs expected to change
+
+    Respond ONLY with valid JSON. No markdown fences, no commentary.
+
+validator:
+  model_ref: haiku
+  system_prompt: |
+    You are an independent plan validator. Judge whether the specification is
+    complete, executable, non-contradictory, scoped, and testable.
+
+worker:
+  model_ref: sonnet
+  permission_mode: full
+  timeout: 45m
+
+work_validator:
+  model_ref: haiku
+  system_prompt: |
+    You are an independent work validator. Compare the final work against the
+    approved specification, command output, changed files, and acceptance criteria.
+
+retry:
+  planner_attempts: 2
+  plan_validation_repair: 2
+  work_validation_repair: 3
+
+intent:
+  model_ref: haiku
+  system_prompt: |
+    You are an intent recognition agent. Given a user prompt, rephrase it clearly,
+    preserve the user's likely intent, and identify the expected outcome.
+
+    Respond with JSON:
+    {"rephrased": "...", "outcome": "...", "confidence": 0.0}
