@@ -53,9 +53,6 @@ type Config struct {
 	ExecutionGraph ExecutionGraphConfig      `yaml:"execution_graph"`
 	Intent         IntentConfig              `yaml:"intent"`
 	Sandbox        SandboxConfig             `yaml:"sandbox"`
-	// LlamaEndpoint is the base URL of a running llama-server OpenAI-compatible
-	// endpoint used by the HTTP work validator. Required for work validation.
-	LlamaEndpoint string `yaml:"llama_endpoint"`
 }
 
 type PlannerConfig struct {
@@ -132,13 +129,14 @@ type IntentConfig struct {
 }
 
 // SandboxConfig configures Docker-based agent sandboxing.
+// Sandboxing is always active — there is no opt-out.
 type SandboxConfig struct {
-	Enabled            bool             `yaml:"enabled"`
 	Image              string           `yaml:"image"`
 	Memory             string           `yaml:"memory"`       // e.g. "4g"
 	CPUs               float64          `yaml:"cpus"`         // e.g. 2.0
 	PidsLimit          int64            `yaml:"pids_limit"`   // max PIDs in container
 	MaxLifetime        Duration         `yaml:"max_lifetime"` // hard kill after this
+	Network            string           `yaml:"network"`      // Docker network mode (e.g. "host", "bridge")
 	ReadOnlyMounts     []SandboxMount   `yaml:"read_only_mounts"`
 	AllowedExecutables []string         `yaml:"allowed_executables"` // glob patterns
 	MCP                SandboxMCPConfig `yaml:"mcp"`
@@ -207,6 +205,14 @@ Respond ONLY with valid JSON. No markdown fences, no commentary.`,
 	}
 }
 
+func formatYAMLError(path string, err error) error {
+	msg := err.Error()
+	if strings.Contains(msg, "did not find expected key") {
+		return fmt.Errorf("parsing config %q: invalid indentation or missing mandatory parameter key near %s", path, msg[strings.Index(msg, "line"):])
+	}
+	return fmt.Errorf("parsing config %q: %w", path, err)
+}
+
 func Load(path string) (*Config, error) {
 	cfg := DefaultConfig()
 
@@ -215,7 +221,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("reading config %q: %w", path, err)
 	}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parsing config %q: %w", path, err)
+		return nil, formatYAMLError(path, err)
 	}
 
 	// Override from environment (always applied)
@@ -236,6 +242,19 @@ func Load(path string) (*Config, error) {
 
 // validate checks that all model references point to existing providers.
 func (c *Config) validate() error {
+	if c.Planner.ModelRef == "" {
+		return fmt.Errorf("missing mandatory planner.model_ref parameter")
+	}
+	if c.Worker.ModelRef == "" {
+		return fmt.Errorf("missing mandatory worker.model_ref parameter")
+	}
+	if c.Validator.ModelRef == "" {
+		return fmt.Errorf("missing mandatory validator.model_ref parameter")
+	}
+	if c.WorkValidator.ModelRef == "" {
+		return fmt.Errorf("missing mandatory work_validator.model_ref parameter")
+	}
+
 	for name, m := range c.Models {
 		if _, ok := c.Providers[m.Provider]; !ok {
 			return fmt.Errorf("model %q references unknown provider %q", name, m.Provider)
@@ -256,6 +275,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	for _, node := range c.ExecutionGraph.Agents {
+		if node.ID == "" && node.Role == "" {
+			return fmt.Errorf("execution graph agent missing mandatory id or role parameter")
+		}
 		if node.ModelRef != "" {
 			if _, ok := c.Models[node.ModelRef]; !ok {
 				return fmt.Errorf("execution graph node %q references unknown model_ref %q", node.identity(), node.ModelRef)
@@ -272,6 +294,7 @@ func (c *Config) validate() error {
 			}
 		}
 	}
+
 	return nil
 }
 

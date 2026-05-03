@@ -77,12 +77,12 @@ type MCPConfig struct {
 
 // Config configures a sandbox instance.
 type Config struct {
-	Enabled            bool          `yaml:"enabled"`
 	Image              string        `yaml:"image"`
 	Memory             string        `yaml:"memory"`       // e.g. "4g"
 	CPUs               float64       `yaml:"cpus"`         // e.g. 2.0
 	PidsLimit          int64         `yaml:"pids_limit"`   // max PIDs in container
 	MaxLifetime        time.Duration `yaml:"max_lifetime"` // hard kill after this duration
+	Network            string        `yaml:"network"`      // Docker network mode (e.g. "host", "bridge")
 	ReadOnlyMounts     []MountConfig `yaml:"read_only_mounts"`
 	AllowedExecutables []string      `yaml:"allowed_executables"` // glob patterns for allowed executable files
 	MCP                MCPConfig     `yaml:"mcp"`
@@ -91,7 +91,6 @@ type Config struct {
 // DefaultConfig returns a sandbox config with sane defaults.
 func DefaultConfig() Config {
 	return Config{
-		Enabled:     false,
 		Image:       "orqestra-sandbox:latest",
 		Memory:      "4g",
 		CPUs:        2,

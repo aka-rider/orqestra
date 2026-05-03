@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -134,7 +136,7 @@ func (d *DockerSandbox) Provision(ctx context.Context) error {
 func (d *DockerSandbox) Exec(ctx context.Context, command []string, env []string, out io.Writer) (int, error) {
 	d.setState(StateRunning)
 
-	args := []string{"exec"}
+	args := []string{"exec", "-u", "sandbox"}
 	// Pass environment variables.
 	for _, e := range env {
 		args = append(args, "-e", e)
@@ -198,31 +200,50 @@ func (d *DockerSandbox) ExtractChanges(ctx context.Context) ([]ChangedFile, erro
 	files := parseBtrfsDump(lines)
 
 	// Enrich files with size and executable info via stat inside the container.
-	for i, f := range files {
+	// Files that fail stat are btrfs internal artifacts — filter them out.
+	var verified []ChangedFile
+	for _, f := range files {
 		if f.Op == FileDeleted {
+			verified = append(verified, f)
 			continue
 		}
 		info, err := d.statFile(ctx, "/workspace/"+f.Path)
 		if err != nil {
-			slog.Warn("sandbox: stat failed", "path", f.Path, "err", err)
+			slog.Debug("sandbox: skipping non-existent diff entry", "path", f.Path)
 			continue
 		}
-		files[i].Size = info.size
-		files[i].IsExecutable = info.executable
+		f.Size = info.size
+		f.IsExecutable = info.executable
+		verified = append(verified, f)
 	}
+	files = verified
 
 	slog.Info("sandbox: extracted changes", "id", d.id, "files", len(files))
 	return files, nil
 }
 
 // CopyOut copies a file from the sandbox workspace to a host path.
+// Uses docker exec + cat because docker cp doesn't see bind mounts inside the container.
 func (d *DockerSandbox) CopyOut(ctx context.Context, sandboxPath, hostPath string) error {
-	src := d.containerID + ":/workspace/" + sandboxPath
-	cmd := exec.CommandContext(ctx, "docker", "cp", src, hostPath)
+	// Ensure parent directory exists on host.
+	dir := filepath.Dir(hostPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating directory %s: %w", dir, err)
+	}
+
+	// Stream file content via docker exec cat.
+	cmd := exec.CommandContext(ctx, "docker", "exec", d.containerID,
+		"cat", "/workspace/"+sandboxPath)
+	var stdout bytes.Buffer
 	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("docker cp %s → %s: %w (stderr: %s)", src, hostPath, err, stderr.String())
+		return fmt.Errorf("reading %s from container: %w (stderr: %s)", sandboxPath, err, stderr.String())
+	}
+
+	if err := os.WriteFile(hostPath, stdout.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", hostPath, err)
 	}
 	return nil
 }
@@ -253,13 +274,18 @@ func (d *DockerSandbox) Destroy(ctx context.Context) error {
 func (d *DockerSandbox) buildCreateArgs() []string {
 	args := []string{
 		"create",
-		"--init",                 // tini as PID 1 — prevents zombie processes
-		"--cap-add", "SYS_ADMIN", // required for btrfs mount inside container
-		"--device", "/dev/loop-control", // loopback device for btrfs image
+		"--init",       // tini as PID 1 — prevents zombie processes
+		"--privileged", // required for btrfs loop mount inside container (Docker Desktop)
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=512m",
 		"--mount", fmt.Sprintf("type=bind,source=%s,target=/workspace-src,readonly", d.repoPath),
 		"--mount", fmt.Sprintf("type=volume,source=%s,target=/btrfs-pool", d.btrfsVolume()),
 		"--mount", fmt.Sprintf("type=volume,source=%s,target=/workspace", d.volumeName),
+	}
+
+	// Network mode — host network gives the sandbox access to the host's
+	// network stack (needed for LAN model servers, copilot-proxy, etc.)
+	if d.cfg.Network != "" {
+		args = append(args, "--network", d.cfg.Network)
 	}
 
 	// Read-only mounts for heavy dependency directories.
@@ -269,9 +295,12 @@ func (d *DockerSandbox) buildCreateArgs() []string {
 	}
 
 	// Docker MCP gateway socket — exposes host MCP servers inside the container.
+	// Only mount if the socket actually exists on the host.
 	if d.cfg.MCP.SocketPath != "" {
-		args = append(args, "--mount",
-			fmt.Sprintf("type=bind,source=%s,target=/run/mcp.sock,readonly", d.cfg.MCP.SocketPath))
+		if _, err := os.Stat(d.cfg.MCP.SocketPath); err == nil {
+			args = append(args, "--mount",
+				fmt.Sprintf("type=bind,source=%s,target=/run/mcp.sock,readonly", d.cfg.MCP.SocketPath))
+		}
 	}
 
 	// Resource limits.

@@ -47,8 +47,9 @@ func TestBuildEnv_OpenAI(t *testing.T) {
 	})
 
 	env := cli.buildEnv()
-	assertEnvContains(t, env, "OPENAI_BASE_URL=http://192.168.50.212:11434/v1")
-	assertEnvContains(t, env, "OPENAI_API_KEY=sk-test")
+	assertEnvContains(t, env, "ANTHROPIC_BASE_URL=http://192.168.50.212:11434")
+	assertEnvContains(t, env, "ANTHROPIC_API_KEY=sk-test")
+	assertEnvContains(t, env, "ANTHROPIC_MODEL=qwen36")
 }
 
 func TestBuildEnv_OperationalFlags(t *testing.T) {

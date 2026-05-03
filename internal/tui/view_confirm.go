@@ -13,19 +13,12 @@ import (
 
 const cursorBlinkInterval = 750 * time.Millisecond
 
-type confirmFocus int
-
-const (
-	focusPlan  confirmFocus = iota
-	focusInput
-)
-
 // confirmView renders the plan in a scrollable bordered viewport with a
 // separate bordered input pane below it for the y/N decision.
 type confirmView struct {
 	decided       bool
 	cursorVisible bool
-	focus         confirmFocus
+	planFocused   bool
 	viewport      viewport.Model
 	ready         bool
 	termWidth     int
@@ -34,7 +27,7 @@ type confirmView struct {
 }
 
 func newConfirmView() confirmView {
-	return confirmView{cursorVisible: true, focus: focusPlan}
+	return confirmView{cursorVisible: true, planFocused: true}
 }
 
 func blinkCmd() tea.Cmd {
@@ -95,16 +88,8 @@ func (cv confirmView) Update(msg tea.Msg) (confirmView, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "tab":
-			if cv.focus == focusPlan {
-				cv.focus = focusInput
-			} else {
-				cv.focus = focusPlan
-			}
-			return cv, nil
-
 		case "up", "down", "pgup", "pgdown", "home", "end":
-			if cv.focus == focusPlan && cv.ready {
+			if cv.planFocused && cv.ready {
 				var cmd tea.Cmd
 				cv.viewport, cmd = cv.viewport.Update(msg)
 				return cv, cmd
@@ -134,7 +119,7 @@ func (cv confirmView) View() string {
 
 	// Plan pane
 	planBorder := stylePlanPane
-	if cv.focus == focusPlan {
+	if cv.planFocused {
 		planBorder = stylePlanPaneFocused
 	}
 
@@ -142,10 +127,13 @@ func (cv confirmView) View() string {
 	if total < 1 {
 		total = 1
 	}
-	scrollInfo := dimStyle.Render(fmt.Sprintf(
-		"↑↓ scroll  tab to switch focus  line %d/%d",
-		cv.viewport.YOffset+1, total,
-	))
+	var scrollHint string
+	if cv.planFocused {
+		scrollHint = "↑↓ scroll  tab→prompt  line %d/%d"
+	} else {
+		scrollHint = "tab→plan  line %d/%d"
+	}
+	scrollInfo := dimStyle.Render(fmt.Sprintf(scrollHint, cv.viewport.YOffset+1, total))
 
 	planSection := lipgloss.JoinVertical(lipgloss.Left,
 		scrollInfo,
@@ -154,9 +142,6 @@ func (cv confirmView) View() string {
 
 	// Input pane
 	inputBorder := InputBoxStyle
-	if cv.focus == focusInput {
-		inputBorder = InputBoxFocusedStyle
-	}
 
 	approve := approveKeyStyle.Render("[A]")
 	reject := rejectKeyStyle.Render("[R]")

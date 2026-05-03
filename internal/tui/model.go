@@ -20,15 +20,15 @@ import (
 type State int
 
 const (
-	StateIdle            State = iota // Command bar focused, waiting for input
-	StateIntentConfirm                // Show rephrased intent, [A]pprove/[R]eject
-	StatePlanning                     // Planning tab active, claude running
-	StateValidating                   // Plan validation in progress
-	StateConfirming                   // Plan ready, waiting for [A]pprove/[R]eject/[E]dit
-	StateSaved                        // Plan saved to file; showing path + resume command
-	StateExecuting                    // Worker tab active, claude running
-	StateWorkValidating               // HTTP work validation in progress
-	StateDone                         // Everything finished, will cycle back to idle
+	StateIdle           State = iota // Command bar focused, waiting for input
+	StateIntentConfirm               // Show rephrased intent, [A]pprove/[R]eject
+	StatePlanning                    // Planning tab active, claude running
+	StateValidating                  // Plan validation in progress
+	StateConfirming                  // Plan ready, waiting for [A]pprove/[R]eject/[E]dit
+	StateSaved                       // Plan saved to file; showing path + resume command
+	StateExecuting                   // Worker tab active, claude running
+	StateWorkValidating              // HTTP work validation in progress
+	StateDone                        // Everything finished, will cycle back to idle
 )
 
 // PipelineFuncs holds the functions the TUI drives.
@@ -41,9 +41,6 @@ type PipelineFuncs struct {
 	Execute func(ctx context.Context, spec types.Specification, stdout io.Writer) error
 	// ValidateWork runs CLI-based work validation. Returns nil report if validation is disabled.
 	ValidateWork func(ctx context.Context, spec types.Specification, workOutput string) (*types.ValidationReport, error)
-	// ValidateWorkResult runs HTTP-based work validation against acceptance criteria.
-	// When set, this takes precedence over ValidateWork in the TUI pipeline.
-	ValidateWorkResult func(ctx context.Context, spec types.Specification, output types.WorkOutput) (types.ValidationResult, error)
 	// SessionManager is the shared session manager whose events drive TUI tabs.
 	// If non-nil, sessions auto-create and update tabs.
 	SessionManager *harness.SessionManager
@@ -55,20 +52,30 @@ type PipelineFuncs struct {
 }
 
 // Model is the main Bubble Tea model that drives the full pipeline.
+// FocusTarget represents which UI component currently accepts keyboard input.
+type FocusTarget int
+
+const (
+	FocusNone FocusTarget = iota
+	FocusPrompt
+	FocusPlan
+	FocusTabs
+)
+
 type Model struct {
 	state    State
+	focus    FocusTarget
 	spec     types.Specification
 	approved bool
 	prompt   string // current prompt from command bar
 
-	tabsView     tabsView
-	confirmView  confirmView
-	savedView    savedView
-	validateView validateView
-	commandBar   commandBarModel
-	registry     *CommandRegistry
-	logPanel     *logPanel
-	showLogs     bool
+	tabsView    tabsView
+	confirmView confirmView
+	savedView   savedView
+	commandBar  commandBarModel
+	registry    *CommandRegistry
+	logPanel    *logPanel
+	showLogs    bool
 
 	// saveErr holds a transient error from a failed plan-save attempt.
 	// Displayed inline in StateConfirming; cleared on next successful transition.
@@ -109,6 +116,7 @@ func NewModel(pipeline PipelineFuncs) Model {
 
 	m := Model{
 		state:       state,
+		focus:       defaultFocusForState(state),
 		tabsView:    newTabsView(),
 		confirmView: newConfirmView(),
 		commandBar:  newCommandBar(registry),
@@ -198,8 +206,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case CycleBackToIdleMsg:
-		m.state = StateIdle
-		m.commandBar.SetState(StateIdle)
+		m.setState(StateIdle)
 		m.commandBar.Focus()
 		m.confirmView = newConfirmView()
 		m.helpContent = ""
@@ -217,8 +224,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case PlanReadyMsg:
-		m.state = StateConfirming
-		m.commandBar.SetState(StateConfirming)
+		m.setState(StateConfirming)
 		m.confirmView.SetPlanText(renderSpecText(m.spec))
 		m.syncConfirmViewport()
 		return m, m.confirmView.Focus()
@@ -229,42 +235,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.planTabIdx = idx
 			m.tabsView.active = idx
 		}
+		if !m.tabsView.pulsing && m.tabsView.hasRunningTabs() {
+			m.tabsView.pulsing = true
+			return m, pulseTickCmd()
+		}
+
 		return m, nil
 
 	case planCompleteMsg:
 		m.spec = msg.spec
 		if m.pipeline.ValidatePlan == nil {
-			m.state = StateConfirming
-			m.commandBar.SetState(StateConfirming)
+			m.setState(StateConfirming)
 			m.confirmView.SetPlanText(renderSpecText(m.spec))
 			m.syncConfirmViewport()
 			return m, m.confirmView.Focus()
 		}
-		m.state = StateValidating
-		m.commandBar.SetState(StateValidating)
+		m.setState(StateValidating)
 		go m.startPlanValidation()
 		return m, nil
 
 	case PlanValidatedMsg:
 		if msg.Err != nil {
 			slog.Warn("plan validation error, proceeding to confirm", "err", msg.Err)
-			m.state = StateConfirming
-			m.commandBar.SetState(StateConfirming)
+			m.setState(StateConfirming)
 			m.confirmView.SetPlanText(renderSpecText(m.spec))
 			m.syncConfirmViewport()
 			return m, m.confirmView.Focus()
 		}
 		if msg.Report != nil && msg.Report.Verdict == types.VerdictFail {
 			m.err = fmt.Errorf("plan validation failed: %s", msg.Report.Summary)
-			m.state = StateDone
-			m.commandBar.SetState(StateDone)
+			m.setState(StateDone)
 			return m, nil
 		}
 		if msg.Report != nil && msg.Report.Verdict == types.VerdictWarn {
 			slog.Warn("plan validation warnings", "summary", msg.Report.Summary)
 		}
-		m.state = StateConfirming
-		m.commandBar.SetState(StateConfirming)
+		m.setState(StateConfirming)
 		m.confirmView.SetPlanText(renderSpecText(m.spec))
 		m.syncConfirmViewport()
 		return m, m.confirmView.Focus()
@@ -277,8 +283,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case ConfirmAccept:
 			m.saveErr = nil
 			m.approved = true
-			m.state = StateExecuting
-			m.commandBar.SetState(StateExecuting)
+			m.setState(StateExecuting)
 			if m.pipeline.SessionManager != nil && m.program != nil {
 				go StartExecutionSession(m.program, m.ctx, m.pipeline.SessionManager, m.spec, m.pipeline)
 			} else if m.program != nil {
@@ -289,14 +294,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		default: // ConfirmReject
 			m.saveErr = nil
-			m.state = StateDone
-			m.commandBar.SetState(StateDone)
+			m.setState(StateDone)
 			return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 		}
 
 	case IntentConfirmMsg:
-		m.state = StatePlanning
-		m.commandBar.SetState(StatePlanning)
+		m.setState(StatePlanning)
 		m.intentContent = ""
 		if m.planTabIdx == -1 {
 			m.planTabIdx = m.tabsView.AddTab("Planner")
@@ -307,8 +310,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case IntentRejectMsg:
-		m.state = StateIdle
-		m.commandBar.SetState(StateIdle)
+		m.setState(StateIdle)
 		m.commandBar.Focus()
 		m.intentContent = ""
 		return m, nil
@@ -324,41 +326,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case ValidationStartedMsg:
-		// Signal consumed; spinner is already ticking via validateView.Init().
 		return m, nil
-
-	case ValidationResultMsg:
-		vv, vCmd := m.validateView.Update(msg)
-		m.validateView = vv
-		m.state = StateDone
-		m.commandBar.SetState(StateDone)
-		if msg.Err != nil {
-			m.err = msg.Err
-		} else if !msg.Result.Passed {
-			m.err = fmt.Errorf("work validation: %d acceptance criteria not met", len(msg.Result.FailedCriteria))
-		}
-		return m, vCmd
 
 	case HarnessDoneMsg:
 		tv, cmd := m.tabsView.Update(msg)
 		m.tabsView = tv
 		if msg.TabIndex == m.execTabIdx || (m.state == StateExecuting && m.execTabIdx == -1) {
 			if msg.Err != nil {
-				m.state = StateDone
-				m.commandBar.SetState(StateDone)
+				m.setState(StateDone)
 				m.err = msg.Err
 				return m, nil
-			} else if m.pipeline.ValidateWorkResult != nil {
-				workOutput := types.WorkOutput{Stdout: msg.WorkOutput}
-				m.state = StateWorkValidating
-				m.commandBar.SetState(StateWorkValidating)
-				m.validateView = newValidateView(m.spec.Acceptance)
-				return m, tea.Batch(cmd, m.validateView.Init(), m.makeValidateWorkCmd(workOutput))
 			} else if m.pipeline.ValidateWork != nil && msg.WorkOutput != "" {
 				go m.startWorkValidation(msg.WorkOutput)
 			} else {
-				m.state = StateDone
-				m.commandBar.SetState(StateDone)
+				m.setState(StateDone)
 				return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 			}
 		}
@@ -373,8 +354,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.Report != nil && msg.Report.Verdict == types.VerdictWarn {
 			slog.Warn("work validation warnings", "summary", msg.Report.Summary)
 		}
-		m.state = StateDone
-		m.commandBar.SetState(StateDone)
+		m.setState(StateDone)
 		if m.err != nil {
 			return m, nil
 		}
@@ -397,14 +377,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ErrorMsg:
 		m.err = msg.Err
-		m.state = StateDone
-		m.commandBar.SetState(StateDone)
+		m.setState(StateDone)
 		return m, nil
 
 	case TokenLimitExceededMsg:
 		m.err = msg.Err
-		m.state = StateDone
-		m.commandBar.SetState(StateDone)
+		m.setState(StateDone)
 		// Stay visible — don't cycle back to idle so the user sees the budget error
 		return m, nil
 
@@ -412,14 +390,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.program = msg.program
 		return m, nil
 
+	case PulseTickMsg:
+		tv, cmd := m.tabsView.Update(msg)
+		m.tabsView = tv
+		return m, cmd
+
 	case spinner.TickMsg:
 		tv, tvCmd := m.tabsView.Update(msg)
 		m.tabsView = tv
-		if m.state == StateWorkValidating {
-			vv, vvCmd := m.validateView.Update(msg)
-			m.validateView = vv
-			return m, tea.Batch(tvCmd, vvCmd)
-		}
 		return m, tvCmd
 	}
 
@@ -434,6 +412,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		m.cancel()
 		return m, tea.Quit
+	}
+
+	// Tab cycling logic
+	if key == "tab" || key == "shift+tab" {
+		if m.commandBar.showAC {
+			cb, cmd := m.commandBar.Update(msg)
+			m.commandBar = cb
+			return m, cmd
+		}
+		m.cycleFocus(key == "shift+tab")
+		return m, nil
 	}
 
 	// Alt+N for tab switching (always available)
@@ -493,8 +482,7 @@ func (m Model) handlePromptSubmit(msg PromptSubmitMsg) (tea.Model, tea.Cmd) {
 	m.helpContent = ""
 
 	// Phase 1: Skip intent recognition, go directly to planning
-	m.state = StatePlanning
-	m.commandBar.SetState(StatePlanning)
+	m.setState(StatePlanning)
 
 	// Create planner tab if needed
 	if m.planTabIdx == -1 {
@@ -539,8 +527,7 @@ func (m Model) handleCommand(msg CommandMsg) (tea.Model, tea.Cmd) {
 			m.cancel()
 			// Create new context for next cycle
 			m.ctx, m.cancel = context.WithCancel(context.Background())
-			m.state = StateIdle
-			m.commandBar.SetState(StateIdle)
+			m.setState(StateIdle)
 			m.commandBar.Focus()
 		}
 		return m, nil
@@ -572,14 +559,11 @@ func (m Model) View() string {
 	}
 
 	if m.state == StateWorkValidating {
-		topView += "\n\n" + m.validateView.View()
 	}
 
 	if m.state == StateDone {
 		if !m.approved {
 			topView += "\n\n" + titleStyle.Render("Plan rejected.")
-		} else if m.validateView.done {
-			topView += "\n\n" + m.validateView.View()
 			if m.err != nil {
 				topView += "\n" + dimStyle.Render("  press any key to dismiss")
 			}
@@ -668,8 +652,7 @@ func (m Model) handleSessionEvent(evt harness.SessionEvent) (tea.Model, tea.Cmd)
 			}
 		}
 		if m.state == StateExecuting && evt.SessionID != "plan" {
-			m.state = StateDone
-			m.commandBar.SetState(StateDone)
+			m.setState(StateDone)
 			return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 		}
 		return m, nil
@@ -683,8 +666,7 @@ func (m Model) handleSessionEvent(evt harness.SessionEvent) (tea.Model, tea.Cmd)
 			}
 		}
 		if m.state == StateExecuting && evt.SessionID != "plan" {
-			m.state = StateDone
-			m.commandBar.SetState(StateDone)
+			m.setState(StateDone)
 			m.err = evt.Err
 			return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 		}
@@ -710,8 +692,7 @@ func (m Model) handleConfirmEdit() (tea.Model, tea.Cmd) {
 		return m, m.confirmView.Focus()
 	}
 	m.saveErr = nil
-	m.state = StateSaved
-	m.commandBar.SetState(StateSaved)
+	m.setState(StateSaved)
 	m.savedView = newSavedView(filePath)
 	if m.width > 0 {
 		tabHeight := m.height - 3
@@ -794,14 +775,6 @@ func (m Model) startPlanValidation() {
 	p.Send(PlanValidatedMsg{Report: report, Err: err})
 }
 
-// makeValidateWorkCmd returns a tea.Cmd that calls ValidateWorkResult asynchronously.
-func (m Model) makeValidateWorkCmd(output types.WorkOutput) tea.Cmd {
-	return func() tea.Msg {
-		result, err := m.pipeline.ValidateWorkResult(m.ctx, m.spec, output)
-		return ValidationResultMsg{Result: result, Err: err}
-	}
-}
-
 // startWorkValidation runs ValidateWork in a goroutine and sends the result.
 func (m Model) startWorkValidation(workOutput string) {
 	p := m.program
@@ -813,4 +786,91 @@ func (m Model) startWorkValidation(workOutput string) {
 	slog.Info("validating work output")
 	report, err := m.pipeline.ValidateWork(m.ctx, m.spec, workOutput)
 	p.Send(WorkValidatedMsg{Report: report, Err: err})
+}
+
+func (m *Model) setState(s State) {
+	m.state = s
+	m.commandBar.SetState(s)
+	m.focus = defaultFocusForState(s)
+}
+func defaultFocusForState(s State) FocusTarget {
+	switch s {
+	case StateIdle, StateIntentConfirm:
+		return FocusPrompt
+	case StatePlanning, StateExecuting:
+		return FocusTabs
+	case StateConfirming:
+		return FocusPlan
+	case StateDone:
+		return FocusNone
+	default:
+		return FocusPrompt
+	}
+}
+
+func (m Model) focusTargets() []FocusTarget {
+	switch m.state {
+	case StateIdle:
+		return []FocusTarget{FocusPrompt}
+	case StatePlanning, StateExecuting:
+		return []FocusTarget{FocusTabs}
+	case StateConfirming:
+		return []FocusTarget{FocusPlan, FocusPrompt}
+	case StateIntentConfirm:
+		return []FocusTarget{FocusPrompt}
+	default:
+		return []FocusTarget{FocusPrompt}
+	}
+}
+
+func (m *Model) cycleFocus(reverse bool) {
+	targets := m.focusTargets()
+	if len(targets) == 0 {
+		m.focus = FocusNone
+		return
+	}
+
+	idx := -1
+	for i, t := range targets {
+		if t == m.focus {
+			idx = i
+			break
+		}
+	}
+
+	if idx == -1 {
+		m.focus = targets[0]
+		return
+	}
+
+	if reverse {
+		idx--
+		if idx < 0 {
+			idx = len(targets) - 1
+		}
+	} else {
+		idx++
+		if idx >= len(targets) {
+			idx = 0
+		}
+	}
+	m.focus = targets[idx]
+}
+
+func (m *Model) syncFocus() {
+	if m.focus == FocusPrompt {
+		m.commandBar.focused = true
+	} else {
+		m.commandBar.focused = false
+	}
+
+	if m.focus == FocusTabs {
+		m.tabsView.focused = true
+	} else {
+		m.tabsView.focused = false
+	}
+
+	if m.state == StateConfirming {
+		m.confirmView.planFocused = (m.focus == FocusPlan)
+	}
 }

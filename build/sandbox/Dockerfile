@@ -42,7 +42,7 @@ RUN mkdir -p /workspace /workspace-src /deps /btrfs-pool /mnt/btrfs /run && \
     chown sandbox:sandbox /workspace
 
 # Entrypoint.
-COPY entrypoint.sh /entrypoint.sh
+COPY build/sandbox/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 WORKDIR /workspace

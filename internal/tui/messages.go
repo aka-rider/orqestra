@@ -130,11 +130,6 @@ type CursorBlinkMsg struct{}
 // ValidationStartedMsg signals that the HTTP work validator has started (triggers spinner).
 type ValidationStartedMsg struct{}
 
-// ValidationResultMsg carries the structured result from the HTTP work validator.
-type ValidationResultMsg struct {
-	Result types.ValidationResult
-	Err    error
-}
 
 // streamChunkCmd creates a tea.Cmd that emits a StreamChunkMsg.
 func streamChunkCmd(tabIndex int, content string) tea.Cmd {
@@ -142,3 +137,6 @@ func streamChunkCmd(tabIndex int, content string) tea.Cmd {
 		return StreamChunkMsg{TabIndex: tabIndex, Content: content}
 	}
 }
+
+// PulseTickMsg drives the tab pulsing animation.
+type PulseTickMsg struct{}

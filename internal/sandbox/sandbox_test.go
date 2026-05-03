@@ -238,9 +238,6 @@ func TestSandboxState_Terminal(t *testing.T) {
 
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.Enabled {
-		t.Error("sandbox should be disabled by default")
-	}
 	if cfg.Image != "orqestra-sandbox:latest" {
 		t.Errorf("unexpected default image: %q", cfg.Image)
 	}
@@ -295,11 +292,32 @@ func TestParseBtrfsDump_Rename(t *testing.T) {
 		m[f.Path] = f.Op
 	}
 
-	if m["old-name.go"] != FileDeleted {
-		t.Errorf("expected old-name.go to be deleted, got %v", m["old-name.go"])
-	}
+	// rename deletes the old path entry (if tracked) and adds the new one
 	if m["new-name.go"] != FileAdded {
 		t.Errorf("expected new-name.go to be added, got %v", m["new-name.go"])
+	}
+}
+
+func TestParseBtrfsDump_RenameDestFormat(t *testing.T) {
+	// btrfs receive --dump on newer kernels uses "dest=" format
+	lines := []string{
+		"mkfile          ./workspace-final/o3991-9-0",
+		"rename          ./workspace-final/o3991-9-0     dest=./workspace-final/SANDBOX_TEST.md",
+		"update_extent   ./workspace-final/SANDBOX_TEST.md offset=0 len=13",
+	}
+
+	files := parseBtrfsDump(lines)
+	m := make(map[string]FileOp)
+	for _, f := range files {
+		m[f.Path] = f.Op
+	}
+
+	if m["SANDBOX_TEST.md"] != FileAdded {
+		t.Errorf("expected SANDBOX_TEST.md to be added, got %v", m["SANDBOX_TEST.md"])
+	}
+	// The temp inode should not appear
+	if _, ok := m["o3991-9-0"]; ok {
+		t.Error("temp inode o3991-9-0 should not appear in results")
 	}
 }
 

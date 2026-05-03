@@ -16,7 +16,12 @@ models:
     model: gemini-3.1-flash
 
 sandbox:
-  enabled: false
+  image: orqestra-sandbox:latest
+  memory: 4g
+  cpus: 2.0
+  pids_limit: 256
+  max_lifetime: 20m
+  network: host
 
 planner:
   model_ref: gemini-flash

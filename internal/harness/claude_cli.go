@@ -279,15 +279,21 @@ func BuildModelEnv(resolved config.ResolvedModel, small *config.ResolvedModel) [
 			)
 		}
 	case "openai":
-		// Strip trailing /v1 or /v1/ before appending — prevents double-suffix
-		// when BaseURL is already normalised (e.g. http://host/v1).
+		// Claude Code CLI uses the Anthropic API path natively. When targeting
+		// an OpenAI-compatible server (Ollama, vLLM, etc.) that also speaks the
+		// Anthropic messages format, route via ANTHROPIC_BASE_URL so the CLI
+		// handles auth and streaming correctly.
 		baseURL := strings.TrimRight(resolved.BaseURL, "/")
-		baseURL = strings.TrimSuffix(baseURL, "/v1")
-		baseURL += "/v1"
 		env = append(env,
-			"OPENAI_BASE_URL="+baseURL,
-			"OPENAI_API_KEY="+resolved.APIKey,
+			"ANTHROPIC_BASE_URL="+baseURL,
+			"ANTHROPIC_API_KEY="+resolved.APIKey,
+			"ANTHROPIC_MODEL="+resolved.Model,
 		)
+		if small != nil {
+			env = append(env,
+				"ANTHROPIC_SMALL_FAST_MODEL="+small.Model,
+			)
+		}
 	}
 	env = append(env,
 		"DISABLE_NON_ESSENTIAL_MODEL_CALLS=1",

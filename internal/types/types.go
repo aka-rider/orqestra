@@ -257,13 +257,6 @@ type ValidationCommandResult struct {
 	Passed       bool     `json:"passed"`
 }
 
-// WorkOutput captures the result of worker execution for work validation.
-type WorkOutput struct {
-	Stdout       string   `json:"stdout"`
-	Stderr       string   `json:"stderr"`
-	ExitCode     int      `json:"exit_code"`
-	MutatedPaths []string `json:"mutated_paths,omitempty"`
-}
 
 // FailedCriterion describes an acceptance criterion that was not met.
 type FailedCriterion struct {
@@ -271,9 +264,3 @@ type FailedCriterion struct {
 	Reason    string `json:"reason"`
 }
 
-// ValidationResult is the structured pass/fail result from the HTTP work validator.
-type ValidationResult struct {
-	Passed         bool              `json:"passed"`
-	Score          float64           `json:"score"`
-	FailedCriteria []FailedCriterion `json:"failed_criteria,omitempty"`
-}

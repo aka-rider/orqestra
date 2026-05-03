@@ -16,6 +16,8 @@ type commandBarModel struct {
 	suggestions []Command
 	showAC      bool // autocomplete overlay visible
 	acIndex     int  // selected autocomplete index
+	focused     bool
+	width       int
 }
 
 func newCommandBar(registry *CommandRegistry) commandBarModel {
@@ -33,6 +35,7 @@ func newCommandBar(registry *CommandRegistry) commandBarModel {
 
 // SetWidth adjusts the input width to fill available space.
 func (c *commandBarModel) SetWidth(w int) {
+	c.width = w
 	if w > 4 {
 		c.input.Width = w - 4
 	}
@@ -184,13 +187,15 @@ func (c *commandBarModel) updateAutocomplete() {
 
 // View renders the command bar (input + hint line).
 func (c commandBarModel) View() string {
-	// Input line
-	inputLine := commandBarInputStyle.Render("> " + c.input.View())
-
-	// Hint line
+	inputLine := "> " + c.input.View()
 	hint := c.renderHint()
+	content := lipgloss.JoinVertical(lipgloss.Left, inputLine, hint)
 
-	return lipgloss.JoinVertical(lipgloss.Left, inputLine, hint)
+	border := InputBoxStyle
+	if c.focused {
+		border = InputBoxFocusedStyle
+	}
+	return border.Width(c.width).Render(content)
 }
 
 // ViewAutocomplete renders the autocomplete overlay above the command bar.

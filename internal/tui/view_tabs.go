@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -14,6 +15,9 @@ type tabsView struct {
 	active   int
 	width    int
 	height   int
+	focused    bool
+	pulseFrame int
+	pulsing    bool
 }
 
 func newTabsView() tabsView {
@@ -34,11 +38,23 @@ func (t *tabsView) AddTab(name string) int {
 
 func (t tabsView) Update(msg tea.Msg) (tabsView, tea.Cmd) {
 	switch msg := msg.(type) {
+	case PulseTickMsg:
+		if !t.hasRunningTabs() {
+			t.pulsing = false
+			return t, nil
+		}
+		t.pulseFrame = (t.pulseFrame + 1) % len(pulseFrames)
+		return t, pulseTickCmd()
+
 	case tea.WindowSizeMsg:
-		t.width = msg.Width - 4
-		t.height = msg.Height - 8
+		t.width = msg.Width - 2
+		t.height = msg.Height
 		for i := range t.tabs {
-			t.tabs[i].SetSize(t.width, t.height-3)
+			contentHeight := t.height - 2 - 2 - 1
+			if contentHeight < 3 {
+				contentHeight = 3
+			}
+			t.tabs[i].SetSize(t.width-2, contentHeight)
 		}
 		return t, nil
 
@@ -93,10 +109,19 @@ func (t tabsView) View() string {
 	// Render tab bar
 	var tabs []string
 	for i, name := range t.tabNames {
+		displayName := name
+		if i < len(t.tabs) {
+			if t.tabs[i].done {
+				displayName += " ✓"
+			} else if t.pulsing {
+				displayName = pulseFrames[t.pulseFrame] + " " + name
+			}
+		}
+
 		if i == t.active {
-			tabs = append(tabs, activeTabStyle.Render(name))
+			tabs = append(tabs, activeTabStyle.Render(displayName))
 		} else {
-			tabs = append(tabs, inactiveTabStyle.Render(name))
+			tabs = append(tabs, inactiveTabStyle.Render(displayName))
 		}
 	}
 
@@ -110,7 +135,13 @@ func (t tabsView) View() string {
 		content = t.tabs[t.active].View()
 	}
 
-	return tabRow + "\n" + content
+	contentBorder := InputBoxStyle
+	if t.focused {
+		contentBorder = InputBoxFocusedStyle
+	}
+	wrappedContent := contentBorder.Width(t.width).Render(content)
+
+	return tabRow + "\n" + wrappedContent
 }
 
 func max(a, b int) int {
@@ -118,4 +149,22 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+var pulseFrames = []string{"✦", "★", "✦", "✧", "·", "✧"}
+const pulseInterval = 200 * time.Millisecond
+
+func (t tabsView) hasRunningTabs() bool {
+	for _, tab := range t.tabs {
+		if !tab.done {
+			return true
+		}
+	}
+	return false
+}
+
+func pulseTickCmd() tea.Cmd {
+	return tea.Tick(pulseInterval, func(time.Time) tea.Msg {
+		return PulseTickMsg{}
+	})
 }

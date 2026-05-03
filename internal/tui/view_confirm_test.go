@@ -22,13 +22,6 @@ func TestConfirmView_DefaultCursorVisible(t *testing.T) {
 	}
 }
 
-func TestConfirmView_DefaultFocusPlan(t *testing.T) {
-	cv := newConfirmView()
-	if cv.focus != focusPlan {
-		t.Error("newConfirmView() should default focus to focusPlan")
-	}
-}
-
 func TestConfirmView_CursorBlinkToggle(t *testing.T) {
 	cv := newConfirmView()
 
@@ -97,24 +90,6 @@ func TestConfirmViewport_ScrollsOnKeyDown(t *testing.T) {
 	}
 }
 
-func TestConfirmViewport_FocusToggle(t *testing.T) {
-	cv := initCV(t)
-
-	if cv.focus != focusPlan {
-		t.Fatalf("expected focusPlan initially, got %v", cv.focus)
-	}
-
-	cv, _ = cv.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if cv.focus != focusInput {
-		t.Error("after Tab, focus should be focusInput")
-	}
-
-	cv, _ = cv.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if cv.focus != focusPlan {
-		t.Error("after second Tab, focus should be back to focusPlan")
-	}
-}
-
 func TestConfirmView_HasBorder(t *testing.T) {
 	cv := initCV(t)
 	out := cv.View()
@@ -146,28 +121,8 @@ func TestConfirmView_FocusHighlight(t *testing.T) {
 	// Functional check: View() renders without panic in both focus states.
 	cv := initCV(t)
 	_ = cv.View() // focusPlan
-	cv, _ = cv.Update(tea.KeyMsg{Type: tea.KeyTab})
+	cv.planFocused = false
 	_ = cv.View() // focusInput
-}
-
-func TestConfirmView_ScrollDoesNotScrollWhenFocusInput(t *testing.T) {
-	cv := newConfirmView()
-	var lines strings.Builder
-	for i := 0; i < 50; i++ {
-		lines.WriteString("line content here\n")
-	}
-	cv.planText = lines.String()
-	cv, _ = cv.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	// Switch to input focus.
-	cv, _ = cv.Update(tea.KeyMsg{Type: tea.KeyTab})
-
-	before := cv.viewport.YOffset
-	cv, _ = cv.Update(tea.KeyMsg{Type: tea.KeyDown})
-	cv, _ = cv.Update(tea.KeyMsg{Type: tea.KeyDown})
-
-	if cv.viewport.YOffset != before {
-		t.Error("Down key should not scroll viewport when focusInput is active")
-	}
 }
 
 func TestConfirmView_ApproveKey(t *testing.T) {

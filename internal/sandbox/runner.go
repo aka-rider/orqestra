@@ -20,6 +20,7 @@ type RunnerConfig struct {
 	Sandbox  Config
 	RepoPath string   // absolute path to the repo on the host
 	Env      []string // environment variables to pass to the container
+	Model    string   // model identifier for the claude CLI --model flag
 
 	// OnState is called when the sandbox state changes.
 	// May be nil.
@@ -172,9 +173,17 @@ func (r *SandboxedCLIRunner) buildCommand(prompt, systemPrompt string, streaming
 		args = append(args, "--print", "-p", prompt, "--output-format", "json")
 	}
 
+	// Route to specific model if configured.
+	if r.cfg.Model != "" {
+		args = append(args, "--model", r.cfg.Model)
+	}
+
 	// Prepend sandbox environment context to the system prompt.
 	fullSystemPrompt := sandboxSystemPrompt + "\n\n" + systemPrompt
 	args = append(args, "--system-prompt", fullSystemPrompt)
+
+	// Skip permissions — sandbox provides the isolation boundary.
+	args = append(args, "--dangerously-skip-permissions")
 
 	return args
 }

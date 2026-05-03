@@ -49,9 +49,10 @@ func parseBtrfsDump(lines []string) []ChangedFile {
 				seen[path] = FileAdded
 			}
 
-		case "write", "truncate":
+		case "write", "truncate", "update_extent":
 			// write ./path offset=0 len=1234
 			// truncate ./path size=5678
+			// update_extent ./path offset=0 len=1234
 			path := extractPath(rest)
 			if path != "" {
 				// Only mark modified if not already marked as added.
@@ -67,28 +68,36 @@ func parseBtrfsDump(lines []string) []ChangedFile {
 			}
 
 		case "rename":
-			// rename ./old -> ./new
-			parts := strings.SplitN(rest, " -> ", 2)
-			if len(parts) == 2 {
-				oldPath := cleanBtrfsPath(parts[0])
-				newPath := cleanBtrfsPath(parts[1])
-				if oldPath != "" {
-					seen[oldPath] = FileDeleted
+			// Two formats:
+			//   rename ./old -> ./new
+			//   rename ./old     dest=./new
+			var oldPath, newPath string
+			if strings.Contains(rest, " -> ") {
+				parts := strings.SplitN(rest, " -> ", 2)
+				if len(parts) == 2 {
+					oldPath = cleanBtrfsPath(parts[0])
+					newPath = cleanBtrfsPath(parts[1])
 				}
-				if newPath != "" {
-					seen[newPath] = FileAdded
-				}
+			} else if idx := strings.Index(rest, "dest="); idx > 0 {
+				oldPath = cleanBtrfsPath(rest[:idx])
+				newPath = cleanBtrfsPath(strings.TrimPrefix(rest[idx:], "dest="))
+			}
+			if oldPath != "" {
+				delete(seen, oldPath) // don't track the temp inode
+			}
+			if newPath != "" {
+				seen[newPath] = FileAdded
 			}
 
-		// Ignore: rmdir, chmod, chown, utimes, set_xattr, link, symlink, mkdir
-		// (directory ops and metadata-only changes don't produce extractable files)
+			// Ignore: rmdir, chmod, chown, utimes, set_xattr, link, symlink, mkdir, snapshot
+			// (directory ops and metadata-only changes don't produce extractable files)
 		}
 	}
 
-	// Convert map to slice, skipping directories.
+	// Convert map to slice, skipping directories and empty paths.
 	var files []ChangedFile
 	for path, op := range seen {
-		if strings.HasSuffix(path, "/") {
+		if path == "" || strings.HasSuffix(path, "/") {
 			continue
 		}
 		files = append(files, ChangedFile{Path: path, Op: op})
@@ -96,7 +105,8 @@ func parseBtrfsDump(lines []string) []ChangedFile {
 	return files
 }
 
-// cleanBtrfsPath normalizes a btrfs dump path — strips leading "./" prefix.
+// cleanBtrfsPath normalizes a btrfs dump path — strips leading "./" prefix
+// and the btrfs subvolume name prefix (e.g. "workspace-final/").
 func cleanBtrfsPath(raw string) string {
 	// btrfs dump paths are relative: "./path/to/file" or "path/to/file"
 	path := strings.TrimSpace(raw)
@@ -105,6 +115,10 @@ func cleanBtrfsPath(raw string) string {
 	if idx := strings.IndexByte(path, ' '); idx != -1 {
 		path = path[:idx]
 	}
+	// btrfs receive --dump prefixes paths with the subvolume name.
+	// Strip known subvolume prefixes.
+	path = strings.TrimPrefix(path, "workspace-final/")
+	path = strings.TrimPrefix(path, "workspace/")
 	return path
 }
 
