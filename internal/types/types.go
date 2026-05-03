@@ -257,10 +257,8 @@ type ValidationCommandResult struct {
 	Passed       bool     `json:"passed"`
 }
 
-
 // FailedCriterion describes an acceptance criterion that was not met.
 type FailedCriterion struct {
 	Criterion string `json:"criterion"`
 	Reason    string `json:"reason"`
 }
-

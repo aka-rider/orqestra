@@ -55,38 +55,36 @@ func NewClaudeCLI(resolved config.ResolvedModel, opts ...ClaudeCLIOption) *Claud
 }
 
 // NewClaudeCLIFromConfig creates a Claude CLI runner from a model_ref.
-// Returns nil if modelRef is empty or cannot be resolved.
+// Returns an error if modelRef is empty or cannot be resolved.
 // Model-level runtime options are applied before caller-supplied options.
-func NewClaudeCLIFromConfig(cfg *config.Config, modelRef string, opts ...ClaudeCLIOption) CLIRunner {
+func NewClaudeCLIFromConfig(cfg *config.Config, modelRef string, opts ...ClaudeCLIOption) (CLIRunner, error) {
 	if modelRef == "" {
-		return nil
+		return nil, fmt.Errorf("missing model_ref")
 	}
 	resolved, err := cfg.ResolveModel(modelRef)
 	if err != nil {
-		slog.Warn("failed to resolve model_ref", "ref", modelRef, "err", err)
-		return nil
+		return nil, fmt.Errorf("resolve model_ref %q: %w", modelRef, err)
 	}
-	return NewClaudeCLI(resolved, append(modelOptions(cfg, modelRef), opts...)...)
+	mopts, err := modelOptions(cfg, modelRef)
+	if err != nil {
+		return nil, fmt.Errorf("resolve model options for %q: %w", modelRef, err)
+	}
+	return NewClaudeCLI(resolved, append(mopts, opts...)...), nil
 }
 
-func modelOptions(cfg *config.Config, modelRef string) []ClaudeCLIOption {
+func modelOptions(cfg *config.Config, modelRef string) ([]ClaudeCLIOption, error) {
 	runtime, err := cfg.RuntimeOptions(modelRef)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("runtime options: %w", err)
 	}
 	var opts []ClaudeCLIOption
 	if runtime.Binary != "" {
 		opts = append(opts, WithBinary(runtime.Binary))
 	}
-	if runtime.SmallRef != "" {
-		small, err := cfg.ResolveModel(runtime.SmallRef)
-		if err != nil {
-			slog.Warn("failed to resolve small_ref", "ref", runtime.SmallRef, "err", err)
-		} else {
-			opts = append(opts, WithSmallModel(small))
-		}
+	if small := cfg.ResolveSmallModel(); small != nil {
+		opts = append(opts, WithSmallModel(*small))
 	}
-	return opts
+	return opts, nil
 }
 
 // ClaudeCLIOption configures ClaudeCLI.

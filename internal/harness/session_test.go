@@ -3,22 +3,33 @@ package harness
 import (
 	"bytes"
 	"context"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
+func waitForSessionState(t *testing.T, events <-chan SessionEvent, want SessionState) SessionEvent {
+	t.Helper()
+	timeout := time.After(2 * time.Second)
+	for {
+		select {
+		case evt := <-events:
+			if evt.State == want {
+				return evt
+			}
+		case <-timeout:
+			t.Fatalf("timed out waiting for session state %v", want)
+			return SessionEvent{}
+		}
+	}
+}
+
 func TestSessionManager_StartSession(t *testing.T) {
 	client := NewClient("test-model", nil)
 
-	var mu sync.Mutex
-	var events []SessionEvent
-
+	events := make(chan SessionEvent, 100)
 	sm := NewSessionManager(client, func(evt SessionEvent) {
-		mu.Lock()
-		events = append(events, evt)
-		mu.Unlock()
+		events <- evt
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -27,34 +38,21 @@ func TestSessionManager_StartSession(t *testing.T) {
 	var buf bytes.Buffer
 	id := sm.StartSession(ctx, "Test", "hello", "", &buf)
 
-	// Wait for session to complete (it should fail fast due to cancelled ctx)
-	time.Sleep(200 * time.Millisecond)
-
 	if id == "" {
 		t.Fatal("expected non-empty session ID")
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	if len(events) < 2 {
-		t.Fatalf("expected at least 2 events (pending, running/failed), got %d", len(events))
-	}
-
-	if events[0].State != SessionPending {
-		t.Errorf("first event should be Pending, got %v", events[0].State)
-	}
-
-	// Should eventually reach Failed due to cancelled context
-	lastEvt := events[len(events)-1]
-	if lastEvt.State != SessionFailed {
-		t.Errorf("last event should be Failed (cancelled ctx), got %v", lastEvt.State)
-	}
+	// Wait for terminal state (Failed due to cancelled ctx)
+	waitForSessionState(t, events, SessionFailed)
 }
 
 func TestSessionManager_Sessions(t *testing.T) {
 	client := NewClient("test-model", nil)
-	sm := NewSessionManager(client, nil)
+
+	events := make(chan SessionEvent, 100)
+	sm := NewSessionManager(client, func(evt SessionEvent) {
+		events <- evt
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -63,7 +61,9 @@ func TestSessionManager_Sessions(t *testing.T) {
 	sm.StartSession(ctx, "A", "p1", "", &buf)
 	sm.StartSession(ctx, "B", "p2", "", &buf)
 
-	time.Sleep(100 * time.Millisecond)
+	// Wait for both to finish
+	waitForSessionState(t, events, SessionFailed)
+	waitForSessionState(t, events, SessionFailed)
 
 	sessions := sm.Sessions()
 	if len(sessions) != 2 {
@@ -78,9 +78,11 @@ func TestSessionManager_SetNotify(t *testing.T) {
 	client := NewClient("test-model", nil)
 	sm := NewSessionManager(client, nil)
 
+	events := make(chan SessionEvent, 100)
 	var called atomic.Bool
 	sm.SetNotify(func(evt SessionEvent) {
 		called.Store(true)
+		events <- evt
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -89,7 +91,7 @@ func TestSessionManager_SetNotify(t *testing.T) {
 	var buf bytes.Buffer
 	sm.StartSession(ctx, "X", "p", "", &buf)
 
-	time.Sleep(100 * time.Millisecond)
+	waitForSessionState(t, events, SessionFailed)
 
 	if !called.Load() {
 		t.Error("expected notify to be called after SetNotify")

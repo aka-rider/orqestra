@@ -74,7 +74,7 @@ type Model struct {
 	savedView   savedView
 	commandBar  commandBarModel
 	registry    *CommandRegistry
-	logPanel    *logPanel
+	logPanel    logPanel
 	showLogs    bool
 
 	// saveErr holds a transient error from a failed plan-save attempt.
@@ -159,8 +159,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		tabHeight := m.height - commandBarHeight - logHeight
 
 		if m.showLogs {
-			m.logPanel.SetWidth(m.width)
-			m.logPanel.SetHeight(logHeight)
+			m.logPanel = m.logPanel.SetWidth(m.width)
+			m.logPanel = m.logPanel.SetHeight(logHeight)
 		}
 
 		m.commandBar.SetWidth(m.width)
@@ -361,14 +361,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 
 	case LogMsg:
-		m.logPanel.Add(msg.Entry)
+		m.logPanel = m.logPanel.Add(msg.Entry)
 		return m, nil
 
 	case SessionEventMsg:
 		return m.handleSessionEvent(msg.Event)
 
 	case SandboxStateMsg:
-		m.logPanel.Add(LogEntry{
+		m.logPanel = m.logPanel.Add(LogEntry{
 			Time:    time.Now(),
 			Level:   "INFO",
 			Message: fmt.Sprintf("sandbox %s: %s", msg.SandboxID[:8], msg.State),

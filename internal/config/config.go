@@ -1,6 +1,7 @@
 package config
 
 import (
+	_ "embed"
 	"fmt"
 	"math"
 	"os"
@@ -11,6 +12,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+//go:embed pipeline.yaml
+var embeddedPipeline []byte
 
 // ProviderConfig defines a named LLM provider endpoint.
 type ProviderConfig struct {
@@ -23,7 +27,6 @@ type ProviderConfig struct {
 type ModelConfig struct {
 	Provider   string `yaml:"provider"`
 	Model      string `yaml:"model"`
-	SmallRef   string `yaml:"small_ref"`
 	Binary     string `yaml:"binary"`
 	TokenLimit string `yaml:"token_limit"` // e.g. "300K", "1M", "1.5M", "unlimited", or ""
 }
@@ -38,8 +41,7 @@ type ResolvedModel struct {
 
 // ModelRuntimeOptions captures non-connection settings for a model-backed CLI harness.
 type ModelRuntimeOptions struct {
-	SmallRef string
-	Binary   string
+	Binary string
 }
 
 type Config struct {
@@ -168,42 +170,12 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 }
 
 func DefaultConfig() *Config {
-	return &Config{
-		Planner: PlannerConfig{
-			ModelRef:     "qwen3.6",
-			AllowedTools: []string{"Read", "Write"},
-			SystemPrompt: `You are Claude operating in /plan mode.
-
-Your sole job is to decompose a user task into an executable specification.
-Think step-by-step. Be specific and concrete. No hand-waving.
-
-Output a JSON object with exactly these fields:
-- "goal": a one-sentence summary of what needs to be done
-- "steps": an ordered array of concrete implementation steps (each step is actionable by a worker agent)
-- "acceptance": an array of verifiable criteria that define when the task is complete
-
-Respond ONLY with valid JSON. No markdown fences, no commentary.`,
-		},
-		Validator: ValidatorConfig{
-			ModelRef:     "qwen3.6",
-			SystemPrompt: planValidatorSystemPrompt,
-		},
-		Worker: WorkerConfig{
-			ModelRef:       "qwen3.6",
-			AllowedTools:   []string{"Read", "Write", "Bash"},
-			PermissionMode: "full",
-			Timeout:        Duration{10 * time.Minute},
-		},
-		WorkValidator: ValidatorConfig{
-			ModelRef:     "qwen3.6",
-			SystemPrompt: workValidatorSystemPrompt,
-		},
-		Retry: RetryConfig{
-			PlannerAttempts:      2,
-			PlanValidationRepair: 3,
-			WorkValidationRepair: 1,
-		},
+	cfg := &Config{}
+	// Load pipeline definition from compile-time embedded YAML.
+	if err := yaml.Unmarshal(embeddedPipeline, cfg); err != nil {
+		panic(fmt.Sprintf("embedded pipeline.yaml is invalid: %v", err))
 	}
+	return cfg
 }
 
 func formatYAMLError(path string, err error) error {
@@ -225,6 +197,9 @@ func Load(path string) (*Config, error) {
 		return nil, formatYAMLError(path, err)
 	}
 
+	// Apply model tier defaults: xl → l, xs → s.
+	applyModelTierDefaults(cfg)
+
 	// Override from environment (always applied)
 	if v := os.Getenv("ORQESTRA_VALIDATOR_MODEL_REF"); v != "" {
 		cfg.Validator.ModelRef = v
@@ -239,6 +214,24 @@ func Load(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// applyModelTierDefaults copies model definitions for unset tiers:
+// x-large defaults to large, x-small defaults to small.
+func applyModelTierDefaults(cfg *Config) {
+	if cfg.Models == nil {
+		return
+	}
+	if _, hasXL := cfg.Models["x-large"]; !hasXL {
+		if l, hasL := cfg.Models["large"]; hasL {
+			cfg.Models["x-large"] = l
+		}
+	}
+	if _, hasXS := cfg.Models["x-small"]; !hasXS {
+		if s, hasS := cfg.Models["small"]; hasS {
+			cfg.Models["x-small"] = s
+		}
+	}
 }
 
 // validate checks that all model references point to existing providers.
@@ -256,14 +249,26 @@ func (c *Config) validate() error {
 		return fmt.Errorf("missing mandatory work_validator.model_ref parameter")
 	}
 
+	// Verify pipeline model_refs resolve to defined model entries.
+	for _, ref := range []struct{ role, ref string }{
+		{"planner", c.Planner.ModelRef},
+		{"worker", c.Worker.ModelRef},
+		{"validator", c.Validator.ModelRef},
+		{"work_validator", c.WorkValidator.ModelRef},
+	} {
+		if _, ok := c.Models[ref.ref]; !ok {
+			return fmt.Errorf("%s.model_ref %q not found in models (define model tier %q in your provider config)", ref.role, ref.ref, ref.ref)
+		}
+	}
+	if c.Intent.ModelRef != "" {
+		if _, ok := c.Models[c.Intent.ModelRef]; !ok {
+			return fmt.Errorf("intent.model_ref %q not found in models (define model tier %q in your provider config)", c.Intent.ModelRef, c.Intent.ModelRef)
+		}
+	}
+
 	for name, m := range c.Models {
 		if _, ok := c.Providers[m.Provider]; !ok {
 			return fmt.Errorf("model %q references unknown provider %q", name, m.Provider)
-		}
-		if m.SmallRef != "" {
-			if _, ok := c.Models[m.SmallRef]; !ok {
-				return fmt.Errorf("model %q references unknown small_ref %q", name, m.SmallRef)
-			}
 		}
 		if m.TokenLimit != "" {
 			if _, err := ParseTokenLimit(m.TokenLimit); err != nil {
@@ -358,9 +363,17 @@ func (c *Config) RuntimeOptions(name string) (ModelRuntimeOptions, error) {
 	}
 
 	return ModelRuntimeOptions{
-		SmallRef: mc.SmallRef,
-		Binary:   mc.Binary,
+		Binary: mc.Binary,
 	}, nil
+}
+
+// ResolveSmallModel resolves the "small" tier model. Returns nil if not defined.
+func (c *Config) ResolveSmallModel() *ResolvedModel {
+	resolved, err := c.ResolveModel("small")
+	if err != nil {
+		return nil
+	}
+	return &resolved
 }
 
 // TokenLimitUnlimited is the sentinel value representing no cap.
@@ -434,36 +447,3 @@ func (c *Config) ResolvedTokenLimits() (map[string]int64, error) {
 	}
 	return limits, nil
 }
-
-const planValidatorSystemPrompt = `You are an independent plan validator. Your job is to judge whether a specification is complete, executable, non-contradictory, and testable.
-
-Analyze the specification and produce a JSON validation report with exactly these fields:
-- "schema_version": "1"
-- "verdict": one of "pass", "warn", or "fail"
-- "summary": one-sentence overall assessment
-- "issues": array of objects with "id", "severity" ("error"|"warning"|"info"), "message", and optional "location"
-- "suggestions": array of improvement suggestions (strings)
-
-Rules:
-- "fail" if any step is ambiguous, contradictory, or impossible
-- "fail" if acceptance criteria are unmeasurable
-- "warn" if steps could be more specific but are workable
-- "pass" if the plan is clear, ordered, and testable
-
-Respond ONLY with valid JSON. No markdown fences, no commentary.`
-
-const workValidatorSystemPrompt = `You are an independent work validator. Your job is to verify that execution output satisfies the original specification.
-
-You will receive the original specification and the execution output/logs. Produce a JSON validation report with exactly these fields:
-- "schema_version": "1"
-- "verdict": one of "pass", "warn", or "fail"
-- "summary": one-sentence overall assessment
-- "issues": array of objects with "id", "severity" ("error"|"warning"|"info"), "message", and optional "location"
-- "suggestions": array of improvement suggestions (strings)
-
-Rules:
-- "fail" if any acceptance criterion is clearly unmet
-- "warn" if work appears complete but evidence is ambiguous
-- "pass" if all acceptance criteria are demonstrably satisfied
-
-Respond ONLY with valid JSON. No markdown fences, no commentary.`

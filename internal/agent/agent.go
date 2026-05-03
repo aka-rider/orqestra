@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -390,40 +389,3 @@ func formatValidationFeedback(report *types.ValidationReport) string {
 	}
 	return result
 }
-
-// NewFromConfig creates a fully-wired Agent from the application config.
-// If validator endpoints are unreachable, validators will be nil (skipped).
-func NewFromConfig(cfg *config.Config) *Agent {
-	// Resolve or build planner runner (tools disabled for pure JSON output)
-	planRunner := harness.NewClaudeCLIFromConfig(cfg, cfg.Planner.ModelRef,
-		harness.WithExtraArgs("--tools", ""))
-
-	// Resolve or build worker runner. Permission flags derived from worker config permission_mode.
-	var workerOpts []harness.ClaudeCLIOption
-	if cfg.Worker.PermissionMode == "full" {
-		workerOpts = append(workerOpts, harness.WithExtraArgs("--dangerously-skip-permissions"))
-	}
-	workerRunner := harness.NewClaudeCLIFromConfig(cfg, cfg.Worker.ModelRef, workerOpts...)
-
-	// Planner
-	p := planner.New(planRunner, &cfg.Planner)
-
-	// Plan Validator
-	var pv *validator.PlanValidator
-	validatorRunner := harness.NewClaudeCLIFromConfig(cfg, cfg.Validator.ModelRef)
-	if validatorRunner != nil {
-		pv = validator.NewPlanValidator(validatorRunner, &cfg.Validator)
-	}
-
-	// Work Validator
-	var wv *validator.WorkValidator
-	workValidatorRunner := harness.NewClaudeCLIFromConfig(cfg, cfg.WorkValidator.ModelRef)
-	if workValidatorRunner != nil {
-		wv = validator.NewWorkValidator(workValidatorRunner, &cfg.WorkValidator)
-	}
-
-	return NewAgent(p, pv, wv, workerRunner, cfg)
-}
-
-// Ensure JSON is imported (used in formatValidationFeedback context).
-var _ = json.Marshal

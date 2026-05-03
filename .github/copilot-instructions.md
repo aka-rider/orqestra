@@ -13,7 +13,7 @@ Orqestra is an LLM agent orchestration system. It coordinates planning, validati
 
 ## Core Principles
 
-1. **Mature solutions** — no cowboy code. Strong types, explicit error handling.
+1. **Mature solutions** — no cowboy code. Strong types, explicit error handling, no errors swallowed.
 2. **Pragmatism** — 1 contributor, keep it simple. No premature abstraction.
 3. **Small iterations** — always a working MVP. Every commit should be runnable.
 4. **TDD** — spec first, tests second, implementation third, validation fourth.
@@ -208,3 +208,18 @@ For a detailed LLM-ready refactoring pass, follow `plan-eliminate-audit-findings
 1. **Make harness construction fail explicitly** — `internal/harness/claude_cli.go` returns `nil` from `NewClaudeCLIFromConfig` when `modelRef` is empty or cannot resolve, and logs instead of returning the error. Change this API to return `(CLIRunner, error)` or split optional construction from required construction. User-specified model references must fail fast.
 2. **Convert TUI log panel back to Elm-style state** — `internal/tui/view_log.go` uses pointer receivers plus `sync.Mutex` inside a Bubble Tea sub-model. Replace external mutation with `LogMsg`/typed messages sent through `p.Send`, store entries as plain value state, and update the panel only from `Update`.
 3. **Replace sleep-based async tests** — `internal/harness/session_test.go` and `internal/scheduler/scheduler_test.go` use `time.Sleep` to wait for goroutines. Replace with completion channels, `sync.WaitGroup`, context deadlines, or eventually-style polling with explicit timeout and assertion messages.
+
+## Available MCP Servers
+
+The following Model Context Protocol (MCP) servers are currently accessible to the AI orchestrator:
+
+1. **awesome-copilot** (`mcp_awesome-copil_*`): Loads and searches custom instructions, skills, agents, and prompts from the repository.
+2. **context7** (`mcp_context7_*`): Queries up-to-date documentation and API references.
+3. **markitdown** (`mcp_markitdown_*`): Converts URIs (http, file, data) to Markdown format.
+4. **mcp_docker** (`mcp_mcp_docker_*`): Provides Docker-based capabilities including browser interactions, Knowledge Graph observations, Wikipedia search, and dynamic MCP catalog exploration (`mcp-find`, `mcp-add`, etc.).
+5. **microsoft_mar** (`mcp_microsoft_mar_*`): Secondary markdown conversion tool.
+6. **microsoft_pla** (`mcp_microsoft_pla_*`): Browser and file interaction tools (drag/drop, console messages, file upload).
+7. **pylance_mcp_s** (`mcp_pylance_mcp_s_*`): Search Pylance documentation, analyze Python imports, configure environments, and validate syntax.
+8. **postgresql_mc** (`mcp_postgresql_mc_*`): Connects to PostgreSQL, gets metrics, server capabilities, query execution, and migration tools.
+
+Always ensure the latest MCP capabilities are used via the active tools instead of attempting raw API interactions.

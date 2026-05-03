@@ -304,8 +304,3 @@ func TestModel_WorkValidationPass(t *testing.T) {
 		t.Error("expected cycle-back command")
 	}
 }
-
-
-
-
-

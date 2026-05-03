@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -22,7 +21,6 @@ type LogEntry struct {
 // logPanel displays structured log entries as a scrollable table at the bottom.
 type logPanel struct {
 	entries  []LogEntry
-	mu       sync.Mutex
 	width    int
 	height   int
 	viewport viewport.Model
@@ -30,63 +28,59 @@ type logPanel struct {
 	focused  bool
 }
 
-func newLogPanel() *logPanel {
-	return &logPanel{
+func newLogPanel() logPanel {
+	return logPanel{
 		height: 8,
 	}
 }
 
-func (l *logPanel) Add(entry LogEntry) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+func (l logPanel) Add(entry LogEntry) logPanel {
 	l.entries = append(l.entries, entry)
 	// Keep last 200 entries
 	if len(l.entries) > 200 {
 		l.entries = l.entries[len(l.entries)-200:]
 	}
-	l.refreshContent()
+	l = l.refreshContent()
+	return l
 }
 
-func (l *logPanel) SetWidth(w int) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+func (l logPanel) SetWidth(w int) logPanel {
 	l.width = w
 	if l.width > 4 {
-		l.initViewport()
-		l.refreshContent()
+		l = l.initViewport()
+		l = l.refreshContent()
 	}
+	return l
 }
 
-func (l *logPanel) SetHeight(h int) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+func (l logPanel) SetHeight(h int) logPanel {
 	l.height = h
 	if l.width > 4 {
-		l.initViewport()
-		l.refreshContent()
+		l = l.initViewport()
+		l = l.refreshContent()
 	}
+	return l
 }
 
-func (l *logPanel) SetFocused(focused bool) {
+func (l logPanel) SetFocused(focused bool) logPanel {
 	l.focused = focused
+	return l
 }
 
-func (l *logPanel) IsFocused() bool {
+func (l logPanel) IsFocused() bool {
 	return l.focused
 }
 
-func (l *logPanel) Update(msg tea.Msg) tea.Cmd {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+func (l logPanel) Update(msg tea.Msg) (logPanel, tea.Cmd) {
 	if !l.ready {
-		return nil
+		return l, nil
 	}
 	var cmd tea.Cmd
 	l.viewport, cmd = l.viewport.Update(msg)
-	return cmd
+	return l, cmd
 }
 
-func (l *logPanel) initViewport() {
+func (l logPanel) initViewport() logPanel {
 	contentHeight := l.height - 3 // header + sep + border
 	if contentHeight < 1 {
 		contentHeight = 1
@@ -97,11 +91,12 @@ func (l *logPanel) initViewport() {
 	}
 	l.viewport = viewport.New(w, contentHeight)
 	l.ready = true
+	return l
 }
 
-func (l *logPanel) refreshContent() {
+func (l logPanel) refreshContent() logPanel {
 	if !l.ready {
-		return
+		return l
 	}
 	var rows []string
 	for _, e := range l.entries {
@@ -145,12 +140,10 @@ func (l *logPanel) refreshContent() {
 
 	l.viewport.SetContent(strings.Join(rows, "\n"))
 	l.viewport.GotoBottom()
+	return l
 }
 
-func (l *logPanel) View() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
+func (l logPanel) View() string {
 	if l.width < 20 || !l.ready {
 		return ""
 	}

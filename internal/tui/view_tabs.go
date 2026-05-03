@@ -10,11 +10,11 @@ import (
 
 // tabsView manages a tabbed container for multiple harness streaming sessions.
 type tabsView struct {
-	tabs     []streamView
-	tabNames []string
-	active   int
-	width    int
-	height   int
+	tabs       []streamView
+	tabNames   []string
+	active     int
+	width      int
+	height     int
 	focused    bool
 	pulseFrame int
 	pulsing    bool
@@ -152,6 +152,7 @@ func max(a, b int) int {
 }
 
 var pulseFrames = []string{"✦", "★", "✦", "✧", "·", "✧"}
+
 const pulseInterval = 200 * time.Millisecond
 
 func (t tabsView) hasRunningTabs() bool {

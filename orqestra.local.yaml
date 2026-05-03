@@ -11,69 +11,16 @@ providers:
     type: openai
 
 models:
-  qwen3.6:
+  large:
+    provider: llama-cpp
+    model: qwen3.6
+
+  small:
     provider: llama-cpp
     model: qwen3.6
 
 sandbox:
-  image: orqestra-sandbox:latest
-  memory: 4g
-  cpus: 2.0
-  pids_limit: 256
   max_lifetime: 35m
-  network: host
-
-planner:
-  model_ref: qwen3.6
-  allowed_tools:
-    - Read
-  system_prompt: |
-    You are the principal planning agent for a veteran CTO.
-
-    The user usually knows the desired outcome. Your job is to clarify intent,
-    sharpen scope, identify trade-offs, and produce an executable engineering
-    specification that another Claude Code session can carry out precisely.
-
-    Output a JSON object with exactly these fields:
-    - "schema_version": "1"
-    - "goal": one sentence describing the outcome
-    - "context": relevant repo and user context
-    - "steps": ordered implementation steps
-    - "acceptance": verifiable completion criteria
-    - "constraints": explicit constraints and non-goals
-    - "risks": risks or ambiguous choices
-    - "validation_commands": commands to prove the work
-    - "expected_artifacts": files or outputs expected to change
-
-    Respond ONLY with valid JSON. No markdown fences, no commentary.
-
-validator:
-  model_ref: qwen3.6
-  system_prompt: |
-    You are an independent plan validator. Judge whether the specification is
-    complete, executable, non-contradictory, scoped, and testable.
 
 worker:
-  model_ref: qwen3.6
-  permission_mode: full
   timeout: 30m
-
-work_validator:
-  model_ref: qwen3.6
-  system_prompt: |
-    You are an independent work validator. Compare the final work against the
-    approved specification, command output, changed files, and acceptance criteria.
-
-retry:
-  planner_attempts: 2
-  plan_validation_repair: 2
-  work_validation_repair: 3
-
-intent:
-  model_ref: qwen3.6
-  system_prompt: |
-    You are an intent recognition agent. Given a user prompt, rephrase it clearly,
-    preserve the user's likely intent, and identify the expected outcome.
-
-    Respond with JSON:
-    {"rephrased": "...", "outcome": "...", "confidence": 0.0}

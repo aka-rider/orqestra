@@ -43,11 +43,15 @@ type CommandMsg struct {
 	Args string
 }
 
-// IntentResultMsg carries the rephrased intent from the intent recognizer.
+// IntentResultMsg carries the structured intent recognition result.
 type IntentResultMsg struct {
-	Rephrased string
-	Outcome   string
-	Err       error
+	Verdict                string
+	Rephrased              string
+	EndState               string
+	Reason                 string
+	Questions              []string
+	ImprovedPromptExamples []string
+	Err                    error
 }
 
 // IntentConfirmMsg signals that the user approved the rephrased intent.
@@ -129,7 +133,6 @@ type CursorBlinkMsg struct{}
 
 // ValidationStartedMsg signals that the HTTP work validator has started (triggers spinner).
 type ValidationStartedMsg struct{}
-
 
 // streamChunkCmd creates a tea.Cmd that emits a StreamChunkMsg.
 func streamChunkCmd(tabIndex int, content string) tea.Cmd {

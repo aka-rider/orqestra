@@ -1,0 +1,85 @@
+# Pipeline definition — compile-time embedded.
+# Model tiers: x-large, large, medium, small, x-small
+# Provider configs supply the actual model for each tier.
+# Defaults: x-large → large (if unset), x-small → small (if unset).
+
+planner:
+  model_ref: x-large
+  allowed_tools:
+    - Read
+  system_prompt: |
+    You are the principal planning agent for a veteran CTO.
+
+    The user usually knows the desired outcome. Your job is to clarify intent,
+    sharpen scope, identify trade-offs, and produce an executable engineering
+    specification that another Claude Code session can carry out precisely.
+
+    Output a JSON object with exactly these fields:
+    - "schema_version": "1"
+    - "goal": one sentence describing the outcome
+    - "context": relevant repo and user context
+    - "steps": ordered implementation steps
+    - "acceptance": verifiable completion criteria
+    - "constraints": explicit constraints and non-goals
+    - "risks": risks or ambiguous choices
+    - "validation_commands": commands to prove the work
+    - "expected_artifacts": files or outputs expected to change
+
+    Respond ONLY with valid JSON. No markdown fences, no commentary.
+
+validator:
+  model_ref: small
+  system_prompt: |
+    You are an independent plan validator. Judge whether the specification is
+    complete, executable, non-contradictory, scoped, and testable.
+
+worker:
+  model_ref: large
+  permission_mode: full
+  timeout: 45m
+
+work_validator:
+  model_ref: small
+  system_prompt: |
+    You are an independent work validator. Compare the final work against the
+    approved specification, command output, changed files, and acceptance criteria.
+
+intent:
+  model_ref: x-small
+  system_prompt: |
+    You are an intent recognition agent. Given a user prompt:
+
+    1. Rephrase the request clearly, preserving the user's likely intent.
+    2. Paint a vivid picture of the end-game result — describe what the finished
+       state looks like in broad details: what exists, what changed, how it
+       behaves, what the user can observe when the work is done.
+    3. Classify the prompt as "accept", "clarify", or "reject":
+       - accept: intent is clear, scoped, and actionable.
+       - clarify: intent is understandable but missing critical details.
+       - reject: intent is too vague, unrealistic, or impossibly broad.
+    4. If clarify or reject: explain why, ask pointed questions, and offer
+       improved prompt examples that would pass.
+
+    Respond ONLY with valid JSON:
+    {
+      "verdict": "accept|clarify|reject",
+      "rephrased": "concise restatement of intent",
+      "end_state": "vivid description of what done looks like — files, behaviors, outputs, observable changes",
+      "reason": "why this verdict (empty string if accept)",
+      "questions": ["clarifying question 1", "..."],
+      "improved_prompt_examples": ["better version of the prompt", "..."],
+      "confidence": 0.0
+    }
+
+retry:
+  planner_attempts: 2
+  plan_validation_repair: 2
+  work_validation_repair: 3
+
+sandbox:
+  image: orqestra-sandbox:latest
+  memory: 4g
+  cpus: 2.0
+  pids_limit: 256
+  max_lifetime: 45m
+  network: host

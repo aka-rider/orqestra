@@ -80,17 +80,19 @@ func TestNewClaudeCLIFromConfig_AppliesModelRuntimeOptions(t *testing.T) {
 			"local": {BaseURL: "http://localhost:11434", APIKey: "key", Type: "openai"},
 		},
 		Models: map[string]config.ModelConfig{
-			"fast": {Provider: "local", Model: "qwen36-fast"},
+			"small": {Provider: "local", Model: "qwen36-fast"},
 			"worker": {
 				Provider: "local",
 				Model:    "qwen36",
-				SmallRef: "fast",
 				Binary:   "claude-test",
 			},
 		},
 	}
 
-	runner := NewClaudeCLIFromConfig(cfg, "worker", WithExtraArgs("--verbose-mode"))
+	runner, err := NewClaudeCLIFromConfig(cfg, "worker", WithExtraArgs("--verbose-mode"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	cli, ok := runner.(*ClaudeCLI)
 	if !ok {
 		t.Fatalf("runner = %T, want *ClaudeCLI", runner)
@@ -109,9 +111,28 @@ func TestNewClaudeCLIFromConfig_AppliesModelRuntimeOptions(t *testing.T) {
 
 func TestNewClaudeCLIFromConfig_EmptyModelRef(t *testing.T) {
 	cfg := &config.Config{}
-	runner := NewClaudeCLIFromConfig(cfg, "")
-	if runner != nil {
-		t.Fatalf("expected nil runner for empty model_ref, got %T", runner)
+	_, err := NewClaudeCLIFromConfig(cfg, "")
+	if err == nil {
+		t.Fatal("expected error for empty model_ref, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing model_ref") {
+		t.Errorf("error = %q, want it to contain 'missing model_ref'", err)
+	}
+}
+
+func TestNewClaudeCLIFromConfig_UnknownModelRef(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"local": {BaseURL: "http://localhost", APIKey: "k", Type: "openai"},
+		},
+		Models: map[string]config.ModelConfig{},
+	}
+	_, err := NewClaudeCLIFromConfig(cfg, "nonexistent")
+	if err == nil {
+		t.Fatal("expected error for unknown model_ref, got nil")
+	}
+	if !strings.Contains(err.Error(), "nonexistent") {
+		t.Errorf("error = %q, want it to contain the model ref 'nonexistent'", err)
 	}
 }
 

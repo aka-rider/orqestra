@@ -7,11 +7,20 @@ import (
 
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.Planner.ModelRef == "" {
-		t.Error("planner model_ref should have a default")
+	if cfg.Planner.ModelRef != "x-large" {
+		t.Errorf("planner model_ref = %q, want %q", cfg.Planner.ModelRef, "x-large")
 	}
-	if cfg.Validator.ModelRef == "" {
-		t.Error("validator model_ref should have a default")
+	if cfg.Validator.ModelRef != "small" {
+		t.Errorf("validator model_ref = %q, want %q", cfg.Validator.ModelRef, "small")
+	}
+	if cfg.Worker.ModelRef != "large" {
+		t.Errorf("worker model_ref = %q, want %q", cfg.Worker.ModelRef, "large")
+	}
+	if cfg.WorkValidator.ModelRef != "small" {
+		t.Errorf("work_validator model_ref = %q, want %q", cfg.WorkValidator.ModelRef, "small")
+	}
+	if cfg.Intent.ModelRef != "x-small" {
+		t.Errorf("intent model_ref = %q, want %q", cfg.Intent.ModelRef, "x-small")
 	}
 	if cfg.Retry.PlannerAttempts < 1 {
 		t.Error("planner attempts should be at least 1")
@@ -34,6 +43,15 @@ providers:
     base_url: http://localhost
     type: openai
 models:
+  x-large:
+    provider: local
+    model: big-model
+  large:
+    provider: local
+    model: custom-model
+  small:
+    provider: local
+    model: small-model
   custom-ref:
     provider: local
     model: custom-model
@@ -61,16 +79,15 @@ providers:
     base_url: http://test:1234
     type: openai
 models:
-  test-planner:
+  x-large:
     provider: local
-    model: test-model
-  test-validator:
+    model: test-planner
+  large:
+    provider: local
+    model: test-worker
+  small:
     provider: local
     model: test-val
-planner:
-  model_ref: test-planner
-validator:
-  model_ref: test-validator
 `
 	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
 	if err != nil {
@@ -83,11 +100,15 @@ validator:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Planner.ModelRef != "test-planner" {
-		t.Errorf("expected test-planner, got %q", cfg.Planner.ModelRef)
+	if cfg.Planner.ModelRef != "x-large" {
+		t.Errorf("expected planner model_ref x-large, got %q", cfg.Planner.ModelRef)
 	}
-	if cfg.Validator.ModelRef != "test-validator" {
-		t.Errorf("expected test-validator, got %q", cfg.Validator.ModelRef)
+	if cfg.Validator.ModelRef != "small" {
+		t.Errorf("expected validator model_ref small, got %q", cfg.Validator.ModelRef)
+	}
+	// x-small should default to small
+	if _, ok := cfg.Models["x-small"]; !ok {
+		t.Error("expected x-small model to be defaulted from small")
 	}
 }
 
@@ -184,6 +205,15 @@ providers:
     base_url: http://localhost
     type: anthropic
 models:
+  x-large:
+    provider: good
+    model: big
+  large:
+    provider: good
+    model: worker
+  small:
+    provider: good
+    model: small
   bad-model:
     provider: nonexistent
     model: x
@@ -208,9 +238,15 @@ providers:
     base_url: http://localhost
     type: openai
 models:
-  my-model:
+  x-large:
+    provider: local
+    model: big
+  large:
     provider: local
     model: qwen36
+  small:
+    provider: local
+    model: small
 `
 	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
 	if err != nil {
@@ -223,8 +259,9 @@ models:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(cfg.Models) != 1 {
-		t.Errorf("expected 1 model, got %d", len(cfg.Models))
+	// x-large, large, small defined + x-small defaulted from small = 4 models
+	if len(cfg.Models) != 4 {
+		t.Errorf("expected 4 models (with x-small default), got %d", len(cfg.Models))
 	}
 }
 
@@ -234,11 +271,9 @@ func TestRuntimeOptions(t *testing.T) {
 			"local": {BaseURL: "http://localhost", Type: "openai"},
 		},
 		Models: map[string]ModelConfig{
-			"fast": {Provider: "local", Model: "qwen36"},
 			"worker": {
 				Provider: "local",
 				Model:    "qwen36",
-				SmallRef: "fast",
 				Binary:   "claude-test",
 			},
 		},
@@ -248,36 +283,43 @@ func TestRuntimeOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RuntimeOptions() error: %v", err)
 	}
-	if runtime.SmallRef != "fast" {
-		t.Errorf("SmallRef = %q, want fast", runtime.SmallRef)
-	}
 	if runtime.Binary != "claude-test" {
 		t.Errorf("Binary = %q, want claude-test", runtime.Binary)
 	}
 }
 
-func TestLoad_ValidationAtLoadTime_InvalidSmallRef(t *testing.T) {
-	content := `
-providers:
-  local:
-    base_url: http://localhost
-    type: openai
-models:
-  worker:
-    provider: local
-    model: qwen36
-    small_ref: missing
-`
-	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
-	if err != nil {
-		t.Fatal(err)
+func TestResolveSmallModel(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]ProviderConfig{
+			"local": {BaseURL: "http://localhost:1234", APIKey: "k", Type: "openai"},
+		},
+		Models: map[string]ModelConfig{
+			"small": {Provider: "local", Model: "haiku"},
+		},
 	}
-	f.WriteString(content)
-	f.Close()
 
-	_, err = Load(f.Name())
-	if err == nil {
-		t.Fatal("expected validation error for missing small_ref")
+	small := cfg.ResolveSmallModel()
+	if small == nil {
+		t.Fatal("expected small model to resolve")
+	}
+	if small.Model != "haiku" {
+		t.Errorf("small.Model = %q, want haiku", small.Model)
+	}
+}
+
+func TestResolveSmallModel_NotDefined(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]ProviderConfig{
+			"local": {BaseURL: "http://localhost", Type: "openai"},
+		},
+		Models: map[string]ModelConfig{
+			"large": {Provider: "local", Model: "big"},
+		},
+	}
+
+	small := cfg.ResolveSmallModel()
+	if small != nil {
+		t.Errorf("expected nil when small tier not defined, got %+v", small)
 	}
 }
 
@@ -288,9 +330,15 @@ providers:
     base_url: http://localhost
     type: openai
 models:
-  qwen:
+  x-large:
+    provider: local
+    model: big
+  large:
     provider: local
     model: qwen36
+  small:
+    provider: local
+    model: small
 execution_graph:
   agents:
     - id: implement
@@ -408,6 +456,15 @@ providers:
     base_url: http://localhost
     type: openai
 models:
+  x-large:
+    provider: local
+    model: big
+  large:
+    provider: local
+    model: qwen36
+  small:
+    provider: local
+    model: small
   bad:
     provider: local
     model: qwen36
@@ -423,5 +480,85 @@ models:
 	_, err = Load(f.Name())
 	if err == nil {
 		t.Fatal("expected validation error for invalid token_limit")
+	}
+}
+
+func TestModelTierDefaults(t *testing.T) {
+	content := `
+providers:
+  local:
+    base_url: http://localhost
+    type: openai
+models:
+  large:
+    provider: local
+    model: worker-model
+  small:
+    provider: local
+    model: small-model
+`
+	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(content)
+	f.Close()
+
+	cfg, err := Load(f.Name())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// x-large should default to large
+	xl, ok := cfg.Models["x-large"]
+	if !ok {
+		t.Fatal("x-large model should be defaulted from large")
+	}
+	if xl.Model != "worker-model" {
+		t.Errorf("x-large.Model = %q, want %q", xl.Model, "worker-model")
+	}
+
+	// x-small should default to small
+	xs, ok := cfg.Models["x-small"]
+	if !ok {
+		t.Fatal("x-small model should be defaulted from small")
+	}
+	if xs.Model != "small-model" {
+		t.Errorf("x-small.Model = %q, want %q", xs.Model, "small-model")
+	}
+}
+
+func TestModelTierDefaults_ExplicitXL(t *testing.T) {
+	content := `
+providers:
+  local:
+    base_url: http://localhost
+    type: openai
+models:
+  x-large:
+    provider: local
+    model: explicit-xl
+  large:
+    provider: local
+    model: worker-model
+  small:
+    provider: local
+    model: small-model
+`
+	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(content)
+	f.Close()
+
+	cfg, err := Load(f.Name())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Explicit x-large should NOT be overwritten
+	if cfg.Models["x-large"].Model != "explicit-xl" {
+		t.Errorf("x-large.Model = %q, want %q", cfg.Models["x-large"].Model, "explicit-xl")
 	}
 }

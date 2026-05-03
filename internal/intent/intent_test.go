@@ -25,7 +25,7 @@ func (m *mockRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (
 
 func TestRecognize_ValidJSON(t *testing.T) {
 	runner := &mockRunner{
-		output: `{"rephrased": "Build a REST API", "outcome": "working API endpoint", "confidence": 0.95}`,
+		output: `{"verdict":"accept","rephrased":"Build a REST API","end_state":"A running HTTP server with /health and /users endpoints, responding to GET requests with JSON. Tests pass via go test ./...","reason":"","questions":[],"improved_prompt_examples":[],"confidence":0.95}`,
 	}
 
 	r := New(runner, &IntentConfig{SystemPrompt: "test"})
@@ -33,14 +33,80 @@ func TestRecognize_ValidJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if intent.Verdict != VerdictAccept {
+		t.Errorf("expected verdict accept, got %q", intent.Verdict)
+	}
 	if intent.Rephrased != "Build a REST API" {
 		t.Errorf("expected rephrased 'Build a REST API', got %q", intent.Rephrased)
 	}
-	if intent.Outcome != "working API endpoint" {
-		t.Errorf("expected outcome 'working API endpoint', got %q", intent.Outcome)
+	if intent.EndState == "" {
+		t.Error("expected non-empty end_state for accepted intent")
 	}
 	if intent.Confidence != 0.95 {
 		t.Errorf("expected confidence 0.95, got %f", intent.Confidence)
+	}
+}
+
+func TestRecognize_ClarifyVerdict(t *testing.T) {
+	runner := &mockRunner{
+		output: `{"verdict":"clarify","rephrased":"Improve the code","end_state":"","reason":"No target files or behavior specified","questions":["Which module?","What metric defines better?"],"improved_prompt_examples":["Refactor internal/auth to reduce cyclomatic complexity below 10"],"confidence":0.4}`,
+	}
+
+	r := New(runner, &IntentConfig{SystemPrompt: "test"})
+	intent, err := r.Recognize(context.Background(), "make it better")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if intent.Verdict != VerdictClarify {
+		t.Errorf("expected verdict clarify, got %q", intent.Verdict)
+	}
+	if len(intent.Questions) == 0 {
+		t.Error("expected clarifying questions")
+	}
+	if len(intent.ImprovedPromptExamples) == 0 {
+		t.Error("expected improved prompt examples")
+	}
+}
+
+func TestRecognize_RejectVerdict(t *testing.T) {
+	runner := &mockRunner{
+		output: `{"verdict":"reject","rephrased":"Rewrite the entire codebase","end_state":"","reason":"Scope is impossibly broad for a single execution","questions":[],"improved_prompt_examples":["Rewrite internal/auth to use OAuth2 with PKCE flow"],"confidence":0.2}`,
+	}
+
+	r := New(runner, &IntentConfig{SystemPrompt: "test"})
+	intent, err := r.Recognize(context.Background(), "rewrite everything")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if intent.Verdict != VerdictReject {
+		t.Errorf("expected verdict reject, got %q", intent.Verdict)
+	}
+	if intent.Reason == "" {
+		t.Error("expected non-empty reason for rejection")
+	}
+}
+
+func TestRecognize_InvalidVerdict(t *testing.T) {
+	runner := &mockRunner{
+		output: `{"verdict":"maybe","rephrased":"something","end_state":"","confidence":0.5}`,
+	}
+
+	r := New(runner, &IntentConfig{SystemPrompt: "test"})
+	_, err := r.Recognize(context.Background(), "do something")
+	if err == nil {
+		t.Fatal("expected error for invalid verdict, got nil")
+	}
+}
+
+func TestRecognize_AcceptWithoutEndState(t *testing.T) {
+	runner := &mockRunner{
+		output: `{"verdict":"accept","rephrased":"Build a thing","end_state":"","confidence":0.9}`,
+	}
+
+	r := New(runner, &IntentConfig{SystemPrompt: "test"})
+	_, err := r.Recognize(context.Background(), "build a thing")
+	if err == nil {
+		t.Fatal("expected error when accept verdict has empty end_state")
 	}
 }
 
@@ -58,7 +124,7 @@ func TestRecognize_InvalidJSON(t *testing.T) {
 
 func TestRecognize_EmptyRephrased(t *testing.T) {
 	runner := &mockRunner{
-		output: `{"rephrased": "", "outcome": "something", "confidence": 0.5}`,
+		output: `{"verdict":"accept","rephrased":"","end_state":"something","confidence":0.5}`,
 	}
 
 	r := New(runner, &IntentConfig{SystemPrompt: "test"})

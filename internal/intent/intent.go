@@ -9,11 +9,24 @@ import (
 	"github.com/xiii/orqestra/internal/harness"
 )
 
+// Verdict classifies the intent recognition outcome.
+type Verdict string
+
+const (
+	VerdictAccept  Verdict = "accept"
+	VerdictClarify Verdict = "clarify"
+	VerdictReject  Verdict = "reject"
+)
+
 // Intent is the parsed result of intent recognition.
 type Intent struct {
-	Rephrased  string  `json:"rephrased"`
-	Outcome    string  `json:"outcome"`
-	Confidence float64 `json:"confidence"`
+	Verdict                Verdict  `json:"verdict"`
+	Rephrased              string   `json:"rephrased"`
+	EndState               string   `json:"end_state"`
+	Reason                 string   `json:"reason"`
+	Questions              []string `json:"questions"`
+	ImprovedPromptExamples []string `json:"improved_prompt_examples"`
+	Confidence             float64  `json:"confidence"`
 }
 
 // IntentConfig configures the intent recognizer.
@@ -45,8 +58,18 @@ func (r *Recognizer) Recognize(ctx context.Context, rawPrompt string) (Intent, e
 		return Intent{}, fmt.Errorf("parsing intent response: %w", err)
 	}
 
+	switch intent.Verdict {
+	case VerdictAccept, VerdictClarify, VerdictReject:
+		// valid
+	default:
+		return Intent{}, fmt.Errorf("intent recognition returned invalid verdict %q", intent.Verdict)
+	}
+
 	if intent.Rephrased == "" {
 		return Intent{}, errors.New("intent recognition returned empty rephrased field")
+	}
+	if intent.Verdict == VerdictAccept && intent.EndState == "" {
+		return Intent{}, errors.New("intent recognition accepted but returned empty end_state")
 	}
 
 	return intent, nil

@@ -80,6 +80,7 @@ func TestSerialExecution(t *testing.T) {
 
 	var running atomic.Int32
 	var maxConcurrent atomic.Int32
+	release := make(chan struct{})
 
 	runner := func(ctx context.Context, node AgentNode, spec types.Specification) error {
 		cur := running.Add(1)
@@ -93,13 +94,23 @@ func TestSerialExecution(t *testing.T) {
 				break
 			}
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-release
 		running.Add(-1)
 		return nil
 	}
 
-	err = s.Run(context.Background(), types.Specification{}, runner, nil)
-	if err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, types.Specification{}, runner, nil) }()
+
+	// Release each agent one at a time
+	for i := 0; i < 3; i++ {
+		release <- struct{}{}
+	}
+
+	if err := <-done; err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
 
@@ -125,6 +136,8 @@ func TestUnlimitedParallel(t *testing.T) {
 
 	var running atomic.Int32
 	var maxConcurrent atomic.Int32
+	allStarted := make(chan struct{})
+	release := make(chan struct{})
 
 	runner := func(ctx context.Context, node AgentNode, spec types.Specification) error {
 		cur := running.Add(1)
@@ -137,13 +150,31 @@ func TestUnlimitedParallel(t *testing.T) {
 				break
 			}
 		}
-		time.Sleep(50 * time.Millisecond)
+		// Signal when all 3 are running
+		if cur == 3 {
+			close(allStarted)
+		}
+		<-release
 		running.Add(-1)
 		return nil
 	}
 
-	err = s.Run(context.Background(), types.Specification{}, runner, nil)
-	if err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, types.Specification{}, runner, nil) }()
+
+	// Wait for all to be running concurrently
+	select {
+	case <-allStarted:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for all agents to start")
+	}
+
+	close(release)
+
+	if err := <-done; err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
 
