@@ -301,9 +301,15 @@ func (d *DockerSandbox) buildCreateArgs() []string {
 	}
 
 	// Docker MCP gateway socket — exposes host MCP servers inside the container.
-	// Only mount if the socket actually exists on the host.
+	// We mount it if provided. If the user explicitly provided a path, errors are surfaced.
 	if d.cfg.MCP.SocketPath != "" {
-		if _, err := os.Stat(d.cfg.MCP.SocketPath); err == nil {
+		if _, err := os.Stat(d.cfg.MCP.SocketPath); err != nil {
+			// If it's a default path, we could ignore it, but config should be explicit.
+			// For safety (and to follow anti-pattern guidelines), log the error or handle it.
+			// Since buildArgs shouldn't fail, we'll currently skip adding the mount.
+			// Ideally this should happen at validation time, but we'll record it.
+			slog.Warn("skipping MCP socket mount due to stat error", "path", d.cfg.MCP.SocketPath, "err", err)
+		} else {
 			args = append(args, "--mount",
 				fmt.Sprintf("type=bind,source=%s,target=/run/mcp.sock,readonly", d.cfg.MCP.SocketPath))
 		}

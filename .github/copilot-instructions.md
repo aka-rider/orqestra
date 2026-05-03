@@ -33,10 +33,11 @@ These are concrete code patterns that violate the core principles. Reject them i
 
 1. **Silent fallback on missing user input** — If the user explicitly specifies a file path, URL, model name, or any resource identifier, its absence is ALWAYS an error. Never fall back to defaults when the user expressed intent. `--config foo.yaml` → file must exist or fatal.
 2. **`if os.IsNotExist(err) { /* use defaults */ }`** — This is the canonical silent-failure footgun. The only acceptable use is for truly optional files that are auto-discovered (not user-specified).
-3. **`_ = err` without `// fire-and-forget: <reason>`** — Banned without explicit doc comment explaining why.
-4. **`err != nil` followed by `log` but no `return`** — Log-and-continue is silent degradation. If you log an error, you must also return it or surface it to the user.
-5. **Default values that mask misconfiguration** — If a config field is required for operation, its zero value must cause a clear error at startup, not silently produce broken behavior at runtime.
-6. **Fallback model/provider resolution** — If `model_ref` doesn't resolve, fail. Don't silently try a different resolution path or return a degraded runner.
+3. **Swallowing `os.Stat` errors** — E.g., `if _, err := os.Stat(path); err == nil { return path, nil } return "", fmt.Errorf("not found")`. This swallows permission denied or other system level errors. Always propagate the actual error (`%w`).
+4. **`_ = err` without `// fire-and-forget: <reason>`** — Banned without explicit doc comment explaining why.
+5. **`err != nil` followed by `log` but no `return`** — Log-and-continue is silent degradation. If you log an error, you must also return it or surface it to the user.
+6. **Default values that mask misconfiguration** — If a config field is required for operation, its zero value must cause a clear error at startup, not silently produce broken behavior at runtime.
+7. **Fallback model/provider resolution** — If `model_ref` doesn't resolve, fail. Don't silently try a different resolution path or return a degraded runner.
 
 ## Architecture
 
@@ -140,3 +141,70 @@ defer func() {
 ```
 
 Always wrap `p.Run()` with this pattern. Context cancellation on ctrl+c ensures harness subprocess cleanup.
+
+## Go Engineering DOs and DON'Ts
+
+### DO
+
+- Write the failing test first, then the smallest production change, then run the narrowest relevant `go test` package before broadening.
+- Return `(T, error)` from constructors, factories, parsers, resolvers, and runners when configuration, IO, subprocesses, or model references can fail.
+- Keep interfaces small and consumer-owned. Prefer concrete structs internally until a seam is needed for tests or alternate implementations.
+- Validate all config at load time. Required provider, model, runtime, sandbox, and prompt references must fail before orchestration starts.
+- Wrap errors with operation and resource context: `fmt.Errorf("resolve worker model %q: %w", ref, err)`.
+- Use table-driven tests for validation matrices and state transitions. Name cases after the behavior, not the implementation detail.
+- Prefer channels, `sync.WaitGroup`, contexts, or deterministic test hooks for goroutine coordination.
+- Keep package boundaries honest: config resolves config, harnesses run harnesses, TUI renders state, sandbox owns isolation.
+- Treat LLM text, file paths, command args, JSON, YAML, and streamed events as hostile until parsed and validated.
+
+### DON'T
+
+- Do not return `nil` interfaces to represent construction failure. Return `(Interface, error)` so callers cannot confuse "disabled" with "misconfigured".
+- Do not log and continue after errors that affect correctness, state truth, model selection, sandbox setup, validation, or user-visible output.
+- Do not use `time.Sleep` to synchronize tests. Sleeps are timing guesses, not correctness guarantees.
+- Do not introduce package-level mutable state for orchestration, UI state, config, or test fixtures.
+- Do not add generic abstractions, option plumbing, or framework layers unless there are at least two real call sites that need them now.
+- Do not parse structured formats with string slicing when `encoding/json`, `yaml.v3`, shell quoting helpers, or typed structs can do the job.
+- Do not silently truncate, drop, or ignore LLM/harness output unless the discarded data is explicitly non-critical and observable in diagnostics.
+
+## Bubble Tea TUI DOs and DON'Ts
+
+### DO
+
+- Keep the Bubble Tea model as the single owner of UI state. External goroutines communicate only by sending immutable `tea.Msg` values.
+- Use value receivers for models and sub-models. `Update` returns the updated value plus a command; parents assign the returned child model back.
+- Convert callbacks, log sinks, subprocess events, validator results, and sandbox state changes into typed messages with enough context to render truthfully.
+- Keep `View()` pure: no IO, no mutation, no goroutines, no logging side effects, no time reads for display state that belongs in the model.
+- Model focus explicitly. Keyboard and mouse handling should route through the focused sub-model instead of duplicating key logic in the parent.
+- Recalculate viewports and dimensions on every `tea.WindowSizeMsg`; clamp sizes before creating or updating viewport models.
+- Use `tea.Batch` only for independent commands and `tea.Sequence` only when ordering is semantically required.
+
+### DON'T
+
+- Do not put `sync.Mutex`, channels, pointers to mutable shared state, or background writers inside Bubble Tea models.
+- Do not mutate a sub-model through a pointer receiver from outside the parent `Update` path.
+- Do not start goroutines directly from child views. Parent state transitions own async boundaries and cancellation context.
+- Do not block `Update` with IO, sleeps, subprocess waits, network calls, validation, or filesystem work.
+- Do not pass maps, slices, buffers, pointers, or mutable structs through `p.Send` unless they are deep-copied first.
+- Do not let transient errors disappear from the UI. Store the error in model state and keep it visible until the user moves on.
+
+## Common Pitfalls and Gotchas
+
+- **Nil interface trap**: an interface value holding a typed nil is not equal to nil. Avoid nullable interface returns from factories.
+- **Loop variable capture**: copy loop variables before launching goroutines or creating closures that outlive the iteration.
+- **Scanner token limits**: `bufio.Scanner` has a small default token limit. Set an explicit buffer for streamed LLM JSON lines and handle `scanner.Err()`.
+- **Map iteration order**: never rely on map order in rendered output, logs, tests, or generated specs. Sort keys before display or comparison.
+- **Context cancellation**: subprocesses, validators, sandboxes, and harness sessions must accept and respect `context.Context`.
+- **Deferred cleanup errors**: cleanup may be best-effort, but errors still need to be logged or surfaced with enough resource identity to debug.
+- **Pointer receiver drift**: one pointer-style sub-model tends to force mutexes and shared ownership. Convert it back to value-style before building on it.
+- **Validation warnings vs failures**: warnings may continue only when the UI clearly displays them; failures must stop the pipeline.
+- **Config defaults**: defaults are acceptable for omitted optional settings, not for user-specified references that fail to resolve.
+
+## Repo Audit Corrections for Future Agents
+
+These are the top three instruction-worthy issues found in this repo. Prefer fixing them before building features on top of the affected code.
+
+For a detailed LLM-ready refactoring pass, follow `plan-eliminate-audit-findings.md`.
+
+1. **Make harness construction fail explicitly** — `internal/harness/claude_cli.go` returns `nil` from `NewClaudeCLIFromConfig` when `modelRef` is empty or cannot resolve, and logs instead of returning the error. Change this API to return `(CLIRunner, error)` or split optional construction from required construction. User-specified model references must fail fast.
+2. **Convert TUI log panel back to Elm-style state** — `internal/tui/view_log.go` uses pointer receivers plus `sync.Mutex` inside a Bubble Tea sub-model. Replace external mutation with `LogMsg`/typed messages sent through `p.Send`, store entries as plain value state, and update the panel only from `Update`.
+3. **Replace sleep-based async tests** — `internal/harness/session_test.go` and `internal/scheduler/scheduler_test.go` use `time.Sleep` to wait for goroutines. Replace with completion channels, `sync.WaitGroup`, context deadlines, or eventually-style polling with explicit timeout and assertion messages.
