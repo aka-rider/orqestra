@@ -9,11 +9,17 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/volume"
+	dockerclient "github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 )
 
 // DockerSandbox is a Sandbox backed by a Docker container.
@@ -27,6 +33,51 @@ type DockerSandbox struct {
 	cfg         Config
 	repoPath    string // absolute path to the host repo
 	env         []string
+	cli         *dockerclient.Client
+}
+
+// newDockerClient creates a Docker client from environment (respects DOCKER_HOST, etc.).
+// When DOCKER_HOST is unset, it probes common Docker Desktop socket paths on macOS.
+func newDockerClient() (*dockerclient.Client, error) {
+	opts := []dockerclient.Opt{dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation()}
+
+	// If DOCKER_HOST is not set, probe for Docker Desktop's non-default socket locations.
+	if os.Getenv("DOCKER_HOST") == "" {
+		if sock := discoverDockerSocket(); sock != "" {
+			opts = append(opts, dockerclient.WithHost("unix://"+sock))
+		}
+	}
+
+	return dockerclient.NewClientWithOpts(opts...)
+}
+
+// discoverDockerSocket probes common Docker socket paths and returns the first that exists.
+func discoverDockerSocket() string {
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		"/var/run/docker.sock",
+	}
+	if home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, ".docker", "run", "docker.sock"),
+			filepath.Join(home, ".colima", "default", "docker.sock"),
+		)
+	}
+	for _, sock := range candidates {
+		if fi, err := os.Stat(sock); err == nil && fi.Mode().Type()&os.ModeSocket != 0 {
+			return sock
+		}
+	}
+	return ""
+}
+
+// newDockerClientWithHost creates a Docker client pointing to a specific host.
+// Used in tests to simulate unreachable daemons.
+func newDockerClientWithHost(host string) (*dockerclient.Client, error) {
+	return dockerclient.NewClientWithOpts(
+		dockerclient.WithHost(host),
+		dockerclient.WithAPIVersionNegotiation(),
+	)
 }
 
 // NewDockerSandbox creates a new sandbox instance. Call Provision to start it.
@@ -74,36 +125,57 @@ func (d *DockerSandbox) Info() Info {
 	}
 }
 
+// ensureClient lazily initializes the Docker SDK client.
+func (d *DockerSandbox) ensureClient() error {
+	if d.cli != nil {
+		return nil
+	}
+	cli, err := newDockerClient()
+	if err != nil {
+		return fmt.Errorf("creating docker client: %w", err)
+	}
+	d.cli = cli
+	return nil
+}
+
 // Provision creates the Docker container with ephemeral volumes and read-only mounts.
 func (d *DockerSandbox) Provision(ctx context.Context) error {
 	d.setState(StateProvisioning)
 	d.createdAt = time.Now()
 
+	if err := d.ensureClient(); err != nil {
+		d.setState(StatePending)
+		return err
+	}
+
+	// Validate MCP socket path if configured — fail loudly if user specified it but it's missing.
+	if d.cfg.MCP.SocketPath != "" {
+		if _, err := os.Stat(d.cfg.MCP.SocketPath); err != nil {
+			d.setState(StatePending)
+			return fmt.Errorf("MCP socket path %q: %w", d.cfg.MCP.SocketPath, err)
+		}
+	}
+
 	// Create ephemeral volumes — both destroyed with the sandbox.
-	if err := d.dockerRun(ctx, "volume", "create", d.volumeName); err != nil {
+	if _, err := d.cli.VolumeCreate(ctx, volume.CreateOptions{Name: d.volumeName}); err != nil {
 		d.setState(StatePending)
 		return fmt.Errorf("creating workspace volume: %w", err)
 	}
-	if err := d.dockerRun(ctx, "volume", "create", d.btrfsVolume()); err != nil {
+	if _, err := d.cli.VolumeCreate(ctx, volume.CreateOptions{Name: d.btrfsVolume()}); err != nil {
 		d.setState(StatePending)
 		return fmt.Errorf("creating btrfs volume: %w", err)
 	}
 
-	args := d.buildCreateArgs()
+	containerConfig, hostConfig := d.buildContainerConfig()
 
-	var stdout bytes.Buffer
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Stdout = &stdout
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	slog.Debug("sandbox: creating container", "id", d.id, "args", args)
-	if err := cmd.Run(); err != nil {
+	slog.Debug("sandbox: creating container", "id", d.id, "image", d.cfg.Image)
+	resp, err := d.cli.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, "")
+	if err != nil {
 		d.setState(StatePending)
-		return fmt.Errorf("docker create: %w (stderr: %s)", err, stderr.String())
+		return fmt.Errorf("docker create: %w", err)
 	}
 
-	containerID := strings.TrimSpace(stdout.String())
+	containerID := resp.ID
 	if containerID == "" {
 		d.setState(StatePending)
 		return fmt.Errorf("docker create returned empty container ID")
@@ -114,13 +186,12 @@ func (d *DockerSandbox) Provision(ctx context.Context) error {
 	d.mu.Unlock()
 
 	// Start the container (entrypoint copies workspace).
-	if err := d.dockerRun(ctx, "start", containerID); err != nil {
+	if err := d.cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
 		d.setState(StatePending)
 		return fmt.Errorf("docker start: %w", err)
 	}
 
-	// Wait for entrypoint init to complete (it should exit 0 if init-only,
-	// or stay running as a long-lived shell). We wait briefly then check state.
+	// Wait for entrypoint init to complete.
 	if err := d.waitReady(ctx); err != nil {
 		d.setState(StatePending)
 		return fmt.Errorf("waiting for container ready: %w", err)
@@ -136,31 +207,48 @@ func (d *DockerSandbox) Provision(ctx context.Context) error {
 func (d *DockerSandbox) Exec(ctx context.Context, command []string, env []string, out io.Writer) (int, error) {
 	d.setState(StateRunning)
 
-	args := []string{"exec", "-u", "sandbox"}
-	// Pass environment variables.
-	for _, e := range env {
-		args = append(args, "-e", e)
+	if err := d.ensureClient(); err != nil {
+		d.setState(StateStopped)
+		return -1, err
 	}
-	args = append(args, d.containerID)
-	args = append(args, command...)
 
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Stdout = out
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	execCfg := container.ExecOptions{
+		Cmd:          command,
+		Env:          env,
+		User:         "sandbox",
+		AttachStdout: true,
+		AttachStderr: true,
+	}
 
 	slog.Debug("sandbox: exec", "id", d.id, "command", command)
-	err := cmd.Run()
+	execResp, err := d.cli.ContainerExecCreate(ctx, d.containerID, execCfg)
+	if err != nil {
+		d.setState(StateStopped)
+		return -1, fmt.Errorf("docker exec create: %w", err)
+	}
+
+	attachResp, err := d.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		d.setState(StateStopped)
+		return -1, fmt.Errorf("docker exec attach: %w", err)
+	}
+	defer attachResp.Close()
+
+	// Demultiplex Docker's binary-prefixed stdout/stderr streams.
+	if _, err := stdcopy.StdCopy(out, io.Discard, attachResp.Reader); err != nil {
+		d.setState(StateStopped)
+		return -1, fmt.Errorf("docker exec stream: %w", err)
+	}
+
+	// Get exit code.
+	inspectResp, err := d.cli.ContainerExecInspect(ctx, execResp.ID)
+	if err != nil {
+		d.setState(StateStopped)
+		return -1, fmt.Errorf("docker exec inspect: %w", err)
+	}
 
 	d.setState(StateStopped)
-
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return exitErr.ExitCode(), nil
-		}
-		return -1, fmt.Errorf("docker exec: %w (stderr: %s)", err, stderr.String())
-	}
-	return 0, nil
+	return inspectResp.ExitCode, nil
 }
 
 // ExtractChanges uses btrfs send to diff the workspace snapshot against the source.
@@ -168,39 +256,41 @@ func (d *DockerSandbox) Exec(ctx context.Context, command []string, env []string
 func (d *DockerSandbox) ExtractChanges(ctx context.Context) ([]ChangedFile, error) {
 	prev := d.State()
 	d.setState(StateExtracting)
-	defer d.setState(prev) // restore to Stopped after extraction
+	defer d.setState(prev)
+
+	if err := d.ensureClient(); err != nil {
+		return nil, err
+	}
 
 	// Snapshot the workspace as read-only (required for btrfs send).
-	var stderr bytes.Buffer
-	snapCmd := exec.CommandContext(ctx, "docker", "exec", d.containerID,
+	snapCode, err := d.execInternal(ctx, []string{
 		"btrfs", "subvolume", "snapshot", "-r",
 		"/mnt/btrfs/workspace", "/mnt/btrfs/workspace-final",
-	)
-	snapCmd.Stderr = &stderr
-	if err := snapCmd.Run(); err != nil {
-		return nil, fmt.Errorf("creating ro snapshot for diff: %w (stderr: %s)", err, stderr.String())
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating ro snapshot for diff: %w", err)
+	}
+	if snapCode != 0 {
+		return nil, fmt.Errorf("creating ro snapshot for diff: exit code %d", snapCode)
 	}
 
 	// btrfs send --no-data diffs workspace-final against source (parent).
-	// Pipe through btrfs receive --dump for human-readable output.
 	var stdout bytes.Buffer
-	stderr.Reset()
-	diffCmd := exec.CommandContext(ctx, "docker", "exec", d.containerID,
+	diffCode, err := d.execInternalWithOutput(ctx, []string{
 		"sh", "-c",
 		"btrfs send --no-data -p /mnt/btrfs/source /mnt/btrfs/workspace-final | btrfs receive --dump",
-	)
-	diffCmd.Stdout = &stdout
-	diffCmd.Stderr = &stderr
-
-	if err := diffCmd.Run(); err != nil {
-		return nil, fmt.Errorf("btrfs send/receive diff: %w (stderr: %s)", err, stderr.String())
+	}, &stdout)
+	if err != nil {
+		return nil, fmt.Errorf("btrfs send/receive diff: %w", err)
+	}
+	if diffCode != 0 {
+		return nil, fmt.Errorf("btrfs send/receive diff: exit code %d", diffCode)
 	}
 
 	lines := strings.Split(stdout.String(), "\n")
 	files := parseBtrfsDump(lines)
 
 	// Enrich files with size and executable info via stat inside the container.
-	// Files that fail stat are btrfs internal artifacts — filter them out.
 	var verified []ChangedFile
 	for _, f := range files {
 		if f.Op == FileDeleted {
@@ -223,23 +313,27 @@ func (d *DockerSandbox) ExtractChanges(ctx context.Context) ([]ChangedFile, erro
 }
 
 // CopyOut copies a file from the sandbox workspace to a host path.
-// Uses docker exec + cat because docker cp doesn't see bind mounts inside the container.
+// Uses exec + cat because /workspace is a bind-mounted btrfs snapshot that
+// Docker's CopyFromContainer API cannot see (it only sees storage driver layers).
 func (d *DockerSandbox) CopyOut(ctx context.Context, sandboxPath, hostPath string) error {
+	if err := d.ensureClient(); err != nil {
+		return err
+	}
+
 	// Ensure parent directory exists on host.
 	dir := filepath.Dir(hostPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating directory %s: %w", dir, err)
 	}
 
-	// Stream file content via docker exec cat.
-	cmd := exec.CommandContext(ctx, "docker", "exec", d.containerID,
-		"cat", "/workspace/"+sandboxPath)
+	// Stream file content via exec cat.
 	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("reading %s from container: %w (stderr: %s)", sandboxPath, err, stderr.String())
+	exitCode, err := d.execInternalWithOutput(ctx, []string{"cat", "/workspace/" + sandboxPath}, &stdout)
+	if err != nil {
+		return fmt.Errorf("reading %s from container: %w", sandboxPath, err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("reading %s from container: exit code %d", sandboxPath, exitCode)
 	}
 
 	if err := os.WriteFile(hostPath, stdout.Bytes(), 0o644); err != nil {
@@ -251,101 +345,120 @@ func (d *DockerSandbox) CopyOut(ctx context.Context, sandboxPath, hostPath strin
 // Destroy stops and removes the container and ALL associated volumes.
 // A sandbox is fully ephemeral — nothing survives destruction.
 func (d *DockerSandbox) Destroy(ctx context.Context) error {
+	if err := d.ensureClient(); err != nil {
+		d.setState(StateDestroyed)
+		return err
+	}
+
 	d.mu.RLock()
 	cid := d.containerID
 	d.mu.RUnlock()
 
 	if cid != "" {
-		// Stop with a short grace period, then force kill.
-		_ = d.dockerRunIgnoreErr(ctx, "stop", "-t", "5", cid)
-		_ = d.dockerRunIgnoreErr(ctx, "rm", "-f", "-v", cid) // -v removes anonymous volumes
+		timeout := 5
+		_ = d.cli.ContainerStop(ctx, cid, container.StopOptions{Timeout: &timeout})                    // fire-and-forget: best-effort stop before force remove
+		_ = d.cli.ContainerRemove(ctx, cid, container.RemoveOptions{Force: true, RemoveVolumes: true}) // fire-and-forget: container may already be gone
 	}
 
 	// Remove both named volumes — workspace and btrfs pool. Nothing persists.
-	_ = d.dockerRunIgnoreErr(ctx, "volume", "rm", "-f", d.volumeName)
-	_ = d.dockerRunIgnoreErr(ctx, "volume", "rm", "-f", d.btrfsVolume())
+	_ = d.cli.VolumeRemove(ctx, d.volumeName, true)    // fire-and-forget: volume may already be removed
+	_ = d.cli.VolumeRemove(ctx, d.btrfsVolume(), true) // fire-and-forget: volume may already be removed
 
 	d.setState(StateDestroyed)
 	slog.Info("sandbox: destroyed", "id", d.id)
 	return nil
 }
 
-// buildCreateArgs constructs the `docker create` arguments.
-func (d *DockerSandbox) buildCreateArgs() []string {
-	args := []string{
-		"create",
-		"--init",       // tini as PID 1 — prevents zombie processes
-		"--privileged", // required for btrfs loop mount inside container (Docker Desktop)
-		"--tmpfs", "/tmp:rw,noexec,nosuid,size=512m",
-		"--mount", fmt.Sprintf("type=bind,source=%s,target=/workspace-src,readonly", d.repoPath),
-		"--mount", fmt.Sprintf("type=volume,source=%s,target=/btrfs-pool", d.btrfsVolume()),
-		"--mount", fmt.Sprintf("type=volume,source=%s,target=/workspace", d.volumeName),
+// buildContainerConfig constructs the container and host configs for Docker SDK.
+func (d *DockerSandbox) buildContainerConfig() (*container.Config, *container.HostConfig) {
+	containerCfg := &container.Config{
+		Image:     d.cfg.Image,
+		Tty:       true,
+		OpenStdin: true,
+		Env:       d.env,
+		Labels: map[string]string{
+			LabelOwner:   LabelOwnerValue,
+			LabelSession: d.id,
+			LabelCreated: time.Now().UTC().Format(time.RFC3339),
+		},
 	}
 
-	// Network mode — host network gives the sandbox access to the host's
-	// network stack (needed for LAN model servers, copilot-proxy, etc.)
+	initTrue := true
+	hostCfg := &container.HostConfig{
+		Init:       &initTrue,
+		Privileged: true, // TODO: remove once OverlayFS migration package lands (required for btrfs loop mount)
+		Tmpfs: map[string]string{
+			"/tmp": "rw,noexec,nosuid,size=512m",
+		},
+		Mounts: []mount.Mount{
+			{
+				Type:     mount.TypeBind,
+				Source:   d.repoPath,
+				Target:   "/workspace-src",
+				ReadOnly: true,
+			},
+			{
+				Type:   mount.TypeVolume,
+				Source: d.btrfsVolume(),
+				Target: "/btrfs-pool",
+			},
+			{
+				Type:   mount.TypeVolume,
+				Source: d.volumeName,
+				Target: "/workspace",
+			},
+		},
+	}
+
+	// Network mode.
 	if d.cfg.Network != "" {
-		args = append(args, "--network", d.cfg.Network)
+		hostCfg.NetworkMode = container.NetworkMode(d.cfg.Network)
 	}
 
 	// Read-only mounts for heavy dependency directories.
 	for _, m := range d.cfg.ReadOnlyMounts {
-		args = append(args, "--mount",
-			fmt.Sprintf("type=bind,source=%s,target=%s,readonly", m.HostPath, m.ContainerPath))
+		hostCfg.Mounts = append(hostCfg.Mounts, mount.Mount{
+			Type:     mount.TypeBind,
+			Source:   m.HostPath,
+			Target:   m.ContainerPath,
+			ReadOnly: true,
+		})
 	}
 
 	// Read-write bind mounts (e.g. credentials that need token refresh).
 	for _, m := range d.cfg.BindMounts {
-		args = append(args, "--mount",
-			fmt.Sprintf("type=bind,source=%s,target=%s", m.HostPath, m.ContainerPath))
+		hostCfg.Mounts = append(hostCfg.Mounts, mount.Mount{
+			Type:   mount.TypeBind,
+			Source: m.HostPath,
+			Target: m.ContainerPath,
+		})
 	}
 
 	// Docker MCP gateway socket — exposes host MCP servers inside the container.
-	// We mount it if provided. If the user explicitly provided a path, errors are surfaced.
 	if d.cfg.MCP.SocketPath != "" {
-		if _, err := os.Stat(d.cfg.MCP.SocketPath); err != nil {
-			// If it's a default path, we could ignore it, but config should be explicit.
-			// For safety (and to follow anti-pattern guidelines), log the error or handle it.
-			// Since buildArgs shouldn't fail, we'll currently skip adding the mount.
-			// Ideally this should happen at validation time, but we'll record it.
-			slog.Warn("skipping MCP socket mount due to stat error", "path", d.cfg.MCP.SocketPath, "err", err)
-		} else {
-			args = append(args, "--mount",
-				fmt.Sprintf("type=bind,source=%s,target=/run/mcp.sock,readonly", d.cfg.MCP.SocketPath))
-		}
+		hostCfg.Mounts = append(hostCfg.Mounts, mount.Mount{
+			Type:     mount.TypeBind,
+			Source:   d.cfg.MCP.SocketPath,
+			Target:   "/run/mcp.sock",
+			ReadOnly: true,
+		})
 	}
 
 	// Resource limits.
 	if d.cfg.Memory != "" {
-		args = append(args, "--memory", d.cfg.Memory)
+		hostCfg.Resources.Memory = parseMemoryBytes(d.cfg.Memory)
 	}
 	if d.cfg.CPUs > 0 {
-		args = append(args, "--cpus", fmt.Sprintf("%.1f", d.cfg.CPUs))
+		hostCfg.Resources.NanoCPUs = int64(d.cfg.CPUs * 1e9)
 	}
 	if d.cfg.PidsLimit > 0 {
-		args = append(args, "--pids-limit", fmt.Sprintf("%d", d.cfg.PidsLimit))
+		hostCfg.Resources.PidsLimit = &d.cfg.PidsLimit
 	}
 
-	// Labels for reaper tracking.
-	args = append(args,
-		"--label", LabelOwner+"="+LabelOwnerValue,
-		"--label", LabelSession+"="+d.id,
-		"--label", LabelCreated+"="+time.Now().UTC().Format(time.RFC3339),
-	)
-
-	// Environment variables.
-	for _, e := range d.env {
-		args = append(args, "-e", e)
-	}
-
-	// Image — entrypoint is baked in (tini + /entrypoint.sh handles btrfs snapshot).
-	args = append(args, d.cfg.Image)
-
-	return args
+	return containerCfg, hostCfg
 }
 
 // btrfsVolume returns the ephemeral Docker volume name for this sandbox's btrfs pool.
-// Fully scoped to this sandbox instance — destroyed with it.
 func (d *DockerSandbox) btrfsVolume() string {
 	return "orqestra-btrfs-" + d.id
 }
@@ -363,21 +476,69 @@ func (d *DockerSandbox) waitReady(ctx context.Context) error {
 		case <-deadline:
 			return fmt.Errorf("timeout waiting for sandbox %s to be ready", d.id)
 		case <-tick.C:
-			// Check if workspace exists and is populated.
-			var stdout bytes.Buffer
-			cmd := exec.CommandContext(ctx, "docker", "exec", d.containerID, "test", "-d", "/workspace/.git")
-			cmd.Stdout = &stdout
-			if cmd.Run() == nil {
-				return nil // workspace is ready
+			code, err := d.execInternal(ctx, []string{"test", "-d", "/workspace/.git"})
+			if err == nil && code == 0 {
+				return nil
 			}
-			// Also try non-git repos — just check /workspace is non-empty.
-			cmd = exec.CommandContext(ctx, "docker", "exec", d.containerID, "ls", "/workspace/")
-			cmd.Stdout = &stdout
-			if err := cmd.Run(); err == nil && stdout.Len() > 0 {
+			var stdout bytes.Buffer
+			code, err = d.execInternalWithOutput(ctx, []string{"ls", "/workspace/"}, &stdout)
+			if err == nil && code == 0 && stdout.Len() > 0 {
 				return nil
 			}
 		}
 	}
+}
+
+// execInternal runs a command inside the container as root, discarding output.
+func (d *DockerSandbox) execInternal(ctx context.Context, cmd []string) (int, error) {
+	execCfg := container.ExecOptions{
+		Cmd:          cmd,
+		AttachStdout: true,
+		AttachStderr: true,
+	}
+	execResp, err := d.cli.ContainerExecCreate(ctx, d.containerID, execCfg)
+	if err != nil {
+		return -1, err
+	}
+	attachResp, err := d.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return -1, err
+	}
+	defer attachResp.Close()
+	if _, err := io.Copy(io.Discard, attachResp.Reader); err != nil {
+		return -1, err
+	}
+	inspect, err := d.cli.ContainerExecInspect(ctx, execResp.ID)
+	if err != nil {
+		return -1, err
+	}
+	return inspect.ExitCode, nil
+}
+
+// execInternalWithOutput runs a command inside the container as root, capturing stdout.
+func (d *DockerSandbox) execInternalWithOutput(ctx context.Context, cmd []string, stdout *bytes.Buffer) (int, error) {
+	execCfg := container.ExecOptions{
+		Cmd:          cmd,
+		AttachStdout: true,
+		AttachStderr: true,
+	}
+	execResp, err := d.cli.ContainerExecCreate(ctx, d.containerID, execCfg)
+	if err != nil {
+		return -1, err
+	}
+	attachResp, err := d.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return -1, err
+	}
+	defer attachResp.Close()
+	if _, err := stdcopy.StdCopy(stdout, io.Discard, attachResp.Reader); err != nil {
+		return -1, err
+	}
+	inspect, err := d.cli.ContainerExecInspect(ctx, execResp.ID)
+	if err != nil {
+		return -1, err
+	}
+	return inspect.ExitCode, nil
 }
 
 type fileInfo struct {
@@ -385,111 +546,103 @@ type fileInfo struct {
 	executable bool
 }
 
-// statFile runs stat inside the container to get file metadata.
+// statFile uses ContainerStatPath to get file metadata.
 func (d *DockerSandbox) statFile(ctx context.Context, path string) (fileInfo, error) {
-	var stdout bytes.Buffer
-	// stat -c "%s %a" gives size and octal permissions.
-	cmd := exec.CommandContext(ctx, "docker", "exec", d.containerID, "stat", "-c", "%s %a", path)
-	cmd.Stdout = &stdout
-	if err := cmd.Run(); err != nil {
+	stat, err := d.cli.ContainerStatPath(ctx, d.containerID, path)
+	if err != nil {
 		return fileInfo{}, err
 	}
-
-	var size int64
-	var mode int
-	if _, err := fmt.Sscanf(strings.TrimSpace(stdout.String()), "%d %o", &size, &mode); err != nil {
-		return fileInfo{}, fmt.Errorf("parsing stat output %q: %w", stdout.String(), err)
-	}
-
 	return fileInfo{
-		size:       size,
-		executable: mode&0o111 != 0,
+		size:       stat.Size,
+		executable: stat.Mode&0o111 != 0,
 	}, nil
-}
-
-// dockerRun executes a docker subcommand and returns any error.
-func (d *DockerSandbox) dockerRun(ctx context.Context, args ...string) error {
-	var stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("docker %s: %w (stderr: %s)", args[0], err, stderr.String())
-	}
-	return nil
-}
-
-// dockerRunIgnoreErr runs a docker command and logs but ignores errors.
-func (d *DockerSandbox) dockerRunIgnoreErr(ctx context.Context, args ...string) error {
-	var stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		slog.Debug("sandbox: docker command failed (ignored)", "args", args, "err", err)
-		return err
-	}
-	return nil
 }
 
 func generateID() string {
 	b := make([]byte, 6)
 	if _, err := rand.Read(b); err != nil {
-		// Fallback to timestamp if crypto/rand fails (shouldn't happen).
 		return fmt.Sprintf("sb-%d", time.Now().UnixNano())
 	}
 	return "sb-" + hex.EncodeToString(b)
 }
 
-// DockerTracker implements ContainerTracker using the docker CLI.
-type DockerTracker struct{}
+// parseMemoryBytes converts a Docker-style memory string (e.g. "4g", "512m") to bytes.
+func parseMemoryBytes(s string) int64 {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" {
+		return 0
+	}
+	multiplier := int64(1)
+	switch {
+	case strings.HasSuffix(s, "g"):
+		multiplier = 1024 * 1024 * 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(s, "m"):
+		multiplier = 1024 * 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(s, "k"):
+		multiplier = 1024
+		s = s[:len(s)-1]
+	}
+	var n int64
+	fmt.Sscanf(s, "%d", &n)
+	return n * multiplier
+}
+
+// DockerTracker implements ContainerTracker using the Docker SDK.
+type DockerTracker struct {
+	cli *dockerclient.Client
+}
 
 // NewDockerTracker creates a DockerTracker.
 func NewDockerTracker() *DockerTracker { return &DockerTracker{} }
 
+func (dt *DockerTracker) ensureClient() error {
+	if dt.cli != nil {
+		return nil
+	}
+	cli, err := newDockerClient()
+	if err != nil {
+		return fmt.Errorf("creating docker client: %w", err)
+	}
+	dt.cli = cli
+	return nil
+}
+
 func (dt *DockerTracker) ListOrqestraContainers(ctx context.Context) ([]TrackedContainer, error) {
-	var stdout bytes.Buffer
-	cmd := exec.CommandContext(ctx, "docker", "ps", "-a",
-		"--filter", "label="+LabelOwner+"="+LabelOwnerValue,
-		"--format", "{{.ID}}\t{{.CreatedAt}}",
-	)
-	cmd.Stdout = &stdout
-	if err := cmd.Run(); err != nil {
+	if err := dt.ensureClient(); err != nil {
+		return nil, err
+	}
+
+	filter := filters.NewArgs(filters.Arg("label", LabelOwner+"="+LabelOwnerValue))
+	containers, err := dt.cli.ContainerList(ctx, container.ListOptions{
+		All:     true,
+		Filters: filter,
+	})
+	if err != nil {
 		return nil, fmt.Errorf("listing containers: %w", err)
 	}
 
-	var containers []TrackedContainer
-	for _, line := range strings.Split(stdout.String(), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) < 2 {
-			continue
-		}
-		id := parts[0]
-		// Docker's CreatedAt format: "2024-01-15 10:30:00 +0000 UTC"
-		createdAt, err := time.Parse("2006-01-02 15:04:05 -0700 MST", parts[1])
-		if err != nil {
-			slog.Warn("reaper: could not parse container created time", "id", id, "raw", parts[1], "err", err)
-			createdAt = time.Now() // treat unparseable as fresh (safe default)
-		}
-		containers = append(containers, TrackedContainer{
-			ID:        id,
-			Labels:    map[string]string{LabelOwner: LabelOwnerValue},
-			CreatedAt: createdAt,
+	var tracked []TrackedContainer
+	for _, c := range containers {
+		tracked = append(tracked, TrackedContainer{
+			ID:        c.ID,
+			Labels:    c.Labels,
+			CreatedAt: time.Unix(c.Created, 0),
 		})
 	}
-	return containers, nil
+	return tracked, nil
 }
 
 func (dt *DockerTracker) KillAndRemove(ctx context.Context, id string) error {
-	// Stop with grace period.
-	stopCmd := exec.CommandContext(ctx, "docker", "stop", "-t", "5", id)
-	_ = stopCmd.Run() // best effort
+	if err := dt.ensureClient(); err != nil {
+		return err
+	}
 
-	// Force remove.
-	rmCmd := exec.CommandContext(ctx, "docker", "rm", "-f", "-v", id)
-	if err := rmCmd.Run(); err != nil {
+	timeout := 5
+	_ = dt.cli.ContainerStop(ctx, id, container.StopOptions{Timeout: &timeout}) // fire-and-forget: best effort
+
+	if err := dt.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
 		return fmt.Errorf("removing container %s: %w", id, err)
 	}
 	return nil
