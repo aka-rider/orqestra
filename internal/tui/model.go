@@ -514,14 +514,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
-	// Tab cycling logic
-	if key == "tab" || key == "shift+tab" {
-		if m.commandBar.showAC {
+	// Tab / focus cycling logic (ctrl+j/ctrl+k as terminal-safe alternatives)
+	if key == "tab" || key == "shift+tab" || key == "ctrl+j" || key == "ctrl+k" {
+		if m.commandBar.showAC && (key == "tab" || key == "shift+tab") {
 			cb, cmd := m.commandBar.Update(msg)
 			m.commandBar = cb
 			return m, cmd
 		}
-		m.cycleFocus(key == "shift+tab")
+		m.cycleFocus(key == "shift+tab" || key == "ctrl+k")
 		return m, nil
 	}
 

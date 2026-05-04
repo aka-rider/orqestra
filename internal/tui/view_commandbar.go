@@ -231,7 +231,7 @@ func (c commandBarModel) renderHint() string {
 	case StateConfirming:
 		approve := approveKeyStyle.Render("[A]")
 		reject := rejectKeyStyle.Render("[R]")
-		return commandBarHintStyle.Render("  " + approve + "pprove or " + reject + "eject?")
+		return commandBarHintStyle.Render("  " + approve + "pprove or " + reject + "eject?  ctrl+j/k focus")
 	case StateIntentConfirm:
 		reject := rejectKeyStyle.Render("[R]")
 		if c.intentVerdict == "reject" {
@@ -239,6 +239,12 @@ func (c commandBarModel) renderHint() string {
 		}
 		approve := approveKeyStyle.Render("[A]")
 		return commandBarHintStyle.Render("  " + approve + "ccept anyway or " + reject + "efine")
+	case StateIntakeRunning:
+		return commandBarHintStyle.Render("  ⟳ Intake running  ctrl+j/k focus  alt+N switch tab")
+	case StatePlanning:
+		return commandBarHintStyle.Render("  ⟳ Planning  ctrl+j/k focus  alt+N switch tab")
+	case StateExecuting:
+		return commandBarHintStyle.Render("  ⟳ Executing  ctrl+j/k focus  alt+N switch tab")
 	default:
 		cmds := c.registry.Available(c.state)
 		var names []string
@@ -248,6 +254,9 @@ func (c commandBarModel) renderHint() string {
 			}
 			names = append(names, cmd.Name)
 		}
-		return commandBarHintStyle.Render("  " + strings.Join(names, "  "))
+		if len(names) > 0 {
+			return commandBarHintStyle.Render("  " + strings.Join(names, "  ") + "  ctrl+j/k focus")
+		}
+		return commandBarHintStyle.Render("  ctrl+j/k focus  alt+N switch tab")
 	}
 }
