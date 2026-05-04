@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"sort"
 	"testing"
 	"time"
 
@@ -20,8 +19,8 @@ func TestBuildContainerConfig_RequiredFields(t *testing.T) {
 	}, repoDir, nil)
 	containerCfg, hostCfg := d.buildContainerConfig()
 
-	if containerCfg.Image != "orqestra-sandbox:test" {
-		t.Errorf("Image = %q, want %q", containerCfg.Image, "orqestra-sandbox:test")
+	if containerCfg.Image != d.ephemeralImage {
+		t.Errorf("Image = %q, want %q", containerCfg.Image, d.ephemeralImage)
 	}
 	if !containerCfg.Tty {
 		t.Error("Tty should be true")
@@ -32,26 +31,8 @@ func TestBuildContainerConfig_RequiredFields(t *testing.T) {
 	if hostCfg.Init == nil || !*hostCfg.Init {
 		t.Error("Init should be true (--init)")
 	}
-	if !hostCfg.Privileged {
-		t.Error("Privileged should be true")
-	}
-	// Check required mounts exist.
-	hasMount := func(target string) bool {
-		for _, m := range hostCfg.Mounts {
-			if m.Target == target {
-				return true
-			}
-		}
-		return false
-	}
-	if !hasMount("/workspace-src") {
-		t.Error("missing /workspace-src mount")
-	}
-	if !hasMount("/btrfs-pool") {
-		t.Error("missing /btrfs-pool mount")
-	}
-	if !hasMount("/workspace") {
-		t.Error("missing /workspace mount")
+	if hostCfg.Privileged {
+		t.Error("Privileged should be false (no btrfs needed)")
 	}
 }
 
@@ -304,8 +285,10 @@ func containsSubstring(args []string, substr string) bool {
 
 // funcTracker implements ContainerTracker with function fields for flexible reaper testing.
 type funcTracker struct {
-	listFn func(ctx context.Context) ([]TrackedContainer, error)
-	killFn func(ctx context.Context, id string) error
+	listFn         func(ctx context.Context) ([]TrackedContainer, error)
+	killFn         func(ctx context.Context, id string) error
+	listOrphanedFn func(ctx context.Context) ([]string, error)
+	removeImageFn  func(ctx context.Context, imageRef string) error
 }
 
 func (m *funcTracker) ListOrqestraContainers(ctx context.Context) ([]TrackedContainer, error) {
@@ -318,6 +301,20 @@ func (m *funcTracker) ListOrqestraContainers(ctx context.Context) ([]TrackedCont
 func (m *funcTracker) KillAndRemove(ctx context.Context, id string) error {
 	if m.killFn != nil {
 		return m.killFn(ctx, id)
+	}
+	return nil
+}
+
+func (m *funcTracker) ListOrphanedImages(ctx context.Context) ([]string, error) {
+	if m.listOrphanedFn != nil {
+		return m.listOrphanedFn(ctx)
+	}
+	return nil, nil
+}
+
+func (m *funcTracker) RemoveImage(ctx context.Context, imageRef string) error {
+	if m.removeImageFn != nil {
+		return m.removeImageFn(ctx, imageRef)
 	}
 	return nil
 }
@@ -413,35 +410,6 @@ func TestContainsTraversal_EdgeCases(t *testing.T) {
 				t.Errorf("containsTraversal(%q) = %v, want %v", tt.path, got, tt.want)
 			}
 		})
-	}
-}
-
-// --- parseDiffOutput alias ---
-
-func TestParseDiffOutput_DelegatesToParseBtrfsDump(t *testing.T) {
-	lines := []string{
-		"mkfile ./foo.go",
-		"unlink ./bar.go",
-	}
-	alias := parseDiffOutput(lines)
-	direct := parseBtrfsDump(lines)
-
-	if len(alias) != len(direct) {
-		t.Fatalf("parseDiffOutput len=%d, parseBtrfsDump len=%d", len(alias), len(direct))
-	}
-
-	sortChangedFiles := func(cf []ChangedFile) {
-		sort.Slice(cf, func(i, j int) bool {
-			return cf[i].Path < cf[j].Path
-		})
-	}
-	sortChangedFiles(alias)
-	sortChangedFiles(direct)
-
-	for i := range alias {
-		if alias[i] != direct[i] {
-			t.Errorf("result[%d]: alias=%+v direct=%+v", i, alias[i], direct[i])
-		}
 	}
 }
 

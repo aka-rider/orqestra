@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -13,6 +14,9 @@ const (
 	LabelSession    = "orqestra-session"
 	LabelCreated    = "orqestra-created"
 )
+
+// EphemeralImagePrefix is the naming prefix for sandbox workspace snapshot images.
+const EphemeralImagePrefix = "orqestra-ws-snapshot-"
 
 // TrackedContainer is a minimal container descriptor returned by the tracker.
 type TrackedContainer struct {
@@ -26,6 +30,11 @@ type TrackedContainer struct {
 type ContainerTracker interface {
 	ListOrqestraContainers(ctx context.Context) ([]TrackedContainer, error)
 	KillAndRemove(ctx context.Context, id string) error
+	// ListOrphanedImages returns image tags matching the ephemeral snapshot prefix
+	// that are no longer associated with a running container.
+	ListOrphanedImages(ctx context.Context) ([]string, error)
+	// RemoveImage removes an image by tag.
+	RemoveImage(ctx context.Context, imageRef string) error
 }
 
 // Reaper periodically kills and removes expired Orqestra sandbox containers.
@@ -43,6 +52,7 @@ func NewReaper(tracker ContainerTracker, maxLifetime time.Duration) *Reaper {
 }
 
 // Sweep checks all Orqestra containers and kills those that have exceeded maxLifetime.
+// Also cleans up orphaned ephemeral images.
 // Returns the IDs of containers that were killed.
 func (r *Reaper) Sweep(ctx context.Context) []string {
 	containers, err := r.tracker.ListOrqestraContainers(ctx)
@@ -64,7 +74,25 @@ func (r *Reaper) Sweep(ctx context.Context) []string {
 		}
 	}
 
+	// Clean up orphaned ephemeral images.
+	r.cleanupOrphanedImages(ctx)
+
 	return killed
+}
+
+// cleanupOrphanedImages removes ephemeral workspace snapshot images that are no longer in use.
+func (r *Reaper) cleanupOrphanedImages(ctx context.Context) {
+	images, err := r.tracker.ListOrphanedImages(ctx)
+	if err != nil {
+		slog.Error("reaper: failed to list orphaned images", "err", err)
+		return
+	}
+	for _, img := range images {
+		slog.Info("reaper: removing orphaned image", "image", img)
+		if err := r.tracker.RemoveImage(ctx, img); err != nil {
+			slog.Error("reaper: failed to remove image", "image", img, "err", err)
+		}
+	}
 }
 
 // CleanupAll kills and removes all Orqestra containers regardless of age.
@@ -82,6 +110,9 @@ func (r *Reaper) CleanupAll(ctx context.Context) {
 			slog.Error("reaper: failed to remove container", "id", c.ID, "err", err)
 		}
 	}
+
+	// Final image cleanup.
+	r.cleanupOrphanedImages(ctx)
 }
 
 // Run starts the reaper loop. It sweeps every interval until the context is cancelled.
@@ -101,4 +132,9 @@ func (r *Reaper) Run(ctx context.Context, interval time.Duration) {
 			r.Sweep(ctx)
 		}
 	}
+}
+
+// IsEphemeralImage returns true if the given image tag matches the ephemeral snapshot prefix.
+func IsEphemeralImage(ref string) bool {
+	return strings.HasPrefix(ref, EphemeralImagePrefix)
 }

@@ -2,7 +2,7 @@
 #
 # Repo-agnostic isolated execution environment for Claude agent sessions.
 # ANY repo is bind-mounted at /workspace-src (read-only) at runtime.
-# The entrypoint creates a BTRFS CoW snapshot as the writable workspace.
+# Workspace is populated via seed-and-commit during provisioning (OverlayFS).
 # Docker MCP servers are accessible via the mounted MCP gateway socket.
 #
 # Build:  docker build -t orqestra-sandbox:latest -f build/sandbox/Dockerfile .
@@ -12,7 +12,6 @@ FROM debian:bookworm-slim
 
 # Runtime dependencies.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    btrfs-progs \
     rsync \
     git \
     tini \
@@ -38,7 +37,7 @@ RUN cp -a /root/.bun /home/sandbox/.bun && \
 ENV PATH="/home/sandbox/.bun/bin:${PATH}"
 
 # Mount points (populated at runtime by docker create).
-RUN mkdir -p /workspace /workspace-src /deps /btrfs-pool /mnt/btrfs /run && \
+RUN mkdir -p /workspace /workspace-src /deps /run && \
     chown sandbox:sandbox /workspace
 
 # Entrypoint.
@@ -47,7 +46,7 @@ RUN chmod +x /entrypoint.sh
 
 WORKDIR /workspace
 
-# Tini as PID 1. Entrypoint runs as root for btrfs mount, drops to sandbox user.
+# Tini as PID 1. Entrypoint drops to sandbox user.
 ENTRYPOINT ["tini", "--", "/entrypoint.sh"]
 
 LABEL sandbox=true

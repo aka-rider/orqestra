@@ -620,7 +620,7 @@ func TestRunInSandbox_ExtractError(t *testing.T) {
 			return 0, nil
 		},
 		extractFn: func(_ context.Context) ([]ChangedFile, error) {
-			return nil, errors.New("btrfs diff failed")
+			return nil, errors.New("container diff failed")
 		},
 		destroyFn: func(_ context.Context) error {
 			destroyed = true

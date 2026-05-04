@@ -16,24 +16,24 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/api/types/volume"
 	dockerclient "github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 )
 
 // DockerSandbox is a Sandbox backed by a Docker container.
 type DockerSandbox struct {
-	mu          sync.RWMutex
-	id          string
-	containerID string
-	volumeName  string
-	state       State
-	createdAt   time.Time
-	cfg         Config
-	repoPath    string // absolute path to the host repo
-	env         []string
-	cli         *dockerclient.Client
+	mu             sync.RWMutex
+	id             string
+	containerID    string
+	ephemeralImage string // committed image tag for this sandbox's workspace
+	state          State
+	createdAt      time.Time
+	cfg            Config
+	repoPath       string // absolute path to the host repo
+	env            []string
+	cli            *dockerclient.Client
 }
 
 // newDockerClient creates a Docker client from environment (respects DOCKER_HOST, etc.).
@@ -84,12 +84,12 @@ func newDockerClientWithHost(host string) (*dockerclient.Client, error) {
 func NewDockerSandbox(cfg Config, repoPath string, env []string) *DockerSandbox {
 	id := generateID()
 	return &DockerSandbox{
-		id:         id,
-		volumeName: "orqestra-ws-" + id,
-		state:      StatePending,
-		cfg:        cfg,
-		repoPath:   repoPath,
-		env:        env,
+		id:             id,
+		ephemeralImage: "orqestra-ws-snapshot-" + id,
+		state:          StatePending,
+		cfg:            cfg,
+		repoPath:       repoPath,
+		env:            env,
 	}
 }
 
@@ -138,7 +138,10 @@ func (d *DockerSandbox) ensureClient() error {
 	return nil
 }
 
-// Provision creates the Docker container with ephemeral volumes and read-only mounts.
+// Provision creates the Docker container using a seed-and-commit model:
+// 1. Spin up a temporary seed container, bind-mount the repo, rsync into /workspace.
+// 2. Commit the seeded container as an ephemeral image.
+// 3. Start the runtime sandbox from the ephemeral image (no --privileged needed).
 func (d *DockerSandbox) Provision(ctx context.Context) error {
 	d.setState(StateProvisioning)
 	d.createdAt = time.Now()
@@ -156,19 +159,91 @@ func (d *DockerSandbox) Provision(ctx context.Context) error {
 		}
 	}
 
-	// Create ephemeral volumes — both destroyed with the sandbox.
-	if _, err := d.cli.VolumeCreate(ctx, volume.CreateOptions{Name: d.volumeName}); err != nil {
-		d.setState(StatePending)
-		return fmt.Errorf("creating workspace volume: %w", err)
+	// --- Seed phase: create a temp container, copy workspace in, commit as image ---
+	seedName := "orqestra-seed-" + d.id
+	seedCfg := &container.Config{
+		Image: d.cfg.Image,
+		Cmd:   []string{"sleep", "infinity"},
+		Tty:   true,
 	}
-	if _, err := d.cli.VolumeCreate(ctx, volume.CreateOptions{Name: d.btrfsVolume()}); err != nil {
-		d.setState(StatePending)
-		return fmt.Errorf("creating btrfs volume: %w", err)
+	seedHostCfg := &container.HostConfig{
+		Mounts: []mount.Mount{
+			{
+				Type:     mount.TypeBind,
+				Source:   d.repoPath,
+				Target:   "/workspace-src",
+				ReadOnly: true,
+			},
+		},
 	}
 
+	slog.Debug("sandbox: creating seed container", "id", d.id, "image", d.cfg.Image)
+	seedResp, err := d.cli.ContainerCreate(ctx, seedCfg, seedHostCfg, nil, nil, seedName)
+	if err != nil {
+		d.setState(StatePending)
+		return fmt.Errorf("creating seed container: %w", err)
+	}
+	seedID := seedResp.ID
+
+	if err := d.cli.ContainerStart(ctx, seedID, container.StartOptions{}); err != nil {
+		_ = d.cli.ContainerRemove(ctx, seedID, container.RemoveOptions{Force: true}) // fire-and-forget: cleanup on failure
+		d.setState(StatePending)
+		return fmt.Errorf("starting seed container: %w", err)
+	}
+
+	// Copy workspace content into the seed container.
+	seedExec := func(cmd []string) error {
+		execCfg := container.ExecOptions{Cmd: cmd, AttachStdout: true, AttachStderr: true}
+		resp, err := d.cli.ContainerExecCreate(ctx, seedID, execCfg)
+		if err != nil {
+			return err
+		}
+		attachResp, err := d.cli.ContainerExecAttach(ctx, resp.ID, container.ExecAttachOptions{})
+		if err != nil {
+			return err
+		}
+		defer attachResp.Close()
+		if _, err := io.Copy(io.Discard, attachResp.Reader); err != nil {
+			return err
+		}
+		inspect, err := d.cli.ContainerExecInspect(ctx, resp.ID)
+		if err != nil {
+			return err
+		}
+		if inspect.ExitCode != 0 {
+			return fmt.Errorf("exit code %d", inspect.ExitCode)
+		}
+		return nil
+	}
+
+	if err := seedExec([]string{"rsync", "-a", "/workspace-src/", "/workspace/"}); err != nil {
+		_ = d.cli.ContainerRemove(ctx, seedID, container.RemoveOptions{Force: true}) // fire-and-forget: cleanup on failure
+		d.setState(StatePending)
+		return fmt.Errorf("seeding workspace: %w", err)
+	}
+	if err := seedExec([]string{"chown", "-R", "sandbox:sandbox", "/workspace"}); err != nil {
+		_ = d.cli.ContainerRemove(ctx, seedID, container.RemoveOptions{Force: true}) // fire-and-forget: cleanup on failure
+		d.setState(StatePending)
+		return fmt.Errorf("setting workspace ownership: %w", err)
+	}
+
+	// Commit the seeded container as an ephemeral image.
+	_, err = d.cli.ContainerCommit(ctx, seedID, container.CommitOptions{
+		Reference: d.ephemeralImage,
+	})
+	if err != nil {
+		_ = d.cli.ContainerRemove(ctx, seedID, container.RemoveOptions{Force: true}) // fire-and-forget: cleanup on failure
+		d.setState(StatePending)
+		return fmt.Errorf("committing seed container: %w", err)
+	}
+
+	// Remove the seed container — no longer needed.
+	_ = d.cli.ContainerRemove(ctx, seedID, container.RemoveOptions{Force: true}) // fire-and-forget: seed container is disposable
+
+	// --- Runtime phase: start the actual sandbox from the ephemeral image ---
 	containerConfig, hostConfig := d.buildContainerConfig()
 
-	slog.Debug("sandbox: creating container", "id", d.id, "image", d.cfg.Image)
+	slog.Debug("sandbox: creating runtime container", "id", d.id, "image", d.ephemeralImage)
 	resp, err := d.cli.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, "")
 	if err != nil {
 		d.setState(StatePending)
@@ -185,13 +260,12 @@ func (d *DockerSandbox) Provision(ctx context.Context) error {
 	d.containerID = containerID
 	d.mu.Unlock()
 
-	// Start the container (entrypoint copies workspace).
 	if err := d.cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
 		d.setState(StatePending)
 		return fmt.Errorf("docker start: %w", err)
 	}
 
-	// Wait for entrypoint init to complete.
+	// Wait for entrypoint to finish (it's trivial now — just symlinks + privilege drop).
 	if err := d.waitReady(ctx); err != nil {
 		d.setState(StatePending)
 		return fmt.Errorf("waiting for container ready: %w", err)
@@ -251,8 +325,8 @@ func (d *DockerSandbox) Exec(ctx context.Context, command []string, env []string
 	return inspectResp.ExitCode, nil
 }
 
-// ExtractChanges uses btrfs send to diff the workspace snapshot against the source.
-// This is a metadata-level diff — no file scanning, O(changed blocks) not O(all files).
+// ExtractChanges uses Docker's ContainerDiff API to detect filesystem changes
+// in the container's writable layer (native OverlayFS diff — no btrfs needed).
 func (d *DockerSandbox) ExtractChanges(ctx context.Context) ([]ChangedFile, error) {
 	prev := d.State()
 	d.setState(StateExtracting)
@@ -262,59 +336,56 @@ func (d *DockerSandbox) ExtractChanges(ctx context.Context) ([]ChangedFile, erro
 		return nil, err
 	}
 
-	// Snapshot the workspace as read-only (required for btrfs send).
-	snapCode, err := d.execInternal(ctx, []string{
-		"btrfs", "subvolume", "snapshot", "-r",
-		"/mnt/btrfs/workspace", "/mnt/btrfs/workspace-final",
-	})
+	changes, err := d.cli.ContainerDiff(ctx, d.containerID)
 	if err != nil {
-		return nil, fmt.Errorf("creating ro snapshot for diff: %w", err)
-	}
-	if snapCode != 0 {
-		return nil, fmt.Errorf("creating ro snapshot for diff: exit code %d", snapCode)
+		return nil, fmt.Errorf("container diff: %w", err)
 	}
 
-	// btrfs send --no-data diffs workspace-final against source (parent).
-	var stdout bytes.Buffer
-	diffCode, err := d.execInternalWithOutput(ctx, []string{
-		"sh", "-c",
-		"btrfs send --no-data -p /mnt/btrfs/source /mnt/btrfs/workspace-final | btrfs receive --dump",
-	}, &stdout)
-	if err != nil {
-		return nil, fmt.Errorf("btrfs send/receive diff: %w", err)
-	}
-	if diffCode != 0 {
-		return nil, fmt.Errorf("btrfs send/receive diff: exit code %d", diffCode)
-	}
-
-	lines := strings.Split(stdout.String(), "\n")
-	files := parseBtrfsDump(lines)
-
-	// Enrich files with size and executable info via stat inside the container.
-	var verified []ChangedFile
-	for _, f := range files {
-		if f.Op == FileDeleted {
-			verified = append(verified, f)
+	var files []ChangedFile
+	for _, c := range changes {
+		// Only include changes under /workspace/.
+		if !strings.HasPrefix(c.Path, "/workspace/") {
 			continue
 		}
-		info, err := d.statFile(ctx, "/workspace/"+f.Path)
-		if err != nil {
-			slog.Debug("sandbox: skipping non-existent diff entry", "path", f.Path)
+		relPath := strings.TrimPrefix(c.Path, "/workspace/")
+		if relPath == "" {
 			continue
 		}
-		f.Size = info.size
-		f.IsExecutable = info.executable
-		verified = append(verified, f)
+
+		var op FileOp
+		switch c.Kind {
+		case 0: // Modified
+			op = FileModified
+		case 1: // Added
+			op = FileAdded
+		case 2: // Deleted
+			op = FileDeleted
+		default:
+			continue
+		}
+
+		f := ChangedFile{Path: relPath, Op: op}
+
+		// Enrich non-deleted files with size and executable info.
+		if op != FileDeleted {
+			info, err := d.statFile(ctx, c.Path)
+			if err != nil {
+				slog.Debug("sandbox: skipping non-statable diff entry", "path", relPath)
+				continue
+			}
+			f.Size = info.size
+			f.IsExecutable = info.executable
+		}
+
+		files = append(files, f)
 	}
-	files = verified
 
 	slog.Info("sandbox: extracted changes", "id", d.id, "files", len(files))
 	return files, nil
 }
 
 // CopyOut copies a file from the sandbox workspace to a host path.
-// Uses exec + cat because /workspace is a bind-mounted btrfs snapshot that
-// Docker's CopyFromContainer API cannot see (it only sees storage driver layers).
+// Uses Docker SDK CopyFromContainer — works natively with OverlayFS layers.
 func (d *DockerSandbox) CopyOut(ctx context.Context, sandboxPath, hostPath string) error {
 	if err := d.ensureClient(); err != nil {
 		return err
@@ -326,7 +397,8 @@ func (d *DockerSandbox) CopyOut(ctx context.Context, sandboxPath, hostPath strin
 		return fmt.Errorf("creating directory %s: %w", dir, err)
 	}
 
-	// Stream file content via exec cat.
+	// Stream file content via exec cat (CopyFromContainer returns a tar archive
+	// which adds complexity; exec cat is simpler for single-file extraction).
 	var stdout bytes.Buffer
 	exitCode, err := d.execInternalWithOutput(ctx, []string{"cat", "/workspace/" + sandboxPath}, &stdout)
 	if err != nil {
@@ -342,7 +414,7 @@ func (d *DockerSandbox) CopyOut(ctx context.Context, sandboxPath, hostPath strin
 	return nil
 }
 
-// Destroy stops and removes the container and ALL associated volumes.
+// Destroy stops and removes the container and ephemeral image.
 // A sandbox is fully ephemeral — nothing survives destruction.
 func (d *DockerSandbox) Destroy(ctx context.Context) error {
 	if err := d.ensureClient(); err != nil {
@@ -360,9 +432,10 @@ func (d *DockerSandbox) Destroy(ctx context.Context) error {
 		_ = d.cli.ContainerRemove(ctx, cid, container.RemoveOptions{Force: true, RemoveVolumes: true}) // fire-and-forget: container may already be gone
 	}
 
-	// Remove both named volumes — workspace and btrfs pool. Nothing persists.
-	_ = d.cli.VolumeRemove(ctx, d.volumeName, true)    // fire-and-forget: volume may already be removed
-	_ = d.cli.VolumeRemove(ctx, d.btrfsVolume(), true) // fire-and-forget: volume may already be removed
+	// Remove the ephemeral image to prevent dangling snapshots.
+	if d.ephemeralImage != "" {
+		_, _ = d.cli.ImageRemove(ctx, d.ephemeralImage, image.RemoveOptions{Force: true}) // fire-and-forget: image may already be removed
+	}
 
 	d.setState(StateDestroyed)
 	slog.Info("sandbox: destroyed", "id", d.id)
@@ -370,9 +443,10 @@ func (d *DockerSandbox) Destroy(ctx context.Context) error {
 }
 
 // buildContainerConfig constructs the container and host configs for Docker SDK.
+// Uses the ephemeral image (which has /workspace pre-populated) — no privileged mode needed.
 func (d *DockerSandbox) buildContainerConfig() (*container.Config, *container.HostConfig) {
 	containerCfg := &container.Config{
-		Image:     d.cfg.Image,
+		Image:     d.ephemeralImage,
 		Tty:       true,
 		OpenStdin: true,
 		Env:       d.env,
@@ -385,28 +459,9 @@ func (d *DockerSandbox) buildContainerConfig() (*container.Config, *container.Ho
 
 	initTrue := true
 	hostCfg := &container.HostConfig{
-		Init:       &initTrue,
-		Privileged: true, // TODO: remove once OverlayFS migration package lands (required for btrfs loop mount)
+		Init: &initTrue,
 		Tmpfs: map[string]string{
 			"/tmp": "rw,noexec,nosuid,size=512m",
-		},
-		Mounts: []mount.Mount{
-			{
-				Type:     mount.TypeBind,
-				Source:   d.repoPath,
-				Target:   "/workspace-src",
-				ReadOnly: true,
-			},
-			{
-				Type:   mount.TypeVolume,
-				Source: d.btrfsVolume(),
-				Target: "/btrfs-pool",
-			},
-			{
-				Type:   mount.TypeVolume,
-				Source: d.volumeName,
-				Target: "/workspace",
-			},
 		},
 	}
 
@@ -456,11 +511,6 @@ func (d *DockerSandbox) buildContainerConfig() (*container.Config, *container.Ho
 	}
 
 	return containerCfg, hostCfg
-}
-
-// btrfsVolume returns the ephemeral Docker volume name for this sandbox's btrfs pool.
-func (d *DockerSandbox) btrfsVolume() string {
-	return "orqestra-btrfs-" + d.id
 }
 
 // waitReady polls the container until the workspace copy is complete.
@@ -644,6 +694,52 @@ func (dt *DockerTracker) KillAndRemove(ctx context.Context, id string) error {
 
 	if err := dt.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
 		return fmt.Errorf("removing container %s: %w", id, err)
+	}
+	return nil
+}
+
+func (dt *DockerTracker) ListOrphanedImages(ctx context.Context) ([]string, error) {
+	if err := dt.ensureClient(); err != nil {
+		return nil, err
+	}
+
+	filter := filters.NewArgs(filters.Arg("reference", EphemeralImagePrefix+"*"))
+	images, err := dt.cli.ImageList(ctx, image.ListOptions{Filters: filter})
+	if err != nil {
+		return nil, fmt.Errorf("listing images: %w", err)
+	}
+
+	// Get running container image IDs so we don't remove in-use images.
+	containers, err := dt.cli.ContainerList(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return nil, fmt.Errorf("listing containers for image check: %w", err)
+	}
+	inUse := make(map[string]bool)
+	for _, c := range containers {
+		inUse[c.ImageID] = true
+	}
+
+	var orphaned []string
+	for _, img := range images {
+		if inUse[img.ID] {
+			continue
+		}
+		for _, tag := range img.RepoTags {
+			if strings.HasPrefix(tag, EphemeralImagePrefix) {
+				orphaned = append(orphaned, tag)
+			}
+		}
+	}
+	return orphaned, nil
+}
+
+func (dt *DockerTracker) RemoveImage(ctx context.Context, imageRef string) error {
+	if err := dt.ensureClient(); err != nil {
+		return err
+	}
+	_, err := dt.cli.ImageRemove(ctx, imageRef, image.RemoveOptions{Force: true})
+	if err != nil {
+		return fmt.Errorf("removing image %s: %w", imageRef, err)
 	}
 	return nil
 }

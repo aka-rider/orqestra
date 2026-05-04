@@ -249,95 +249,6 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
-// TestExtractChanges_DiffParsing tests that btrfs receive --dump output is correctly parsed.
-func TestExtractChanges_DiffParsing(t *testing.T) {
-	// btrfs receive --dump output format:
-	lines := []string{
-		"mkfile       ./new-file.go",
-		"write        ./new-file.go offset=0 len=1234",
-		"write        ./modified.go offset=0 len=5678",
-		"unlink       ./deleted.go",
-	}
-
-	files := parseBtrfsDump(lines)
-	if len(files) != 3 {
-		t.Fatalf("expected 3 changed files, got %d", len(files))
-	}
-
-	// Build a map for order-independent assertions.
-	m := make(map[string]FileOp)
-	for _, f := range files {
-		m[f.Path] = f.Op
-	}
-
-	if m["new-file.go"] != FileAdded {
-		t.Errorf("expected new-file.go to be added, got %v", m["new-file.go"])
-	}
-	if m["modified.go"] != FileModified {
-		t.Errorf("expected modified.go to be modified, got %v", m["modified.go"])
-	}
-	if m["deleted.go"] != FileDeleted {
-		t.Errorf("expected deleted.go to be deleted, got %v", m["deleted.go"])
-	}
-}
-
-func TestParseBtrfsDump_Rename(t *testing.T) {
-	lines := []string{
-		"rename       ./old-name.go -> ./new-name.go",
-	}
-
-	files := parseBtrfsDump(lines)
-	m := make(map[string]FileOp)
-	for _, f := range files {
-		m[f.Path] = f.Op
-	}
-
-	// rename deletes the old path entry (if tracked) and adds the new one
-	if m["new-name.go"] != FileAdded {
-		t.Errorf("expected new-name.go to be added, got %v", m["new-name.go"])
-	}
-}
-
-func TestParseBtrfsDump_RenameDestFormat(t *testing.T) {
-	// btrfs receive --dump on newer kernels uses "dest=" format
-	lines := []string{
-		"mkfile          ./workspace-final/o3991-9-0",
-		"rename          ./workspace-final/o3991-9-0     dest=./workspace-final/SANDBOX_TEST.md",
-		"update_extent   ./workspace-final/SANDBOX_TEST.md offset=0 len=13",
-	}
-
-	files := parseBtrfsDump(lines)
-	m := make(map[string]FileOp)
-	for _, f := range files {
-		m[f.Path] = f.Op
-	}
-
-	if m["SANDBOX_TEST.md"] != FileAdded {
-		t.Errorf("expected SANDBOX_TEST.md to be added, got %v", m["SANDBOX_TEST.md"])
-	}
-	// The temp inode should not appear
-	if _, ok := m["o3991-9-0"]; ok {
-		t.Error("temp inode o3991-9-0 should not appear in results")
-	}
-}
-
-func TestParseBtrfsDump_IgnoresDirectories(t *testing.T) {
-	lines := []string{
-		"mkdir        ./new-dir/",
-		"mkfile       ./new-dir/file.go",
-		"write        ./new-dir/file.go offset=0 len=100",
-		"rmdir        ./old-dir/",
-	}
-
-	files := parseBtrfsDump(lines)
-	if len(files) != 1 {
-		t.Fatalf("expected 1 file (ignoring dirs), got %d: %+v", len(files), files)
-	}
-	if files[0].Path != "new-dir/file.go" || files[0].Op != FileAdded {
-		t.Errorf("expected added new-dir/file.go, got %+v", files[0])
-	}
-}
-
 // TestCopyOutStaging verifies files are written to a staging directory.
 func TestCopyOutStaging(t *testing.T) {
 	staging := t.TempDir()
@@ -372,5 +283,13 @@ func (m *mockTracker) KillAndRemove(_ context.Context, id string) error {
 		m.killCalled = make(map[string]bool)
 	}
 	m.killCalled[id] = true
+	return nil
+}
+
+func (m *mockTracker) ListOrphanedImages(_ context.Context) ([]string, error) {
+	return nil, nil
+}
+
+func (m *mockTracker) RemoveImage(_ context.Context, _ string) error {
 	return nil
 }
