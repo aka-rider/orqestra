@@ -9,17 +9,20 @@ import (
 
 func TestBuildPTYCommand_NonInteractive(t *testing.T) {
 	cmd := harness.BuildPTYCommand("do something", false)
-	if len(cmd) != 6 {
-		t.Fatalf("expected 6 args, got %d: %v", len(cmd), cmd)
+	if len(cmd) != 7 {
+		t.Fatalf("expected 7 args, got %d: %v", len(cmd), cmd)
 	}
 	if cmd[0] != "claude" {
 		t.Errorf("expected claude binary, got %q", cmd[0])
 	}
-	if cmd[1] != "-p" {
-		t.Errorf("expected -p flag, got %q", cmd[1])
+	if cmd[1] != "--dangerously-skip-permissions" {
+		t.Errorf("expected --dangerously-skip-permissions, got %q", cmd[1])
 	}
-	if cmd[2] != "do something" {
-		t.Errorf("expected prompt, got %q", cmd[2])
+	if cmd[2] != "-p" {
+		t.Errorf("expected -p flag, got %q", cmd[2])
+	}
+	if cmd[3] != "do something" {
+		t.Errorf("expected prompt, got %q", cmd[3])
 	}
 }
 

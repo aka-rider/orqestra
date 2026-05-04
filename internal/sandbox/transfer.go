@@ -27,8 +27,15 @@ func (s Session) sessionDir() string {
 	return "/workspace/.orqestra/" + s.Name
 }
 
+// sandboxUID and sandboxGID are the uid/gid of the sandbox user inside the container.
+// Matches the Dockerfile: useradd -u 1000 -g sandbox.
+const (
+	sandboxUID = 1000
+	sandboxGID = 1000
+)
+
 // CopyToContainer wraps content in a tar archive and copies it to the specified
-// path inside the container using the Docker SDK.
+// path inside the container using the Docker SDK. Files are owned by the sandbox user.
 func CopyToContainer(ctx context.Context, cli *dockerclient.Client, containerID, containerPath string, content io.Reader) error {
 	data, err := io.ReadAll(content)
 	if err != nil {
@@ -45,6 +52,8 @@ func CopyToContainer(ctx context.Context, cli *dockerclient.Client, containerID,
 		Mode:    0o644,
 		Size:    int64(len(data)),
 		ModTime: time.Now(),
+		Uid:     sandboxUID,
+		Gid:     sandboxGID,
 	}
 	if err := tw.WriteHeader(hdr); err != nil {
 		return fmt.Errorf("writing tar header: %w", err)
@@ -231,8 +240,8 @@ func (d *DockerSandbox) StageInputs(ctx context.Context, sess Session, inputMD, 
 
 	sessDir := sess.sessionDir()
 
-	// Create the session directory inside the container.
-	exitCode, err := d.execInternal(ctx, []string{"mkdir", "-p", sessDir})
+	// Create the session directory as the sandbox user.
+	exitCode, err := d.execInternalAs(ctx, "sandbox", []string{"mkdir", "-p", sessDir})
 	if err != nil {
 		return fmt.Errorf("creating session dir %s: %w", sessDir, err)
 	}

@@ -93,6 +93,12 @@ func NewDockerSandbox(cfg Config, repoPath string, env []string) *DockerSandbox 
 	}
 }
 
+// isDockerVMPath returns true for paths that exist inside the Docker Desktop VM
+// but are not accessible on the macOS host filesystem.
+func isDockerVMPath(path string) bool {
+	return strings.HasPrefix(path, "/run/host-services/")
+}
+
 func (d *DockerSandbox) ID() string {
 	return d.id
 }
@@ -165,8 +171,11 @@ func (d *DockerSandbox) Provision(ctx context.Context) error {
 		return err
 	}
 
-	// Validate MCP socket path if configured — fail loudly if user specified it but it's missing.
-	if d.cfg.MCP.SocketPath != "" {
+	// Validate MCP socket path if configured.
+	// On Docker Desktop for Mac, /run/host-services/* paths exist inside the Docker
+	// VM but are NOT stat-able from macOS. Skip host-side validation for these paths
+	// — Docker resolves them at container creation time.
+	if d.cfg.MCP.SocketPath != "" && !isDockerVMPath(d.cfg.MCP.SocketPath) {
 		if _, err := os.Stat(d.cfg.MCP.SocketPath); err != nil {
 			d.setState(StatePending)
 			return fmt.Errorf("MCP socket path %q: %w", d.cfg.MCP.SocketPath, err)
@@ -536,8 +545,15 @@ func (d *DockerSandbox) waitReady(ctx context.Context) error {
 
 // execInternal runs a command inside the container as root, discarding output.
 func (d *DockerSandbox) execInternal(ctx context.Context, cmd []string) (int, error) {
+	return d.execInternalAs(ctx, "", cmd)
+}
+
+// execInternalAs runs a command inside the container as the specified user, discarding output.
+// An empty user means container default (root).
+func (d *DockerSandbox) execInternalAs(ctx context.Context, user string, cmd []string) (int, error) {
 	execCfg := container.ExecOptions{
 		Cmd:          cmd,
+		User:         user,
 		AttachStdout: true,
 		AttachStderr: true,
 	}

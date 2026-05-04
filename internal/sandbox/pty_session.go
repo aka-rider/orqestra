@@ -69,6 +69,8 @@ func (ps *PTYSession) Start(ctx context.Context, containerID string, command []s
 	execCfg := container.ExecOptions{
 		Cmd:          command,
 		Env:          env,
+		User:         "sandbox",
+		WorkingDir:   "/workspace",
 		Tty:          true,
 		AttachStdin:  true,
 		AttachStdout: true,

@@ -569,6 +569,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg { return CycleBackToIdleMsg{} }
 	}
 
+	// When focus is on tabs, forward keys to the active tab (enables PTY input).
+	if m.focus == FocusTabs {
+		tv, cmd := m.tabsView.Update(msg)
+		m.tabsView = tv
+		return m, cmd
+	}
+
 	// Everything else goes to command bar
 	cb, cmd := m.commandBar.Update(msg)
 	m.commandBar = cb
@@ -1146,6 +1153,7 @@ func (m *Model) setState(s State) {
 	m.state = s
 	m.commandBar.SetState(s)
 	m.focus = defaultFocusForState(s)
+	m.syncFocus()
 }
 
 func (m *Model) setIntentVerdict(verdict string) {
@@ -1172,7 +1180,7 @@ func (m Model) focusTargets() []FocusTarget {
 	case StateIdle:
 		return []FocusTarget{FocusPrompt}
 	case StatePlanning, StateExecuting, StateIntakeRunning:
-		return []FocusTarget{FocusTabs}
+		return []FocusTarget{FocusPrompt, FocusTabs}
 	case StateConfirming:
 		return []FocusTarget{FocusPlan, FocusPrompt}
 	case StateIntentConfirm:
@@ -1214,6 +1222,7 @@ func (m *Model) cycleFocus(reverse bool) {
 		}
 	}
 	m.focus = targets[idx]
+	m.syncFocus()
 }
 
 func (m *Model) syncFocus() {
@@ -1223,10 +1232,18 @@ func (m *Model) syncFocus() {
 		m.commandBar.focused = false
 	}
 
-	if m.focus == FocusTabs {
-		m.tabsView.focused = true
-	} else {
-		m.tabsView.focused = false
+	tabsFocused := m.focus == FocusTabs
+	m.tabsView.focused = tabsFocused
+
+	// Propagate focus to all term tabs — only the active one gets true.
+	for i := range m.tabsView.termTabs {
+		m.tabsView.termTabs[i].focused = false
+	}
+	if tabsFocused && m.tabsView.active < len(m.tabsView.tabKinds) && m.tabsView.tabKinds[m.tabsView.active] == tabKindTerm {
+		tIdx := m.tabsView.termIndex(m.tabsView.active)
+		if tIdx < len(m.tabsView.termTabs) {
+			m.tabsView.termTabs[tIdx].focused = true
+		}
 	}
 
 	if m.state == StateConfirming {
