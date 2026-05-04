@@ -23,6 +23,7 @@ type State int
 const (
 	StateIdle            State = iota // Command bar focused, waiting for input
 	StateIntentConfirm                // Show intake feedback before planning
+	StateIntakeRunning                // PTY intake agent running in sandbox
 	StatePlanning                     // Planning tab active, claude running
 	StateValidating                   // Plan validation in progress
 	StateConfirming                   // Plan ready, waiting for [A]pprove/[R]eject/[E]dit
@@ -37,6 +38,11 @@ const (
 type PipelineFuncs struct {
 	// RecognizeIntent optionally cleans or blocks prompts before planning.
 	RecognizeIntent func(ctx context.Context, prompt string) (IntentResult, error)
+	// RunIntake launches the PTY-based intake agent inside a sandbox.
+	// tabIndex identifies the term tab to stream output to.
+	// send delivers tea.Msg (PTYOutputMsg, PTYDoneMsg) to the TUI loop.
+	// Returns the artifact bytes on success.
+	RunIntake func(ctx context.Context, prompt string, tabIndex int, send func(tea.Msg)) ([]byte, error)
 	// Plan runs the planner and streams output. Returns the spec.
 	Plan func(ctx context.Context, prompt string, stdout io.Writer) (types.Specification, error)
 	// ValidatePlan runs plan validation. Returns nil report if validation is disabled.
@@ -109,8 +115,9 @@ type Model struct {
 	height int
 	err    error
 
-	planTabIdx int
-	execTabIdx int
+	planTabIdx   int
+	execTabIdx   int
+	intakeTabIdx int
 
 	// Session->tab mapping: sessionID -> tab index
 	sessionTabs map[string]int
@@ -130,20 +137,21 @@ func NewModel(pipeline PipelineFuncs) Model {
 	}
 
 	m := Model{
-		state:       state,
-		focus:       defaultFocusForState(state),
-		tabsView:    newTabsView(),
-		confirmView: newConfirmView(),
-		commandBar:  newCommandBar(registry),
-		registry:    registry,
-		logPanel:    newLogPanel(),
-		showLogs:    false,
-		pipeline:    pipeline,
-		ctx:         ctx,
-		cancel:      cancel,
-		planTabIdx:  -1,
-		execTabIdx:  -1,
-		sessionTabs: make(map[string]int),
+		state:        state,
+		focus:        defaultFocusForState(state),
+		tabsView:     newTabsView(),
+		confirmView:  newConfirmView(),
+		commandBar:   newCommandBar(registry),
+		registry:     registry,
+		logPanel:     newLogPanel(),
+		showLogs:     false,
+		pipeline:     pipeline,
+		ctx:          ctx,
+		cancel:       cancel,
+		planTabIdx:   -1,
+		execTabIdx:   -1,
+		intakeTabIdx: -1,
+		sessionTabs:  make(map[string]int),
 	}
 	if pipeline.InitialSpec != nil {
 		m.commandBar.SetState(StatePlanning)
@@ -391,6 +399,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tabsView = tv
 		return m, cmd
 
+	case PTYOutputMsg:
+		tv, cmd := m.tabsView.Update(msg)
+		m.tabsView = tv
+		return m, cmd
+
+	case PTYNeedsInputMsg:
+		tv, cmd := m.tabsView.Update(msg)
+		m.tabsView = tv
+		return m, cmd
+
+	case PTYDoneMsg:
+		tv, cmd := m.tabsView.Update(msg)
+		m.tabsView = tv
+		return m, cmd
+
+	case IntakeCompleteMsg:
+		if msg.Err != nil {
+			m.err = msg.Err
+			m.setState(StateDone)
+			return m, nil
+		}
+		// Intake succeeded — transition to planning with the artifact as enriched prompt.
+		// Use the artifact content as the planning prompt (it's the structured intake output).
+		m.prompt = string(msg.Artifact)
+		return m.beginPlanning()
+
 	case ValidationStartedMsg:
 		return m, nil
 
@@ -551,6 +585,20 @@ func (m Model) handlePromptSubmit(msg PromptSubmitMsg) (tea.Model, tea.Cmd) {
 	m.helpContent = ""
 	m.setIntentVerdict("")
 
+	// Prefer PTY-based intake runner over old RecognizeIntent.
+	if m.pipeline.RunIntake != nil {
+		m.setState(StateIntakeRunning)
+		m.intakeTabIdx = m.tabsView.AddTermTab("Intake")
+		m.tabsView.active = m.intakeTabIdx
+		if !m.tabsView.pulsing {
+			m.tabsView.pulsing = true
+			go m.startIntake(msg.Prompt)
+			return m, pulseTickCmd()
+		}
+		go m.startIntake(msg.Prompt)
+		return m, nil
+	}
+
 	if m.pipeline.RecognizeIntent != nil {
 		m.intentContent = renderIntent("Reviewing request...", "", "", nil, nil, "pending")
 		m.setState(StateIntentConfirm)
@@ -572,9 +620,12 @@ func (m Model) beginPlanning() (tea.Model, tea.Cmd) {
 		m.sessionTabs["plan"] = m.planTabIdx
 	} else {
 		// Reset existing planner tab for new run
-		m.tabsView.tabs[m.planTabIdx] = newStreamView(m.planTabIdx)
-		if m.tabsView.width > 0 {
-			m.tabsView.tabs[m.planTabIdx].SetSize(m.tabsView.width, m.tabsView.height-3)
+		sIdx := m.tabsView.streamIndex(m.planTabIdx)
+		if sIdx < len(m.tabsView.tabs) {
+			m.tabsView.tabs[sIdx] = newStreamView(m.planTabIdx)
+			if m.tabsView.width > 0 {
+				m.tabsView.tabs[sIdx].SetSize(m.tabsView.width, m.tabsView.height-3)
+			}
 		}
 		m.tabsView.tabNames[m.planTabIdx] = "Planner"
 	}
@@ -597,10 +648,13 @@ func (m Model) handleCommand(msg CommandMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "/clear":
 		m.helpContent = ""
-		if m.state == StateIdle && len(m.tabsView.tabs) > 0 && m.tabsView.active < len(m.tabsView.tabs) {
-			m.tabsView.tabs[m.tabsView.active] = newStreamView(m.tabsView.active)
-			if m.tabsView.width > 0 {
-				m.tabsView.tabs[m.tabsView.active].SetSize(m.tabsView.width, m.tabsView.height-3)
+		if m.state == StateIdle && m.tabsView.active < len(m.tabsView.tabKinds) && m.tabsView.tabKinds[m.tabsView.active] == tabKindStream {
+			sIdx := m.tabsView.streamIndex(m.tabsView.active)
+			if sIdx < len(m.tabsView.tabs) {
+				m.tabsView.tabs[sIdx] = newStreamView(m.tabsView.active)
+				if m.tabsView.width > 0 {
+					m.tabsView.tabs[sIdx].SetSize(m.tabsView.width, m.tabsView.height-3)
+				}
 			}
 		}
 		return m, nil
@@ -660,7 +714,7 @@ func (m Model) View() string {
 		}
 	}
 
-	if m.state == StateIdle && len(m.tabsView.tabs) == 0 {
+	if m.state == StateIdle && len(m.tabsView.tabNames) == 0 {
 		topView = titleStyle.Render("orqestra") + "\n\n" +
 			subtitleStyle.Render("Type a prompt to start planning, or /help for commands.")
 	}
@@ -733,8 +787,11 @@ func (m Model) handleSessionEvent(evt harness.SessionEvent) (tea.Model, tea.Cmd)
 	case harness.SessionDone:
 		if exists {
 			m.tabsView.tabNames[tabIdx] = evt.Name + " ✓"
-			if tabIdx < len(m.tabsView.tabs) {
-				m.tabsView.tabs[tabIdx].done = true
+			if tabIdx < len(m.tabsView.tabKinds) && m.tabsView.tabKinds[tabIdx] == tabKindStream {
+				sIdx := m.tabsView.streamIndex(tabIdx)
+				if sIdx < len(m.tabsView.tabs) {
+					m.tabsView.tabs[sIdx].done = true
+				}
 			}
 		}
 		if m.state == StateExecuting && evt.SessionID != "plan" {
@@ -746,9 +803,12 @@ func (m Model) handleSessionEvent(evt harness.SessionEvent) (tea.Model, tea.Cmd)
 	case harness.SessionFailed:
 		if exists {
 			m.tabsView.tabNames[tabIdx] = evt.Name + " ✗"
-			if tabIdx < len(m.tabsView.tabs) {
-				m.tabsView.tabs[tabIdx].done = true
-				m.tabsView.tabs[tabIdx].err = evt.Err
+			if tabIdx < len(m.tabsView.tabKinds) && m.tabsView.tabKinds[tabIdx] == tabKindStream {
+				sIdx := m.tabsView.streamIndex(tabIdx)
+				if sIdx < len(m.tabsView.tabs) {
+					m.tabsView.tabs[sIdx].done = true
+					m.tabsView.tabs[sIdx].err = evt.Err
+				}
 			}
 		}
 		if m.state == StateExecuting && evt.SessionID != "plan" {
@@ -900,6 +960,19 @@ func (m Model) startPlanning() {
 		State:     harness.SessionDone,
 	}})
 	p.Send(planCompleteMsg{spec: spec})
+}
+
+// startIntake launches the PTY-based intake runner in a goroutine.
+func (m Model) startIntake(prompt string) {
+	p := m.program
+	tabIdx := m.intakeTabIdx
+
+	artifact, err := m.pipeline.RunIntake(m.ctx, prompt, tabIdx, p.Send)
+	if err != nil {
+		p.Send(IntakeCompleteMsg{Err: err})
+		return
+	}
+	p.Send(IntakeCompleteMsg{Artifact: artifact})
 }
 
 // startIntentRecognition runs the intake model before the expensive planner.
@@ -1083,7 +1156,7 @@ func defaultFocusForState(s State) FocusTarget {
 	switch s {
 	case StateIdle, StateIntentConfirm:
 		return FocusPrompt
-	case StatePlanning, StateExecuting, StateProjectManaging:
+	case StatePlanning, StateExecuting, StateProjectManaging, StateIntakeRunning:
 		return FocusTabs
 	case StateConfirming:
 		return FocusPlan
@@ -1098,7 +1171,7 @@ func (m Model) focusTargets() []FocusTarget {
 	switch m.state {
 	case StateIdle:
 		return []FocusTarget{FocusPrompt}
-	case StatePlanning, StateExecuting:
+	case StatePlanning, StateExecuting, StateIntakeRunning:
 		return []FocusTarget{FocusTabs}
 	case StateConfirming:
 		return []FocusTarget{FocusPlan, FocusPrompt}

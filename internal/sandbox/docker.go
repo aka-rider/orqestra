@@ -138,6 +138,20 @@ func (d *DockerSandbox) ensureClient() error {
 	return nil
 }
 
+// ContainerID returns the Docker container ID. Empty if not provisioned.
+func (d *DockerSandbox) ContainerID() string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.containerID
+}
+
+// Client returns the Docker client. May be nil if not yet initialized.
+func (d *DockerSandbox) Client() *dockerclient.Client {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.cli
+}
+
 // Provision creates the Docker container using a seed-and-commit model:
 // 1. Spin up a temporary seed container, bind-mount the repo, rsync into /workspace.
 // 2. Commit the seeded container as an ephemeral image.

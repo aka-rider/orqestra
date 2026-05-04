@@ -8,10 +8,20 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// tabKind identifies the type of content a tab renders.
+type tabKind int
+
+const (
+	tabKindStream tabKind = iota
+	tabKindTerm
+)
+
 // tabsView manages a tabbed container for multiple harness streaming sessions.
 type tabsView struct {
 	tabs       []streamView
+	termTabs   []termView
 	tabNames   []string
+	tabKinds   []tabKind
 	active     int
 	width      int
 	height     int
@@ -24,16 +34,71 @@ func newTabsView() tabsView {
 	return tabsView{}
 }
 
-// AddTab creates a new tab with the given name.
+// AddTab creates a new stream tab with the given name.
 func (t *tabsView) AddTab(name string) int {
-	idx := len(t.tabs)
+	idx := len(t.tabNames)
 	sv := newStreamView(idx)
 	if t.width > 0 {
 		sv.SetSize(t.width, t.height-3) // account for tab bar
 	}
 	t.tabs = append(t.tabs, sv)
 	t.tabNames = append(t.tabNames, name)
+	t.tabKinds = append(t.tabKinds, tabKindStream)
 	return idx
+}
+
+// AddTermTab creates a new PTY terminal tab with the given name.
+// Returns the tab index. Use AttachPTY on the returned termView to wire input.
+func (t *tabsView) AddTermTab(name string) int {
+	idx := len(t.tabNames)
+	cols := t.width
+	if cols < 1 {
+		cols = 80
+	}
+	rows := t.height - 3
+	if rows < 3 {
+		rows = 24
+	}
+	tv := newTermView(idx, cols, rows)
+	t.termTabs = append(t.termTabs, tv)
+	t.tabNames = append(t.tabNames, name)
+	t.tabKinds = append(t.tabKinds, tabKindTerm)
+	return idx
+}
+
+// TermTab returns a pointer to the termView at the given tab index.
+// Returns nil if the index is out of range or not a term tab.
+func (t *tabsView) TermTab(idx int) *termView {
+	if idx < 0 || idx >= len(t.tabKinds) || t.tabKinds[idx] != tabKindTerm {
+		return nil
+	}
+	termIdx := t.termIndex(idx)
+	if termIdx < 0 || termIdx >= len(t.termTabs) {
+		return nil
+	}
+	return &t.termTabs[termIdx]
+}
+
+// termIndex converts a global tab index to the index within t.termTabs.
+func (t *tabsView) termIndex(globalIdx int) int {
+	count := 0
+	for i := 0; i < globalIdx; i++ {
+		if i < len(t.tabKinds) && t.tabKinds[i] == tabKindTerm {
+			count++
+		}
+	}
+	return count
+}
+
+// streamIndex converts a global tab index to the index within t.tabs (stream tabs).
+func (t *tabsView) streamIndex(globalIdx int) int {
+	count := 0
+	for i := 0; i < globalIdx; i++ {
+		if i < len(t.tabKinds) && t.tabKinds[i] == tabKindStream {
+			count++
+		}
+	}
+	return count
 }
 
 func (t tabsView) Update(msg tea.Msg) (tabsView, tea.Cmd) {
@@ -56,10 +121,15 @@ func (t tabsView) Update(msg tea.Msg) (tabsView, tea.Cmd) {
 			}
 			t.tabs[i].SetSize(t.width-2, contentHeight)
 		}
+		// Resize term tabs too.
+		termMsg := tea.WindowSizeMsg{Width: t.width - 2, Height: t.height - 2 - 2 - 1}
+		for i := range t.termTabs {
+			t.termTabs[i], _ = t.termTabs[i].Update(termMsg)
+		}
 		return t, nil
 
 	case TabSwitchMsg:
-		if msg.Index >= 0 && msg.Index < len(t.tabs) {
+		if msg.Index >= 0 && msg.Index < len(t.tabNames) {
 			t.active = msg.Index
 		}
 		return t, nil
@@ -68,41 +138,92 @@ func (t tabsView) Update(msg tea.Msg) (tabsView, tea.Cmd) {
 		switch msg.String() {
 		case "alt+1", "alt+2", "alt+3", "alt+4", "alt+5", "alt+6", "alt+7", "alt+8", "alt+9":
 			idx := int(msg.String()[len(msg.String())-1] - '1')
-			if idx >= 0 && idx < len(t.tabs) {
+			if idx >= 0 && idx < len(t.tabNames) {
 				t.active = idx
 			}
 			return t, nil
 		}
 
 	case StreamChunkMsg:
-		if msg.TabIndex >= 0 && msg.TabIndex < len(t.tabs) {
-			var cmd tea.Cmd
-			t.tabs[msg.TabIndex], cmd = t.tabs[msg.TabIndex].Update(msg)
-			return t, cmd
+		if msg.TabIndex >= 0 && msg.TabIndex < len(t.tabNames) && t.tabKinds[msg.TabIndex] == tabKindStream {
+			sIdx := t.streamIndex(msg.TabIndex)
+			if sIdx < len(t.tabs) {
+				var cmd tea.Cmd
+				t.tabs[sIdx], cmd = t.tabs[sIdx].Update(msg)
+				return t, cmd
+			}
 		}
 		return t, nil
 
 	case HarnessDoneMsg:
-		if msg.TabIndex >= 0 && msg.TabIndex < len(t.tabs) {
-			var cmd tea.Cmd
-			t.tabs[msg.TabIndex], cmd = t.tabs[msg.TabIndex].Update(msg)
-			return t, cmd
+		if msg.TabIndex >= 0 && msg.TabIndex < len(t.tabNames) && t.tabKinds[msg.TabIndex] == tabKindStream {
+			sIdx := t.streamIndex(msg.TabIndex)
+			if sIdx < len(t.tabs) {
+				var cmd tea.Cmd
+				t.tabs[sIdx], cmd = t.tabs[sIdx].Update(msg)
+				return t, cmd
+			}
+		}
+		return t, nil
+
+	case PTYOutputMsg:
+		if msg.TabIndex >= 0 && msg.TabIndex < len(t.tabNames) && t.tabKinds[msg.TabIndex] == tabKindTerm {
+			tIdx := t.termIndex(msg.TabIndex)
+			if tIdx < len(t.termTabs) {
+				var cmd tea.Cmd
+				t.termTabs[tIdx], cmd = t.termTabs[tIdx].Update(msg)
+				return t, cmd
+			}
+		}
+		return t, nil
+
+	case PTYNeedsInputMsg:
+		if msg.TabIndex >= 0 && msg.TabIndex < len(t.tabNames) && t.tabKinds[msg.TabIndex] == tabKindTerm {
+			tIdx := t.termIndex(msg.TabIndex)
+			if tIdx < len(t.termTabs) {
+				var cmd tea.Cmd
+				t.termTabs[tIdx], cmd = t.termTabs[tIdx].Update(msg)
+				return t, cmd
+			}
+		}
+		return t, nil
+
+	case PTYDoneMsg:
+		if msg.TabIndex >= 0 && msg.TabIndex < len(t.tabNames) && t.tabKinds[msg.TabIndex] == tabKindTerm {
+			tIdx := t.termIndex(msg.TabIndex)
+			if tIdx < len(t.termTabs) {
+				var cmd tea.Cmd
+				t.termTabs[tIdx], cmd = t.termTabs[tIdx].Update(msg)
+				return t, cmd
+			}
 		}
 		return t, nil
 	}
 
 	// Forward to active tab
-	if len(t.tabs) > 0 && t.active < len(t.tabs) {
-		var cmd tea.Cmd
-		t.tabs[t.active], cmd = t.tabs[t.active].Update(msg)
-		return t, cmd
+	if len(t.tabNames) > 0 && t.active < len(t.tabNames) {
+		if t.tabKinds[t.active] == tabKindStream {
+			sIdx := t.streamIndex(t.active)
+			if sIdx < len(t.tabs) {
+				var cmd tea.Cmd
+				t.tabs[sIdx], cmd = t.tabs[sIdx].Update(msg)
+				return t, cmd
+			}
+		} else if t.tabKinds[t.active] == tabKindTerm {
+			tIdx := t.termIndex(t.active)
+			if tIdx < len(t.termTabs) {
+				var cmd tea.Cmd
+				t.termTabs[tIdx], cmd = t.termTabs[tIdx].Update(msg)
+				return t, cmd
+			}
+		}
 	}
 
 	return t, nil
 }
 
 func (t tabsView) View() string {
-	if len(t.tabs) == 0 {
+	if len(t.tabNames) == 0 {
 		return ""
 	}
 
@@ -110,8 +231,16 @@ func (t tabsView) View() string {
 	var tabs []string
 	for i, name := range t.tabNames {
 		displayName := name
-		if i < len(t.tabs) {
-			if t.tabs[i].done {
+		if t.tabKinds[i] == tabKindStream {
+			sIdx := t.streamIndex(i)
+			if sIdx < len(t.tabs) && t.tabs[sIdx].done {
+				displayName += " ✓"
+			} else if t.pulsing {
+				displayName = pulseFrames[t.pulseFrame] + " " + name
+			}
+		} else if t.tabKinds[i] == tabKindTerm {
+			tIdx := t.termIndex(i)
+			if tIdx < len(t.termTabs) && t.termTabs[tIdx].done {
 				displayName += " ✓"
 			} else if t.pulsing {
 				displayName = pulseFrames[t.pulseFrame] + " " + name
@@ -131,8 +260,18 @@ func (t tabsView) View() string {
 
 	// Render active tab content
 	var content string
-	if t.active < len(t.tabs) {
-		content = t.tabs[t.active].View()
+	if t.active < len(t.tabNames) {
+		if t.tabKinds[t.active] == tabKindStream {
+			sIdx := t.streamIndex(t.active)
+			if sIdx < len(t.tabs) {
+				content = t.tabs[sIdx].View()
+			}
+		} else if t.tabKinds[t.active] == tabKindTerm {
+			tIdx := t.termIndex(t.active)
+			if tIdx < len(t.termTabs) {
+				content = t.termTabs[tIdx].View()
+			}
+		}
 	}
 
 	contentBorder := InputBoxStyle
@@ -157,6 +296,11 @@ const pulseInterval = 200 * time.Millisecond
 
 func (t tabsView) hasRunningTabs() bool {
 	for _, tab := range t.tabs {
+		if !tab.done {
+			return true
+		}
+	}
+	for _, tab := range t.termTabs {
 		if !tab.done {
 			return true
 		}

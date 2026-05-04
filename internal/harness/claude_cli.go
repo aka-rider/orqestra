@@ -300,6 +300,16 @@ func BuildModelEnv(resolved config.ResolvedModel, small *config.ResolvedModel) [
 	return env
 }
 
+// BuildPTYCommand builds the Claude Code CLI launch command for PTY-mode execution.
+// Non-interactive mode (intake/validation) uses -p with stream-json output.
+// Interactive mode (worker) launches the full interactive CLI.
+func BuildPTYCommand(prompt string, interactive bool) []string {
+	if interactive {
+		return []string{"claude", "--dangerously-skip-permissions"}
+	}
+	return []string{"claude", "-p", prompt, "--output-format", "stream-json", "--verbose"}
+}
+
 // buildEnv constructs the environment variables for the claude subprocess.
 func (c *ClaudeCLI) buildEnv() []string {
 	env := os.Environ()

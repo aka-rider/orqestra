@@ -109,6 +109,8 @@ func stateName(s State) string {
 		return "idle"
 	case StateIntentConfirm:
 		return "intent-confirm"
+	case StateIntakeRunning:
+		return "intake-running"
 	case StatePlanning:
 		return "planning"
 	case StateValidating:

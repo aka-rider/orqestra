@@ -7,7 +7,6 @@ Orqestra is an LLM agent orchestration system. It coordinates planning, validati
 ## Stack
 
 - **Language**: Go 1.26+
-- **Proxy**: CLIProxyAPI SDK (embedded) — routes to Claude Code, Codex, llama-server
 - **Testing**: `go test`, TDD-first
 - **Distribution**: static binary via `go build`
 
@@ -71,16 +70,8 @@ The **specification** is the shared contract between Planner, Worker, and Valida
 ## CLI
 
 - Entry point: `cmd/orqestra/main.go`
-- Usage: `orqestra <prompt>`
 - Human gate: interactive stdin prompt with plan display
 - Output: structured plan display for humans, JSON for machine consumption
-
-## Out of Scope (Future)
-
-- Sandboxed workers (container isolation)
-- Multi-agent orchestrator (parallel agent coordination)
-- Web UI / VSCode extension
-- Plugin system
 
 ## Bubble Tea (TUI)
 

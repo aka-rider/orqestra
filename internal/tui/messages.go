@@ -159,3 +159,27 @@ func streamChunkCmd(tabIndex int, content string) tea.Cmd {
 
 // PulseTickMsg drives the tab pulsing animation.
 type PulseTickMsg struct{}
+
+// PTYOutputMsg delivers raw bytes from the PTY session to the terminal view.
+type PTYOutputMsg struct {
+	TabIndex int
+	Data     []byte
+}
+
+// PTYNeedsInputMsg signals that the PTY session is waiting for user input.
+type PTYNeedsInputMsg struct {
+	TabIndex int
+}
+
+// PTYDoneMsg signals that the PTY session has exited.
+type PTYDoneMsg struct {
+	TabIndex int
+	Err      error
+	ExitCode int
+}
+
+// IntakeCompleteMsg signals that the PTY intake runner finished.
+type IntakeCompleteMsg struct {
+	Artifact []byte // extracted output artifact
+	Err      error
+}
