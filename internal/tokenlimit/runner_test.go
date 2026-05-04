@@ -366,3 +366,132 @@ func TestNewStore_FileAsDirectoryComponent(t *testing.T) {
 		t.Fatal("expected error when a path component is a file, not a directory")
 	}
 }
+
+// --- LimitedRunner.RunStreaming passthrough ---
+
+func TestLimitedRunner_RunStreaming_PassthroughOnBudgetOK(t *testing.T) {
+	inner := &mockCLIRunner{
+		runStreamingFn: func(_ context.Context, _, _ string, stdout io.Writer) (harness.RunResult, error) {
+			stdout.Write([]byte("streamed text"))
+			return harness.RunResult{Output: "streamed text"}, nil
+		},
+	}
+	limiter := newTestLimiter(t, map[string]int64{"opus": 10000})
+	runner := NewLimitedRunner(inner, limiter, "opus", "worker")
+
+	var buf strings.Builder
+	result, err := runner.RunStreaming(context.Background(), "prompt", "sys", &buf)
+	if err != nil {
+		t.Fatalf("RunStreaming() error: %v", err)
+	}
+	if result.Output != "streamed text" {
+		t.Errorf("output = %q, want %q", result.Output, "streamed text")
+	}
+	if buf.String() != "streamed text" {
+		t.Errorf("writer = %q, want %q", buf.String(), "streamed text")
+	}
+}
+
+// --- LimitedRunner.RunStreaming nil usage ---
+
+func TestLimitedRunner_RunStreaming_NilUsageSkipsRecord(t *testing.T) {
+	inner := &mockCLIRunner{
+		runStreamingFn: func(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
+			return harness.RunResult{Usage: nil}, nil
+		},
+	}
+	limiter := newTestLimiter(t, map[string]int64{"opus": 1000})
+	runner := NewLimitedRunner(inner, limiter, "opus", "worker")
+
+	_, err := runner.RunStreaming(context.Background(), "prompt", "sys", io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	used, _ := limiter.store.UsageByModel(context.Background(), "opus")
+	if used != 0 {
+		t.Errorf("expected 0 tokens, got %d", used)
+	}
+}
+
+// --- LimitedRunner.RunStreaming zero tokens ---
+
+func TestLimitedRunner_RunStreaming_ZeroTokensSkipsRecord(t *testing.T) {
+	inner := &mockCLIRunner{
+		runStreamingFn: func(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
+			return harness.RunResult{
+				Usage: &harness.TokenUsage{TotalTokens: 0},
+			}, nil
+		},
+	}
+	limiter := newTestLimiter(t, map[string]int64{"opus": 1000})
+	runner := NewLimitedRunner(inner, limiter, "opus", "worker")
+
+	_, err := runner.RunStreaming(context.Background(), "prompt", "sys", io.Discard)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	used, _ := limiter.store.UsageByModel(context.Background(), "opus")
+	if used != 0 {
+		t.Errorf("expected 0 tokens recorded, got %d", used)
+	}
+}
+
+// --- LimitedRunner.RunStreaming no limit ---
+
+func TestLimitedRunner_RunStreaming_NoLimit_AlwaysPasses(t *testing.T) {
+	inner := &mockCLIRunner{
+		runStreamingFn: func(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
+			return harness.RunResult{
+				Output: "ok",
+				Usage:  &harness.TokenUsage{TotalTokens: 999999},
+			}, nil
+		},
+	}
+	limiter := newTestLimiter(t, map[string]int64{})
+	runner := NewLimitedRunner(inner, limiter, "opus", "worker")
+
+	result, err := runner.RunStreaming(context.Background(), "prompt", "sys", io.Discard)
+	if err != nil {
+		t.Fatalf("expected no error with unlimited model, got %v", err)
+	}
+	if result.Output != "ok" {
+		t.Errorf("output = %q, want %q", result.Output, "ok")
+	}
+}
+
+// --- Limiter.Status error from UsageByModelAgent ---
+
+func TestLimiter_Status_ByAgentBreakdown(t *testing.T) {
+	limiter := newTestLimiter(t, map[string]int64{"opus": 5000})
+	ctx := context.Background()
+	limiter.store.Record(ctx, "opus", "planner", 1000)
+	limiter.store.Record(ctx, "opus", "worker", 500)
+
+	status, err := limiter.Status(ctx, "opus")
+	if err != nil {
+		t.Fatalf("Status() error: %v", err)
+	}
+	if status.Used != 1500 {
+		t.Errorf("used = %d, want 1500", status.Used)
+	}
+	if status.Remaining != 3500 {
+		t.Errorf("remaining = %d, want 3500", status.Remaining)
+	}
+	if len(status.ByAgent) != 2 {
+		t.Errorf("byAgent count = %d, want 2", len(status.ByAgent))
+	}
+}
+
+func TestLimiter_Status_Unlimited(t *testing.T) {
+	limiter := newTestLimiter(t, map[string]int64{}) // no limit for "opus"
+	ctx := context.Background()
+	limiter.store.Record(ctx, "opus", "planner", 1000)
+
+	status, err := limiter.Status(ctx, "opus")
+	if err != nil {
+		t.Fatalf("Status() error: %v", err)
+	}
+	if status.Remaining != -1 {
+		t.Errorf("remaining = %d, want -1 (unlimited)", status.Remaining)
+	}
+}

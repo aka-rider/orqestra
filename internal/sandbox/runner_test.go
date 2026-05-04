@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mockSandbox implements Sandbox for unit testing without Docker.
@@ -21,9 +22,9 @@ type mockSandbox struct {
 	destroyFn   func(ctx context.Context) error
 }
 
-func (m *mockSandbox) ID() string    { return m.id }
-func (m *mockSandbox) State() State  { return StatePending }
-func (m *mockSandbox) Info() Info    { return Info{ID: m.id} }
+func (m *mockSandbox) ID() string   { return m.id }
+func (m *mockSandbox) State() State { return StatePending }
+func (m *mockSandbox) Info() Info   { return Info{ID: m.id} }
 
 func (m *mockSandbox) Provision(ctx context.Context) error {
 	if m.provisionFn != nil {
@@ -520,5 +521,188 @@ func TestEmitState_CallbackInvoked(t *testing.T) {
 
 	if len(got) != 2 || got[0] != StateRunning || got[1] != StateDestroyed {
 		t.Errorf("got states %v, want [Running Destroyed]", got)
+	}
+}
+
+// --- RunPrint / RunStreaming public API ---
+
+func TestRunPrint_DelegatesToRunInSandbox(t *testing.T) {
+	repoDir := t.TempDir()
+	execCalled := false
+	mock := &mockSandbox{
+		id: "rp-sb",
+		execFn: func(_ context.Context, cmd []string, _ []string, stdout io.Writer) (int, error) {
+			execCalled = true
+			mustContain(t, cmd, "--print")
+			stdout.Write([]byte("printed"))
+			return 0, nil
+		},
+		extractFn: func(_ context.Context) ([]ChangedFile, error) { return nil, nil },
+	}
+	r := newRunnerWithMock(RunnerConfig{RepoPath: repoDir, Model: "opus"}, mock)
+
+	result, err := r.RunPrint(context.Background(), "prompt", "sys")
+	if err != nil {
+		t.Fatalf("RunPrint() error: %v", err)
+	}
+	if !execCalled {
+		t.Error("sandbox Exec was not called")
+	}
+	if result.Output != "printed" {
+		t.Errorf("output = %q, want %q", result.Output, "printed")
+	}
+}
+
+func TestRunStreaming_DelegatesToRunInSandbox(t *testing.T) {
+	repoDir := t.TempDir()
+	execCalled := false
+	mock := &mockSandbox{
+		id: "rs-sb",
+		execFn: func(_ context.Context, cmd []string, _ []string, stdout io.Writer) (int, error) {
+			execCalled = true
+			mustContain(t, cmd, "stream-json")
+			stdout.Write([]byte("streamed"))
+			return 0, nil
+		},
+		extractFn: func(_ context.Context) ([]ChangedFile, error) { return nil, nil },
+	}
+	var buf bytes.Buffer
+	r := newRunnerWithMock(RunnerConfig{RepoPath: repoDir}, mock)
+
+	result, err := r.RunStreaming(context.Background(), "prompt", "sys", &buf)
+	if err != nil {
+		t.Fatalf("RunStreaming() error: %v", err)
+	}
+	if !execCalled {
+		t.Error("sandbox Exec was not called")
+	}
+	if result.Output != "streamed" {
+		t.Errorf("output = %q, want %q", result.Output, "streamed")
+	}
+	if buf.String() != "streamed" {
+		t.Errorf("passthrough = %q, want %q", buf.String(), "streamed")
+	}
+}
+
+// --- runInSandbox: non-zero exit code ---
+
+func TestRunInSandbox_NonZeroExitCode(t *testing.T) {
+	mock := &mockSandbox{
+		id: "exit-sb",
+		execFn: func(_ context.Context, _ []string, _ []string, stdout io.Writer) (int, error) {
+			stdout.Write([]byte("partial output"))
+			return 1, nil
+		},
+	}
+	r := newRunnerWithMock(RunnerConfig{}, mock)
+
+	out, _, err := r.runInSandbox(context.Background(), []string{"claude"}, nil)
+	if err == nil {
+		t.Fatal("expected error for non-zero exit code")
+	}
+	if !strings.Contains(err.Error(), "exit code 1") {
+		t.Errorf("error = %q, want mention of exit code", err.Error())
+	}
+	// Output should still be captured even with non-zero exit.
+	if out != "partial output" {
+		t.Errorf("output = %q, want %q", out, "partial output")
+	}
+}
+
+// --- runInSandbox: extract error ---
+
+func TestRunInSandbox_ExtractError(t *testing.T) {
+	destroyed := false
+	mock := &mockSandbox{
+		id: "extract-err-sb",
+		execFn: func(_ context.Context, _ []string, _ []string, stdout io.Writer) (int, error) {
+			stdout.Write([]byte("exec ok"))
+			return 0, nil
+		},
+		extractFn: func(_ context.Context) ([]ChangedFile, error) {
+			return nil, errors.New("btrfs diff failed")
+		},
+		destroyFn: func(_ context.Context) error {
+			destroyed = true
+			return nil
+		},
+	}
+	r := newRunnerWithMock(RunnerConfig{}, mock)
+
+	out, _, err := r.runInSandbox(context.Background(), []string{"claude"}, nil)
+	if err == nil {
+		t.Fatal("expected error from extract failure")
+	}
+	if !strings.Contains(err.Error(), "sandbox extract") {
+		t.Errorf("error = %q, want 'sandbox extract' prefix", err.Error())
+	}
+	if out != "exec ok" {
+		t.Errorf("output = %q, should be preserved on extract error", out)
+	}
+	if !destroyed {
+		t.Error("sandbox must be destroyed even when extract fails")
+	}
+}
+
+// --- runInSandbox: exec returns error (not exit code) ---
+
+func TestRunInSandbox_ExecError(t *testing.T) {
+	mock := &mockSandbox{
+		id: "exec-err-sb",
+		execFn: func(_ context.Context, _ []string, _ []string, _ io.Writer) (int, error) {
+			return -1, errors.New("docker exec: connection refused")
+		},
+	}
+	r := newRunnerWithMock(RunnerConfig{}, mock)
+
+	_, _, err := r.runInSandbox(context.Background(), []string{"claude"}, nil)
+	if err == nil {
+		t.Fatal("expected error from exec failure")
+	}
+	if !strings.Contains(err.Error(), "sandbox exec") {
+		t.Errorf("error = %q, want 'sandbox exec' prefix", err.Error())
+	}
+}
+
+// --- Sweep with kill error ---
+
+func TestReaper_Sweep_KillError_ContinuesOthers(t *testing.T) {
+	killed := []string{}
+	tracker := &funcTracker{
+		listFn: func(_ context.Context) ([]TrackedContainer, error) {
+			return []TrackedContainer{
+				{ID: "fail-1", CreatedAt: time.Now().Add(-2 * time.Hour)},
+				{ID: "ok-2", CreatedAt: time.Now().Add(-2 * time.Hour)},
+			}, nil
+		},
+		killFn: func(_ context.Context, id string) error {
+			if id == "fail-1" {
+				return errors.New("permission denied")
+			}
+			killed = append(killed, id)
+			return nil
+		},
+	}
+	r := NewReaper(tracker, 1*time.Hour)
+	result := r.Sweep(context.Background())
+
+	if len(result) != 1 || result[0] != "ok-2" {
+		t.Errorf("killed = %v, want [ok-2]", result)
+	}
+}
+
+// --- Sweep with list error ---
+
+func TestReaper_Sweep_ListError_ReturnsNil(t *testing.T) {
+	tracker := &funcTracker{
+		listFn: func(_ context.Context) ([]TrackedContainer, error) {
+			return nil, errors.New("docker daemon not running")
+		},
+	}
+	r := NewReaper(tracker, 1*time.Hour)
+	result := r.Sweep(context.Background())
+
+	if result != nil {
+		t.Errorf("expected nil on list error, got %v", result)
 	}
 }
