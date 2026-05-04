@@ -117,6 +117,8 @@ func stateName(s State) string {
 		return "confirming"
 	case StateSaved:
 		return "saved"
+	case StateProjectManaging:
+		return "project-managing"
 	case StateExecuting:
 		return "executing"
 	case StateWorkValidating:

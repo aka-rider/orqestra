@@ -51,6 +51,7 @@ type Config struct {
 	Validator      ValidatorConfig           `yaml:"validator"`
 	Worker         WorkerConfig              `yaml:"worker"`
 	WorkValidator  ValidatorConfig           `yaml:"work_validator"`
+	ProjectManager ProjectManagerConfig      `yaml:"project_manager"`
 	Retry          RetryConfig               `yaml:"retry"`
 	ExecutionGraph ExecutionGraphConfig      `yaml:"execution_graph"`
 	Intent         IntentConfig              `yaml:"intent"`
@@ -122,6 +123,13 @@ type ValidatorNodeConfig struct {
 	Model            string `yaml:"model"`
 	PromptFile       string `yaml:"prompt_file"`
 	SystemPromptFile string `yaml:"system_prompt_file"`
+}
+
+// ProjectManagerConfig configures the project manager that decomposes specs
+// into independent work packages for parallel worker execution.
+type ProjectManagerConfig struct {
+	ModelRef     string `yaml:"model_ref"`
+	SystemPrompt string `yaml:"system_prompt"`
 }
 
 // IntentConfig configures the intent recognition layer.
@@ -263,6 +271,11 @@ func (c *Config) validate() error {
 	if c.Intent.ModelRef != "" {
 		if _, ok := c.Models[c.Intent.ModelRef]; !ok {
 			return fmt.Errorf("intent.model_ref %q not found in models (define model tier %q in your provider config)", c.Intent.ModelRef, c.Intent.ModelRef)
+		}
+	}
+	if c.ProjectManager.ModelRef != "" {
+		if _, ok := c.Models[c.ProjectManager.ModelRef]; !ok {
+			return fmt.Errorf("project_manager.model_ref %q not found in models (define model tier %q in your provider config)", c.ProjectManager.ModelRef, c.ProjectManager.ModelRef)
 		}
 	}
 

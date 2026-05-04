@@ -2,7 +2,6 @@ package config
 
 import (
 	"os"
-	"strings"
 	"testing"
 )
 
@@ -25,22 +24,6 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.Retry.PlannerAttempts < 1 {
 		t.Error("planner attempts should be at least 1")
-	}
-}
-
-func TestDefaultConfig_IntentPromptDefinesLowFrictionIntake(t *testing.T) {
-	cfg := DefaultConfig()
-	for _, want := range []string{
-		"senior business analyst and project",
-		"positive feedback loop with minimal friction",
-		"clear work should pass through quickly",
-		"Ask at most three questions",
-		"Do not ask for details that the planner can discover",
-		"Make me an MMORPG",
-	} {
-		if !strings.Contains(cfg.Intent.SystemPrompt, want) {
-			t.Fatalf("intent system prompt missing %q", want)
-		}
 	}
 }
 

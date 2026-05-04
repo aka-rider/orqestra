@@ -82,6 +82,12 @@ type PlanValidatedMsg struct {
 	Err    error
 }
 
+// ProjectPlanReadyMsg signals that the PM finished decomposing the spec.
+type ProjectPlanReadyMsg struct {
+	Plan types.ProjectPlan
+	Err  error
+}
+
 // WorkValidatedMsg signals that work validation completed.
 type WorkValidatedMsg struct {
 	Report *types.ValidationReport

@@ -71,11 +71,7 @@ func WireSessionManager(p *tea.Program, sm *harness.SessionManager) {
 // StartExecutionSession starts the worker session via the SessionManager,
 // streaming into the TUI. Called from model.Update after confirmation.
 func StartExecutionSession(p *tea.Program, ctx context.Context, sm *harness.SessionManager, spec types.Specification, pipeline PipelineFuncs) {
-	// Build the prompt from spec
-	execPrompt := fmt.Sprintf("Execute the following plan:\n\nGoal: %s\n\nSteps:\n", spec.Goal)
-	for i, step := range spec.Steps {
-		execPrompt += fmt.Sprintf("%d. %s\n", i+1, step)
-	}
+	execPrompt := types.BuildExecutionPrompt(spec)
 
 	// The session manager will emit SessionPending → TUI creates tab.
 	// We use a sessionWriter that starts with tabIndex from the session event.
@@ -211,3 +207,23 @@ func (cw *capturingWriter) Write(p []byte) (n int, err error) {
 	}
 	return len(p), nil
 }
+
+// capturingSessionWriter routes streaming output via session ID and captures it.
+type capturingSessionWriter struct {
+	program   *tea.Program
+	sessionID string
+	captured  strings.Builder
+}
+
+func (cw *capturingSessionWriter) Write(p []byte) (n int, err error) {
+	if len(p) > 0 {
+		cw.program.Send(StreamChunkMsg{
+			SessionID: cw.sessionID,
+			Content:   string(p),
+		})
+		cw.captured.Write(p)
+	}
+	return len(p), nil
+}
+
+var _ io.Writer = (*capturingSessionWriter)(nil)

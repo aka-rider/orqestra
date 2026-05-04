@@ -262,3 +262,119 @@ type FailedCriterion struct {
 	Criterion string `json:"criterion"`
 	Reason    string `json:"reason"`
 }
+
+// WorkPackage is a single unit of work assigned by the Project Manager.
+// Each package is executed by one worker session independently.
+type WorkPackage struct {
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Steps       []string `json:"steps"`
+	Acceptance  []string `json:"acceptance"`
+	DependsOn   []string `json:"depends_on,omitempty"`
+	Constraints []string `json:"constraints,omitempty"`
+}
+
+// ProjectPlan is the PM's decomposition of a Specification into parallel worker tasks.
+type ProjectPlan struct {
+	SchemaVersion string        `json:"schema_version"`
+	Packages      []WorkPackage `json:"packages"`
+}
+
+// ToSpecification converts a WorkPackage into a Specification suitable for a
+// single worker session, inheriting context from the parent spec.
+func (wp WorkPackage) ToSpecification(parent Specification) Specification {
+	return Specification{
+		SchemaVersion: parent.SchemaVersion,
+		ID:            wp.ID,
+		Title:         wp.Title,
+		Goal:          wp.Title,
+		Context:       parent.Context,
+		Steps:         wp.Steps,
+		Acceptance:    wp.Acceptance,
+		Scope:         parent.Scope,
+		Constraints:   wp.Constraints,
+	}
+}
+
+// BuildExecutionPrompt renders a Specification into a prompt string for worker execution.
+func BuildExecutionPrompt(spec Specification) string {
+	prompt := fmt.Sprintf("Execute the following plan:\n\nGoal: %s\n\nSteps:\n", spec.Goal)
+	for i, step := range spec.Steps {
+		prompt += fmt.Sprintf("%d. %s\n", i+1, step)
+	}
+	if len(spec.Acceptance) > 0 {
+		prompt += "\nAcceptance Criteria:\n"
+		for _, criterion := range spec.Acceptance {
+			prompt += fmt.Sprintf("- %s\n", criterion)
+		}
+	}
+	return prompt
+}
+
+// FormatValidationFeedback renders a ValidationReport into text feedback for re-planning.
+func FormatValidationFeedback(report *ValidationReport) string {
+	result := fmt.Sprintf("Verdict: %s\nSummary: %s\n", report.Verdict, report.Summary)
+	if len(report.Issues) > 0 {
+		result += "Issues:\n"
+		for _, issue := range report.Issues {
+			result += fmt.Sprintf("  [%s] %s: %s\n", issue.Severity, issue.ID, issue.Message)
+		}
+	}
+	if len(report.Suggestions) > 0 {
+		result += "Suggestions:\n"
+		for _, s := range report.Suggestions {
+			result += fmt.Sprintf("  - %s\n", s)
+		}
+	}
+	return result
+}
+
+// TopoWaves sorts work packages into dependency waves using Kahn's algorithm.
+// Each wave contains packages whose dependencies are all in prior waves.
+func TopoWaves(packages []WorkPackage) [][]WorkPackage {
+	idx := make(map[string]int, len(packages))
+	for i, pkg := range packages {
+		idx[pkg.ID] = i
+	}
+
+	inDegree := make([]int, len(packages))
+	for i := range packages {
+		for range packages[i].DependsOn {
+			inDegree[i]++
+		}
+	}
+
+	var queue []int
+	for i, d := range inDegree {
+		if d == 0 {
+			queue = append(queue, i)
+		}
+	}
+
+	var waves [][]WorkPackage
+	for len(queue) > 0 {
+		wave := make([]WorkPackage, len(queue))
+		for i, qi := range queue {
+			wave[i] = packages[qi]
+		}
+		waves = append(waves, wave)
+
+		var nextQueue []int
+		for _, qi := range queue {
+			curID := packages[qi].ID
+			for i, pkg := range packages {
+				for _, dep := range pkg.DependsOn {
+					if dep == curID {
+						inDegree[i]--
+						if inDegree[i] == 0 {
+							nextQueue = append(nextQueue, i)
+						}
+					}
+				}
+			}
+		}
+		queue = nextQueue
+	}
+
+	return waves
+}

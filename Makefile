@@ -10,7 +10,7 @@ run: build
 
 test:
 	go test -coverprofile=coverage.out -covermode=atomic ./...
-	go tool cover -func=coverage.out
+	#go tool cover -func=coverage.out
 
 lint:
 	go vet ./...

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -20,15 +21,16 @@ import (
 type State int
 
 const (
-	StateIdle           State = iota // Command bar focused, waiting for input
-	StateIntentConfirm               // Show intake feedback before planning
-	StatePlanning                    // Planning tab active, claude running
-	StateValidating                  // Plan validation in progress
-	StateConfirming                  // Plan ready, waiting for [A]pprove/[R]eject/[E]dit
-	StateSaved                       // Plan saved to file; showing path + resume command
-	StateExecuting                   // Worker tab active, claude running
-	StateWorkValidating              // HTTP work validation in progress
-	StateDone                        // Everything finished, will cycle back to idle
+	StateIdle            State = iota // Command bar focused, waiting for input
+	StateIntentConfirm                // Show intake feedback before planning
+	StatePlanning                     // Planning tab active, claude running
+	StateValidating                   // Plan validation in progress
+	StateConfirming                   // Plan ready, waiting for [A]pprove/[R]eject/[E]dit
+	StateSaved                        // Plan saved to file; showing path + resume command
+	StateProjectManaging              // PM decomposing spec into work packages
+	StateExecuting                    // Worker tab(s) active, claude running
+	StateWorkValidating               // HTTP work validation in progress
+	StateDone                         // Everything finished, will cycle back to idle
 )
 
 // PipelineFuncs holds the functions the TUI drives.
@@ -39,6 +41,9 @@ type PipelineFuncs struct {
 	Plan func(ctx context.Context, prompt string, stdout io.Writer) (types.Specification, error)
 	// ValidatePlan runs plan validation. Returns nil report if validation is disabled.
 	ValidatePlan func(ctx context.Context, spec types.Specification) (*types.ValidationReport, error)
+	// DecomposeSpec runs the project manager to split a spec into work packages.
+	// If nil, the single-worker path is used.
+	DecomposeSpec func(ctx context.Context, spec types.Specification, stdout io.Writer) (types.ProjectPlan, error)
 	// Execute runs the worker and streams output.
 	Execute func(ctx context.Context, spec types.Specification, stdout io.Writer) error
 	// ValidateWork runs CLI-based work validation. Returns nil report if validation is disabled.
@@ -51,6 +56,11 @@ type PipelineFuncs struct {
 	// InitialSpec, when non-nil, skips the planning phase and starts directly at
 	// plan validation / confirmation with the pre-loaded spec.
 	InitialSpec *types.Specification
+
+	// Retry configuration — ported from the old Agent orchestrator.
+	PlannerAttempts      int // max planning attempts (0 or 1 = no retry)
+	PlanValidationRepair int // max plan-validation → re-plan cycles (0 = no repair)
+	WorkValidationRepair int // max work-validation → re-execute cycles (0 = no repair)
 }
 
 // Model is the main Bubble Tea model that drives the full pipeline.
@@ -70,6 +80,8 @@ type Model struct {
 	spec     types.Specification
 	approved bool
 	prompt   string // current prompt from command bar
+
+	projectPlan *types.ProjectPlan // set when PM decomposes the spec
 
 	tabsView    tabsView
 	confirmView confirmView
@@ -234,6 +246,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case addTabMsg:
 		idx := m.tabsView.AddTab(msg.name)
+		// Map tab name as session ID for stream routing
+		m.sessionTabs[msg.name] = idx
 		if m.state == StatePlanning && m.planTabIdx == -1 {
 			m.planTabIdx = idx
 			m.tabsView.active = idx
@@ -278,6 +292,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncConfirmViewport()
 		return m, m.confirmView.Focus()
 
+	case ProjectPlanReadyMsg:
+		if msg.Err != nil {
+			m.err = msg.Err
+			m.setState(StateDone)
+			return m, nil
+		}
+		m.projectPlan = &msg.Plan
+		m.setState(StateExecuting)
+
+		// Launch one worker per package, respecting dependencies via waves.
+		go m.startMultiWorkerExecution()
+		return m, nil
+
 	case ConfirmMsg:
 		m.confirmView.Blur()
 		switch msg.Choice {
@@ -286,6 +313,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case ConfirmAccept:
 			m.saveErr = nil
 			m.approved = true
+			// Route through project manager if available
+			if m.pipeline.DecomposeSpec != nil {
+				m.setState(StateProjectManaging)
+				go m.startProjectManagement()
+				return m, nil
+			}
 			m.setState(StateExecuting)
 			if m.pipeline.SessionManager != nil && m.program != nil {
 				go StartExecutionSession(m.program, m.ctx, m.pipeline.SessionManager, m.spec, m.pipeline)
@@ -607,6 +640,10 @@ func (m Model) View() string {
 		topView += "\n\n" + statusStyle.Render("⟳ Validating plan...")
 	}
 
+	if m.state == StateProjectManaging {
+		topView += "\n\n" + statusStyle.Render("⟳ Decomposing into work packages...")
+	}
+
 	if m.state == StateWorkValidating {
 	}
 
@@ -780,7 +817,8 @@ func (m Model) TabIndexForSession(sessionID string) int {
 }
 
 // startPlanning runs the pipeline.Plan function in a goroutine, streaming
-// output into the Planner tab.
+// output into the Planner tab. Includes planner retries and plan-validation
+// repair loops (re-plan on validation failure).
 func (m Model) startPlanning() {
 	p := m.program
 	pw := &sessionWriter{program: p, sessionID: "plan"}
@@ -791,7 +829,33 @@ func (m Model) startPlanning() {
 		State:     harness.SessionRunning,
 	}})
 
-	spec, err := m.pipeline.Plan(m.ctx, m.prompt, pw)
+	attempts := m.pipeline.PlannerAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+	repairs := m.pipeline.PlanValidationRepair
+	if repairs < 0 {
+		repairs = 0
+	}
+
+	currentPrompt := m.prompt
+
+	// planOnce tries to plan with retry on transient failures.
+	planOnce := func(prompt string) (types.Specification, error) {
+		var lastErr error
+		for i := 0; i < attempts; i++ {
+			spec, err := m.pipeline.Plan(m.ctx, prompt, pw)
+			if err != nil {
+				lastErr = err
+				slog.Warn("planner attempt failed", "attempt", i+1, "err", err)
+				continue
+			}
+			return spec, nil
+		}
+		return types.Specification{}, fmt.Errorf("planner exhausted %d attempts: %w", attempts, lastErr)
+	}
+
+	spec, err := planOnce(currentPrompt)
 	if err != nil {
 		p.Send(SessionEventMsg{Event: harness.SessionEvent{
 			SessionID: "plan",
@@ -801,6 +865,33 @@ func (m Model) startPlanning() {
 		}})
 		p.Send(ErrorMsg{Err: err})
 		return
+	}
+
+	// Plan-validation repair loop: validate, and if it fails, re-plan with feedback.
+	if m.pipeline.ValidatePlan != nil && repairs > 0 {
+		for i := 0; i <= repairs; i++ {
+			slog.Info("validating plan", "goal", spec.Goal, "repair_attempt", i)
+			report, valErr := m.pipeline.ValidatePlan(m.ctx, spec)
+			if valErr != nil {
+				slog.Warn("plan validation error, proceeding", "err", valErr)
+				break // validation infra error — proceed with current spec
+			}
+			if report == nil || report.Verdict != types.VerdictFail {
+				break // passed or warned — proceed
+			}
+			if i < repairs {
+				slog.Info("plan validation failed, re-planning", "attempt", i+1, "summary", report.Summary)
+				feedback := types.FormatValidationFeedback(report)
+				repairPrompt := fmt.Sprintf("%s\n\nPrevious plan was rejected by validator:\n%s\nPlease fix the issues and produce a corrected specification.", currentPrompt, feedback)
+				newSpec, planErr := planOnce(repairPrompt)
+				if planErr != nil {
+					slog.Warn("re-planning failed, using last spec", "err", planErr)
+					break
+				}
+				spec = newSpec
+			}
+			// If i == repairs and still failing, we fall through with the last spec.
+		}
 	}
 
 	p.Send(SessionEventMsg{Event: harness.SessionEvent{
@@ -842,7 +933,8 @@ func (m Model) startPlanValidation() {
 	p.Send(PlanValidatedMsg{Report: report, Err: err})
 }
 
-// startWorkValidation runs ValidateWork in a goroutine and sends the result.
+// startWorkValidation runs ValidateWork in a goroutine with optional re-execution
+// repair loop, and sends the result.
 func (m Model) startWorkValidation(workOutput string) {
 	p := m.program
 	if m.pipeline.ValidateWork == nil {
@@ -850,9 +942,131 @@ func (m Model) startWorkValidation(workOutput string) {
 		return
 	}
 
-	slog.Info("validating work output")
-	report, err := m.pipeline.ValidateWork(m.ctx, m.spec, workOutput)
-	p.Send(WorkValidatedMsg{Report: report, Err: err})
+	repairs := m.pipeline.WorkValidationRepair
+	if repairs < 0 {
+		repairs = 0
+	}
+
+	currentOutput := workOutput
+	for i := 0; i <= repairs; i++ {
+		slog.Info("validating work output", "attempt", i)
+		report, err := m.pipeline.ValidateWork(m.ctx, m.spec, currentOutput)
+		if err != nil {
+			p.Send(WorkValidatedMsg{Report: report, Err: err})
+			return
+		}
+		if report == nil || report.Verdict != types.VerdictFail {
+			p.Send(WorkValidatedMsg{Report: report})
+			return
+		}
+		if i < repairs {
+			slog.Info("work validation failed, re-executing", "attempt", i+1, "summary", report.Summary)
+			feedback := types.FormatValidationFeedback(report)
+			repairPrompt := fmt.Sprintf("The previous execution was rejected by the validator:\n%s\n\nOriginal spec goal: %s\nPlease fix the issues.", feedback, m.spec.Goal)
+			// Re-execute using a temporary spec with the repair prompt as goal
+			repairSpec := types.Specification{
+				Goal:       repairPrompt,
+				Steps:      m.spec.Steps,
+				Acceptance: m.spec.Acceptance,
+			}
+			cw := &capturingWriter{program: p, tabIndex: m.execTabIdx}
+			reExecErr := m.pipeline.Execute(m.ctx, repairSpec, cw)
+			if reExecErr != nil {
+				p.Send(WorkValidatedMsg{Report: report})
+				return
+			}
+			currentOutput = cw.captured.String()
+		} else {
+			p.Send(WorkValidatedMsg{Report: report})
+			return
+		}
+	}
+	p.Send(WorkValidatedMsg{})
+}
+
+// startProjectManagement runs DecomposeSpec in a goroutine.
+func (m Model) startProjectManagement() {
+	p := m.program
+	if m.pipeline.DecomposeSpec == nil {
+		p.Send(ProjectPlanReadyMsg{Err: fmt.Errorf("project manager not configured")})
+		return
+	}
+
+	// Create a PM tab for streaming output
+	pmTabIdx := -1
+	if p != nil {
+		p.Send(addTabMsg{name: "PM"})
+	}
+	_ = pmTabIdx
+
+	slog.Info("decomposing spec into work packages", "goal", m.spec.Goal)
+	pw := &sessionWriter{program: p, sessionID: "pm"}
+	plan, err := m.pipeline.DecomposeSpec(m.ctx, m.spec, pw)
+	p.Send(ProjectPlanReadyMsg{Plan: plan, Err: err})
+}
+
+// startMultiWorkerExecution launches workers for each package, respecting dependency waves.
+func (m Model) startMultiWorkerExecution() {
+	p := m.program
+	if m.projectPlan == nil || len(m.projectPlan.Packages) == 0 {
+		p.Send(HarnessDoneMsg{Err: fmt.Errorf("no work packages to execute")})
+		return
+	}
+
+	plan := *m.projectPlan
+	waves := types.TopoWaves(plan.Packages)
+
+	// Track all captured output for work validation
+	var allOutput strings.Builder
+
+	for waveIdx, wave := range waves {
+		slog.Info("executing wave", "wave", waveIdx+1, "packages", len(wave))
+
+		type result struct {
+			pkgID  string
+			output string
+			err    error
+		}
+		results := make(chan result, len(wave))
+
+		for _, pkg := range wave {
+			go func(wp types.WorkPackage) {
+				spec := wp.ToSpecification(m.spec)
+				tabIdx := -1
+
+				// Create tab for this worker
+				p.Send(addTabMsg{name: wp.ID})
+				// Slight race: tab index comes back async. Use session-based routing.
+				cw := &capturingSessionWriter{
+					program:   p,
+					sessionID: wp.ID,
+				}
+
+				slog.Info("worker started", "package", wp.ID)
+				err := m.pipeline.Execute(m.ctx, spec, cw)
+				_ = tabIdx
+				if err != nil {
+					results <- result{pkgID: wp.ID, err: fmt.Errorf("worker %q: %w", wp.ID, err)}
+					return
+				}
+				slog.Info("worker done", "package", wp.ID)
+				results <- result{pkgID: wp.ID, output: cw.captured.String()}
+			}(pkg)
+		}
+
+		// Collect results for this wave
+		for range wave {
+			r := <-results
+			if r.err != nil {
+				p.Send(HarnessDoneMsg{Err: r.err})
+				return
+			}
+			fmt.Fprintf(&allOutput, "=== Package: %s ===\n%s\n", r.pkgID, r.output)
+		}
+	}
+
+	// All packages done — send completion with combined output for work validation
+	p.Send(HarnessDoneMsg{WorkOutput: allOutput.String()})
 }
 
 func (m *Model) setState(s State) {
@@ -869,7 +1083,7 @@ func defaultFocusForState(s State) FocusTarget {
 	switch s {
 	case StateIdle, StateIntentConfirm:
 		return FocusPrompt
-	case StatePlanning, StateExecuting:
+	case StatePlanning, StateExecuting, StateProjectManaging:
 		return FocusTabs
 	case StateConfirming:
 		return FocusPlan

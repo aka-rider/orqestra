@@ -199,15 +199,9 @@ Always wrap `p.Run()` with this pattern. Context cancellation on ctrl+c ensures 
 - **Validation warnings vs failures**: warnings may continue only when the UI clearly displays them; failures must stop the pipeline.
 - **Config defaults**: defaults are acceptable for omitted optional settings, not for user-specified references that fail to resolve.
 
-## Repo Audit Corrections for Future Agents
+## Repo Maintenance
 
-These are the top three instruction-worthy issues found in this repo. Prefer fixing them before building features on top of the affected code.
-
-For a detailed LLM-ready refactoring pass, follow `plan-eliminate-audit-findings.md`.
-
-1. **Make harness construction fail explicitly** — `internal/harness/claude_cli.go` returns `nil` from `NewClaudeCLIFromConfig` when `modelRef` is empty or cannot resolve, and logs instead of returning the error. Change this API to return `(CLIRunner, error)` or split optional construction from required construction. User-specified model references must fail fast.
-2. **Convert TUI log panel back to Elm-style state** — `internal/tui/view_log.go` uses pointer receivers plus `sync.Mutex` inside a Bubble Tea sub-model. Replace external mutation with `LogMsg`/typed messages sent through `p.Send`, store entries as plain value state, and update the panel only from `Update`.
-3. **Replace sleep-based async tests** — `internal/harness/session_test.go` and `internal/scheduler/scheduler_test.go` use `time.Sleep` to wait for goroutines. Replace with completion channels, `sync.WaitGroup`, context deadlines, or eventually-style polling with explicit timeout and assertion messages.
+The codebase enforces strict rules on Bubble Tea sub-models, error handling, and Goroutine synchronization. Look at `internal/tui/view_log.go`, `internal/harness/claude_cli.go`, and `internal/scheduler/scheduler_test.go` as canonical examples of how to correctly manage state, construction failures, and asynchronous tests without relying on anti-patterns.
 
 ## Available MCP Servers
 
