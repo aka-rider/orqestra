@@ -45,8 +45,7 @@ Wave 11 ── remove-old-paths (← planner-pty, validator-pm-pty, workers-pty,
 | [docker-sdk-migration](phase-0-docker-sdk-migration.md) | 1 | `internal/sandbox/docker.go` — replace CLI shell-outs with Go SDK |
 | [overlayfs-sandbox](phase-0-overlayfs-sandbox.md) | 2 | `internal/sandbox/docker.go`, `build/sandbox/` — replace BTRFS with OverlayFS |
 | [sandbox-file-transfer](phase-0-sandbox-file-transfer.md) | 2 | `internal/sandbox/transfer.go` — SDK CopyTo/CopyFrom for artifacts and files |
-| [pty-session](phase-0-pty-session.md) | 3 | `internal/harness/pty_session.go` — Docker exec-attach with TTY |
-| [term-view](phase-0-term-view.md) | 4 | `internal/tui/view_term.go` |
+| [pty-session + term-view](phase-0-pty-session-and-term-view.md) | 3–4 | `internal/harness/pty_session.go` + `internal/tui/view_term.go` — creack/pty wrapping docker exec -it |
 | [input-detection](phase-1-input-detection.md) | 4 | `internal/harness/input_detector.go` |
 
 ### Phase 1 — Intake Agent E2E (Waves 5–7)
@@ -72,7 +71,7 @@ Wave 11 ── remove-old-paths (← planner-pty, validator-pm-pty, workers-pty,
 
 - **Wave 1** (3 packages) are fully concurrent — disjoint files.
 - **Wave 2** (2 packages) are concurrent — `overlayfs-sandbox` and `sandbox-file-transfer` touch different files.
-- **Wave 3** (`pty-session`) is the critical pivot: it depends on the Docker SDK being in place to use `ContainerExecAttach` with TTY. This replaces the local `creack/pty` approach — we need a real Docker TTY, not a host-side PTY wrapping `docker exec`.
+- **Wave 3** (`pty-session`) is the critical pivot: it uses `creack/pty` to wrap `docker exec -it` — allocating a local PTY that propagates TTY through Docker into the container. This gives us bidirectional raw I/O with SIGWINCH propagation for resize.
 - **Wave 5** (`pty-runner-lifecycle`) is the integration point: it combines session naming, artifacts, PTY, OverlayFS extraction, and SDK file transfer into the complete Prepare→Launch→Collect→Destroy lifecycle.
 - **Phase 1 must be rock-solid before starting Phase 2.**
 - All integration tests require Docker and the rebuilt `orqestra-sandbox:latest` image (no BTRFS, no `--privileged`).
@@ -85,7 +84,7 @@ Wave 11 ── remove-old-paths (← planner-pty, validator-pm-pty, workers-pty,
 | `exec.CommandContext(ctx, "docker", ...)` | `github.com/docker/docker/client` SDK | `docker-sdk-migration` |
 | BTRFS loop mount + `--privileged` + `btrfs send/receive` | Docker native OverlayFS + `ContainerDiff` API | `overlayfs-sandbox` |
 | `docker exec cat` for file extraction | `CopyToContainer` / `CopyFromContainer` | `sandbox-file-transfer` |
-| `creack/pty` local PTY wrapping docker exec CLI | `ContainerExecAttach(Tty: true)` hijacked conn | `pty-session` |
+| `creack/pty` local PTY wrapping docker exec CLI | Same — `creack/pty` wrapping `docker exec -it` (correct arch) | `pty-session-term-view` |
 
 ## Critical Invariants (Must Not Regress)
 

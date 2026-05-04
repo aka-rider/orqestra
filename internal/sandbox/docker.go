@@ -391,27 +391,8 @@ func (d *DockerSandbox) CopyOut(ctx context.Context, sandboxPath, hostPath strin
 		return err
 	}
 
-	// Ensure parent directory exists on host.
-	dir := filepath.Dir(hostPath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("creating directory %s: %w", dir, err)
-	}
-
-	// Stream file content via exec cat (CopyFromContainer returns a tar archive
-	// which adds complexity; exec cat is simpler for single-file extraction).
-	var stdout bytes.Buffer
-	exitCode, err := d.execInternalWithOutput(ctx, []string{"cat", "/workspace/" + sandboxPath}, &stdout)
-	if err != nil {
-		return fmt.Errorf("reading %s from container: %w", sandboxPath, err)
-	}
-	if exitCode != 0 {
-		return fmt.Errorf("reading %s from container: exit code %d", sandboxPath, exitCode)
-	}
-
-	if err := os.WriteFile(hostPath, stdout.Bytes(), 0o644); err != nil {
-		return fmt.Errorf("writing %s: %w", hostPath, err)
-	}
-	return nil
+	containerPath := "/workspace/" + sandboxPath
+	return CopyFileFromContainer(ctx, d.cli, d.containerID, containerPath, hostPath)
 }
 
 // Destroy stops and removes the container and ephemeral image.
