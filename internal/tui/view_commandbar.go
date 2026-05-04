@@ -10,14 +10,15 @@ import (
 
 // commandBarModel is the persistent command bar at the bottom of the TUI.
 type commandBarModel struct {
-	input       textinput.Model
-	registry    *CommandRegistry
-	state       State // current model state for autocomplete filtering
-	suggestions []Command
-	showAC      bool // autocomplete overlay visible
-	acIndex     int  // selected autocomplete index
-	focused     bool
-	width       int
+	input         textinput.Model
+	registry      *CommandRegistry
+	state         State // current model state for autocomplete filtering
+	suggestions   []Command
+	showAC        bool // autocomplete overlay visible
+	acIndex       int  // selected autocomplete index
+	focused       bool
+	width         int
+	intentVerdict string
 }
 
 func newCommandBar(registry *CommandRegistry) commandBarModel {
@@ -44,6 +45,11 @@ func (c *commandBarModel) SetWidth(w int) {
 // SetState updates the current state for filtering commands.
 func (c *commandBarModel) SetState(state State) {
 	c.state = state
+}
+
+// SetIntentVerdict updates the intake verdict used for contextual hints.
+func (c *commandBarModel) SetIntentVerdict(verdict string) {
+	c.intentVerdict = verdict
 }
 
 // Focus gives keyboard focus to the command bar.
@@ -222,10 +228,17 @@ func (c commandBarModel) ViewAutocomplete() string {
 // renderHint produces the contextual hint line.
 func (c commandBarModel) renderHint() string {
 	switch c.state {
-	case StateConfirming, StateIntentConfirm:
+	case StateConfirming:
 		approve := approveKeyStyle.Render("[A]")
 		reject := rejectKeyStyle.Render("[R]")
 		return commandBarHintStyle.Render("  " + approve + "pprove or " + reject + "eject?")
+	case StateIntentConfirm:
+		reject := rejectKeyStyle.Render("[R]")
+		if c.intentVerdict == "reject" {
+			return commandBarHintStyle.Render("  " + reject + "efine prompt")
+		}
+		approve := approveKeyStyle.Render("[A]")
+		return commandBarHintStyle.Render("  " + approve + "ccept anyway or " + reject + "efine")
 	default:
 		cmds := c.registry.Available(c.state)
 		var names []string

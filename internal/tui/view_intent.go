@@ -2,12 +2,11 @@ package tui
 
 import "strings"
 
-// renderIntent renders the intent confirmation view showing rephrased intent,
-// end-state vision, and any clarification or rejection feedback.
+// renderIntent renders the intake view showing cleaned intent and any feedback.
 func renderIntent(rephrased, endState, reason string, questions, examples []string, verdict string) string {
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render("Intent Recognition"))
+	b.WriteString(titleStyle.Render("Intake"))
 	b.WriteString("\n\n")
 
 	b.WriteString(goalStyle.Render("Rephrased: "))
@@ -46,11 +45,13 @@ func renderIntent(rephrased, endState, reason string, questions, examples []stri
 
 	switch verdict {
 	case "reject":
-		b.WriteString(errorStyle.Render("✗ Rejected") + " — refine your prompt and try again.")
+		b.WriteString(errorStyle.Render("✗ Not planner-ready") + " — refine your prompt and try again.")
 	case "clarify":
 		approve := approveKeyStyle.Render("[A]")
 		reject := rejectKeyStyle.Render("[R]")
 		b.WriteString(approve + "ccept anyway or " + reject + "efine prompt")
+	case "pending":
+		b.WriteString(subtitleStyle.Render("Checking scope before planning..."))
 	default:
 		approve := approveKeyStyle.Render("[A]")
 		reject := rejectKeyStyle.Render("[R]")

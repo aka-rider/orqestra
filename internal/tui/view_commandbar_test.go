@@ -121,6 +121,20 @@ func TestCommandBar_HintShowsApproveReject(t *testing.T) {
 	}
 }
 
+func TestCommandBar_IntakeRejectHintShowsRefineOnly(t *testing.T) {
+	cb := newCommandBar(testRegistry())
+	cb.SetState(StateIntentConfirm)
+	cb.SetIntentVerdict("reject")
+
+	hint := cb.renderHint()
+	if strings.Contains(hint, "[A]") {
+		t.Errorf("reject intake hint should not advertise accept, got %q", hint)
+	}
+	if !strings.Contains(hint, "[R]") || !strings.Contains(hint, "efine") {
+		t.Errorf("reject intake hint should offer refine, got %q", hint)
+	}
+}
+
 func TestCommandBar_TabCompletesSelectedSuggestion(t *testing.T) {
 	cb := newCommandBar(testRegistry())
 	cb.SetState(StateIdle)

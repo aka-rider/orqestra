@@ -1,0 +1,31 @@
+{
+  "prompts": {
+    "happy_path": "build a happy path thing"
+  },
+  "responses": {
+    "intent_accept": {
+      "verdict": "accept",
+      "rephrased": "Add a right pane listing keystrokes",
+      "end_state": "Pane exists"
+    },
+    "intent_clarify": {
+      "verdict": "clarify",
+      "reason": "What specifically?",
+      "questions": ["A or B?"]
+    }
+  },
+  "spec": {
+    "goal": "Test goal",
+    "steps": ["Step 1", "Step 2"],
+    "acceptance": ["Criterion 1", "Criterion 2"]
+  },
+  "llm_mock": {
+    "choices": [
+      {
+        "message": {
+          "content": "Mocked LLM Response Output"
+        }
+      }
+    ]
+  }
+}

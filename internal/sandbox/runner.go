@@ -29,6 +29,10 @@ type RunnerConfig struct {
 	// StagingDir is the directory where extracted files are staged before
 	// being copied to the repo. If empty, a temp directory is used.
 	StagingDir string
+
+	// SandboxFactory creates a new Sandbox instance. If nil, NewDockerSandbox is used.
+	// Override in tests to inject a mock sandbox without requiring Docker.
+	SandboxFactory func(cfg Config, repoPath string, env []string) Sandbox
 }
 
 // SandboxedCLIRunner implements harness.CLIRunner by running the claude CLI
@@ -66,7 +70,13 @@ func (r *SandboxedCLIRunner) RunStreaming(ctx context.Context, prompt, systemPro
 
 // runInSandbox manages the full sandbox lifecycle: provision → exec → extract → verify → apply → destroy.
 func (r *SandboxedCLIRunner) runInSandbox(ctx context.Context, command []string, stdout io.Writer) (string, []ChangedFile, error) {
-	sb := NewDockerSandbox(r.cfg.Sandbox, r.cfg.RepoPath, r.cfg.Env)
+	factory := r.cfg.SandboxFactory
+	if factory == nil {
+		factory = func(cfg Config, repoPath string, env []string) Sandbox {
+			return NewDockerSandbox(cfg, repoPath, env)
+		}
+	}
+	sb := factory(r.cfg.Sandbox, r.cfg.RepoPath, r.cfg.Env)
 	r.emitState(sb.ID(), StatePending)
 
 	// Always destroy the sandbox, even on error or panic.
@@ -142,8 +152,37 @@ func (r *SandboxedCLIRunner) runInSandbox(ctx context.Context, command []string,
 	return capture.String(), changes, nil
 }
 
-// applyChanges copies verified files from the sandbox to the host repo.
+// applyChanges stages verified files from the sandbox to a staging directory,
+// then copies them atomically to the host repo. This two-phase approach ensures
+// the repo is not partially modified if any copy from the sandbox fails.
 func (r *SandboxedCLIRunner) applyChanges(ctx context.Context, sb Sandbox, changes []ChangedFile) error {
+	stagingDir := r.cfg.StagingDir
+	if stagingDir == "" {
+		var err error
+		stagingDir, err = os.MkdirTemp("", "orqestra-staging-*")
+		if err != nil {
+			return fmt.Errorf("creating staging dir: %w", err)
+		}
+		defer os.RemoveAll(stagingDir)
+	}
+
+	// Phase 1: stage all added/modified files from the sandbox.
+	// If any extraction fails, the repo is untouched.
+	for _, f := range changes {
+		if f.Op == FileDeleted {
+			continue
+		}
+		stagingPath := filepath.Join(stagingDir, f.Path)
+		if err := os.MkdirAll(filepath.Dir(stagingPath), 0o755); err != nil {
+			return fmt.Errorf("creating staging parent for %s: %w", f.Path, err)
+		}
+		if err := sb.CopyOut(ctx, f.Path, stagingPath); err != nil {
+			return fmt.Errorf("staging %s: %w", f.Path, err)
+		}
+		slog.Debug("sandbox: staged", "path", f.Path)
+	}
+
+	// Phase 2: apply staged files to the repo.
 	for _, f := range changes {
 		switch f.Op {
 		case FileDeleted:
@@ -154,14 +193,38 @@ func (r *SandboxedCLIRunner) applyChanges(ctx context.Context, sb Sandbox, chang
 			slog.Debug("sandbox: deleted", "path", f.Path)
 
 		case FileAdded, FileModified:
+			stagingPath := filepath.Join(stagingDir, f.Path)
 			hostPath := filepath.Join(r.cfg.RepoPath, f.Path)
-			if err := sb.CopyOut(ctx, f.Path, hostPath); err != nil {
-				return fmt.Errorf("copying %s: %w", f.Path, err)
+			if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
+				return fmt.Errorf("creating parent dir for %s: %w", f.Path, err)
+			}
+			if err := copyFile(stagingPath, hostPath); err != nil {
+				return fmt.Errorf("applying %s: %w", f.Path, err)
 			}
 			slog.Debug("sandbox: applied", "path", f.Path, "op", f.Op)
 		}
 	}
 	return nil
+}
+
+// copyFile copies the file at src to dst, overwriting dst if it exists.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // buildCommand constructs the claude CLI command to run inside the container.

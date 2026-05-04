@@ -1,4 +1,4 @@
-.PHONY: build run test lint clean sandbox-image sandbox-test
+.PHONY: build run test lint clean e2e sandbox-image sandbox-test
 
 BINARY := orqestra
 
@@ -9,13 +9,17 @@ run: build
 	./$(BINARY) $(ARGS)
 
 test:
-	go test ./...
+	go test -coverprofile=coverage.out -covermode=atomic ./...
+	go tool cover -func=coverage.out
 
 lint:
 	go vet ./...
 
 clean:
 	rm -f $(BINARY)
+
+e2e:
+	go test -tags e2e ./internal/harness/ -v -count=1 -run TestE2E -timeout 120s
 
 sandbox-image:
 	docker build -t orqestra-sandbox:latest -f build/sandbox/Dockerfile .

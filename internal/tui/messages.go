@@ -54,6 +54,16 @@ type IntentResultMsg struct {
 	Err                    error
 }
 
+// IntentResult is the non-UI equivalent returned by the pipeline intake hook.
+type IntentResult struct {
+	Verdict                string
+	Rephrased              string
+	EndState               string
+	Reason                 string
+	Questions              []string
+	ImprovedPromptExamples []string
+}
+
 // IntentConfirmMsg signals that the user approved the rephrased intent.
 type IntentConfirmMsg struct{}
 

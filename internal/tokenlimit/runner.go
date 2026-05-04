@@ -31,21 +31,20 @@ func (r *LimitedRunner) RunPrint(ctx context.Context, prompt, systemPrompt strin
 		return harness.RunResult{}, err
 	}
 
-	result, err := r.inner.RunPrint(ctx, prompt, systemPrompt)
-	if err != nil {
-		return result, err
-	}
+	result, innerErr := r.inner.RunPrint(ctx, prompt, systemPrompt)
 
 	if result.Usage != nil && result.Usage.TotalTokens > 0 {
 		if budgetErr := r.limiter.Record(ctx, r.model, r.agentID, result.Usage.TotalTokens); budgetErr != nil {
 			// Record succeeded (tokens are persisted), but budget is now exceeded.
-			// Return the result alongside the budget error so the caller gets both the
-			// output and the notification that budget is blown.
+			// If the inner call also errored, return the inner error — it is the primary failure.
+			if innerErr != nil {
+				return result, innerErr
+			}
 			return result, budgetErr
 		}
 	}
 
-	return result, nil
+	return result, innerErr
 }
 
 func (r *LimitedRunner) RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (harness.RunResult, error) {
@@ -53,16 +52,16 @@ func (r *LimitedRunner) RunStreaming(ctx context.Context, prompt, systemPrompt s
 		return harness.RunResult{}, err
 	}
 
-	result, err := r.inner.RunStreaming(ctx, prompt, systemPrompt, stdout)
-	if err != nil {
-		return result, err
-	}
+	result, innerErr := r.inner.RunStreaming(ctx, prompt, systemPrompt, stdout)
 
 	if result.Usage != nil && result.Usage.TotalTokens > 0 {
 		if budgetErr := r.limiter.Record(ctx, r.model, r.agentID, result.Usage.TotalTokens); budgetErr != nil {
+			if innerErr != nil {
+				return result, innerErr
+			}
 			return result, budgetErr
 		}
 	}
 
-	return result, nil
+	return result, innerErr
 }

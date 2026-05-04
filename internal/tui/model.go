@@ -21,7 +21,7 @@ type State int
 
 const (
 	StateIdle           State = iota // Command bar focused, waiting for input
-	StateIntentConfirm               // Show rephrased intent, [A]pprove/[R]eject
+	StateIntentConfirm               // Show intake feedback before planning
 	StatePlanning                    // Planning tab active, claude running
 	StateValidating                  // Plan validation in progress
 	StateConfirming                  // Plan ready, waiting for [A]pprove/[R]eject/[E]dit
@@ -33,6 +33,8 @@ const (
 
 // PipelineFuncs holds the functions the TUI drives.
 type PipelineFuncs struct {
+	// RecognizeIntent optionally cleans or blocks prompts before planning.
+	RecognizeIntent func(ctx context.Context, prompt string) (IntentResult, error)
 	// Plan runs the planner and streams output. Returns the spec.
 	Plan func(ctx context.Context, prompt string, stdout io.Writer) (types.Specification, error)
 	// ValidatePlan runs plan validation. Returns nil report if validation is disabled.
@@ -84,6 +86,7 @@ type Model struct {
 	// Help/intent ephemeral content displayed in tab area
 	helpContent   string
 	intentContent string
+	intentVerdict string
 
 	pipeline PipelineFuncs
 	program  *tea.Program // set after program creation for execution coordination
@@ -301,6 +304,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case IntentConfirmMsg:
 		m.setState(StatePlanning)
 		m.intentContent = ""
+		m.setIntentVerdict("")
 		if m.planTabIdx == -1 {
 			m.planTabIdx = m.tabsView.AddTab("Planner")
 			m.sessionTabs["plan"] = m.planTabIdx
@@ -313,7 +317,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setState(StateIdle)
 		m.commandBar.Focus()
 		m.intentContent = ""
+		m.setIntentVerdict("")
 		return m, nil
+
+	case IntentResultMsg:
+		if msg.Err != nil {
+			m.err = msg.Err
+			m.intentContent = ""
+			m.setIntentVerdict("")
+			m.setState(StateDone)
+			return m, nil
+		}
+		m.prompt = msg.Rephrased
+		switch msg.Verdict {
+		case "accept":
+			m.intentContent = ""
+			m.setIntentVerdict("")
+			return m.beginPlanning()
+		case "clarify", "reject":
+			m.setIntentVerdict(msg.Verdict)
+			m.intentContent = renderIntent(msg.Rephrased, msg.EndState, msg.Reason, msg.Questions, msg.ImprovedPromptExamples, msg.Verdict)
+			m.setState(StateIntentConfirm)
+			m.commandBar.Focus()
+			return m, nil
+		default:
+			m.err = fmt.Errorf("intent recognition returned invalid verdict %q", msg.Verdict)
+			m.intentContent = ""
+			m.setIntentVerdict("")
+			m.setState(StateDone)
+			return m, nil
+		}
 
 	case StreamChunkMsg:
 		if msg.SessionID != "" {
@@ -454,6 +487,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.state == StateIntentConfirm {
 		switch key {
 		case "a", "A":
+			if m.intentVerdict == "reject" {
+				return m, nil
+			}
 			return m, func() tea.Msg { return IntentConfirmMsg{} }
 		case "r", "R":
 			return m, func() tea.Msg { return IntentRejectMsg{} }
@@ -480,8 +516,21 @@ func (m Model) handlePromptSubmit(msg PromptSubmitMsg) (tea.Model, tea.Cmd) {
 
 	m.prompt = msg.Prompt
 	m.helpContent = ""
+	m.setIntentVerdict("")
 
-	// Phase 1: Skip intent recognition, go directly to planning
+	if m.pipeline.RecognizeIntent != nil {
+		m.intentContent = renderIntent("Reviewing request...", "", "", nil, nil, "pending")
+		m.setState(StateIntentConfirm)
+		if m.program != nil {
+			go m.startIntentRecognition(msg.Prompt)
+		}
+		return m, nil
+	}
+
+	return m.beginPlanning()
+}
+
+func (m Model) beginPlanning() (tea.Model, tea.Cmd) {
 	m.setState(StatePlanning)
 
 	// Create planner tab if needed
@@ -762,6 +811,24 @@ func (m Model) startPlanning() {
 	p.Send(planCompleteMsg{spec: spec})
 }
 
+// startIntentRecognition runs the intake model before the expensive planner.
+func (m Model) startIntentRecognition(prompt string) {
+	p := m.program
+	result, err := m.pipeline.RecognizeIntent(m.ctx, prompt)
+	if err != nil {
+		p.Send(IntentResultMsg{Err: err})
+		return
+	}
+	p.Send(IntentResultMsg{
+		Verdict:                result.Verdict,
+		Rephrased:              result.Rephrased,
+		EndState:               result.EndState,
+		Reason:                 result.Reason,
+		Questions:              result.Questions,
+		ImprovedPromptExamples: result.ImprovedPromptExamples,
+	})
+}
+
 // startPlanValidation runs ValidatePlan in a goroutine and sends the result.
 func (m Model) startPlanValidation() {
 	p := m.program
@@ -792,6 +859,11 @@ func (m *Model) setState(s State) {
 	m.state = s
 	m.commandBar.SetState(s)
 	m.focus = defaultFocusForState(s)
+}
+
+func (m *Model) setIntentVerdict(verdict string) {
+	m.intentVerdict = verdict
+	m.commandBar.SetIntentVerdict(verdict)
 }
 func defaultFocusForState(s State) FocusTarget {
 	switch s {
