@@ -17,15 +17,18 @@ Single end-to-end integration test proving the full Intake agent lifecycle with 
 
 ```go
 func TestE2E_IntakePTY(t *testing.T) {
-    // 1. Generate session name
-    // 2. Write user prompt as input artifact
-    // 3. Prepare sandbox (Docker, network=bridge)
-    // 4. Launch Claude Code PTY inside sandbox
+    // 0. Use `harness.NewPTYRunner` and `sandbox.NewDockerSandbox` public APIs
+    // 1. Generate session name, passing to Prepare
+    // 2. Write a deterministic input prompt artifact (e.g., "Create a spec that verifies tty emulation works")
+    // 3. Prepare sandbox (Docker, network=bridge) using SandboxEnvironment interface
+    // 4. Launch Claude Code PTY inside sandbox (connected to Qwen3.6 via proxy)
     // 5. Wait for PTYDoneMsg (timeout: 3 min)
     // 6. Collect output artifact
     //
     // Assert:
+    //   - PTYDoneMsg returns `ExitCode == 0` (no crash)
     //   - output.md exists in session dir with valid frontmatter
+    //   - frontmatter explicitly contains `ID`, `Goals`, `Files`, `depends_on`
     //   - output body is non-empty markdown
     //   - input_hash in output matches hash of input.md
     //   - system-prompt.md saved in session dir
@@ -52,7 +55,8 @@ func TestE2E_IntakePTY(t *testing.T) {
 ## Acceptance
 
 - `go test ./internal/harness/ -tags e2e -run TestE2E_IntakePTY -timeout 5m` passes.
-- Output artifact has valid YAML frontmatter with all required fields.
+- Explicit assertion on `PTYRunner` returning zero exit codes.
+- Output artifact has valid YAML frontmatter, explicitly checking for required fields (`ID`, `Goals`, `Files`, `depends_on`).
 - Artifact chain validation passes (InputHash matches).
 - No orphaned Docker resources after test.
 - Files touched: ONLY `internal/harness/pty_runner_e2e_test.go`.

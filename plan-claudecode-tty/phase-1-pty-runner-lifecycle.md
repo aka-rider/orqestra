@@ -17,9 +17,10 @@ Implement `SandboxedPTYRunner` with the full agent lifecycle: Prepare → Launch
 
 1. Create `internal/harness/pty_runner.go` with:
    - `SandboxedPTYRunner` struct holding session config, sandbox builder, and verifier.
-   - `RunningAgent` struct: `Config`, `Sandbox`, `PTY *PTYSession`, `SessionDir`, `StepName`, `tabIndex int`.
-   - `Prepare(ctx context.Context, cfg AgentConfig) (RunningAgent, error)`:
-     - Generate session name via `GenerateSessionName()`.
+   - `SandboxEnvironment` interface encapsulating dependencies on `internal/sandbox` functions (e.g., `Provision`, `StageInputs`, `ExtractArtifact`, `ExtractChanges`, `Destroy`, `CopyFileFromContainer`) to ensure loose coupling. Consumers instantiate `SandboxedPTYRunner` with a concrete `SandboxEnvironment`.
+   - `RunningAgent` struct: `Config`, `Sandbox Environment`, `PTY *PTYSession`, `SessionDir`, `StepName`, `tabIndex int`.
+   - `Prepare(ctx context.Context, cfg AgentConfig, sessionName, basePath string) (RunningAgent, error)`:
+     - Generate session name externally to decouple; the pipeline passes it in.
      - Create session directory on host: `<basePath>/<sessionName>/<stepName>/`.
      - Write `input.md` and `system-prompt.md` to step directory on host.
      - Provision Docker container (via `DockerSandbox.Provision()` — uses Docker SDK, OverlayFS).
@@ -30,11 +31,11 @@ Implement `SandboxedPTYRunner` with the full agent lifecycle: Prepare → Launch
 
 1. Add to `pty_runner.go`:
    - `Launch(ctx context.Context, agent *RunningAgent, send func(tea.Msg)) error`:
-     - Build Claude Code command: `[]string{"claude", "--dangerously-skip-permissions", "--system-prompt", "$(cat /workspace/.orqestra/system-prompt.md)"}`.
+     - Build Claude Code command: `[]string{"sh", "-c", "claude --dangerously-skip-permissions --system-prompt \"$(cat /workspace/.orqestra/system-prompt.md)\""}`.
      - Start `PTYSession` via Docker SDK exec-attach (`pty.Start(ctx, cli, containerID, command, env, cols, rows)`).
      - Launch `pumpOutput` goroutine (reads from hijacked connection → sends `PTYOutputMsg`).
-     - Launch `sendInitialPrompt` goroutine (waits 2s, writes instruction to hijacked connection).
-   - `sendInitialPrompt()` — waits, then writes the "read input.md, write output.md" instruction.
+     - Launch `sendInitialPrompt` goroutine (waits until deterministic output detection in `pumpOutput` triggers, then writes instruction to hijacked connection without using `time.Sleep`).
+   - `sendInitialPrompt()` — writes the "read input.md, write output.md" instruction once terminal readiness is detected.
 
 ### 1.3 — SandboxedPTYRunner.Collect()
 
@@ -53,8 +54,8 @@ Implement `SandboxedPTYRunner` with the full agent lifecycle: Prepare → Launch
 1. Add to `pty_runner.go`:
    - `pumpOutput(send func(tea.Msg))`:
      - 4KB read buffer, loop until EOF or context cancel.
-     - Deep copy bytes before sending (`PTYOutputMsg{TabIndex, Data}`).
-     - On EOF/error: send `PTYDoneMsg{TabIndex, Err, ExitCode}`.
+     - Deep copy bytes before sending (`PTYOutputMsg{TabIndex, Data}`). Output scanning allows synchronization with `sendInitialPrompt` upon detection of the application readiness token.
+     - On EOF/error: explicitly query the Docker SDK `ContainerExecInspect` to fetch the final `ExitCode` before dispatching `PTYDoneMsg{TabIndex, Err, ExitCode}` to correctly capture failure.
 
 ### 1.5 — Destroy + Signal Handling
 

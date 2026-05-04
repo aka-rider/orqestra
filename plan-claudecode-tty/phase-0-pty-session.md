@@ -20,12 +20,12 @@ Implement the PTYSession type that wraps Docker SDK's exec-attach with TTY alloc
      - `ContainerExecCreate(ctx, containerID, types.ExecConfig{Cmd, Env, Tty: true, AttachStdin: true, AttachStdout: true, AttachStderr: true, ConsoleSize: [2]uint{rows, cols}})`
      - `ContainerExecAttach(ctx, execID, types.ExecStartCheck{Tty: true, ConsoleSize: [2]uint{rows, cols}})` — returns hijacked connection.
      - The hijacked connection's `Conn` implements `io.ReadWriteCloser` — this IS the TTY stream.
-     - Start background goroutine monitoring exec exit via `ContainerExecInspect` polling.
-   - `Write(p []byte) (int, error)` — writes to hijacked connection (reaches subprocess stdin).
-   - `Read(p []byte) (int, error)` — reads from hijacked connection (subprocess stdout+stderr, already merged in TTY mode). Blocking.
+     - Wait for `Read()` to return `io.EOF` on the hijacked connection, then perform a single `ContainerExecInspect` to fetch the final `ExitCode`. (Do NOT use a separate polling goroutine that burns CPU).
+   - `Write(p []byte) (int, error)` — writes to hijacked connection (reaches subprocess stdin). Do not hold `mu` mutex during blocking writes.
+   - `Read(p []byte) (int, error)` — reads from hijacked connection (subprocess stdout+stderr, already merged in TTY mode). Blocking. Do not hold `mu` mutex during blocking reads.
    - `Resize(cols, rows uint16) error` — calls `cli.ContainerExecResize(ctx, execID, container.ResizeOptions{Height: rows, Width: cols})`.
    - `ExitCode() int` — returns subprocess exit code (valid after Read returns io.EOF). Obtained from `ContainerExecInspect`.
-   - `Close() error` — closes hijacked connection, cancels context. Idempotent (second call returns nil). Does NOT destroy the container (that's the runner's job).
+   - `Close() error` — closes hijacked connection, cancels context. Idempotent (second call returns nil). Does NOT destroy the container (that's the runner's job). Thread-safely closes the connection to unblock any pending `Read`/`Write` by using `mu`. Note that Docker `exec` cancellation does not forcefully kill the process; send `\x03` (SIGINT) to the TTY before closing if process termination is required.
 
    Note: No `github.com/creack/pty` dependency. Docker SDK handles TTY allocation server-side. The hijacked connection is a raw TCP/Unix socket stream — no local PTY needed.
 
@@ -34,14 +34,14 @@ Implement the PTYSession type that wraps Docker SDK's exec-attach with TTY alloc
    | Test | Command inside container | Assert |
    |------|---------|--------|
    | Basic I/O | `echo hello` | Read returns "hello\r\n", ExitCode 0 |
-   | Bidirectional | `cat` | Write "foo\n" → Read returns "foo" |
-   | Interactive | `sh -c "read x; echo got $x"` | Write "bar\n" → Read returns "got bar" |
+   | Bidirectional | `cat` | Write "foo\n" → Read returns "foo\r\n" |
+   | Interactive | `sh -c "read x; echo got $x"` | Write "bar\n" → Read returns "got bar\r\n" |
    | Exit code | `sh -c "exit 42"` | ExitCode 42 |
-   | Context cancel | `sleep 60` | Cancel ctx → Close succeeds, exec process exits within 5s |
-   | Resize | `sh -c "sleep 0.1; tput cols"` after Resize(120, 40) | Read returns "120" |
+   | Context cancel | `sleep 60` | Send SIGINT `\x03` + Close() succeeds, exec process exits within 5s |
+   | Resize | `sh -c "sleep 0.1; tput cols"` after Resize(120, 40) | Read returns "120\r\n" |
    | Double close | any | Second Close() returns nil (idempotent) |
 
-   Test setup: spin up a temporary container (`docker run -d orqestra-sandbox:latest sleep infinity`), exec PTYSession commands inside it, tear down container in `t.Cleanup`.
+   Test setup: spin up a temporary container using a minimal distroless image containing required coreutils (`docker run -d cgr.dev/chainguard/busybox:latest sleep infinity`), exec PTYSession commands inside it, tear down container in `t.Cleanup`.
 
 ## Acceptance
 

@@ -24,29 +24,31 @@ Replace the BTRFS-based copy-on-write sandbox with native Docker OverlayFS. Elim
 
 2. Rewrite `build/sandbox/entrypoint.sh`:
    - Remove ALL btrfs logic (truncate, mkfs.btrfs, mount, subvolume create/snapshot, property set).
+   - Remove `rsync` and `chown` from here (moved to seeding phase in provisioning).
    - New flow:
-     1. `rsync -a /workspace-src/ /workspace/` (copy repo into writable layer).
-     2. `chown -R sandbox:sandbox /workspace`.
-     3. Symlink read-only dependency mounts (keep existing logic).
-     4. Configure MCP socket if present (keep existing logic).
-     5. `exec su -s /bin/bash sandbox -c "exec sleep infinity"` (keep existing logic).
-   - This is ~15 lines instead of ~50.
+     1. Symlink read-only dependency mounts (keep existing logic).
+     2. Configure MCP socket if present (keep existing logic).
+     3. `exec su -s /bin/bash sandbox -c "exec sleep infinity"` (keep existing logic).
 
 ### Provisioning Changes
 
-1. Update `DockerSandbox.Provision()`:
-   - Remove btrfs volume creation (`orqestra-btrfs-<id>` volume).
-   - Keep workspace volume (`orqestra-ws-<id>`) only if workspace persistence across exec calls is needed. Otherwise, the writable overlay layer IS the workspace — no volume needed at all.
-   - Decision: Use the container's writable layer directly. The entrypoint rsync's `/workspace-src` → `/workspace`. Changes accumulate in the overlay upper dir. Remove the workspace volume entirely.
+1. Update `DockerSandbox.Provision()` to use a seed-and-commit model:
+   - Spin up a temporary seed container using the base image, bind mounting `/workspace-src`.
+   - Execute `rsync -a /workspace-src/ /workspace/` and `chown -R sandbox:sandbox /workspace` inside the seed container.
+   - Run `cli.ContainerCommit(ctx, seedContainerID, types.ContainerCommitOptions{Reference: ephemeralImageTag})` where the tag incorporates the session ID (e.g., `orqestra-ws-snapshot-<id>`).
+   - Remove the seed container.
+   - Start the actual runtime LLM sandbox using the newly created `ephemeralImageTag`.
 
 2. Update `buildCreateArgs()` / SDK equivalent:
    - Remove `--privileged`.
    - Remove `--mount type=volume,source=<btrfs-volume>,target=/btrfs-pool`.
    - Remove `--mount type=volume,source=<ws-volume>,target=/workspace`.
-   - Keep `--mount type=bind,source=<repo>,target=/workspace-src,readonly`.
-   - The writable `/workspace` lives in the container's overlay upper directory.
+   - Remove bind mount of `/workspace-src` for the runtime container (it's baked into the ephemeral image).
+   - Use the `ephemeralImageTag` as the container image.
 
-3. Remove `btrfsVolume()` helper.
+3. Update Sandbox Destruction (`internal/sandbox/reaper.go` & `docker.go`):
+   - When destroying the container, explicitly issue `cli.ImageRemove(ctx, ephemeralImageTag, image.RemoveOptions{})` to prevent dangling snapshots from filling the disk.
+   - Update background reaper to identify and clean up orphaned images matching `orqestra-ws-snapshot-*`.
 
 ### Change Extraction via OverlayFS Diff
 

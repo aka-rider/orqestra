@@ -5,7 +5,7 @@
 | **ID** | `session-cli` |
 | **Wave** | 8 |
 | **depends_on** | `session-naming`, `artifact-system` |
-| **Files** | `cmd/orqestra/sessions.go`, `cmd/orqestra/sessions_test.go` |
+| **Files** | `cmd/orqestra/main.go`, `cmd/orqestra/sessions.go`, `cmd/orqestra/sessions_test.go`, `internal/config/config.go` |
 
 ## Goal
 
@@ -13,10 +13,11 @@ Implement session management CLI subcommands for listing, inspecting, and prunin
 
 ## Steps
 
-1. Create `cmd/orqestra/sessions.go` (or appropriate CLI entry point):
-   - `orqestra sessions list` — list session directories under the configured session base path, sorted by timestamp. Show: name, date, step count, status (complete/partial).
-   - `orqestra sessions inspect <name>` — show pipeline trace for a session: each step's name, artifact presence (input.md, output.md), duration if available, status.
-   - `orqestra sessions prune --older-than <duration>` — delete session directories older than the given duration (e.g., `7d`, `24h`). Require confirmation unless `--force` is passed.
+1. Create `cmd/orqestra/sessions.go` and hook it into `cmd/orqestra/main.go`:
+   - Extend `internal/config/config.go` to explicitly include `Session.BasePath`. If missing, fallback to `./.orqestra/sessions/`.
+   - `orqestra sessions list` — list session directories under the configured base path, strictly sorted by the timestamp prefix in the directory name.
+   - `orqestra sessions inspect <name>` — show pipeline trace for a session by exclusively using `sandbox.ReadArtifact` to parse the `output.md` artifacts per step to safely extract status and duration from the struct.
+   - `orqestra sessions prune --older-than <duration>` — delete session directories. Must check `isatty.IsTerminal(os.Stdin.Fd())` and fail proactively if ran without `--force` in a non-TTY CI environment.
 
 2. Session directory discovery:
    - Scan configured base path for directories matching session name format.
@@ -30,9 +31,9 @@ Implement session management CLI subcommands for listing, inspecting, and prunin
 
 ## Acceptance
 
-- `go test ./cmd/orqestra/ -run TestSessions` passes.
-- `orqestra sessions list` produces human-readable output.
-- `orqestra sessions inspect <name>` shows step-by-step trace.
+- `go test ./cmd/orqestra/ -run TestSessions` passes., sorted by timestamp via name format.
+- `orqestra sessions inspect <name>` shows step-by-step trace safely derived from Artifact struct.
 - `orqestra sessions prune --older-than 0s --force` removes all sessions (in test with temp dirs).
-- Prune without `--force` requires confirmation (does not auto-delete).
+- Prune without `--force` requires TTY confirmation (fails fast if no TTY).
+- Files touched: ONLY `cmd/orqestra/main.go`, `cmd/orqestra/sessions.go`, `cmd/orqestra/sessions_test.go`, `internal/config/config
 - Files touched: ONLY `cmd/orqestra/sessions.go`, `cmd/orqestra/sessions_test.go`.

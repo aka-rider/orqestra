@@ -15,8 +15,8 @@ Wire `termView` into the TUI tab system, implement tab header states, quick-swit
 
 ### 1.6 — TUI Tab Rendering
 
-1. Modify `internal/tui/view_tabs.go`:
-   - Replace text-in-tab rendering with `termView` for PTY-backed tabs.
+1. Modify `internal/tui/view_tabs.go` & `model.go`:
+   - Replace text-in-tab rendering with `termView` for PTY-backed tabs. The parent model/tab manager explicitly manages a map or slice (e.g. `map[int]termView`) to store independent states and forward messages correctly.
    - Tab header states based on agent lifecycle:
 
      | State | Header Display |
@@ -28,8 +28,8 @@ Wire `termView` into the TUI tab system, implement tab header states, quick-swit
      | Failed | `✗ <name>` (red) |
 
    - ANSI escape sequences from PTY render correctly (Claude Code uses colors, spinners).
-   - Terminal bell (`\a`) triggers tab notification, not `^G` in output.
-   - Window resize propagates: `WindowSizeMsg` → `PTYSession.Resize()` → VT buffer resize → re-render.
+   - Terminal bell (`\a`) triggers tab notification, not `^G` in output. The VT parser callback emits a `PTYBellMsg` via async `p.Send()` to trigger visual status updates.
+   - Window resize propagates: `WindowSizeMsg` updates VT buffer dimensions instantly and triggers an asynchronous `tea.Cmd` to call `PTYSession.Resize()` avoiding blocking the UI thread.
 
 ### 1.7 — Input Detection + Quick-Switch
 
@@ -46,14 +46,14 @@ Wire `termView` into the TUI tab system, implement tab header states, quick-swit
    - `esc` releases focus back to `FocusPrompt` (command bar).
    - `Enter` or clicking tab area grants `FocusTabs`.
    - `ctrl+c` within focused tab:
-     - First press: display warning "Press Ctrl+C again to force kill the session".
-     - Second press (within 2s): send kill signal to Docker API to terminate the PTY container. Do NOT proxy `ctrl+c` to Claude Code.
+     - First press: transition state to warn and display warning "Press Ctrl+C again to force kill the session".
+     - Second press (within 2s): emit a `tea.Cmd` (e.g. `StopPTYCmd()`) to asynchronously send the kill signal to the Docker API and terminate the PTY container without blocking `Update()`. Do NOT proxy `ctrl+c` to Claude Code.
 
 2. Add new messages to `internal/tui/messages.go`:
    - `PTYOutputMsg{TabIndex int, Data []byte}` (if not already present).
    - `PTYNeedsInputMsg{TabIndex int}`.
    - `PTYDoneMsg{TabIndex int, Err error, ExitCode int}`.
-   - `ArtifactReadyMsg{TabIndex int, Artifact Artifact, Role string}`.
+   - `PTYBellMsg{TabIndex int}`.
 
 3. Update `internal/tui/focus_test.go`:
    - Assert key routing per focus state: FocusTabs forwards to termView, FocusPrompt does not.

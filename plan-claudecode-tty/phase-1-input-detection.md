@@ -14,14 +14,13 @@ Implement heuristic-based detection that a PTY subprocess is waiting for user in
 ## Steps
 
 1. Create `internal/harness/input_detector.go` with:
-   - `InputDetector` struct holding pattern list and VT buffer reference.
-   - `NewInputDetector() *InputDetector` — initializes with default prompt patterns.
-   - `Check(screenBuffer string, cursorRow, cursorCol int) bool`:
-     - Pattern matching: scan recent VT buffer for Claude Code prompts:
-       - `"Do you want to proceed?"`, `"(y/n)"`, `"Allow"`, `"[Y/n]"`, `"[y/N]"`
-       - Prompt-like suffixes: lines ending in `?`, `>`, `:`
-     - Cursor position: cursor at end of a line matching a prompt-like pattern.
-     - Return true if any heuristic matches.
+   - `InputDetector` struct holding pre-compiled `*regexp.Regexp` patterns. (Stateless regarding the buffer).
+   - `NewInputDetector() *InputDetector` — initializes with default prompt patterns (e.g., `(?i)^(Select an option|Enter value).*> *$`).
+   - `Check(plainLines []string, cursorRow, cursorCol int) bool`:
+     - Pattern matching: scans the specific line in `plainLines` at index `cursorRow`. The `plainLines` slice must already be stripped of ANSI escape codes via `vt.String()`.
+     - Generic 1-character suffix rules (`?`, `>`, `:`) are NOT allowed independently, they must be part of explicit interactive prompt regexes to prevent false positives when output pauses mid-generation.
+     - Cursor validation: The cursor column must be >= the length of the matched prompt text on the current line.
+     - Return true if the strict regex heuristic matches the cursor line.
    - `DetectedPattern() string` — returns the pattern that triggered the last positive detection (for diagnostics/logging).
 
 2. Create `internal/harness/input_detector_test.go` with table-driven tests:
@@ -37,7 +36,9 @@ Implement heuristic-based detection that a PTY subprocess is waiting for user in
    | `"Error: file not found\n$ "` | end of line | true (shell prompt) |
    | Mid-output with no prompt | mid-line | false |
    | Empty buffer | 0,0 | false |
-
+Code block generation paused mid-line ending in `:` | end of line | false |
+   | Markdown string paused at `> ` | end of line | false |
+   | 
 3. Do NOT use time-based heuristics (idle timeout). Claude delays are common and must not trigger false positives. Detection is purely deterministic based on buffer content.
 
 ## Acceptance

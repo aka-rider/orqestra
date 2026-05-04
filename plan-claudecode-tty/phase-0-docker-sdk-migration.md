@@ -20,21 +20,21 @@ Replace all `exec.CommandContext(ctx, "docker", ...)` shell-outs in the sandbox 
    ```
 
 2. Create a Docker client wrapper (or inline in `docker.go`):
-   - `newDockerClient() (*client.Client, error)` — creates a client from environment (respects `DOCKER_HOST`, etc.).
-   - Client should be stored on `DockerSandbox` or as a package-level singleton with lifecycle management.
+   - `newDockerClient() (*client.Client, error)` — creates a client from environment (respects `DOCKER_HOST`, etc.). Must use `client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())`.
+   - Client MUST be explicitly stored on `DockerSandbox` struct fields via dependency injection (no package-level singletons).
 
 3. Replace `Provision()` shell-outs:
    - `docker volume create` → `cli.VolumeCreate(ctx, volume.CreateOptions{Name: ...})`
    - `docker create` → `cli.ContainerCreate(ctx, containerConfig, hostConfig, networkConfig, nil, "")` with:
      - `container.Config`: Image, Env, Labels, Tty=true, OpenStdin=true
      - `container.HostConfig`: Mounts (bind + volume), Resources (Memory, NanoCPUs, PidsLimit), NetworkMode, Init (pointer to true), Tmpfs
-     - Remove `--privileged` (no longer needed after OverlayFS migration — but keep it for now until that package lands, with a TODO comment)
+     - `container.HostConfig` must explicitly set `Privileged: true`, with a TODO attached directly to that line indicating it should be removed once the OverlayFS migration package lands.
    - `docker start` → `cli.ContainerStart(ctx, containerID, container.StartOptions{})`
 
 4. Replace `Exec()`:
    - `docker exec` → `cli.ContainerExecCreate(ctx, containerID, execConfig)` + `cli.ContainerExecAttach(ctx, execID, execStartCheck)` + `cli.ContainerExecInspect()` for exit code.
    - `execConfig`: `Cmd`, `Env`, `AttachStdout=true`, `AttachStderr=true`, `User="sandbox"`.
-   - The attach response gives `io.Reader` (multiplexed stdout+stderr) and `io.Writer` (stdin) — this is the foundation for PTY attach later.
+   - The attach response gives `HijackedResponse.Reader`. Must explicitly use `github.com/docker/docker/pkg/stdcopy.StdCopy` to safely demultiplex the binary-prefixed stdout and stderr streams.
 
 5. Replace `Destroy()`:
    - `docker stop` → `cli.ContainerStop(ctx, containerID, container.StopOptions{Timeout: intPtr(5)})`
@@ -43,7 +43,7 @@ Replace all `exec.CommandContext(ctx, "docker", ...)` shell-outs in the sandbox 
 
 6. Replace `CopyOut()`:
    - `docker exec cat` → `cli.CopyFromContainer(ctx, containerID, path)` — returns `io.ReadCloser` with tar archive.
-   - Extract single file from tar, write to host path.
+   - Must explicitly use `archive/tar.NewReader` and iteratively call `Next()` to read payloads to safely extract the single file from the tar archive, writing to host path.
 
 7. Replace `statFile()`:
    - `docker exec stat` → `cli.ContainerStatPath(ctx, containerID, path)` — returns `container.PathStat` with size, mode.

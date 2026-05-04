@@ -16,27 +16,25 @@ Remove legacy execution paths that are fully replaced by the PTY-based pipeline.
 1. Remove `streamView` from `internal/tui/view_stream.go`:
    - Fully replaced by `termView`.
    - Remove all references in `view_tabs.go` and `model.go`.
+   - Remove all stream-specific `tea.Msg` types in `internal/tui/messages.go` (e.g. `streamChunkMsg`, `streamErrorMsg`) and model properties tracking old stream states.
 
-2. Remove from `internal/planner/`:
-   - `planner.PlanStreaming()` — replaced by sandbox PTY + artifact extraction.
-   - Any JSON specification output format logic.
+2. Update `internal/planner/` and `internal/pm/`:
+   - Remove `planner.PlanStreaming()` and `pm.DecomposeStreaming()`.
+   - Ensure the JSON parsers are explicitly transitioned to the new Markdown artifact parser safely decoupled in `plan/spec.go` instead of blind deletion.
 
-3. Remove from `internal/pm/`:
-   - `pm.DecomposeStreaming()` — replaced by sandbox PTY + artifact extraction.
+3. Update Interface definition (`internal/harness/client.go` / `sandbox.Runner`):
+   - Preserve core interface signatures but explicitly strip `RunPrint()` / `RunStreaming()` bounds.
+   - Refactor `SandboxedCLIRunner` and ensure `CLIRunner` executes cleanly under the base `Run()` command for `llama-server`.
 
-4. Remove from `internal/harness/`:
-   - `SandboxedCLIRunner.RunPrint()` / `RunStreaming()` — replaced by `SandboxedPTYRunner`.
-   - Keep `CLIRunner` only for cheap llama-server API calls (local validation).
-
-5. Remove from agent execution:
-   - `--output-format stream-json` flag usage — agents run in native interactive mode.
+4. Update config & command builder:
+   - Scrub `--output-format stream-json` from the CLI configurations (`internal/config/config.go` & `harness/claude_cli.go`).
    - JSON specification as inter-agent protocol — replaced by markdown artifacts.
 
-6. Update tests:
+5. Update tests:
    - Remove tests that exercised deleted code paths.
-   - Ensure remaining tests still pass after removals.
+   - Add E2E equivalency check: Verify that PTY-based execution checks fill coverage vacated by the removed `PlanStreaming` test variants. Ensure `go test ./...` coverage on orchestration doesn't drop.
 
-7. Run full test suite: `go test ./...` must pass after all removals.
+6. Run full test suite: `go test ./...` must pass after all removals.
 
 ## Acceptance
 
