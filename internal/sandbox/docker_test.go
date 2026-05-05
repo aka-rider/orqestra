@@ -19,8 +19,8 @@ func TestBuildContainerConfig_RequiredFields(t *testing.T) {
 	}, repoDir, nil)
 	containerCfg, hostCfg := d.buildContainerConfig()
 
-	if containerCfg.Image != d.ephemeralImage {
-		t.Errorf("Image = %q, want %q", containerCfg.Image, d.ephemeralImage)
+	if containerCfg.Image != "orqestra-sandbox:test" {
+		t.Errorf("Image = %q, want %q", containerCfg.Image, "orqestra-sandbox:test")
 	}
 	if !containerCfg.Tty {
 		t.Error("Tty should be true")

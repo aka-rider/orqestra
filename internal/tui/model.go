@@ -3,119 +3,32 @@ package tui
 import (
 	"context"
 	"fmt"
-	"io"
-	"log/slog"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/xiii/orqestra/internal/harness"
-	"github.com/xiii/orqestra/internal/plan"
-	"github.com/xiii/orqestra/internal/types"
 )
 
 // State represents the current phase of the TUI.
 type State int
 
 const (
-	StateIdle            State = iota // Command bar focused, waiting for input
-	StateIntentConfirm                // Show intake feedback before planning
-	StateIntakeRunning                // PTY intake agent running in sandbox
-	StatePlanning                     // Planning tab active, claude running
-	StateValidating                   // Plan validation in progress
-	StateConfirming                   // Plan ready, waiting for [A]pprove/[R]eject/[E]dit
-	StateSaved                        // Plan saved to file; showing path + resume command
-	StateProjectManaging              // PM decomposing spec into work packages
-	StateExecuting                    // Worker tab(s) active, claude running
-	StateWorkValidating               // HTTP work validation in progress
-	StateDone                         // Everything finished, will cycle back to idle
+	StateIdle    State = iota // Waiting for agent launch
+	StateRunning              // Agent(s) running in tabs
+	StateDone                 // All agents finished
 )
 
-// PipelineFuncs holds the functions the TUI drives.
-type PipelineFuncs struct {
-	// RecognizeIntent optionally cleans or blocks prompts before planning.
-	RecognizeIntent func(ctx context.Context, prompt string) (IntentResult, error)
-	// RunIntake launches the PTY-based intake agent inside a sandbox.
-	// tabIndex identifies the term tab to stream output to.
-	// send delivers tea.Msg (PTYOutputMsg, PTYDoneMsg) to the TUI loop.
-	// Returns the artifact bytes on success.
-	RunIntake func(ctx context.Context, prompt string, tabIndex int, send func(tea.Msg)) ([]byte, error)
-	// LaunchInteractive starts an interactive Claude Code agent in a sandbox.
-	// Returns a PTYWriter for bidirectional I/O (attach to term tab) and a
-	// WaitFunc that blocks until the agent exits, returning the extracted artifact.
-	// The prompt is staged as input; the agent launches in full interactive mode.
-	LaunchInteractive func(ctx context.Context, prompt string, send func(tea.Msg), tabIndex int) (PTYWriter, WaitFunc, error)
-	// Plan runs the planner and streams output. Returns the spec.
-	Plan func(ctx context.Context, prompt string, stdout io.Writer) (types.Specification, error)
-	// ValidatePlan runs plan validation. Returns nil report if validation is disabled.
-	ValidatePlan func(ctx context.Context, spec types.Specification) (*types.ValidationReport, error)
-	// DecomposeSpec runs the project manager to split a spec into work packages.
-	// If nil, the single-worker path is used.
-	DecomposeSpec func(ctx context.Context, spec types.Specification, stdout io.Writer) (types.ProjectPlan, error)
-	// Execute runs the worker and streams output.
-	Execute func(ctx context.Context, spec types.Specification, stdout io.Writer) error
-	// ValidateWork runs CLI-based work validation. Returns nil report if validation is disabled.
-	ValidateWork func(ctx context.Context, spec types.Specification, workOutput string) (*types.ValidationReport, error)
-	// SessionManager is the shared session manager whose events drive TUI tabs.
-	// If non-nil, sessions auto-create and update tabs.
-	SessionManager *harness.SessionManager
-	// Send delivers a tea.Msg into the TUI event loop. Wired after program creation.
-	Send func(tea.Msg)
-	// InitialSpec, when non-nil, skips the planning phase and starts directly at
-	// plan validation / confirmation with the pre-loaded spec.
-	InitialSpec *types.Specification
-
-	// Retry configuration — ported from the old Agent orchestrator.
-	PlannerAttempts      int // max planning attempts (0 or 1 = no retry)
-	PlanValidationRepair int // max plan-validation → re-plan cycles (0 = no repair)
-	WorkValidationRepair int // max work-validation → re-execute cycles (0 = no repair)
-}
-
-// WaitFunc blocks until an interactive agent exits and returns the artifact.
-type WaitFunc func(ctx context.Context) ([]byte, error)
-
-// Model is the main Bubble Tea model that drives the full pipeline.
-// FocusTarget represents which UI component currently accepts keyboard input.
-type FocusTarget int
-
-const (
-	FocusNone FocusTarget = iota
-	FocusPrompt
-	FocusPlan
-	FocusTabs
-)
-
+// Model is the main Bubble Tea model.
 type Model struct {
-	state    State
-	focus    FocusTarget
-	spec     types.Specification
-	approved bool
-	prompt   string // current prompt from command bar
+	state State
 
-	projectPlan *types.ProjectPlan // set when PM decomposes the spec
-
-	tabsView    tabsView
-	confirmView confirmView
-	savedView   savedView
-	commandBar  commandBarModel
-	registry    *CommandRegistry
-	logPanel    logPanel
-	showLogs    bool
-
-	// saveErr holds a transient error from a failed plan-save attempt.
-	// Displayed inline in StateConfirming; cleared on next successful transition.
-	saveErr error
-
-	// Help/intent ephemeral content displayed in tab area
-	helpContent   string
-	intentContent string
-	intentVerdict string
+	tabsView tabsView
+	logPanel logPanel
+	showLogs bool
 
 	pipeline PipelineFuncs
-	program  *tea.Program // set after program creation for execution coordination
+	program  *tea.Program
 	ctx      context.Context
 	cancel   context.CancelFunc
 
@@ -123,57 +36,30 @@ type Model struct {
 	height int
 	err    error
 
-	planTabIdx   int
-	execTabIdx   int
 	intakeTabIdx int
-
-	// Session->tab mapping: sessionID -> tab index
-	sessionTabs map[string]int
+	gotSize      bool // true once first WindowSizeMsg has been processed
+	gotProgram   bool // true once setProgramMsg has been received
+	launched     bool // true once the agent goroutine has been started
 }
 
-// NewModel creates the main TUI model starting at StateIdle.
-// If pipeline.InitialSpec is non-nil the model begins in StatePlanning and
-// Init() immediately emits planCompleteMsg, skipping the prompt/planner phase.
+// NewModel creates the main TUI model.
 func NewModel(pipeline PipelineFuncs) Model {
 	ctx, cancel := context.WithCancel(context.Background())
-	registry := NewCommandRegistry()
-	RegisterBuiltins(registry)
 
-	state := StateIdle
-	if pipeline.InitialSpec != nil {
-		state = StatePlanning
-	}
-
-	m := Model{
-		state:        state,
-		focus:        defaultFocusForState(state),
+	return Model{
+		state:        StateIdle,
 		tabsView:     newTabsView(),
-		confirmView:  newConfirmView(),
-		commandBar:   newCommandBar(registry),
-		registry:     registry,
 		logPanel:     newLogPanel(),
-		showLogs:     false,
+		showLogs:     true,
 		pipeline:     pipeline,
 		ctx:          ctx,
 		cancel:       cancel,
-		planTabIdx:   -1,
-		execTabIdx:   -1,
 		intakeTabIdx: -1,
-		sessionTabs:  make(map[string]int),
 	}
-	if pipeline.InitialSpec != nil {
-		m.commandBar.SetState(StatePlanning)
-	}
-	return m
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{spinner.New().Tick}
-	if m.pipeline.InitialSpec != nil {
-		spec := *m.pipeline.InitialSpec
-		cmds = append(cmds, func() tea.Msg { return planCompleteMsg{spec: spec} })
-	}
-	return tea.Batch(cmds...)
+	return spinner.New().Tick
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -181,53 +67,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.gotSize = true
 
-		commandBarHeight := 3
 		logHeight := 0
 		if m.showLogs {
 			logHeight = 8
 		}
-		tabHeight := m.height - commandBarHeight - logHeight
+		tabHeight := m.height - logHeight
 
 		if m.showLogs {
 			m.logPanel = m.logPanel.SetWidth(m.width)
 			m.logPanel = m.logPanel.SetHeight(logHeight)
 		}
 
-		m.commandBar.SetWidth(m.width)
-
 		tabMsg := tea.WindowSizeMsg{Width: m.width, Height: tabHeight}
 		tv, cmd := m.tabsView.Update(tabMsg)
 		m.tabsView = tv
 
-		if m.state == StateConfirming {
-			cv, cvCmd := m.confirmView.Update(tabMsg)
-			m.confirmView = cv
-			return m, tea.Batch(cmd, cvCmd)
-		}
-		if m.state == StateSaved {
-			sv, svCmd := m.savedView.Update(tabMsg)
-			m.savedView = sv
-			return m, tea.Batch(cmd, svCmd)
+		// If we have both size and program but haven't launched yet, do it now.
+		if launchCmd := m.tryLaunch(); launchCmd != nil {
+			return m, tea.Batch(cmd, launchCmd)
 		}
 		return m, cmd
 
-	case tea.MouseMsg:
-		if m.state == StateConfirming {
-			cv, cmd := m.confirmView.Update(msg)
-			m.confirmView = cv
-			return m, cmd
-		}
-		return m, nil
-
 	case tea.KeyMsg:
 		return m.handleKey(msg)
-
-	case PromptSubmitMsg:
-		return m.handlePromptSubmit(msg)
-
-	case CommandMsg:
-		return m.handleCommand(msg)
 
 	case ToggleLogsMsg:
 		m.showLogs = !m.showLogs
@@ -236,190 +100,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case CycleBackToIdleMsg:
-		m.setState(StateIdle)
-		m.commandBar.Focus()
-		m.confirmView = newConfirmView()
-		m.helpContent = ""
-		m.intentContent = ""
-		return m, nil
-
-	case CursorBlinkMsg:
-		if m.state == StateConfirming {
-			cv, cmd := m.confirmView.Update(msg)
-			m.confirmView = cv
-			return m, cmd
-		}
-		// Not in StateConfirming: drop the message. blinkCmd is not re-armed,
-		// so the tick loop terminates after this last in-flight message.
-		return m, nil
-
-	case PlanReadyMsg:
-		m.setState(StateConfirming)
-		m.confirmView.SetPlanText(renderSpecText(m.spec))
-		m.syncConfirmViewport()
-		return m, m.confirmView.Focus()
-
-	case addTabMsg:
-		idx := m.tabsView.AddTab(msg.name)
-		// Map tab name as session ID for stream routing
-		m.sessionTabs[msg.name] = idx
-		if m.state == StatePlanning && m.planTabIdx == -1 {
-			m.planTabIdx = idx
-			m.tabsView.active = idx
-		}
-		if !m.tabsView.pulsing && m.tabsView.hasRunningTabs() {
-			m.tabsView.pulsing = true
-			return m, pulseTickCmd()
-		}
-
-		return m, nil
-
-	case planCompleteMsg:
-		m.spec = msg.spec
-		if m.pipeline.ValidatePlan == nil {
-			m.setState(StateConfirming)
-			m.confirmView.SetPlanText(renderSpecText(m.spec))
-			m.syncConfirmViewport()
-			return m, m.confirmView.Focus()
-		}
-		m.setState(StateValidating)
-		go m.startPlanValidation()
-		return m, nil
-
-	case PlanValidatedMsg:
-		if msg.Err != nil {
-			slog.Warn("plan validation error, proceeding to confirm", "err", msg.Err)
-			m.setState(StateConfirming)
-			m.confirmView.SetPlanText(renderSpecText(m.spec))
-			m.syncConfirmViewport()
-			return m, m.confirmView.Focus()
-		}
-		if msg.Report != nil && msg.Report.Verdict == types.VerdictFail {
-			m.err = fmt.Errorf("plan validation failed: %s", msg.Report.Summary)
-			m.setState(StateDone)
-			return m, nil
-		}
-		if msg.Report != nil && msg.Report.Verdict == types.VerdictWarn {
-			slog.Warn("plan validation warnings", "summary", msg.Report.Summary)
-		}
-		m.setState(StateConfirming)
-		m.confirmView.SetPlanText(renderSpecText(m.spec))
-		m.syncConfirmViewport()
-		return m, m.confirmView.Focus()
-
-	case ProjectPlanReadyMsg:
-		if msg.Err != nil {
-			m.err = msg.Err
-			m.setState(StateDone)
-			return m, nil
-		}
-		m.projectPlan = &msg.Plan
-		m.setState(StateExecuting)
-
-		// Launch one worker per package, respecting dependencies via waves.
-		go m.startMultiWorkerExecution()
-		return m, nil
-
-	case ConfirmMsg:
-		m.confirmView.Blur()
-		switch msg.Choice {
-		case ConfirmEdit:
-			return m.handleConfirmEdit()
-		case ConfirmAccept:
-			m.saveErr = nil
-			m.approved = true
-			// Route through project manager if available
-			if m.pipeline.DecomposeSpec != nil {
-				m.setState(StateProjectManaging)
-				go m.startProjectManagement()
-				return m, nil
-			}
-			m.setState(StateExecuting)
-			if m.pipeline.SessionManager != nil && m.program != nil {
-				go StartExecutionSession(m.program, m.ctx, m.pipeline.SessionManager, m.spec, m.pipeline)
-			} else if m.program != nil {
-				m.execTabIdx = m.tabsView.AddTab("Worker")
-				m.tabsView.active = m.execTabIdx
-				go RunExecution(m.program, m.ctx, m.pipeline, m.spec, m.execTabIdx)
-			}
-			return m, nil
-		default: // ConfirmReject
-			m.saveErr = nil
-			m.setState(StateDone)
-			return m, func() tea.Msg { return CycleBackToIdleMsg{} }
-		}
-
-	case IntentConfirmMsg:
-		m.setState(StatePlanning)
-		m.intentContent = ""
-		m.setIntentVerdict("")
-		if m.planTabIdx == -1 {
-			m.planTabIdx = m.tabsView.AddTab("Planner")
-			m.sessionTabs["plan"] = m.planTabIdx
-		}
-		m.tabsView.active = m.planTabIdx
-		go m.startPlanning()
-		return m, nil
-
-	case IntentRejectMsg:
-		m.setState(StateIdle)
-		m.commandBar.Focus()
-		m.intentContent = ""
-		m.setIntentVerdict("")
-		return m, nil
-
-	case IntentResultMsg:
-		if msg.Err != nil {
-			m.err = msg.Err
-			m.intentContent = ""
-			m.setIntentVerdict("")
-			m.setState(StateDone)
-			return m, nil
-		}
-		m.prompt = msg.Rephrased
-		switch msg.Verdict {
-		case "accept":
-			m.intentContent = ""
-			m.setIntentVerdict("")
-			return m.beginPlanning()
-		case "clarify", "reject":
-			m.setIntentVerdict(msg.Verdict)
-			m.intentContent = renderIntent(msg.Rephrased, msg.EndState, msg.Reason, msg.Questions, msg.ImprovedPromptExamples, msg.Verdict)
-			m.setState(StateIntentConfirm)
-			m.commandBar.Focus()
-			return m, nil
-		default:
-			m.err = fmt.Errorf("intent recognition returned invalid verdict %q", msg.Verdict)
-			m.intentContent = ""
-			m.setIntentVerdict("")
-			m.setState(StateDone)
-			return m, nil
-		}
-
-	case StreamChunkMsg:
-		if msg.SessionID != "" {
-			if idx, ok := m.sessionTabs[msg.SessionID]; ok {
-				msg.TabIndex = idx
-			}
-		}
-		tv, cmd := m.tabsView.Update(msg)
-		m.tabsView = tv
-		return m, cmd
-
 	case attachPTYMsg:
-		// Attach a live PTY writer to the term tab for bidirectional I/O.
 		if tv := m.tabsView.TermTab(msg.tabIndex); tv != nil {
 			tv.AttachPTY(msg.pty)
+			// Immediately resize the PTY to match the terminal emulator dimensions.
+			// The tab may have been created before WindowSizeMsg arrived, or the PTY
+			// was started with default dimensions that don't match the TUI layout.
+			if tv.width > 0 && tv.height > 1 {
+				vtHeight := tv.height - 1
+				if vtHeight < 1 {
+					vtHeight = 1
+				}
+				_ = msg.pty.Resize(uint(tv.width), uint(vtHeight))
+			}
 		}
 		return m, nil
 
 	case PTYOutputMsg:
-		tv, cmd := m.tabsView.Update(msg)
-		m.tabsView = tv
-		return m, cmd
-
-	case PTYNeedsInputMsg:
 		tv, cmd := m.tabsView.Update(msg)
 		m.tabsView = tv
 		return m, cmd
@@ -433,96 +130,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tabsView.SetAttention(msg.TabIndex)
 		return m, nil
 
-	case AgentPipelineStateMsg:
-		m.logPanel = m.logPanel.Add(LogEntry{
-			Level:   "info",
-			Message: "pipeline: " + msg.Phase,
-		})
-		return m, nil
-
 	case IntakeCompleteMsg:
 		if msg.Err != nil {
+			m.logPanel = m.logPanel.Add(LogEntry{
+				Time:    time.Now(),
+				Level:   "ERROR",
+				Message: "agent failed",
+				Attrs:   map[string]string{"err": msg.Err.Error()},
+			})
 			m.err = msg.Err
-			m.setState(StateDone)
+			m.state = StateDone
 			return m, nil
 		}
-		// Intake succeeded — transition to planning with the artifact as enriched prompt.
-		// Use the artifact content as the planning prompt (it's the structured intake output).
-		m.prompt = string(msg.Artifact)
-		return m.beginPlanning()
-
-	case ValidationStartedMsg:
+		// Agent exited cleanly.
+		m.state = StateDone
 		return m, nil
 
-	case HarnessDoneMsg:
-		tv, cmd := m.tabsView.Update(msg)
-		m.tabsView = tv
-		if msg.TabIndex == m.execTabIdx || (m.state == StateExecuting && m.execTabIdx == -1) {
-			if msg.Err != nil {
-				m.setState(StateDone)
-				m.err = msg.Err
-				return m, nil
-			} else if m.pipeline.ValidateWork != nil && msg.WorkOutput != "" {
-				go m.startWorkValidation(msg.WorkOutput)
-			} else {
-				m.setState(StateDone)
-				return m, func() tea.Msg { return CycleBackToIdleMsg{} }
-			}
-		}
-		return m, cmd
-
-	case WorkValidatedMsg:
-		if msg.Err != nil {
-			slog.Warn("work validation error", "err", msg.Err)
-		}
-		if msg.Report != nil && msg.Report.Verdict == types.VerdictFail {
-			m.err = fmt.Errorf("work validation failed: %s", msg.Report.Summary)
-		} else if msg.Report != nil && msg.Report.Verdict == types.VerdictWarn {
-			slog.Warn("work validation warnings", "summary", msg.Report.Summary)
-		}
-		m.setState(StateDone)
-		if m.err != nil {
-			return m, nil
-		}
-		return m, func() tea.Msg { return CycleBackToIdleMsg{} }
+	case ErrorMsg:
+		m.logPanel = m.logPanel.Add(LogEntry{
+			Time:    time.Now(),
+			Level:   "ERROR",
+			Message: "error",
+			Attrs:   map[string]string{"err": msg.Err.Error()},
+		})
+		m.err = msg.Err
+		m.state = StateDone
+		return m, nil
 
 	case LogMsg:
 		m.logPanel = m.logPanel.Add(msg.Entry)
 		return m, nil
 
-	case SessionEventMsg:
-		return m.handleSessionEvent(msg.Event)
-
 	case SandboxStateMsg:
 		m.logPanel = m.logPanel.Add(LogEntry{
 			Time:    time.Now(),
 			Level:   "INFO",
-			Message: fmt.Sprintf("sandbox %s: %s", msg.SandboxID[:8], msg.State),
+			Message: fmt.Sprintf("sandbox %s: %s", truncID(msg.SandboxID), msg.State),
 		})
-		return m, nil
-
-	case ErrorMsg:
-		m.err = msg.Err
-		m.setState(StateDone)
-		return m, nil
-
-	case TokenLimitExceededMsg:
-		m.err = msg.Err
-		m.setState(StateDone)
-		// Stay visible — don't cycle back to idle so the user sees the budget error
 		return m, nil
 
 	case setProgramMsg:
 		m.program = msg.program
-		// Auto-launch interactive Claude Code session on startup.
-		if m.pipeline.LaunchInteractive != nil && m.state == StateIdle {
-			m.setState(StateIntakeRunning)
-			m.intakeTabIdx = m.tabsView.AddTermTab("Claude")
-			m.tabsView.active = m.intakeTabIdx
-			m.focus = FocusTabs
-			m.syncFocus()
-			go m.startInteractiveIntake("")
-			return m, pulseTickCmd()
+		m.gotProgram = true
+		// If we already have window dimensions, launch now.
+		if cmd := m.tryLaunch(); cmd != nil {
+			return m, cmd
 		}
 		return m, nil
 
@@ -540,7 +192,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleKey routes keystrokes based on state.
+// handleKey routes keystrokes.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
@@ -550,189 +202,39 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
-	// Tab / focus cycling logic (ctrl+j/ctrl+k as terminal-safe alternatives)
-	if key == "tab" || key == "shift+tab" || key == "ctrl+j" || key == "ctrl+k" {
-		if m.commandBar.showAC && (key == "tab" || key == "shift+tab") {
-			cb, cmd := m.commandBar.Update(msg)
-			m.commandBar = cb
-			return m, cmd
+	// Toggle logs
+	if key == "ctrl+l" {
+		m.showLogs = !m.showLogs
+		if m.width > 0 {
+			return m.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
 		}
-		m.cycleFocus(key == "shift+tab" || key == "ctrl+k")
 		return m, nil
 	}
 
-	// Alt+N for tab switching (always available)
+	// Alt+N for tab switching
 	switch key {
 	case "alt+1", "alt+2", "alt+3", "alt+4", "alt+5", "alt+6", "alt+7", "alt+8", "alt+9":
 		tv, cmd := m.tabsView.Update(msg)
 		m.tabsView = tv
 		return m, cmd
 	case "alt+!":
-		// Jump to first tab with attention marker.
 		if idx := m.tabsView.FirstAttentionTab(); idx >= 0 {
 			m.tabsView.active = idx
 			m.tabsView.ClearAttention(idx)
-			m.focus = FocusTabs
 		}
 		return m, nil
 	}
 
-	// In StateSaved, any key exits cleanly.
-	if m.state == StateSaved {
-		sv, cmd := m.savedView.Update(msg)
-		m.savedView = sv
-		return m, cmd
-	}
-
-	// In confirming state, forward all relevant keys to confirmView.
-	if m.state == StateConfirming {
-		switch key {
-		case "a", "A", "y", "Y", "r", "R", "n", "N", "e", "E",
-			"tab", "up", "down", "pgup", "pgdown", "home", "end":
-			cv, cmd := m.confirmView.Update(msg)
-			m.confirmView = cv
-			return m, cmd
-		}
-	}
-
-	if m.state == StateIntentConfirm {
-		switch key {
-		case "a", "A":
-			if m.intentVerdict == "reject" {
-				return m, nil
-			}
-			return m, func() tea.Msg { return IntentConfirmMsg{} }
-		case "r", "R":
-			return m, func() tea.Msg { return IntentRejectMsg{} }
-		}
-	}
-
-	// In StateDone with error, any key dismisses back to idle
+	// In StateDone with error, any key quits.
 	if m.state == StateDone && m.err != nil {
-		m.err = nil
-		return m, func() tea.Msg { return CycleBackToIdleMsg{} }
+		return m, tea.Quit
 	}
 
-	// When focus is on tabs, forward keys to the active tab (enables PTY input).
-	if m.focus == FocusTabs {
+	// Forward all other keys to the active term tab (user is typing in Claude Code).
+	if m.state == StateRunning && len(m.tabsView.termTabs) > 0 {
 		tv, cmd := m.tabsView.Update(msg)
 		m.tabsView = tv
 		return m, cmd
-	}
-
-	// Everything else goes to command bar
-	cb, cmd := m.commandBar.Update(msg)
-	m.commandBar = cb
-	return m, cmd
-}
-
-// handlePromptSubmit processes a prompt submission from the command bar.
-func (m Model) handlePromptSubmit(msg PromptSubmitMsg) (tea.Model, tea.Cmd) {
-	if m.state != StateIdle {
-		return m, nil
-	}
-
-	m.prompt = msg.Prompt
-	m.helpContent = ""
-	m.setIntentVerdict("")
-
-	// Prefer interactive launch: Claude Code UI in a term tab.
-	if m.pipeline.LaunchInteractive != nil {
-		m.setState(StateIntakeRunning)
-		m.intakeTabIdx = m.tabsView.AddTermTab("Intake")
-		m.tabsView.active = m.intakeTabIdx
-		m.focus = FocusTabs
-		if !m.tabsView.pulsing {
-			m.tabsView.pulsing = true
-			go m.startInteractiveIntake(msg.Prompt)
-			return m, pulseTickCmd()
-		}
-		go m.startInteractiveIntake(msg.Prompt)
-		return m, nil
-	}
-
-	// Fallback: PTY-based intake runner (headless).
-	if m.pipeline.RunIntake != nil {
-		m.setState(StateIntakeRunning)
-		m.intakeTabIdx = m.tabsView.AddTermTab("Intake")
-		m.tabsView.active = m.intakeTabIdx
-		if !m.tabsView.pulsing {
-			m.tabsView.pulsing = true
-			go m.startIntake(msg.Prompt)
-			return m, pulseTickCmd()
-		}
-		go m.startIntake(msg.Prompt)
-		return m, nil
-	}
-
-	if m.pipeline.RecognizeIntent != nil {
-		m.intentContent = renderIntent("Reviewing request...", "", "", nil, nil, "pending")
-		m.setState(StateIntentConfirm)
-		if m.program != nil {
-			go m.startIntentRecognition(msg.Prompt)
-		}
-		return m, nil
-	}
-
-	return m.beginPlanning()
-}
-
-func (m Model) beginPlanning() (tea.Model, tea.Cmd) {
-	m.setState(StatePlanning)
-
-	// Create planner tab if needed
-	if m.planTabIdx == -1 {
-		m.planTabIdx = m.tabsView.AddTab("Planner")
-		m.sessionTabs["plan"] = m.planTabIdx
-	} else {
-		// Reset existing planner tab for new run
-		sIdx := m.tabsView.streamIndex(m.planTabIdx)
-		if sIdx < len(m.tabsView.tabs) {
-			m.tabsView.tabs[sIdx] = newStreamView(m.planTabIdx)
-			if m.tabsView.width > 0 {
-				m.tabsView.tabs[sIdx].SetSize(m.tabsView.width, m.tabsView.height-3)
-			}
-		}
-		m.tabsView.tabNames[m.planTabIdx] = "Planner"
-	}
-	m.tabsView.active = m.planTabIdx
-
-	if m.program != nil {
-		go m.startPlanning()
-	}
-	return m, nil
-}
-
-// handleCommand processes a slash command.
-func (m Model) handleCommand(msg CommandMsg) (tea.Model, tea.Cmd) {
-	switch msg.Name {
-	case "/help":
-		m.helpContent = renderHelp(m.registry, m.state, msg.Args)
-		return m, nil
-	case "/status":
-		m.helpContent = statusStyle.Render("State: " + stateName(m.state))
-		return m, nil
-	case "/clear":
-		m.helpContent = ""
-		if m.state == StateIdle && m.tabsView.active < len(m.tabsView.tabKinds) && m.tabsView.tabKinds[m.tabsView.active] == tabKindStream {
-			sIdx := m.tabsView.streamIndex(m.tabsView.active)
-			if sIdx < len(m.tabsView.tabs) {
-				m.tabsView.tabs[sIdx] = newStreamView(m.tabsView.active)
-				if m.tabsView.width > 0 {
-					m.tabsView.tabs[sIdx].SetSize(m.tabsView.width, m.tabsView.height-3)
-				}
-			}
-		}
-		return m, nil
-	case "/abort":
-		if m.state == StatePlanning || m.state == StateExecuting {
-			m.cancel()
-			// Create new context for next cycle
-			m.ctx, m.cancel = context.WithCancel(context.Background())
-			m.setState(StateIdle)
-			m.commandBar.Focus()
-		}
-		return m, nil
 	}
 
 	return m, nil
@@ -741,307 +243,62 @@ func (m Model) handleCommand(msg CommandMsg) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	var topView string
 
-	if m.state == StateSaved {
-		topView = m.savedView.View()
-	} else if m.state == StateConfirming {
-		topView = m.confirmView.View()
-		if m.saveErr != nil {
-			topView += "\n" + errorStyle.Render("✗ Save failed: "+m.saveErr.Error())
-		}
-	} else if m.helpContent != "" {
-		topView = m.tabsView.View() + "\n\n" + m.helpContent
-	} else if m.intentContent != "" {
-		topView = m.intentContent
+	if len(m.tabsView.tabNames) == 0 && m.state == StateIdle {
+		topView = titleStyle.Render("orqestra") + "\n\n" +
+			statusStyle.Render("Starting agent...")
+	} else if m.state == StateRunning && len(m.tabsView.termTabs) > 0 && m.tabsView.termTabs[m.tabsView.active].ptySession == nil {
+		topView = m.tabsView.View() + "\n\n" +
+			statusStyle.Render("⟳ Provisioning sandbox... (ctrl+c to quit)")
 	} else {
 		topView = m.tabsView.View()
 	}
 
-	if m.state == StateValidating {
-		topView += "\n\n" + statusStyle.Render("⟳ Validating plan...")
-	}
-
-	if m.state == StateProjectManaging {
-		topView += "\n\n" + statusStyle.Render("⟳ Decomposing into work packages...")
-	}
-
-	if m.state == StateWorkValidating {
-	}
-
 	if m.state == StateDone {
 		if m.err != nil {
-			topView += "\n\n" + errorStyle.Render("✗ Error: "+m.err.Error()) + "\n" + dimStyle.Render("  press any key to dismiss")
-		} else if !m.approved {
-			topView += "\n\n" + titleStyle.Render("Plan rejected.")
+			topView += "\n\n" + errorStyle.Render("✗ Error: "+m.err.Error()) + "\n" + dimStyle.Render("  press any key to exit")
 		} else {
-			topView += "\n\n" + goalStyle.Render("✓ Complete")
+			topView += "\n\n" + goalStyle.Render("✓ Agent session complete")
 		}
 	}
 
-	if m.state == StateIdle && len(m.tabsView.tabNames) == 0 {
-		topView = titleStyle.Render("orqestra") + "\n\n" +
-			subtitleStyle.Render("Type a prompt to start planning, or /help for commands.")
-	}
-
-	// Log panel (only if toggled on)
 	var logView string
 	if m.showLogs {
 		logView = m.logPanel.View()
 	}
-
-	// Autocomplete overlay
-	acView := m.commandBar.ViewAutocomplete()
-
-	// Command bar
-	cmdBarView := m.commandBar.View()
 
 	var parts []string
 	parts = append(parts, topView)
 	if logView != "" {
 		parts = append(parts, logView)
 	}
-	if acView != "" {
-		parts = append(parts, acView)
-	}
-	parts = append(parts, cmdBarView)
 
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
-// IsApproved returns whether the user approved the plan.
-func (m Model) IsApproved() bool {
-	return m.approved
+// tryLaunch starts the interactive agent if both WindowSizeMsg and setProgramMsg
+// have been received. Returns a tea.Cmd if launch happened, nil otherwise.
+func (m *Model) tryLaunch() tea.Cmd {
+	if m.launched || !m.gotSize || !m.gotProgram {
+		return nil
+	}
+	if m.pipeline.LaunchInteractive == nil {
+		return nil
+	}
+
+	m.launched = true
+	m.state = StateRunning
+	m.intakeTabIdx = m.tabsView.AddTermTab("Claude")
+	m.tabsView.active = m.intakeTabIdx
+	m.tabsView.focused = true
+	m.tabsView.termTabs[m.intakeTabIdx].focused = true
+
+	go m.startInteractiveAgent("")
+	return pulseTickCmd()
 }
 
-// Error returns any error from execution.
-func (m Model) Error() error {
-	return m.err
-}
-
-// Spec returns the spec produced by planning.
-func (m Model) Spec() types.Specification {
-	return m.spec
-}
-
-// SetSpec sets the spec after planning completes.
-func (m *Model) SetSpec(spec types.Specification) {
-	m.spec = spec
-}
-
-// handleSessionEvent processes a harness session lifecycle event.
-func (m Model) handleSessionEvent(evt harness.SessionEvent) (tea.Model, tea.Cmd) {
-	tabIdx, exists := m.sessionTabs[evt.SessionID]
-
-	switch evt.State {
-	case harness.SessionPending:
-		if exists {
-			return m, nil
-		}
-		idx := m.tabsView.AddTab(evt.Name)
-		m.sessionTabs[evt.SessionID] = idx
-		m.tabsView.active = idx
-		return m, nil
-
-	case harness.SessionRunning:
-		if exists {
-			m.tabsView.tabNames[tabIdx] = evt.Name + " ⟳"
-		}
-		return m, nil
-
-	case harness.SessionDone:
-		if exists {
-			m.tabsView.tabNames[tabIdx] = evt.Name + " ✓"
-			if tabIdx < len(m.tabsView.tabKinds) && m.tabsView.tabKinds[tabIdx] == tabKindStream {
-				sIdx := m.tabsView.streamIndex(tabIdx)
-				if sIdx < len(m.tabsView.tabs) {
-					m.tabsView.tabs[sIdx].done = true
-				}
-			}
-		}
-		if m.state == StateExecuting && evt.SessionID != "plan" {
-			m.setState(StateDone)
-			return m, func() tea.Msg { return CycleBackToIdleMsg{} }
-		}
-		return m, nil
-
-	case harness.SessionFailed:
-		if exists {
-			m.tabsView.tabNames[tabIdx] = evt.Name + " ✗"
-			if tabIdx < len(m.tabsView.tabKinds) && m.tabsView.tabKinds[tabIdx] == tabKindStream {
-				sIdx := m.tabsView.streamIndex(tabIdx)
-				if sIdx < len(m.tabsView.tabs) {
-					m.tabsView.tabs[sIdx].done = true
-					m.tabsView.tabs[sIdx].err = evt.Err
-				}
-			}
-		}
-		if m.state == StateExecuting && evt.SessionID != "plan" {
-			m.setState(StateDone)
-			m.err = evt.Err
-			return m, func() tea.Msg { return CycleBackToIdleMsg{} }
-		}
-		return m, nil
-	}
-
-	return m, nil
-}
-
-// handleConfirmEdit saves the current spec to a markdown file in cwd.
-// On success it transitions to StateSaved; on failure it stays in StateConfirming
-// with m.saveErr set for display.
-func (m Model) handleConfirmEdit() (tea.Model, tea.Cmd) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		m.saveErr = fmt.Errorf("cannot determine working directory: %w", err)
-		return m, m.confirmView.Focus()
-	}
-	s := plan.FromSpecification(m.spec)
-	filePath, err := plan.SaveToFile(s, cwd)
-	if err != nil {
-		m.saveErr = err
-		return m, m.confirmView.Focus()
-	}
-	m.saveErr = nil
-	m.setState(StateSaved)
-	m.savedView = newSavedView(filePath)
-	if m.width > 0 {
-		tabHeight := m.height - 3
-		if m.showLogs {
-			tabHeight -= 8
-		}
-		sv, _ := m.savedView.Update(tea.WindowSizeMsg{Width: m.width, Height: tabHeight})
-		m.savedView = sv
-	}
-	return m, nil
-}
-
-// syncConfirmViewport sends the current terminal dimensions to the confirmView
-// so its viewport initialises correctly when entering StateConfirming. Safe to
-// call before the first tea.WindowSizeMsg if m.width == 0 (no-op in that case).
-func (m *Model) syncConfirmViewport() {
-	if m.width == 0 {
-		return
-	}
-	logHeight := 0
-	if m.showLogs {
-		logHeight = 8
-	}
-	tabHeight := m.height - 3 - logHeight // 3 = commandBarHeight
-	cv, _ := m.confirmView.Update(tea.WindowSizeMsg{Width: m.width, Height: tabHeight})
-	m.confirmView = cv
-}
-
-// TabIndexForSession returns the tab index for a given session ID, or -1 if not found.
-func (m Model) TabIndexForSession(sessionID string) int {
-	idx, ok := m.sessionTabs[sessionID]
-	if !ok {
-		return -1
-	}
-	return idx
-}
-
-// startPlanning runs the pipeline.Plan function in a goroutine, streaming
-// output into the Planner tab. Includes planner retries and plan-validation
-// repair loops (re-plan on validation failure).
-func (m Model) startPlanning() {
-	p := m.program
-	pw := &sessionWriter{program: p, sessionID: "plan"}
-
-	p.Send(SessionEventMsg{Event: harness.SessionEvent{
-		SessionID: "plan",
-		Name:      "Planner",
-		State:     harness.SessionRunning,
-	}})
-
-	attempts := m.pipeline.PlannerAttempts
-	if attempts < 1 {
-		attempts = 1
-	}
-	repairs := m.pipeline.PlanValidationRepair
-	if repairs < 0 {
-		repairs = 0
-	}
-
-	currentPrompt := m.prompt
-
-	// planOnce tries to plan with retry on transient failures.
-	planOnce := func(prompt string) (types.Specification, error) {
-		var lastErr error
-		for i := 0; i < attempts; i++ {
-			spec, err := m.pipeline.Plan(m.ctx, prompt, pw)
-			if err != nil {
-				lastErr = err
-				slog.Warn("planner attempt failed", "attempt", i+1, "err", err)
-				continue
-			}
-			return spec, nil
-		}
-		return types.Specification{}, fmt.Errorf("planner exhausted %d attempts: %w", attempts, lastErr)
-	}
-
-	spec, err := planOnce(currentPrompt)
-	if err != nil {
-		p.Send(SessionEventMsg{Event: harness.SessionEvent{
-			SessionID: "plan",
-			Name:      "Planner",
-			State:     harness.SessionFailed,
-			Err:       err,
-		}})
-		p.Send(ErrorMsg{Err: err})
-		return
-	}
-
-	// Plan-validation repair loop: validate, and if it fails, re-plan with feedback.
-	if m.pipeline.ValidatePlan != nil && repairs > 0 {
-		for i := 0; i <= repairs; i++ {
-			slog.Info("validating plan", "goal", spec.Goal, "repair_attempt", i)
-			report, valErr := m.pipeline.ValidatePlan(m.ctx, spec)
-			if valErr != nil {
-				slog.Warn("plan validation error, proceeding", "err", valErr)
-				break // validation infra error — proceed with current spec
-			}
-			if report == nil || report.Verdict != types.VerdictFail {
-				break // passed or warned — proceed
-			}
-			if i < repairs {
-				slog.Info("plan validation failed, re-planning", "attempt", i+1, "summary", report.Summary)
-				feedback := types.FormatValidationFeedback(report)
-				repairPrompt := fmt.Sprintf("%s\n\nPrevious plan was rejected by validator:\n%s\nPlease fix the issues and produce a corrected specification.", currentPrompt, feedback)
-				newSpec, planErr := planOnce(repairPrompt)
-				if planErr != nil {
-					slog.Warn("re-planning failed, using last spec", "err", planErr)
-					break
-				}
-				spec = newSpec
-			}
-			// If i == repairs and still failing, we fall through with the last spec.
-		}
-	}
-
-	p.Send(SessionEventMsg{Event: harness.SessionEvent{
-		SessionID: "plan",
-		Name:      "Planner",
-		State:     harness.SessionDone,
-	}})
-	p.Send(planCompleteMsg{spec: spec})
-}
-
-// startIntake launches the PTY-based intake runner in a goroutine.
-func (m Model) startIntake(prompt string) {
-	p := m.program
-	tabIdx := m.intakeTabIdx
-
-	artifact, err := m.pipeline.RunIntake(m.ctx, prompt, tabIdx, p.Send)
-	if err != nil {
-		p.Send(IntakeCompleteMsg{Err: err})
-		return
-	}
-	p.Send(IntakeCompleteMsg{Artifact: artifact})
-}
-
-// startInteractiveIntake launches Claude Code in interactive mode inside a
+// startInteractiveAgent launches Claude Code in interactive mode inside a
 // sandbox term tab. The user interacts directly with Claude Code's UI.
-// When the session exits, the artifact is extracted and planning begins.
-func (m Model) startInteractiveIntake(prompt string) {
+func (m Model) startInteractiveAgent(prompt string) {
 	p := m.program
 	tabIdx := m.intakeTabIdx
 
@@ -1063,271 +320,10 @@ func (m Model) startInteractiveIntake(prompt string) {
 	p.Send(IntakeCompleteMsg{Artifact: artifact})
 }
 
-// startIntentRecognition runs the intake model before the expensive planner.
-func (m Model) startIntentRecognition(prompt string) {
-	p := m.program
-	result, err := m.pipeline.RecognizeIntent(m.ctx, prompt)
-	if err != nil {
-		p.Send(IntentResultMsg{Err: err})
-		return
+// truncID safely truncates an ID for display.
+func truncID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
 	}
-	p.Send(IntentResultMsg{
-		Verdict:                result.Verdict,
-		Rephrased:              result.Rephrased,
-		EndState:               result.EndState,
-		Reason:                 result.Reason,
-		Questions:              result.Questions,
-		ImprovedPromptExamples: result.ImprovedPromptExamples,
-	})
-}
-
-// startPlanValidation runs ValidatePlan in a goroutine and sends the result.
-func (m Model) startPlanValidation() {
-	p := m.program
-	if m.pipeline.ValidatePlan == nil {
-		p.Send(PlanValidatedMsg{})
-		return
-	}
-
-	slog.Info("validating plan", "goal", m.spec.Goal)
-	report, err := m.pipeline.ValidatePlan(m.ctx, m.spec)
-	p.Send(PlanValidatedMsg{Report: report, Err: err})
-}
-
-// startWorkValidation runs ValidateWork in a goroutine with optional re-execution
-// repair loop, and sends the result.
-func (m Model) startWorkValidation(workOutput string) {
-	p := m.program
-	if m.pipeline.ValidateWork == nil {
-		p.Send(WorkValidatedMsg{})
-		return
-	}
-
-	repairs := m.pipeline.WorkValidationRepair
-	if repairs < 0 {
-		repairs = 0
-	}
-
-	currentOutput := workOutput
-	for i := 0; i <= repairs; i++ {
-		slog.Info("validating work output", "attempt", i)
-		report, err := m.pipeline.ValidateWork(m.ctx, m.spec, currentOutput)
-		if err != nil {
-			p.Send(WorkValidatedMsg{Report: report, Err: err})
-			return
-		}
-		if report == nil || report.Verdict != types.VerdictFail {
-			p.Send(WorkValidatedMsg{Report: report})
-			return
-		}
-		if i < repairs {
-			slog.Info("work validation failed, re-executing", "attempt", i+1, "summary", report.Summary)
-			feedback := types.FormatValidationFeedback(report)
-			repairPrompt := fmt.Sprintf("The previous execution was rejected by the validator:\n%s\n\nOriginal spec goal: %s\nPlease fix the issues.", feedback, m.spec.Goal)
-			// Re-execute using a temporary spec with the repair prompt as goal
-			repairSpec := types.Specification{
-				Goal:       repairPrompt,
-				Steps:      m.spec.Steps,
-				Acceptance: m.spec.Acceptance,
-			}
-			cw := &capturingWriter{program: p, tabIndex: m.execTabIdx}
-			reExecErr := m.pipeline.Execute(m.ctx, repairSpec, cw)
-			if reExecErr != nil {
-				p.Send(WorkValidatedMsg{Report: report})
-				return
-			}
-			currentOutput = cw.captured.String()
-		} else {
-			p.Send(WorkValidatedMsg{Report: report})
-			return
-		}
-	}
-	p.Send(WorkValidatedMsg{})
-}
-
-// startProjectManagement runs DecomposeSpec in a goroutine.
-func (m Model) startProjectManagement() {
-	p := m.program
-	if m.pipeline.DecomposeSpec == nil {
-		p.Send(ProjectPlanReadyMsg{Err: fmt.Errorf("project manager not configured")})
-		return
-	}
-
-	// Create a PM tab for streaming output
-	pmTabIdx := -1
-	if p != nil {
-		p.Send(addTabMsg{name: "PM"})
-	}
-	_ = pmTabIdx
-
-	slog.Info("decomposing spec into work packages", "goal", m.spec.Goal)
-	pw := &sessionWriter{program: p, sessionID: "pm"}
-	plan, err := m.pipeline.DecomposeSpec(m.ctx, m.spec, pw)
-	p.Send(ProjectPlanReadyMsg{Plan: plan, Err: err})
-}
-
-// startMultiWorkerExecution launches workers for each package, respecting dependency waves.
-func (m Model) startMultiWorkerExecution() {
-	p := m.program
-	if m.projectPlan == nil || len(m.projectPlan.Packages) == 0 {
-		p.Send(HarnessDoneMsg{Err: fmt.Errorf("no work packages to execute")})
-		return
-	}
-
-	plan := *m.projectPlan
-	waves := types.TopoWaves(plan.Packages)
-
-	// Track all captured output for work validation
-	var allOutput strings.Builder
-
-	for waveIdx, wave := range waves {
-		slog.Info("executing wave", "wave", waveIdx+1, "packages", len(wave))
-
-		type result struct {
-			pkgID  string
-			output string
-			err    error
-		}
-		results := make(chan result, len(wave))
-
-		for _, pkg := range wave {
-			go func(wp types.WorkPackage) {
-				spec := wp.ToSpecification(m.spec)
-				tabIdx := -1
-
-				// Create tab for this worker
-				p.Send(addTabMsg{name: wp.ID})
-				// Slight race: tab index comes back async. Use session-based routing.
-				cw := &capturingSessionWriter{
-					program:   p,
-					sessionID: wp.ID,
-				}
-
-				slog.Info("worker started", "package", wp.ID)
-				err := m.pipeline.Execute(m.ctx, spec, cw)
-				_ = tabIdx
-				if err != nil {
-					results <- result{pkgID: wp.ID, err: fmt.Errorf("worker %q: %w", wp.ID, err)}
-					return
-				}
-				slog.Info("worker done", "package", wp.ID)
-				results <- result{pkgID: wp.ID, output: cw.captured.String()}
-			}(pkg)
-		}
-
-		// Collect results for this wave
-		for range wave {
-			r := <-results
-			if r.err != nil {
-				p.Send(HarnessDoneMsg{Err: r.err})
-				return
-			}
-			fmt.Fprintf(&allOutput, "=== Package: %s ===\n%s\n", r.pkgID, r.output)
-		}
-	}
-
-	// All packages done — send completion with combined output for work validation
-	p.Send(HarnessDoneMsg{WorkOutput: allOutput.String()})
-}
-
-func (m *Model) setState(s State) {
-	m.state = s
-	m.commandBar.SetState(s)
-	m.focus = defaultFocusForState(s)
-	m.syncFocus()
-}
-
-func (m *Model) setIntentVerdict(verdict string) {
-	m.intentVerdict = verdict
-	m.commandBar.SetIntentVerdict(verdict)
-}
-func defaultFocusForState(s State) FocusTarget {
-	switch s {
-	case StateIdle, StateIntentConfirm:
-		return FocusPrompt
-	case StatePlanning, StateExecuting, StateProjectManaging, StateIntakeRunning:
-		return FocusTabs
-	case StateConfirming:
-		return FocusPlan
-	case StateDone:
-		return FocusNone
-	default:
-		return FocusPrompt
-	}
-}
-
-func (m Model) focusTargets() []FocusTarget {
-	switch m.state {
-	case StateIdle:
-		return []FocusTarget{FocusPrompt}
-	case StatePlanning, StateExecuting, StateIntakeRunning:
-		return []FocusTarget{FocusPrompt, FocusTabs}
-	case StateConfirming:
-		return []FocusTarget{FocusPlan, FocusPrompt}
-	case StateIntentConfirm:
-		return []FocusTarget{FocusPrompt}
-	default:
-		return []FocusTarget{FocusPrompt}
-	}
-}
-
-func (m *Model) cycleFocus(reverse bool) {
-	targets := m.focusTargets()
-	if len(targets) == 0 {
-		m.focus = FocusNone
-		return
-	}
-
-	idx := -1
-	for i, t := range targets {
-		if t == m.focus {
-			idx = i
-			break
-		}
-	}
-
-	if idx == -1 {
-		m.focus = targets[0]
-		return
-	}
-
-	if reverse {
-		idx--
-		if idx < 0 {
-			idx = len(targets) - 1
-		}
-	} else {
-		idx++
-		if idx >= len(targets) {
-			idx = 0
-		}
-	}
-	m.focus = targets[idx]
-	m.syncFocus()
-}
-
-func (m *Model) syncFocus() {
-	if m.focus == FocusPrompt {
-		m.commandBar.focused = true
-	} else {
-		m.commandBar.focused = false
-	}
-
-	tabsFocused := m.focus == FocusTabs
-	m.tabsView.focused = tabsFocused
-
-	// Propagate focus to all term tabs — only the active one gets true.
-	for i := range m.tabsView.termTabs {
-		m.tabsView.termTabs[i].focused = false
-	}
-	if tabsFocused && m.tabsView.active < len(m.tabsView.tabKinds) && m.tabsView.tabKinds[m.tabsView.active] == tabKindTerm {
-		tIdx := m.tabsView.termIndex(m.tabsView.active)
-		if tIdx < len(m.tabsView.termTabs) {
-			m.tabsView.termTabs[tIdx].focused = true
-		}
-	}
-
-	if m.state == StateConfirming {
-		m.confirmView.planFocused = (m.focus == FocusPlan)
-	}
+	return id
 }

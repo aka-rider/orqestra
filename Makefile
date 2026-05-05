@@ -25,7 +25,11 @@ e2e:
 	go test -tags e2e ./internal/harness/ -v -count=1 -run TestE2E -timeout 120s
 
 sandbox-image:
-	docker build -t orqestra-sandbox:latest -f build/sandbox/Dockerfile .
+	docker build \
+		--build-arg UID=$(shell id -u) \
+		--build-arg GID=$(shell id -g) \
+		-t orqestra-sandbox:latest \
+		-f build/sandbox/Dockerfile .
 
 sandbox-test: sandbox-image
 	go test ./internal/sandbox/ -v -count=1 -run Integration

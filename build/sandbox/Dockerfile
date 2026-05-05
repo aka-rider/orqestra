@@ -1,18 +1,7 @@
-# Agent Sandbox — Generic Execution Container
-#
-# Repo-agnostic isolated execution environment for Claude agent sessions.
-# ANY repo is bind-mounted at /workspace-src (read-only) at runtime.
-# Workspace is populated via seed-and-commit during provisioning (OverlayFS).
-# Docker MCP servers are accessible via the mounted MCP gateway socket.
-#
-# Build:  docker build -t orqestra-sandbox:latest -f build/sandbox/Dockerfile .
-# Usage:  Managed by the sandbox package — not meant for direct use.
-
-FROM debian:bookworm-slim
+FROM oven/bun:1-slim
 
 # Runtime dependencies.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    rsync \
     git \
     tini \
     curl \
@@ -20,48 +9,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install bun (JavaScript runtime — runs Claude Code).
-RUN curl -fsSL https://bun.sh/install | bash
-ENV PATH="/root/.bun/bin:${PATH}"
+# Assume MacOS defaults
+ARG UID=501
+ARG GID=20
 
-# Install Claude Code globally via bun.
-RUN bun install -g @anthropic-ai/claude-code
-
-# Create non-root sandbox user.
-RUN groupadd -g 1000 sandbox && \
-    useradd -u 1000 -g sandbox -m -s /bin/bash sandbox
-
-# Copy bun + claude to sandbox user.
-RUN cp -a /root/.bun /home/sandbox/.bun && \
-    chown -R sandbox:sandbox /home/sandbox/.bun
-ENV PATH="/home/sandbox/.bun/bin:${PATH}"
-
-# Mount points (populated at runtime by docker create).
-RUN mkdir -p /workspace /workspace-src /deps /run && \
-    chown sandbox:sandbox /workspace
-
-# Agent artifact directories (system prompt, input/output staging).
-RUN mkdir -p /workspace/.orqestra/agent/input /workspace/.orqestra/agent/output && \
-    chown -R sandbox:sandbox /workspace/.orqestra
-
-# Bake project-level Claude Code hooks into workspace.
-# Notification + Stop hooks emit BEL (\x07) to /dev/tty for Orqestra detection.
-RUN mkdir -p /workspace/.claude
-COPY build/sandbox/claude-settings.json /workspace/.claude/settings.json
-RUN chown -R sandbox:sandbox /workspace/.claude
-
-# Also install as user-level settings (used by -p mode and global config).
-RUN mkdir -p /home/sandbox/.claude
-COPY build/sandbox/claude-settings.json /home/sandbox/.claude/settings.json
-RUN chown -R sandbox:sandbox /home/sandbox/.claude
+# Create non-root sandbox user and root directories.
+# Note: Since the host GID might naturally collide with existing groups in Debian (like GID 20: dialout),
+# we allow fallback creation if groupadd fails.
+RUN groupadd -g ${GID} sandbox || groupadd sandbox && \
+    useradd -u ${UID} -g sandbox -d /workspace -s /bin/bash sandbox
 
 # Entrypoint.
 COPY build/sandbox/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# Switch to sandbox user for all user-level setup
+USER sandbox
+
+# Install Claude Code globally using bun
+RUN bun install -g @anthropic-ai/claude-code
+
+# Bake project-level Claude Code config into workspace.
+# Contains hooks (BEL on Stop/Notification) for Orqestra attention detection.
+# Permissions are handled by --dangerously-skip-permissions at launch time.
+# This is the ONLY config file we write. ~/.claude.json is never touched.
+# For native Anthropic auth, host ~/.claude/ is bind-mounted at runtime.
+RUN mkdir -p /workspace/.claude
+COPY --chown=sandbox:sandbox build/sandbox/claude-settings.json /workspace/.claude/settings.json
+
 WORKDIR /workspace
 
-# Tini as PID 1. Entrypoint drops to sandbox user.
-ENTRYPOINT ["tini", "--", "/entrypoint.sh"]
+ENV DOCKER_MCP_SOCKET="/run/mcp.sock"
+# Tini as PID 1. Entrypoint runs natively as sandbox user.
+ENTRYPOINT ["tini", "--", "sleep", "infinity"]
 
 LABEL sandbox=true

@@ -41,8 +41,7 @@ func setupPTYTestContainer(t *testing.T) (*dockerclient.Client, string) {
 	}
 
 	resp, err := cli.ContainerCreate(ctx, &container.Config{
-		Image: "alpine:latest",
-		Cmd:   []string{"sleep", "300"},
+		Image: "orqestra-sandbox:latest",
 		Tty:   false,
 	}, nil, nil, nil, "")
 	require.NoError(t, err, "creating test container")

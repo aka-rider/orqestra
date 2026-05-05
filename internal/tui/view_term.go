@@ -9,12 +9,7 @@ import (
 	"github.com/charmbracelet/x/vt"
 )
 
-// PTYWriter is the interface termView uses to send input and resize the PTY.
-// Decouples TUI from concrete sandbox.PTYSession to avoid circular imports.
-type PTYWriter interface {
-	Write([]byte) (int, error)
-	Resize(cols, rows uint) error
-}
+// Note: PTYWriter interface is defined in messages.go.
 
 // termView renders PTY output in a virtual terminal buffer inside the TUI.
 type termView struct {

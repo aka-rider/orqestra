@@ -24,16 +24,15 @@ import (
 
 // DockerSandbox is a Sandbox backed by a Docker container.
 type DockerSandbox struct {
-	mu             sync.RWMutex
-	id             string
-	containerID    string
-	ephemeralImage string // committed image tag for this sandbox's workspace
-	state          State
-	createdAt      time.Time
-	cfg            Config
-	repoPath       string // absolute path to the host repo
-	env            []string
-	cli            *dockerclient.Client
+	mu          sync.RWMutex
+	id          string
+	containerID string
+	state       State
+	createdAt   time.Time
+	cfg         Config
+	repoPath    string // absolute path to the host repo
+	env         []string
+	cli         *dockerclient.Client
 }
 
 // newDockerClient creates a Docker client from environment (respects DOCKER_HOST, etc.).
@@ -84,12 +83,11 @@ func newDockerClientWithHost(host string) (*dockerclient.Client, error) {
 func NewDockerSandbox(cfg Config, repoPath string, env []string) *DockerSandbox {
 	id := generateID()
 	return &DockerSandbox{
-		id:             id,
-		ephemeralImage: "orqestra-ws-snapshot-" + id,
-		state:          StatePending,
-		cfg:            cfg,
-		repoPath:       repoPath,
-		env:            env,
+		id:       id,
+		state:    StatePending,
+		cfg:      cfg,
+		repoPath: repoPath,
+		env:      env,
 	}
 }
 
@@ -158,10 +156,10 @@ func (d *DockerSandbox) Client() *dockerclient.Client {
 	return d.cli
 }
 
-// Provision creates the Docker container using a seed-and-commit model:
-// 1. Spin up a temporary seed container, bind-mount the repo, rsync into /workspace.
-// 2. Commit the seeded container as an ephemeral image.
-// 3. Start the runtime sandbox from the ephemeral image (no --privileged needed).
+// Provision creates the Docker container:
+// 1. Create and start the runtime container from the base image.
+// 2. Copy the workspace into the container via the Docker API (tar-based).
+// 3. Fix ownership and wait for readiness.
 func (d *DockerSandbox) Provision(ctx context.Context) error {
 	d.setState(StateProvisioning)
 	d.createdAt = time.Now()
@@ -182,91 +180,10 @@ func (d *DockerSandbox) Provision(ctx context.Context) error {
 		}
 	}
 
-	// --- Seed phase: create a temp container, copy workspace in, commit as image ---
-	seedName := "orqestra-seed-" + d.id
-	seedCfg := &container.Config{
-		Image: d.cfg.Image,
-		Cmd:   []string{"sleep", "infinity"},
-		Tty:   true,
-	}
-	seedHostCfg := &container.HostConfig{
-		Mounts: []mount.Mount{
-			{
-				Type:     mount.TypeBind,
-				Source:   d.repoPath,
-				Target:   "/workspace-src",
-				ReadOnly: true,
-			},
-		},
-	}
-
-	slog.Debug("sandbox: creating seed container", "id", d.id, "image", d.cfg.Image)
-	seedResp, err := d.cli.ContainerCreate(ctx, seedCfg, seedHostCfg, nil, nil, seedName)
-	if err != nil {
-		d.setState(StatePending)
-		return fmt.Errorf("creating seed container: %w", err)
-	}
-	seedID := seedResp.ID
-
-	if err := d.cli.ContainerStart(ctx, seedID, container.StartOptions{}); err != nil {
-		_ = d.cli.ContainerRemove(ctx, seedID, container.RemoveOptions{Force: true}) // fire-and-forget: cleanup on failure
-		d.setState(StatePending)
-		return fmt.Errorf("starting seed container: %w", err)
-	}
-
-	// Copy workspace content into the seed container.
-	seedExec := func(cmd []string) error {
-		execCfg := container.ExecOptions{Cmd: cmd, AttachStdout: true, AttachStderr: true}
-		resp, err := d.cli.ContainerExecCreate(ctx, seedID, execCfg)
-		if err != nil {
-			return err
-		}
-		attachResp, err := d.cli.ContainerExecAttach(ctx, resp.ID, container.ExecAttachOptions{})
-		if err != nil {
-			return err
-		}
-		defer attachResp.Close()
-		if _, err := io.Copy(io.Discard, attachResp.Reader); err != nil {
-			return err
-		}
-		inspect, err := d.cli.ContainerExecInspect(ctx, resp.ID)
-		if err != nil {
-			return err
-		}
-		if inspect.ExitCode != 0 {
-			return fmt.Errorf("exit code %d", inspect.ExitCode)
-		}
-		return nil
-	}
-
-	if err := seedExec([]string{"rsync", "-a", "/workspace-src/", "/workspace/"}); err != nil {
-		_ = d.cli.ContainerRemove(ctx, seedID, container.RemoveOptions{Force: true}) // fire-and-forget: cleanup on failure
-		d.setState(StatePending)
-		return fmt.Errorf("seeding workspace: %w", err)
-	}
-	if err := seedExec([]string{"chown", "-R", "sandbox:sandbox", "/workspace"}); err != nil {
-		_ = d.cli.ContainerRemove(ctx, seedID, container.RemoveOptions{Force: true}) // fire-and-forget: cleanup on failure
-		d.setState(StatePending)
-		return fmt.Errorf("setting workspace ownership: %w", err)
-	}
-
-	// Commit the seeded container as an ephemeral image.
-	_, err = d.cli.ContainerCommit(ctx, seedID, container.CommitOptions{
-		Reference: d.ephemeralImage,
-	})
-	if err != nil {
-		_ = d.cli.ContainerRemove(ctx, seedID, container.RemoveOptions{Force: true}) // fire-and-forget: cleanup on failure
-		d.setState(StatePending)
-		return fmt.Errorf("committing seed container: %w", err)
-	}
-
-	// Remove the seed container — no longer needed.
-	_ = d.cli.ContainerRemove(ctx, seedID, container.RemoveOptions{Force: true}) // fire-and-forget: seed container is disposable
-
-	// --- Runtime phase: start the actual sandbox from the ephemeral image ---
+	// Create and start the runtime container directly from the base image.
 	containerConfig, hostConfig := d.buildContainerConfig()
 
-	slog.Debug("sandbox: creating runtime container", "id", d.id, "image", d.ephemeralImage)
+	slog.Info("sandbox: creating container", "id", d.id, "image", d.cfg.Image)
 	resp, err := d.cli.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, "")
 	if err != nil {
 		d.setState(StatePending)
@@ -283,12 +200,35 @@ func (d *DockerSandbox) Provision(ctx context.Context) error {
 	d.containerID = containerID
 	d.mu.Unlock()
 
+	slog.Info("sandbox: starting container", "id", d.id)
 	if err := d.cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
 		d.setState(StatePending)
 		return fmt.Errorf("docker start: %w", err)
 	}
 
-	// Wait for entrypoint to finish (it's trivial now — just symlinks + privilege drop).
+	// Wait for the container to be fully running before copying files.
+	if err := d.waitRunning(ctx); err != nil {
+		d.setState(StatePending)
+		return fmt.Errorf("waiting for container to start: %w", err)
+	}
+
+	// Copy workspace into the running container via the Docker API.
+	slog.Info("sandbox: copying workspace", "id", d.id, "repo", d.repoPath)
+	if err := CopyDirToContainer(ctx, d.cli, containerID, "/workspace", d.repoPath); err != nil {
+		d.setState(StatePending)
+		return fmt.Errorf("copying workspace: %w", err)
+	}
+
+	// Fix ownership — CopyDirToContainer preserves host UIDs, but the sandbox
+	// user (1000:1000) needs to own /workspace.
+	slog.Info("sandbox: fixing ownership", "id", d.id)
+	if _, err := d.execInternal(ctx, []string{"chown", "-R", "sandbox:sandbox", "/workspace"}); err != nil {
+		d.setState(StatePending)
+		return fmt.Errorf("setting workspace ownership: %w", err)
+	}
+
+	// Wait for entrypoint to finish and workspace to be ready.
+	slog.Info("sandbox: waiting for ready", "id", d.id)
 	if err := d.waitReady(ctx); err != nil {
 		d.setState(StatePending)
 		return fmt.Errorf("waiting for container ready: %w", err)
@@ -436,7 +376,7 @@ func (d *DockerSandbox) CopyOut(ctx context.Context, sandboxPath, hostPath strin
 	return CopyFileFromContainer(ctx, d.cli, d.containerID, containerPath, hostPath)
 }
 
-// Destroy stops and removes the container and ephemeral image.
+// Destroy stops and removes the container.
 // A sandbox is fully ephemeral — nothing survives destruction.
 func (d *DockerSandbox) Destroy(ctx context.Context) error {
 	if err := d.ensureClient(); err != nil {
@@ -454,21 +394,15 @@ func (d *DockerSandbox) Destroy(ctx context.Context) error {
 		_ = d.cli.ContainerRemove(ctx, cid, container.RemoveOptions{Force: true, RemoveVolumes: true}) // fire-and-forget: container may already be gone
 	}
 
-	// Remove the ephemeral image to prevent dangling snapshots.
-	if d.ephemeralImage != "" {
-		_, _ = d.cli.ImageRemove(ctx, d.ephemeralImage, image.RemoveOptions{Force: true}) // fire-and-forget: image may already be removed
-	}
-
 	d.setState(StateDestroyed)
 	slog.Info("sandbox: destroyed", "id", d.id)
 	return nil
 }
 
 // buildContainerConfig constructs the container and host configs for Docker SDK.
-// Uses the ephemeral image (which has /workspace pre-populated) — no privileged mode needed.
 func (d *DockerSandbox) buildContainerConfig() (*container.Config, *container.HostConfig) {
 	containerCfg := &container.Config{
-		Image:     d.ephemeralImage,
+		Image:     d.cfg.Image,
 		Tty:       true,
 		OpenStdin: true,
 		Env:       d.env,
@@ -535,6 +469,30 @@ func (d *DockerSandbox) buildContainerConfig() (*container.Config, *container.Ho
 	return containerCfg, hostCfg
 }
 
+// waitRunning polls the Docker API until the container is in the "running" state.
+func (d *DockerSandbox) waitRunning(ctx context.Context) error {
+	deadline := time.After(30 * time.Second)
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline:
+			return fmt.Errorf("timeout waiting for container %s to start", d.id)
+		case <-tick.C:
+			inspect, err := d.cli.ContainerInspect(ctx, d.containerID)
+			if err != nil {
+				continue
+			}
+			if inspect.State != nil && inspect.State.Running {
+				return nil
+			}
+		}
+	}
+}
+
 // waitReady polls the container until the workspace copy is complete.
 func (d *DockerSandbox) waitReady(ctx context.Context) error {
 	deadline := time.After(60 * time.Second)
@@ -569,6 +527,9 @@ func (d *DockerSandbox) execInternal(ctx context.Context, cmd []string) (int, er
 // execInternalAs runs a command inside the container as the specified user, discarding output.
 // An empty user means container default (root).
 func (d *DockerSandbox) execInternalAs(ctx context.Context, user string, cmd []string) (int, error) {
+	if user == "" {
+		user = "root"
+	}
 	execCfg := container.ExecOptions{
 		Cmd:          cmd,
 		User:         user,
@@ -600,6 +561,7 @@ func (d *DockerSandbox) execInternalWithOutput(ctx context.Context, cmd []string
 		Cmd:          cmd,
 		AttachStdout: true,
 		AttachStderr: true,
+		User:         "root",
 	}
 	execResp, err := d.cli.ContainerExecCreate(ctx, d.containerID, execCfg)
 	if err != nil {

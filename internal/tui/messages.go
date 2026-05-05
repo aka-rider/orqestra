@@ -1,169 +1,23 @@
 package tui
 
 import (
+	"context"
+
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/xiii/orqestra/internal/harness"
-	"github.com/xiii/orqestra/internal/scheduler"
-	"github.com/xiii/orqestra/internal/tokenlimit"
 	"github.com/xiii/orqestra/internal/types"
 )
 
-// Custom message types for TUI state transitions.
-
-// PlanReadyMsg signals that planning completed successfully.
-type PlanReadyMsg struct{}
-
-// ConfirmChoice represents the user's decision at the Human Gate.
-type ConfirmChoice int
-
-const (
-	ConfirmAccept ConfirmChoice = iota // user approved the plan
-	ConfirmReject                      // user rejected the plan
-	ConfirmEdit                        // user chose to save the plan for editing
-)
-
-// ConfirmMsg carries the user's gate decision.
-type ConfirmMsg struct {
-	Choice ConfirmChoice
-}
-
-// PlanSavedMsg is sent after the plan is successfully written to disk.
-type PlanSavedMsg struct {
-	FilePath string
-}
-
-// PromptSubmitMsg carries a user-typed prompt from the command bar.
-type PromptSubmitMsg struct {
-	Prompt string
-}
-
-// CommandMsg carries a parsed slash command from the command bar.
-type CommandMsg struct {
-	Name string
-	Args string
-}
-
-// IntentResultMsg carries the structured intent recognition result.
-type IntentResultMsg struct {
-	Verdict                string
-	Rephrased              string
-	EndState               string
-	Reason                 string
-	Questions              []string
-	ImprovedPromptExamples []string
-	Err                    error
-}
-
-// IntentResult is the non-UI equivalent returned by the pipeline intake hook.
-type IntentResult struct {
-	Verdict                string
-	Rephrased              string
-	EndState               string
-	Reason                 string
-	Questions              []string
-	ImprovedPromptExamples []string
-}
-
-// IntentConfirmMsg signals that the user approved the rephrased intent.
-type IntentConfirmMsg struct{}
-
-// IntentRejectMsg signals that the user rejected the rephrased intent.
-type IntentRejectMsg struct{}
-
-// ToggleLogsMsg signals that the log panel should be toggled.
-type ToggleLogsMsg struct{}
-
-// CycleBackToIdleMsg signals StateDone should transition back to StateIdle.
-type CycleBackToIdleMsg struct{}
-
-// PlanValidatedMsg signals that plan validation completed.
-type PlanValidatedMsg struct {
-	Report *types.ValidationReport
-	Err    error
-}
-
-// ProjectPlanReadyMsg signals that the PM finished decomposing the spec.
-type ProjectPlanReadyMsg struct {
-	Plan types.ProjectPlan
-	Err  error
-}
-
-// WorkValidatedMsg signals that work validation completed.
-type WorkValidatedMsg struct {
-	Report *types.ValidationReport
-	Err    error
-}
-
-// StreamChunkMsg carries incremental output from a harness session.
-type StreamChunkMsg struct {
-	TabIndex  int
-	SessionID string // if set, used to resolve tab index from sessionTabs
-	Content   string
-}
-
-// HarnessDoneMsg signals that a harness session completed.
-type HarnessDoneMsg struct {
-	TabIndex   int
-	Err        error
-	WorkOutput string // captured work output for validation
-}
-
-// ErrorMsg signals an unrecoverable error.
-type ErrorMsg struct {
-	Err error
-}
-
-// TabSwitchMsg requests switching to a specific tab.
-type TabSwitchMsg struct {
-	Index int
-}
-
-// LogMsg delivers a log entry to the TUI log panel.
-type LogMsg struct {
-	Entry LogEntry
-}
-
-// SessionEventMsg wraps a harness.SessionEvent for the TUI event loop.
-type SessionEventMsg struct {
-	Event harness.SessionEvent
-}
-
-// SchedulerEventMsg wraps a scheduler event for the TUI.
-type SchedulerEventMsg struct {
-	Event scheduler.Event
-}
-
-// TokenLimitExceededMsg signals that a model's token budget was exhausted.
-type TokenLimitExceededMsg struct {
-	Err *tokenlimit.ErrBudgetExhausted
-}
-
-// SandboxStateMsg signals a sandbox lifecycle state change.
-type SandboxStateMsg struct {
-	SandboxID string
-	State     string // "pending", "provisioning", "ready", "running", "stopped", "extracting", "destroyed"
-}
-
-// CursorBlinkMsg is fired by the cursor blink tick loop in confirmView.
-type CursorBlinkMsg struct{}
-
-// ValidationStartedMsg signals that the HTTP work validator has started (triggers spinner).
-type ValidationStartedMsg struct{}
-
-// streamChunkCmd creates a tea.Cmd that emits a StreamChunkMsg.
-func streamChunkCmd(tabIndex int, content string) tea.Cmd {
-	return func() tea.Msg {
-		return StreamChunkMsg{TabIndex: tabIndex, Content: content}
-	}
-}
-
-// PulseTickMsg drives the tab pulsing animation.
-type PulseTickMsg struct{}
-
-// PTYOutputMsg delivers raw bytes from the PTY session to the terminal view.
+// PTYOutputMsg delivers raw bytes from a PTY session to the terminal view.
 type PTYOutputMsg struct {
 	TabIndex int
 	Data     []byte
+}
+
+// PTYDoneMsg signals that a PTY session has exited.
+type PTYDoneMsg struct {
+	TabIndex int
+	Err      error
+	ExitCode int
 }
 
 // PTYNeedsInputMsg signals that the PTY session is waiting for user input.
@@ -171,32 +25,70 @@ type PTYNeedsInputMsg struct {
 	TabIndex int
 }
 
-// PTYDoneMsg signals that the PTY session has exited.
-type PTYDoneMsg struct {
-	TabIndex int
-	Err      error
-	ExitCode int
-}
-
-// IntakeCompleteMsg signals that the PTY intake runner finished.
-type IntakeCompleteMsg struct {
-	Artifact []byte // extracted output artifact
-	Err      error
-}
-
 // AttentionMsg signals that a tab's agent needs user attention (BEL detected).
 type AttentionMsg struct {
 	TabIndex int
 }
 
-// AgentPipelineStateMsg signals a pipeline phase transition.
-type AgentPipelineStateMsg struct {
-	Phase string // "intake", "planning", "validating", "executing", "done", "halted"
+// IntakeCompleteMsg signals that the interactive intake runner finished.
+type IntakeCompleteMsg struct {
+	Artifact []byte
+	Err      error
 }
 
+// ErrorMsg signals an unrecoverable error.
+type ErrorMsg struct {
+	Err error
+}
+
+// LogMsg delivers a log entry to the TUI log panel.
+type LogMsg struct {
+	Entry LogEntry
+}
+
+// SandboxStateMsg signals a sandbox lifecycle state change.
+type SandboxStateMsg struct {
+	SandboxID string
+	State     string
+}
+
+// ToggleLogsMsg signals that the log panel should be toggled.
+type ToggleLogsMsg struct{}
+
+// PulseTickMsg drives the tab pulsing animation.
+type PulseTickMsg struct{}
+
 // attachPTYMsg delivers a live PTY writer to be attached to a term tab.
-// Sent from goroutines after RunInteractive returns.
 type attachPTYMsg struct {
 	tabIndex int
 	pty      PTYWriter
+}
+
+// setProgramMsg delivers the tea.Program reference to the model.
+type setProgramMsg struct {
+	program *tea.Program
+}
+
+// PTYWriter is the write-side of a PTY for sending user input to the agent
+// and controlling terminal size.
+type PTYWriter interface {
+	Write(p []byte) (n int, err error)
+	Resize(cols, rows uint) error
+}
+
+// WaitFunc blocks until an interactive agent exits and returns the artifact.
+type WaitFunc func(ctx context.Context) ([]byte, error)
+
+// PipelineFuncs holds the functions the TUI drives.
+type PipelineFuncs struct {
+	// LaunchInteractive starts an interactive Claude Code agent in a sandbox.
+	// Returns a PTYWriter for bidirectional I/O and a WaitFunc that blocks
+	// until the agent exits, returning the extracted artifact.
+	LaunchInteractive func(ctx context.Context, prompt string, send func(tea.Msg), tabIndex int) (PTYWriter, WaitFunc, error)
+
+	// Send delivers a tea.Msg into the TUI event loop. Wired after program creation.
+	Send func(tea.Msg)
+
+	// InitialSpec, when non-nil, signals a pre-loaded spec (e.g. resume from file).
+	InitialSpec *types.Specification
 }
