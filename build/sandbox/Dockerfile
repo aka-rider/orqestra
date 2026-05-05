@@ -40,6 +40,21 @@ ENV PATH="/home/sandbox/.bun/bin:${PATH}"
 RUN mkdir -p /workspace /workspace-src /deps /run && \
     chown sandbox:sandbox /workspace
 
+# Agent artifact directories (system prompt, input/output staging).
+RUN mkdir -p /workspace/.orqestra/agent/input /workspace/.orqestra/agent/output && \
+    chown -R sandbox:sandbox /workspace/.orqestra
+
+# Bake project-level Claude Code hooks into workspace.
+# Notification + Stop hooks emit BEL (\x07) to /dev/tty for Orqestra detection.
+RUN mkdir -p /workspace/.claude
+COPY build/sandbox/claude-settings.json /workspace/.claude/settings.json
+RUN chown -R sandbox:sandbox /workspace/.claude
+
+# Also install as user-level settings (used by -p mode and global config).
+RUN mkdir -p /home/sandbox/.claude
+COPY build/sandbox/claude-settings.json /home/sandbox/.claude/settings.json
+RUN chown -R sandbox:sandbox /home/sandbox/.claude
+
 # Entrypoint.
 COPY build/sandbox/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

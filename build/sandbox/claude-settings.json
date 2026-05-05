@@ -1,0 +1,26 @@
+{
+    "hooks": {
+        "Notification": [
+            {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "printf '\\a' > /dev/tty"
+                    }
+                ]
+            }
+        ],
+        "Stop": [
+            {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "printf '\\a' > /dev/tty"
+                    }
+                ]
+            }
+        ]
+    }
+}

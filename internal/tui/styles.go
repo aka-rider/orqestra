@@ -55,6 +55,13 @@ var (
 				BorderForeground(mutedColor).
 				Padding(0, 2)
 
+	attentionTabStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#F59E0B")).
+				Border(lipgloss.RoundedBorder(), true, true, false, true).
+				BorderForeground(lipgloss.Color("#F59E0B")).
+				Padding(0, 2)
+
 	tabGapStyle = lipgloss.NewStyle().
 			Border(lipgloss.Border{Bottom: "─"}, false, false, true, false).
 			BorderForeground(mutedColor)

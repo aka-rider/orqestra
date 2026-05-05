@@ -43,6 +43,11 @@ type PipelineFuncs struct {
 	// send delivers tea.Msg (PTYOutputMsg, PTYDoneMsg) to the TUI loop.
 	// Returns the artifact bytes on success.
 	RunIntake func(ctx context.Context, prompt string, tabIndex int, send func(tea.Msg)) ([]byte, error)
+	// LaunchInteractive starts an interactive Claude Code agent in a sandbox.
+	// Returns a PTYWriter for bidirectional I/O (attach to term tab) and a
+	// WaitFunc that blocks until the agent exits, returning the extracted artifact.
+	// The prompt is staged as input; the agent launches in full interactive mode.
+	LaunchInteractive func(ctx context.Context, prompt string, send func(tea.Msg), tabIndex int) (PTYWriter, WaitFunc, error)
 	// Plan runs the planner and streams output. Returns the spec.
 	Plan func(ctx context.Context, prompt string, stdout io.Writer) (types.Specification, error)
 	// ValidatePlan runs plan validation. Returns nil report if validation is disabled.
@@ -68,6 +73,9 @@ type PipelineFuncs struct {
 	PlanValidationRepair int // max plan-validation → re-plan cycles (0 = no repair)
 	WorkValidationRepair int // max work-validation → re-execute cycles (0 = no repair)
 }
+
+// WaitFunc blocks until an interactive agent exits and returns the artifact.
+type WaitFunc func(ctx context.Context) ([]byte, error)
 
 // Model is the main Bubble Tea model that drives the full pipeline.
 // FocusTarget represents which UI component currently accepts keyboard input.
@@ -399,6 +407,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tabsView = tv
 		return m, cmd
 
+	case attachPTYMsg:
+		// Attach a live PTY writer to the term tab for bidirectional I/O.
+		if tv := m.tabsView.TermTab(msg.tabIndex); tv != nil {
+			tv.AttachPTY(msg.pty)
+		}
+		return m, nil
+
 	case PTYOutputMsg:
 		tv, cmd := m.tabsView.Update(msg)
 		m.tabsView = tv
@@ -413,6 +428,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		tv, cmd := m.tabsView.Update(msg)
 		m.tabsView = tv
 		return m, cmd
+
+	case AttentionMsg:
+		m.tabsView.SetAttention(msg.TabIndex)
+		return m, nil
+
+	case AgentPipelineStateMsg:
+		m.logPanel = m.logPanel.Add(LogEntry{
+			Level:   "info",
+			Message: "pipeline: " + msg.Phase,
+		})
+		return m, nil
 
 	case IntakeCompleteMsg:
 		if msg.Err != nil {
@@ -488,6 +514,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case setProgramMsg:
 		m.program = msg.program
+		// Auto-launch interactive Claude Code session on startup.
+		if m.pipeline.LaunchInteractive != nil && m.state == StateIdle {
+			m.setState(StateIntakeRunning)
+			m.intakeTabIdx = m.tabsView.AddTermTab("Claude")
+			m.tabsView.active = m.intakeTabIdx
+			m.focus = FocusTabs
+			m.syncFocus()
+			go m.startInteractiveIntake("")
+			return m, pulseTickCmd()
+		}
 		return m, nil
 
 	case PulseTickMsg:
@@ -531,6 +567,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		tv, cmd := m.tabsView.Update(msg)
 		m.tabsView = tv
 		return m, cmd
+	case "alt+!":
+		// Jump to first tab with attention marker.
+		if idx := m.tabsView.FirstAttentionTab(); idx >= 0 {
+			m.tabsView.active = idx
+			m.tabsView.ClearAttention(idx)
+			m.focus = FocusTabs
+		}
+		return m, nil
 	}
 
 	// In StateSaved, any key exits cleanly.
@@ -592,7 +636,22 @@ func (m Model) handlePromptSubmit(msg PromptSubmitMsg) (tea.Model, tea.Cmd) {
 	m.helpContent = ""
 	m.setIntentVerdict("")
 
-	// Prefer PTY-based intake runner over old RecognizeIntent.
+	// Prefer interactive launch: Claude Code UI in a term tab.
+	if m.pipeline.LaunchInteractive != nil {
+		m.setState(StateIntakeRunning)
+		m.intakeTabIdx = m.tabsView.AddTermTab("Intake")
+		m.tabsView.active = m.intakeTabIdx
+		m.focus = FocusTabs
+		if !m.tabsView.pulsing {
+			m.tabsView.pulsing = true
+			go m.startInteractiveIntake(msg.Prompt)
+			return m, pulseTickCmd()
+		}
+		go m.startInteractiveIntake(msg.Prompt)
+		return m, nil
+	}
+
+	// Fallback: PTY-based intake runner (headless).
 	if m.pipeline.RunIntake != nil {
 		m.setState(StateIntakeRunning)
 		m.intakeTabIdx = m.tabsView.AddTermTab("Intake")
@@ -709,13 +768,10 @@ func (m Model) View() string {
 	}
 
 	if m.state == StateDone {
-		if !m.approved {
-			topView += "\n\n" + titleStyle.Render("Plan rejected.")
-			if m.err != nil {
-				topView += "\n" + dimStyle.Render("  press any key to dismiss")
-			}
-		} else if m.err != nil {
+		if m.err != nil {
 			topView += "\n\n" + errorStyle.Render("✗ Error: "+m.err.Error()) + "\n" + dimStyle.Render("  press any key to dismiss")
+		} else if !m.approved {
+			topView += "\n\n" + titleStyle.Render("Plan rejected.")
 		} else {
 			topView += "\n\n" + goalStyle.Render("✓ Complete")
 		}
@@ -975,6 +1031,31 @@ func (m Model) startIntake(prompt string) {
 	tabIdx := m.intakeTabIdx
 
 	artifact, err := m.pipeline.RunIntake(m.ctx, prompt, tabIdx, p.Send)
+	if err != nil {
+		p.Send(IntakeCompleteMsg{Err: err})
+		return
+	}
+	p.Send(IntakeCompleteMsg{Artifact: artifact})
+}
+
+// startInteractiveIntake launches Claude Code in interactive mode inside a
+// sandbox term tab. The user interacts directly with Claude Code's UI.
+// When the session exits, the artifact is extracted and planning begins.
+func (m Model) startInteractiveIntake(prompt string) {
+	p := m.program
+	tabIdx := m.intakeTabIdx
+
+	ptyWriter, waitFn, err := m.pipeline.LaunchInteractive(m.ctx, prompt, p.Send, tabIdx)
+	if err != nil {
+		p.Send(IntakeCompleteMsg{Err: err})
+		return
+	}
+
+	// Attach the PTY to the term tab for bidirectional I/O.
+	p.Send(attachPTYMsg{tabIndex: tabIdx, pty: ptyWriter})
+
+	// Block until the agent exits and extract the artifact.
+	artifact, err := waitFn(m.ctx)
 	if err != nil {
 		p.Send(IntakeCompleteMsg{Err: err})
 		return

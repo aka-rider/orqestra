@@ -301,14 +301,32 @@ func BuildModelEnv(resolved config.ResolvedModel, small *config.ResolvedModel) [
 }
 
 // BuildPTYCommand builds the Claude Code CLI launch command for PTY-mode execution.
-// Non-interactive mode (intake/validation) uses -p with stream-json output.
+// Non-interactive mode (intake/validation) uses -p with the prompt text.
 // Interactive mode (worker) launches the full interactive CLI.
 // Both modes skip permissions — the sandbox is already isolated.
+// If systemPromptFile is non-empty, --append-system-prompt-file is added.
 func BuildPTYCommand(prompt string, interactive bool) []string {
 	if interactive {
 		return []string{"claude", "--dangerously-skip-permissions"}
 	}
 	return []string{"claude", "--dangerously-skip-permissions", "-p", prompt, "--output-format", "stream-json", "--verbose"}
+}
+
+// BuildPTYCommandWithPromptFile builds the Claude Code CLI command with system prompt file support.
+// This is the preferred variant for the universal agent runner.
+func BuildPTYCommandWithPromptFile(prompt, systemPromptFile string, interactive bool) []string {
+	if interactive {
+		cmd := []string{"claude", "--dangerously-skip-permissions"}
+		if systemPromptFile != "" {
+			cmd = append(cmd, "--append-system-prompt-file", systemPromptFile)
+		}
+		return cmd
+	}
+	cmd := []string{"claude", "--dangerously-skip-permissions", "-p", prompt}
+	if systemPromptFile != "" {
+		cmd = append(cmd, "--append-system-prompt-file", systemPromptFile)
+	}
+	return cmd
 }
 
 // buildEnv constructs the environment variables for the claude subprocess.

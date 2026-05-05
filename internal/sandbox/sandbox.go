@@ -113,6 +113,11 @@ type Sandbox interface {
 	// Transitions: Pending → Provisioning → Ready.
 	Provision(ctx context.Context) error
 
+	// StageFiles copies content into the sandbox at specified container paths.
+	// Must be called after Provision and before Exec.
+	// Keys are absolute paths inside the container.
+	StageFiles(ctx context.Context, files map[string][]byte) error
+
 	// Exec runs a command inside the sandbox, streaming output to stdout.
 	// Transitions: Ready → Running → Stopped.
 	Exec(ctx context.Context, command []string, env []string, stdout io.Writer) (int, error)

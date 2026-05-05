@@ -183,3 +183,20 @@ type IntakeCompleteMsg struct {
 	Artifact []byte // extracted output artifact
 	Err      error
 }
+
+// AttentionMsg signals that a tab's agent needs user attention (BEL detected).
+type AttentionMsg struct {
+	TabIndex int
+}
+
+// AgentPipelineStateMsg signals a pipeline phase transition.
+type AgentPipelineStateMsg struct {
+	Phase string // "intake", "planning", "validating", "executing", "done", "halted"
+}
+
+// attachPTYMsg delivers a live PTY writer to be attached to a term tab.
+// Sent from goroutines after RunInteractive returns.
+type attachPTYMsg struct {
+	tabIndex int
+	pty      PTYWriter
+}

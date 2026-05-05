@@ -299,6 +299,24 @@ func (d *DockerSandbox) Provision(ctx context.Context) error {
 	return nil
 }
 
+// StageFiles copies content into the sandbox at specified container paths.
+// Keys are absolute paths inside the container. Parent directories are created automatically.
+// Must be called after Provision and before Exec.
+func (d *DockerSandbox) StageFiles(ctx context.Context, files map[string][]byte) error {
+	if err := d.ensureClient(); err != nil {
+		return err
+	}
+
+	for containerPath, content := range files {
+		if err := CopyToContainer(ctx, d.cli, d.containerID, containerPath, bytes.NewReader(content)); err != nil {
+			return fmt.Errorf("staging file %s: %w", containerPath, err)
+		}
+	}
+
+	slog.Debug("sandbox: staged files", "id", d.id, "count", len(files))
+	return nil
+}
+
 // Exec runs a command inside the container, streaming stdout to out.
 // Returns the exit code and any error.
 func (d *DockerSandbox) Exec(ctx context.Context, command []string, env []string, out io.Writer) (int, error) {

@@ -14,12 +14,13 @@ import (
 
 // mockSandbox implements Sandbox for unit testing without Docker.
 type mockSandbox struct {
-	id          string
-	provisionFn func(ctx context.Context) error
-	execFn      func(ctx context.Context, command []string, env []string, stdout io.Writer) (int, error)
-	extractFn   func(ctx context.Context) ([]ChangedFile, error)
-	copyOutFn   func(ctx context.Context, sandboxPath, hostPath string) error
-	destroyFn   func(ctx context.Context) error
+	id           string
+	provisionFn  func(ctx context.Context) error
+	stageFilesFn func(ctx context.Context, files map[string][]byte) error
+	execFn       func(ctx context.Context, command []string, env []string, stdout io.Writer) (int, error)
+	extractFn    func(ctx context.Context) ([]ChangedFile, error)
+	copyOutFn    func(ctx context.Context, sandboxPath, hostPath string) error
+	destroyFn    func(ctx context.Context) error
 }
 
 func (m *mockSandbox) ID() string   { return m.id }
@@ -29,6 +30,13 @@ func (m *mockSandbox) Info() Info   { return Info{ID: m.id} }
 func (m *mockSandbox) Provision(ctx context.Context) error {
 	if m.provisionFn != nil {
 		return m.provisionFn(ctx)
+	}
+	return nil
+}
+
+func (m *mockSandbox) StageFiles(ctx context.Context, files map[string][]byte) error {
+	if m.stageFilesFn != nil {
+		return m.stageFilesFn(ctx, files)
 	}
 	return nil
 }

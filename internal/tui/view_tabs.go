@@ -22,6 +22,7 @@ type tabsView struct {
 	termTabs   []termView
 	tabNames   []string
 	tabKinds   []tabKind
+	attention  []bool // per-tab attention marker (BEL detected)
 	active     int
 	width      int
 	height     int
@@ -44,6 +45,7 @@ func (t *tabsView) AddTab(name string) int {
 	t.tabs = append(t.tabs, sv)
 	t.tabNames = append(t.tabNames, name)
 	t.tabKinds = append(t.tabKinds, tabKindStream)
+	t.attention = append(t.attention, false)
 	return idx
 }
 
@@ -63,6 +65,7 @@ func (t *tabsView) AddTermTab(name string) int {
 	t.termTabs = append(t.termTabs, tv)
 	t.tabNames = append(t.tabNames, name)
 	t.tabKinds = append(t.tabKinds, tabKindTerm)
+	t.attention = append(t.attention, false)
 	return idx
 }
 
@@ -103,6 +106,12 @@ func (t *tabsView) streamIndex(globalIdx int) int {
 
 func (t tabsView) Update(msg tea.Msg) (tabsView, tea.Cmd) {
 	switch msg := msg.(type) {
+	case AttentionMsg:
+		if msg.TabIndex >= 0 && msg.TabIndex < len(t.attention) {
+			t.attention[msg.TabIndex] = true
+		}
+		return t, nil
+
 	case PulseTickMsg:
 		if !t.hasRunningTabs() {
 			t.pulsing = false
@@ -131,6 +140,7 @@ func (t tabsView) Update(msg tea.Msg) (tabsView, tea.Cmd) {
 	case TabSwitchMsg:
 		if msg.Index >= 0 && msg.Index < len(t.tabNames) {
 			t.active = msg.Index
+			t.ClearAttention(msg.Index)
 		}
 		return t, nil
 
@@ -140,6 +150,7 @@ func (t tabsView) Update(msg tea.Msg) (tabsView, tea.Cmd) {
 			idx := int(msg.String()[len(msg.String())-1] - '1')
 			if idx >= 0 && idx < len(t.tabNames) {
 				t.active = idx
+				t.ClearAttention(idx)
 			}
 			return t, nil
 		}
@@ -231,17 +242,21 @@ func (t tabsView) View() string {
 	var tabs []string
 	for i, name := range t.tabNames {
 		displayName := name
-		if t.tabKinds[i] == tabKindStream {
+
+		// Attention marker takes precedence over other indicators.
+		if i < len(t.attention) && t.attention[i] {
+			displayName = "⚠ " + name
+		} else if t.tabKinds[i] == tabKindStream {
 			sIdx := t.streamIndex(i)
 			if sIdx < len(t.tabs) && t.tabs[sIdx].done {
-				displayName += " ✓"
+				displayName = "✓ " + name
 			} else if t.pulsing {
 				displayName = pulseFrames[t.pulseFrame] + " " + name
 			}
 		} else if t.tabKinds[i] == tabKindTerm {
 			tIdx := t.termIndex(i)
 			if tIdx < len(t.termTabs) && t.termTabs[tIdx].done {
-				displayName += " ✓"
+				displayName = "✓ " + name
 			} else if t.pulsing {
 				displayName = pulseFrames[t.pulseFrame] + " " + name
 			}
@@ -250,7 +265,11 @@ func (t tabsView) View() string {
 		if i == t.active {
 			tabs = append(tabs, activeTabStyle.Render(displayName))
 		} else {
-			tabs = append(tabs, inactiveTabStyle.Render(displayName))
+			if i < len(t.attention) && t.attention[i] {
+				tabs = append(tabs, attentionTabStyle.Render(displayName))
+			} else {
+				tabs = append(tabs, inactiveTabStyle.Render(displayName))
+			}
 		}
 	}
 
@@ -312,4 +331,28 @@ func pulseTickCmd() tea.Cmd {
 	return tea.Tick(pulseInterval, func(time.Time) tea.Msg {
 		return PulseTickMsg{}
 	})
+}
+
+// SetAttention marks a tab as needing user attention.
+func (t *tabsView) SetAttention(idx int) {
+	if idx >= 0 && idx < len(t.attention) {
+		t.attention[idx] = true
+	}
+}
+
+// ClearAttention removes the attention marker from a tab.
+func (t *tabsView) ClearAttention(idx int) {
+	if idx >= 0 && idx < len(t.attention) {
+		t.attention[idx] = false
+	}
+}
+
+// FirstAttentionTab returns the index of the first tab with attention set, or -1.
+func (t *tabsView) FirstAttentionTab() int {
+	for i, a := range t.attention {
+		if a {
+			return i
+		}
+	}
+	return -1
 }
