@@ -15,6 +15,7 @@ import (
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/seatbelt"
+	"golang.org/x/sys/unix"
 )
 
 // AgentRunner is the interface for running sandboxed agents.
@@ -111,11 +112,20 @@ func (r *SeatbeltRunner) Run(ctx context.Context, cfg RunConfig) ([]byte, error)
 }
 
 // RunInteractive starts an interactive agent session under seatbelt and returns immediately.
+// Unlike Run, the caller (mux) owns PTY reading. No internal read loop is started.
 func (r *SeatbeltRunner) RunInteractive(ctx context.Context, cfg RunConfig) (*NativeLiveSession, error) {
-	return r.start(ctx, cfg)
+	return r.startInteractive(ctx, cfg)
 }
 
 func (r *SeatbeltRunner) start(ctx context.Context, cfg RunConfig) (*NativeLiveSession, error) {
+	return r.doStart(ctx, cfg, true)
+}
+
+func (r *SeatbeltRunner) startInteractive(ctx context.Context, cfg RunConfig) (*NativeLiveSession, error) {
+	return r.doStart(ctx, cfg, false)
+}
+
+func (r *SeatbeltRunner) doStart(ctx context.Context, cfg RunConfig, withReadLoop bool) (*NativeLiveSession, error) {
 	spec := cfg.Spec
 
 	// Determine repo writability from role.
@@ -174,8 +184,9 @@ func (r *SeatbeltRunner) start(ctx context.Context, cfg RunConfig) (*NativeLiveS
 		return nil, fmt.Errorf("agent %s wrap: %w", spec.Role, err)
 	}
 
-	// Start under native PTY.
-	npty, err := StartNativePTY(cmd, 120, 40)
+	// Start under native PTY with real terminal size.
+	cols, rows := getTerminalSize()
+	npty, err := StartNativePTY(cmd, cols, rows)
 	if err != nil {
 		sb.Close()
 		return nil, fmt.Errorf("agent %s pty start: %w", spec.Role, err)
@@ -185,13 +196,21 @@ func (r *SeatbeltRunner) start(ctx context.Context, cfg RunConfig) (*NativeLiveS
 		cfg.Callbacks.OnState(StateRunning)
 	}
 
-	// Start read loop.
 	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		r.readLoop(npty, cfg.Callbacks)
-		npty.Wait()
-	}()
+	if withReadLoop {
+		// Start read loop (non-interactive: runner owns PTY reading).
+		go func() {
+			defer close(done)
+			r.readLoop(npty, cfg.Callbacks)
+			npty.Wait()
+		}()
+	} else {
+		// Interactive: mux owns PTY reading. Just monitor process exit.
+		go func() {
+			defer close(done)
+			npty.Wait()
+		}()
+	}
 
 	// Handle context cancellation in background.
 	go func() {
@@ -271,4 +290,20 @@ func (r *SeatbeltRunner) MaxLifetime() time.Duration {
 		return r.cfg.MaxLifetime.Duration
 	}
 	return 2 * time.Hour
+}
+
+// getTerminalSize queries /dev/tty for the current terminal dimensions.
+// Falls back to 120x40 if unavailable.
+func getTerminalSize() (cols, rows uint16) {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDONLY, 0)
+	if err != nil {
+		return 120, 40
+	}
+	defer tty.Close()
+
+	ws, err := unix.IoctlGetWinsize(int(tty.Fd()), unix.TIOCGWINSZ)
+	if err != nil || ws.Col == 0 || ws.Row == 0 {
+		return 120, 40
+	}
+	return ws.Col, ws.Row
 }

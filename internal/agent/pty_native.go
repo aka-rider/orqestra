@@ -85,6 +85,19 @@ func (p *NativePTY) ExitCode() int {
 }
 
 // Close closes the PTY master file descriptor.
+// Pid returns the process ID of the child, or 0 if the process hasn't started.
+func (p *NativePTY) Pid() int {
+	if p.cmd.Process != nil {
+		return p.cmd.Process.Pid
+	}
+	return 0
+}
+
+// Fd returns the PTY master file for low-level operations (e.g. ioctl resize).
+func (p *NativePTY) Fd() *os.File {
+	return p.ptmx
+}
+
 func (p *NativePTY) Close() error {
 	return p.ptmx.Close()
 }
