@@ -284,9 +284,11 @@ func BuildModelEnv(resolved config.ResolvedModel, small *config.ResolvedModel) [
 		baseURL := strings.TrimRight(resolved.BaseURL, "/")
 		env = append(env,
 			"ANTHROPIC_BASE_URL="+baseURL,
-			"ANTHROPIC_API_KEY="+resolved.APIKey,
 			"ANTHROPIC_MODEL="+resolved.Model,
 		)
+		if resolved.APIKey != "" {
+			env = append(env, "ANTHROPIC_API_KEY="+resolved.APIKey)
+		}
 		if small != nil {
 			env = append(env,
 				"ANTHROPIC_SMALL_FAST_MODEL="+small.Model,

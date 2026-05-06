@@ -166,11 +166,38 @@ func main() {
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 
-	if err := sb.Run(ctx, cmd); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
-		}
+	// Wrap applies sandbox-exec trampoline and sets Setpgid=true (new process group).
+	// For interactive TTY use, we must also make the child the foreground PG,
+	// otherwise macOS stops it with SIGTTOU/SIGTTIN when it accesses the terminal.
+	if err := sb.Wrap(cmd); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+	cmd.SysProcAttr.Foreground = true
+	cmd.SysProcAttr.Ctty = int(os.Stdin.Fd())
+
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				os.Exit(exitErr.ExitCode())
+			}
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+	case <-ctx.Done():
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		<-done
+		os.Exit(137)
 	}
 }

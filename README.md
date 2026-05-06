@@ -30,8 +30,9 @@ In my workflow, I use Opus for planning, Gemini for plan validation and improvem
 
 ## Goals
 
-- Safety-first. Agent sandbox, token budget kill-switch, no stochastic models on critical paths.
-- Reduce human interactions to a single plan approval gate per task
+- Human-as-a
+-
+- Safety-first. Agent sandbox, token budget kill-switch, no stochastic models on control plane
 - Optimize token usage by leaning on cheaper (ideally, local) models
 - Mature engineering solutions (it only glues together best-of-breed components)
 

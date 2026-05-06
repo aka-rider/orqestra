@@ -7,7 +7,6 @@
 providers:
   llama-cpp:
     base_url: http://192.168.50.212:11434
-    api_key: dummy
     type: openai
 
 models:
