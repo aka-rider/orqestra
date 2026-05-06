@@ -468,7 +468,7 @@ Future production integration sketch:
 
 ```go
 // In cmd/orqestra or internal/agent — NOT in seatbelt package
-func buildSandbox(workspace string, cfg config.Config, resolved config.ResolvedModel) (*seatbelt.Sandbox, error) {
+cfunc buildSandbox(workspace string, cfg config.Config, resolved config.ResolvedModel) (*seatbelt.Sandbox, error) {
     home := os.Getenv("HOME")
     if home == "" {
         return nil, fmt.Errorf("HOME not set")
