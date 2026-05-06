@@ -113,7 +113,8 @@ type AgentNodeConfig struct {
 	MaxAttempts      int                  `yaml:"max_attempts"`
 	OnFailure        string               `yaml:"on_failure"`
 	Validator        *ValidatorNodeConfig `yaml:"validator"`
-	Sandbox          *SandboxConfig       `yaml:"sandbox"` // per-agent sandbox override
+	Sandbox          *SandboxConfig       `yaml:"sandbox"`  // per-agent sandbox override (legacy)
+	Seatbelt         *SeatbeltConfig      `yaml:"seatbelt"` // per-agent seatbelt override
 }
 
 // ValidatorNodeConfig defines a validator attached to an agent.

@@ -2,7 +2,9 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -560,5 +562,191 @@ models:
 	// Explicit x-large should NOT be overwritten
 	if cfg.Models["x-large"].Model != "explicit-xl" {
 		t.Errorf("x-large.Model = %q, want %q", cfg.Models["x-large"].Model, "explicit-xl")
+	}
+}
+
+func TestLoad_SeatbeltConfig(t *testing.T) {
+	yaml := `
+providers:
+  test:
+    base_url: http://localhost
+    api_key: dummy
+    type: openai
+models:
+  x-large:
+    provider: test
+    model: test-xl
+    token_limit: 100K
+  large:
+    provider: test
+    model: test-large
+    token_limit: 100K
+  small:
+    provider: test
+    model: test-small
+    token_limit: 50K
+  x-small:
+    provider: test
+    model: test-xs
+    token_limit: 50K
+worker:
+  model_ref: large
+seatbelt:
+  max_lifetime: 2h
+  proxy_env:
+    - AWS_PROFILE
+    - SSH_AUTH_SOCK
+  extra_env:
+    NODE_ENV: development
+    CUSTOM_VAR: hello
+  allow_read:
+    - ~/.dotfiles
+    - ~/.aws/config
+  allow_write:
+    - /tmp/my-cache
+  allow_exec:
+    - /opt/homebrew/bin
+`
+	f := filepath.Join(t.TempDir(), "cfg.yaml")
+	os.WriteFile(f, []byte(yaml), 0644)
+
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Seatbelt.MaxLifetime.Duration != 2*time.Hour {
+		t.Errorf("max_lifetime = %v, want 2h", cfg.Seatbelt.MaxLifetime.Duration)
+	}
+	if len(cfg.Seatbelt.ProxyEnv) != 2 || cfg.Seatbelt.ProxyEnv[0] != "AWS_PROFILE" {
+		t.Errorf("proxy_env = %v, want [AWS_PROFILE SSH_AUTH_SOCK]", cfg.Seatbelt.ProxyEnv)
+	}
+	if cfg.Seatbelt.ExtraEnv["NODE_ENV"] != "development" {
+		t.Errorf("extra_env[NODE_ENV] = %q, want development", cfg.Seatbelt.ExtraEnv["NODE_ENV"])
+	}
+	if len(cfg.Seatbelt.AllowRead) != 2 {
+		t.Errorf("allow_read length = %d, want 2", len(cfg.Seatbelt.AllowRead))
+	}
+	if len(cfg.Seatbelt.AllowWrite) != 1 || cfg.Seatbelt.AllowWrite[0] != "/tmp/my-cache" {
+		t.Errorf("allow_write = %v, want [/tmp/my-cache]", cfg.Seatbelt.AllowWrite)
+	}
+	if len(cfg.Seatbelt.AllowExec) != 1 || cfg.Seatbelt.AllowExec[0] != "/opt/homebrew/bin" {
+		t.Errorf("allow_exec = %v, want [/opt/homebrew/bin]", cfg.Seatbelt.AllowExec)
+	}
+}
+
+func TestLoad_SeatbeltDefaults(t *testing.T) {
+	yaml := `
+providers:
+  test:
+    base_url: http://localhost
+    api_key: dummy
+    type: openai
+models:
+  x-large:
+    provider: test
+    model: test-xl
+    token_limit: 100K
+  large:
+    provider: test
+    model: test-large
+    token_limit: 100K
+  small:
+    provider: test
+    model: test-small
+    token_limit: 50K
+  x-small:
+    provider: test
+    model: test-xs
+    token_limit: 50K
+worker:
+  model_ref: large
+`
+	f := filepath.Join(t.TempDir(), "cfg.yaml")
+	os.WriteFile(f, []byte(yaml), 0644)
+
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Seatbelt.MaxLifetime.Duration != 45*time.Minute {
+		t.Errorf("max_lifetime default = %v, want 45m (from embedded pipeline.yaml)", cfg.Seatbelt.MaxLifetime.Duration)
+	}
+	if len(cfg.Seatbelt.ProxyEnv) != 0 {
+		t.Errorf("proxy_env default = %v, want empty", cfg.Seatbelt.ProxyEnv)
+	}
+	if len(cfg.Seatbelt.ExtraEnv) != 0 {
+		t.Errorf("extra_env default = %v, want empty", cfg.Seatbelt.ExtraEnv)
+	}
+	if len(cfg.Seatbelt.AllowRead) != 0 {
+		t.Errorf("allow_read default = %v, want empty", cfg.Seatbelt.AllowRead)
+	}
+}
+
+func TestLoad_SeatbeltPerAgentOverride(t *testing.T) {
+	yaml := `
+providers:
+  test:
+    base_url: http://localhost
+    api_key: dummy
+    type: openai
+models:
+  x-large:
+    provider: test
+    model: test-xl
+    token_limit: 100K
+  large:
+    provider: test
+    model: test-large
+    token_limit: 100K
+  small:
+    provider: test
+    model: test-small
+    token_limit: 50K
+  x-small:
+    provider: test
+    model: test-xs
+    token_limit: 50K
+worker:
+  model_ref: large
+seatbelt:
+  max_lifetime: 1h
+  allow_exec:
+    - /opt/homebrew/bin
+execution_graph:
+  agents:
+    - id: worker-1
+      role: worker
+      model_ref: x-large
+      seatbelt:
+        max_lifetime: 30m
+        allow_write:
+          - /tmp/worker-cache
+`
+	f := filepath.Join(t.TempDir(), "cfg.yaml")
+	os.WriteFile(f, []byte(yaml), 0644)
+
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Seatbelt.MaxLifetime.Duration != 1*time.Hour {
+		t.Errorf("global max_lifetime = %v, want 1h", cfg.Seatbelt.MaxLifetime.Duration)
+	}
+
+	if len(cfg.ExecutionGraph.Agents) == 0 {
+		t.Fatal("expected at least one agent in execution_graph")
+	}
+	agent := cfg.ExecutionGraph.Agents[0]
+	if agent.Seatbelt == nil {
+		t.Fatal("agent seatbelt override is nil")
+	}
+	if agent.Seatbelt.MaxLifetime.Duration != 30*time.Minute {
+		t.Errorf("agent max_lifetime = %v, want 30m", agent.Seatbelt.MaxLifetime.Duration)
+	}
+	if len(agent.Seatbelt.AllowWrite) != 1 || agent.Seatbelt.AllowWrite[0] != "/tmp/worker-cache" {
+		t.Errorf("agent allow_write = %v, want [/tmp/worker-cache]", agent.Seatbelt.AllowWrite)
 	}
 }

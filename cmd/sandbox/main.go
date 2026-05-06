@@ -1,4 +1,3 @@
-package main
 //go:build darwin
 
 // cmd/sandbox is a standalone Darwin-only local sandbox runner for Claude/tool execution.
@@ -34,6 +33,7 @@ func (a *arrayFlags) Set(s string) error {
 func main() {
 	var (
 		workspace    string
+		writable     bool
 		claudeBinary string
 		proxyEnvs    arrayFlags
 		extraEnvs    arrayFlags
@@ -48,6 +48,7 @@ func main() {
 	)
 
 	flag.StringVar(&workspace, "workspace", "", "required: workspace directory path")
+	flag.BoolVar(&writable, "writable", false, "allow writes to workspace (worker mode)")
 	flag.StringVar(&claudeBinary, "claude-binary", "claude", "claude CLI binary name or path")
 	flag.Var(&proxyEnvs, "proxy-env", "env var NAME to forward from host (repeatable, must exist)")
 	flag.Var(&extraEnvs, "env", "KEY=value env override (repeatable)")
@@ -143,11 +144,12 @@ func main() {
 
 	// --- Create sandbox ---
 	sb, err := seatbelt.New(seatbelt.Config{
-		Workspace:  workspace,
-		Profiles:   profiles,
-		HarnessEnv: harnessEnv,
-		ProxyEnv:   []string(proxyEnvs),
-		ExtraEnv:   extraEnv,
+		RepoPath:     workspace,
+		RepoWritable: writable,
+		Profiles:     profiles,
+		HarnessEnv:   harnessEnv,
+		ProxyEnv:     []string(proxyEnvs),
+		ExtraEnv:     extraEnv,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

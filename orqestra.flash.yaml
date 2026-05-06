@@ -19,7 +19,7 @@ models:
     provider: copilot-proxy
     model: gemini-3.1-flash
 
-sandbox:
+seatbelt:
   max_lifetime: 20m
 
 retry:

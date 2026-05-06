@@ -1,9 +1,0 @@
-services:
-  copilot-proxy:
-    image: oven/bun:latest
-    command: bunx copilot-api@latest start
-    ports:
-      - "4141:4141"
-    volumes:
-      - ./copilot-data:/root/.local/share/copilot-api
-

@@ -24,9 +24,7 @@ models:
     provider: anthropic-native
     model: claude-haiku-4-5
 
-sandbox:
-  bind_mounts:
-    - host: ${HOME}/.claude
-      container: /home/sandbox/.claude
-  mcp:
-    socket_path: /run/host-services/docker.proxy.sock
+seatbelt:
+  max_lifetime: 45m
+  allow_read:
+    - ~/.claude

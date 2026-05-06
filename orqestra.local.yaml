@@ -19,7 +19,7 @@ models:
     provider: llama-cpp
     model: qwen3.6
 
-sandbox:
+seatbelt:
   max_lifetime: 35m
 
 worker:

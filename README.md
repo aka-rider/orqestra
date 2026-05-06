@@ -47,9 +47,10 @@ So "agent" in Orqestra is headless ClaudeCode running yolo mode in a sandbox.
 
 ### Sandbox
 
-Docker continer (good enough isolation for a developer machine).
-It utilizes BTRFS snapshot capabilities to create fast, copy-on-write codebase clones.
-Sandbox and host don't share writeable filesystem. Host only takes back the snaphot diff (what was changed or produced by the agent) while filtering out potentially malicious files (e.g. a malware that the agent curl2sudoed from the internet)
+macOS `sandbox-exec` (seatbelt) with kernel-enforced path permissions.
+Readonly agents can inspect the repo and write only to their session directory.
+Workers can write the repo; `git diff` shows what they changed for human audit.
+No Docker required — agents run directly on macOS with process-group isolation.
 
 ### Workflow
 
@@ -67,7 +68,8 @@ The **specification** is the shared contract. Planner, Worker, and Validators op
 ## Requirements
 
 - Go 1.26+ for building
-- Docker
+- macOS (sandbox-exec / seatbelt)
+- Claude Code CLI
 
 ## Quick Start
 
@@ -149,10 +151,17 @@ worker:
 work_validator:
   model_ref: qwen3.6
 
-sandbox:
-  enabled: false
-  image: orqestra-sandbox:latest
-  memory: 4g
+seatbelt:
+  max_lifetime: 1h
+  proxy_env:
+    - AWS_PROFILE
+    - SSH_AUTH_SOCK
+  extra_env:
+    NODE_ENV: "development"
+  allow_read:
+    - ~/.dotfiles
+  allow_exec:
+    - /opt/homebrew/bin
 ```
 
 ## Infrastructure
@@ -162,7 +171,7 @@ sandbox:
 The copilot-api proxy provides an OpenAI-compatible endpoint routing to Claude, Gemini, and other models:
 
 ```bash
-docker compose up -d copilot-proxy
+./scripts/copilot-proxy-up.sh
 ```
 
 ### Local Models (Optional)
@@ -186,11 +195,8 @@ make test
 # Lint
 make lint
 
-# Build sandbox image (for sandboxed execution)
-make sandbox-image
-
-# Run sandbox integration tests
-make sandbox-test
+# Run seatbelt integration tests
+go test ./internal/seatbelt/ -timeout 2m
 
 # Clean build artifacts
 make clean
@@ -200,14 +206,15 @@ make clean
 
 ```
 cmd/orqestra/       Entry point
+cmd/sandbox/        Standalone seatbelt sandbox runner CLI
 internal/
-  agent/            Top-level agent orchestration
+  agent/            Top-level agent orchestration (seatbelt runner, pipeline)
   config/           YAML config loading and validation
   gate/             Human approval gate
   harness/          LLM harness client (Claude CLI, OpenAI-compatible)
   intent/           Intent classification
   planner/          Specification generation
-  sandbox/          Docker-based sandboxed execution
+  seatbelt/         macOS sandbox-exec policy generation and enforcement
   scheduler/        DAG-based execution graph scheduler
   tokenlimit/       Token budget tracking
   tui/              Bubble Tea terminal UI

@@ -299,10 +299,5 @@ retry:
   plan_validation_repair: 2
   work_validation_repair: 3
 
-sandbox:
-  image: orqestra-sandbox:latest
-  memory: 4g
-  cpus: 2.0
-  pids_limit: 256
+seatbelt:
   max_lifetime: 45m
-  network: host
