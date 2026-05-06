@@ -31,7 +31,16 @@ type AttentionMsg struct {
 }
 
 // IntakeCompleteMsg signals that the interactive intake runner finished.
+// Deprecated: replaced by AgentCompleteMsg for pipeline mode.
 type IntakeCompleteMsg struct {
+	Artifact []byte
+	Err      error
+}
+
+// AgentCompleteMsg signals that a pipeline agent finished.
+type AgentCompleteMsg struct {
+	Role     string
+	TabIndex int
 	Artifact []byte
 	Err      error
 }
@@ -81,9 +90,14 @@ type WaitFunc func(ctx context.Context) ([]byte, error)
 
 // PipelineFuncs holds the functions the TUI drives.
 type PipelineFuncs struct {
-	// LaunchInteractive starts an interactive Claude Code agent in a sandbox.
+	// LaunchAgent starts an interactive Claude Code agent in a sandbox for the given role.
+	// inputFiles are staged into the agent's input directory before launch.
 	// Returns a PTYWriter for bidirectional I/O and a WaitFunc that blocks
 	// until the agent exits, returning the extracted artifact.
+	LaunchAgent func(ctx context.Context, role string, inputFiles map[string][]byte, send func(tea.Msg), tabIndex int) (PTYWriter, WaitFunc, error)
+
+	// LaunchInteractive is the legacy single-agent launcher (used by runTUIFromSpec).
+	// Deprecated: use LaunchAgent for pipeline mode.
 	LaunchInteractive func(ctx context.Context, prompt string, send func(tea.Msg), tabIndex int) (PTYWriter, WaitFunc, error)
 
 	// Send delivers a tea.Msg into the TUI event loop. Wired after program creation.

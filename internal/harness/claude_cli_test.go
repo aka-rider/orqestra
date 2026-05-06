@@ -17,9 +17,10 @@ func TestBuildEnv_Anthropic(t *testing.T) {
 
 	env := cli.buildEnv()
 	assertEnvContains(t, env, "ANTHROPIC_BASE_URL=http://localhost:4141")
-	assertEnvContains(t, env, "ANTHROPIC_AUTH_TOKEN=test-key")
 	assertEnvContains(t, env, "ANTHROPIC_MODEL=claude-sonnet-4.6")
 	assertEnvContains(t, env, "ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4.6")
+	assertEnvNotContains(t, env, "ANTHROPIC_AUTH_TOKEN")
+	assertEnvNotContains(t, env, "ANTHROPIC_API_KEY")
 }
 
 func TestBuildEnv_Anthropic_WithSmallModel(t *testing.T) {
@@ -48,30 +49,20 @@ func TestBuildEnv_OpenAI(t *testing.T) {
 
 	env := cli.buildEnv()
 	assertEnvContains(t, env, "ANTHROPIC_BASE_URL=http://192.168.50.212:11434")
-	assertEnvContains(t, env, "ANTHROPIC_API_KEY=sk-test")
 	assertEnvContains(t, env, "ANTHROPIC_MODEL=qwen36")
+	assertEnvNotContains(t, env, "ANTHROPIC_API_KEY")
+	assertEnvNotContains(t, env, "ANTHROPIC_AUTH_TOKEN")
 }
 
-func TestBuildEnv_OperationalFlags(t *testing.T) {
+func TestBuildEnv_NoOperationalFlags(t *testing.T) {
 	cli := NewClaudeCLI(config.ResolvedModel{
 		BaseURL: "http://localhost",
 		Type:    "anthropic",
 	})
 
 	env := cli.buildEnv()
-	assertEnvContains(t, env, "DISABLE_NON_ESSENTIAL_MODEL_CALLS=1")
-	assertEnvContains(t, env, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")
-}
-
-func TestBuildEnv_OperationalFlags_OpenAI(t *testing.T) {
-	cli := NewClaudeCLI(config.ResolvedModel{
-		BaseURL: "http://localhost",
-		Type:    "openai",
-	})
-
-	env := cli.buildEnv()
-	assertEnvContains(t, env, "DISABLE_NON_ESSENTIAL_MODEL_CALLS=1")
-	assertEnvContains(t, env, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")
+	assertEnvNotContains(t, env, "DISABLE_NON_ESSENTIAL_MODEL_CALLS")
+	assertEnvNotContains(t, env, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
 }
 
 func TestNewClaudeCLIFromConfig_AppliesModelRuntimeOptions(t *testing.T) {
@@ -152,4 +143,13 @@ func assertEnvContains(t *testing.T, env []string, expected string) {
 		}
 	}
 	t.Errorf("env does not contain %q\nrelevant vars: %v", expected, relevant)
+}
+
+func assertEnvNotContains(t *testing.T, env []string, prefix string) {
+	t.Helper()
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			t.Errorf("env should not contain %q but found: %s", prefix, e)
+		}
+	}
 }

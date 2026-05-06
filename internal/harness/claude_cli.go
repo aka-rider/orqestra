@@ -266,7 +266,6 @@ func BuildModelEnv(resolved config.ResolvedModel, small *config.ResolvedModel) [
 	case "anthropic":
 		env = append(env,
 			"ANTHROPIC_BASE_URL="+resolved.BaseURL,
-			"ANTHROPIC_AUTH_TOKEN="+resolved.APIKey,
 			"ANTHROPIC_MODEL="+resolved.Model,
 			"ANTHROPIC_DEFAULT_SONNET_MODEL="+resolved.Model,
 		)
@@ -286,19 +285,12 @@ func BuildModelEnv(resolved config.ResolvedModel, small *config.ResolvedModel) [
 			"ANTHROPIC_BASE_URL="+baseURL,
 			"ANTHROPIC_MODEL="+resolved.Model,
 		)
-		if resolved.APIKey != "" {
-			env = append(env, "ANTHROPIC_API_KEY="+resolved.APIKey)
-		}
 		if small != nil {
 			env = append(env,
 				"ANTHROPIC_SMALL_FAST_MODEL="+small.Model,
 			)
 		}
 	}
-	env = append(env,
-		"DISABLE_NON_ESSENTIAL_MODEL_CALLS=1",
-		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
-	)
 	return env
 }
 

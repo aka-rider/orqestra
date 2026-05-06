@@ -32,44 +32,29 @@ Result: Claude Code → `❯` prompt immediately. Responds to "say hello". No sc
 1. `tryLaunch` uses `*Model` receiver (compiles via internal address-taking but is technically wrong)
 2. Debug `/tmp/key.log` writes still in model.go and view_term.go
 3. Single-agent dead end: `IntakeCompleteMsg` → `StateDone`, no next phase
-4. `harness.BuildPTYCommandWithPromptFile` hardcodes `--dangerously-skip-permissions` (triggers acceptance dialog)
-5. `harness.BuildModelEnv` uses `ANTHROPIC_API_KEY` (triggers "custom API key" screen)
+4. `harness.BuildModelEnv` uses `ANTHROPIC_API_KEY` (triggers "custom API key" screen)
+
+**NOT broken (keep as-is):**
+
+- `--dangerously-skip-permissions` STAYS — required for autonomous agent operation (file edits, shell commands without per-action prompts). The seatbelt sandbox is the hard security boundary. On first launch, the user approves the workspace interactively via the intake tab. Subsequent agents (planner, validator, worker) inherit the workspace trust.
 
 ---
 
 ## Phase 1: Fix Harness for Zero-Prompt Launch (PREREQUISITE)
 
-Three changes to eliminate Claude Code startup screens:
+Two changes to eliminate Claude Code startup screens:
 
-### Step 1.1: Remove `--dangerously-skip-permissions` from interactive command
-
-In `internal/harness/claude_cli.go` line 318, the interactive command is:
-
-```go
-cmd := []string{"claude", "--dangerously-skip-permissions"}
-```
-
-Change to:
-
-```go
-cmd := []string{"claude"}
-```
-
-**Rationale**: `--dangerously-skip-permissions` triggers a "WARNING: Bypass Permissions mode" dialog with default "No, exit". The seatbelt sandbox provides isolation — Claude Code doesn't need this flag.
-
-### Step 1.2: Fix env in BuildModelEnv — no auth tokens
+### Step 1.1: Fix env in BuildModelEnv — no auth tokens
 
 `BuildModelEnv` must NOT emit `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. Claude Code uses existing OAuth/keychain auth (the sandbox allows `~/.claude` + XPC forwarding). Just set routing env:
 
 - `ANTHROPIC_BASE_URL` — redirects API calls to Ollama
 - `ANTHROPIC_MODEL` — model name at the endpoint
 - `ANTHROPIC_SMALL_FAST_MODEL` — for fast completions
-- `DISABLE_NON_ESSENTIAL_MODEL_CALLS=0`
-- `CLAUDE_CODE_ATTRIBUTION_HEADER=0`
 
-### Step 1.3: Add `DISABLE_NON_ESSENTIAL_MODEL_CALLS=0` and `CLAUDE_CODE_ATTRIBUTION_HEADER=0`
+### Step 1.2: Remove hardcoded operational env vars from BuildModelEnv
 
-These suppress attribution headers and allow essential model calls only.
+Remove `DISABLE_NON_ESSENTIAL_MODEL_CALLS=1` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` from `BuildModelEnv`. These are deployment-specific knobs that belong in `seatbelt.extra_env` or `--env` CLI flags, not hardcoded in the harness.
 
 ### Acceptance criteria
 
@@ -96,13 +81,13 @@ go run ./cmd/sandbox --workspace=$(pwd) \
 # Auth: "Claude Team" (existing OAuth via keychain). Ollama ignores the auth header.
 ```
 
-### Step 1.4: Remove debug logging
+### Step 1.3: Remove debug logging
 
 Remove all `/tmp/key.log` writes from `model.go` and `view_term.go`. Remove `"os"` import if no longer needed.
 
-### Step 1.5: Fix tryLaunch receiver (cleanup)
+### Step 1.4: Fix tryLaunch receiver
 
-Convert `func (m *Model) tryLaunch() tea.Cmd` to value-return pattern: `func tryLaunch(m Model) (Model, tea.Cmd)`. Update callsites in `Update()` to use returned model.
+Convert `func (m *Model) tryLaunch() tea.Cmd` to value-return pattern: `func tryLaunch(m Model) (Model, tea.Cmd)`. Update callsites in `Update()` to use returned model. This is NOT cosmetic — pointer receiver in a Bubble Tea `Update` violates the Elm architecture contract. Mutations via `*Model` work today by accident (interface boxing), but are technically unsound.
 
 ### Acceptance criteria
 
@@ -127,9 +112,9 @@ After Phase 1 changes, the launch chain becomes:
 4. `go startInteractiveAgent("")` → closure builds:
 
    ```
-   AgentSpec.Command = ["claude", "--append-system-prompt-file", "<session>/intake/agent.md"]
-   AgentSpec.Env includes: ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_MODEL,
-                           DISABLE_NON_ESSENTIAL_MODEL_CALLS=1, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+   AgentSpec.Command = ["claude", "--dangerously-skip-permissions", "--append-system-prompt-file", "<session>/intake/agent.md"]
+   AgentSpec.Env includes: ANTHROPIC_BASE_URL, ANTHROPIC_MODEL
+   (plus any extra env from seatbelt.extra_env config)
    ```
 
 5. `seatbeltRunner.RunInteractive()` → `seatbelt.New()` → SBPL → `StartNativePTY(cmd, cols, rows)`
@@ -144,8 +129,8 @@ After Phase 1 changes, the launch chain becomes:
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Tab shows "⟳ Provisioning sandbox..." forever | `seatbeltRunner.RunInteractive()` failed, no `attachPTYMsg` sent | Check `m.logPanel` for error. Run `seatbelt-trace.sh` to trace SBPL denials |
-| Claude Code shows "Detected a custom API key" dialog | `ANTHROPIC_API_KEY` set in env | Verify `BuildModelEnv` emits `ANTHROPIC_AUTH_TOKEN` not `ANTHROPIC_API_KEY` |
-| Claude Code shows "WARNING: Bypass Permissions" dialog | `--dangerously-skip-permissions` still in command | Verify `BuildPTYCommandWithPromptFile` doesn't include it |
+| Claude Code shows "Detected a custom API key" dialog | `ANTHROPIC_API_KEY` set in env | Verify `BuildModelEnv` emits no auth tokens |
+| Claude Code shows "WARNING: Bypass Permissions" dialog | First launch in this workspace — expected | User approves once; subsequent agents inherit trust |
 | Claude Code shows "Do you trust this folder?" | New directory never trusted before | Run `claude` once manually in that dir to accept; OR use `--bare` |
 | Tab shows garbled escape sequences | VT emulator doesn't support sequences Claude uses | Cosmetic only — not a blocker |
 | No output at all, PTY attached but blank | Claude Code process stopped (SIGTTOU) | PTY mode doesn't have this issue (PTY IS its own terminal). Only cmd/sandbox with raw TTY needs `Foreground=true` |
@@ -437,7 +422,7 @@ git diff  # Shows CONTRIBUTING.md created by worker
 | File                         | What changes                                                                                                                                                                                                             |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `cmd/sandbox/main.go`        | Add `Foreground=true` + `Ctty` for interactive TTY. Use `Wrap` + manual Start/Wait instead of `sb.Run()`. ✅ DONE                                                                                                         |
-| `internal/harness/claude_cli.go` | Remove `--dangerously-skip-permissions` from interactive command. Remove `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` from `BuildModelEnv` — no auth env needed. Add `DISABLE_NON_ESSENTIAL_MODEL_CALLS=0` + `CLAUDE_CODE_ATTRIBUTION_HEADER=0`. |
+| `internal/harness/claude_cli.go` | Keep `--dangerously-skip-permissions`. Remove `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` from `BuildModelEnv`. Remove hardcoded `DISABLE_NON_ESSENTIAL_MODEL_CALLS` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` (move to config-level extra_env). |
 | `internal/tui/model.go`      | Fix `tryLaunch` → free function returning (Model, tea.Cmd). Add `PipelinePhase`, `artifacts`. Replace `IntakeCompleteMsg` handler with `AgentCompleteMsg` → `advancePipeline()`. Add `startAgent`. Remove debug logging. |
 | `internal/tui/messages.go`   | Replace `LaunchInteractive` with `LaunchAgent` in `PipelineFuncs`. Add `AgentCompleteMsg`. Remove `IntakeCompleteMsg` (replaced).                                                                                        |
 | `internal/tui/view_term.go`  | Remove `/tmp/key.log` debug writes.                                                                                                                                                                                      |
@@ -464,7 +449,7 @@ git diff  # Shows CONTRIBUTING.md created by worker
 - **Sequential execution** — agents run one at a time. No parallelism.
 - **Shared session dir** — one `SessionDir` per orqestra run, all roles write into it.
 - **All agents are interactive** — even planner/worker get full PTY. User CAN interact with any.
-- **No `--dangerously-skip-permissions`** — triggers acceptance dialog. Seatbelt IS the security boundary.
+- **Keep `--dangerously-skip-permissions`** — required for autonomous operation (no per-action prompts). The seatbelt sandbox is the hard security boundary. User approves workspace trust once on first interactive launch (intake); subsequent agents inherit the permission.
 - **No auth env vars** — Claude Code uses existing OAuth/keychain. Sandbox allows `~/.claude` + XPC for keychain IPC. Ollama ignores the auth header sent.
 - **Agent CWD = repoPath** — confirmed via `sandbox.Wrap()` setting `cmd.Dir = s.repoPath`.
 - **PTY mode doesn't need `Foreground=true`** — only `cmd/sandbox` (direct TTY sharing) needed that fix. `SeatbeltRunner.RunInteractive` uses `StartNativePTY` which creates its own pseudo-terminal.

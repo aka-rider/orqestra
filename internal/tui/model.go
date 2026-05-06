@@ -2,8 +2,8 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -12,12 +12,24 @@ import (
 )
 
 // State represents the current phase of the TUI.
+// State represents the current phase of the TUI.
 type State int
 
 const (
 	StateIdle    State = iota // Waiting for agent launch
 	StateRunning              // Agent(s) running in tabs
 	StateDone                 // All agents finished
+)
+
+// PipelinePhase tracks which agent is currently active in the pipeline.
+type PipelinePhase int
+
+const (
+	PhaseIntake PipelinePhase = iota
+	PhasePlanner
+	PhaseValidator
+	PhaseWorker
+	PhaseDone
 )
 
 // Model is the main Bubble Tea model.
@@ -41,6 +53,9 @@ type Model struct {
 	gotSize      bool // true once first WindowSizeMsg has been processed
 	gotProgram   bool // true once setProgramMsg has been received
 	launched     bool // true once the agent goroutine has been started
+
+	phase     PipelinePhase
+	artifacts map[string][]byte // keyed by role name
 }
 
 // NewModel creates the main TUI model.
@@ -64,18 +79,6 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	
-    if _, ok := msg.(tea.KeyMsg); ok {
-        f, _ := os.OpenFile("/tmp/key.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-        f.WriteString(fmt.Sprintf("Key: %v\n", msg))
-        f.Close()
-    }
-    if _, ok := msg.(PulseTickMsg); ok {
-        f, _ := os.OpenFile("/tmp/key.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-        f.WriteString("PulseTickMsg\n")
-        f.Close()
-    }
-
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -98,8 +101,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tabsView = tv
 
 		// If we have both size and program but haven't launched yet, do it now.
-		if launchCmd := m.tryLaunch(); launchCmd != nil {
-			return m, tea.Batch(cmd, launchCmd)
+		if m2, launchCmd := tryLaunch(m); launchCmd != nil {
+			return m2, tea.Batch(cmd, launchCmd)
 		}
 		return m, cmd
 
@@ -155,9 +158,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = StateDone
 			return m, nil
 		}
-		// Agent exited cleanly.
+		// Legacy single-agent path: agent exited cleanly.
 		m.state = StateDone
 		return m, nil
+
+	case AgentCompleteMsg:
+		if msg.Err != nil {
+			m.logPanel = m.logPanel.Add(LogEntry{
+				Time:    time.Now(),
+				Level:   "ERROR",
+				Message: fmt.Sprintf("agent %s failed", msg.Role),
+				Attrs:   map[string]string{"err": msg.Err.Error()},
+			})
+			m.err = msg.Err
+			m.state = StateDone
+			return m, nil
+		}
+		if m.artifacts == nil {
+			m.artifacts = make(map[string][]byte)
+		}
+		m.artifacts[msg.Role] = msg.Artifact
+		return m.advancePipeline()
 
 	case ErrorMsg:
 		m.logPanel = m.logPanel.Add(LogEntry{
@@ -186,8 +207,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.program = msg.program
 		m.gotProgram = true
 		// If we already have window dimensions, launch now.
-		if cmd := m.tryLaunch(); cmd != nil {
-			return m, cmd
+		if m2, cmd := tryLaunch(m); cmd != nil {
+			return m2, cmd
 		}
 		return m, nil
 
@@ -208,13 +229,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // handleKey routes keystrokes.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
-	f, _ := os.OpenFile("/tmp/key.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	tv := m.tabsView
-	f.WriteString(fmt.Sprintf("handleKey: %q. state=%v termTabs=%v active=%v\n", key, m.state, len(tv.termTabs), tv.active))
-	if len(tv.termTabs) > tv.active {
-		f.WriteString(fmt.Sprintf("  activeTab.focused=%v done=%v ptyNil=%v\n", tv.termTabs[tv.active].focused, tv.termTabs[tv.active].done, tv.termTabs[tv.active].ptySession == nil))
-	}
-	f.Close()
 
 	// Global: ctrl+c always quits
 	if key == "ctrl+c" {
@@ -296,28 +310,58 @@ func (m Model) View() string {
 }
 
 // tryLaunch starts the interactive agent if both WindowSizeMsg and setProgramMsg
-// have been received. Returns a tea.Cmd if launch happened, nil otherwise.
-func (m *Model) tryLaunch() tea.Cmd {
+// have been received. Returns the updated model and a tea.Cmd if launch happened.
+func tryLaunch(m Model) (Model, tea.Cmd) {
 	if m.launched || !m.gotSize || !m.gotProgram {
-		return nil
+		return m, nil
 	}
-	if m.pipeline.LaunchInteractive == nil {
-		return nil
+	if m.pipeline.LaunchAgent == nil && m.pipeline.LaunchInteractive == nil {
+		return m, nil
 	}
 
 	m.launched = true
 	m.state = StateRunning
+
+	// Pipeline mode: start with intake agent.
+	if m.pipeline.LaunchAgent != nil {
+		m.phase = PhaseIntake
+		tabIdx := m.tabsView.AddTermTab("Intake")
+		m.tabsView.active = tabIdx
+		m.tabsView.focused = true
+		m.tabsView.termTabs[tabIdx].focused = true
+		m.intakeTabIdx = tabIdx
+		go m.startAgent("intake", tabIdx, nil)
+		return m, pulseTickCmd()
+	}
+
+	// Legacy mode: single interactive agent.
 	m.intakeTabIdx = m.tabsView.AddTermTab("Claude")
 	m.tabsView.active = m.intakeTabIdx
 	m.tabsView.focused = true
 	m.tabsView.termTabs[m.intakeTabIdx].focused = true
-
 	go m.startInteractiveAgent("")
-	return pulseTickCmd()
+	return m, pulseTickCmd()
+}
+
+// startAgent launches a pipeline agent in its own tab.
+// Safe to call from a goroutine — only reads stable fields and uses p.Send.
+func (m Model) startAgent(role string, tabIdx int, inputFiles map[string][]byte) {
+	p := m.program
+
+	ptyWriter, waitFn, err := m.pipeline.LaunchAgent(m.ctx, role, inputFiles, p.Send, tabIdx)
+	if err != nil {
+		p.Send(AgentCompleteMsg{Role: role, TabIndex: tabIdx, Err: err})
+		return
+	}
+
+	p.Send(attachPTYMsg{tabIndex: tabIdx, pty: ptyWriter})
+
+	artifact, err := waitFn(m.ctx)
+	p.Send(AgentCompleteMsg{Role: role, TabIndex: tabIdx, Artifact: artifact, Err: err})
 }
 
 // startInteractiveAgent launches Claude Code in interactive mode inside a
-// sandbox term tab. The user interacts directly with Claude Code's UI.
+// sandbox term tab. Legacy single-agent path.
 func (m Model) startInteractiveAgent(prompt string) {
 	p := m.program
 	tabIdx := m.intakeTabIdx
@@ -328,16 +372,78 @@ func (m Model) startInteractiveAgent(prompt string) {
 		return
 	}
 
-	// Attach the PTY to the term tab for bidirectional I/O.
 	p.Send(attachPTYMsg{tabIndex: tabIdx, pty: ptyWriter})
 
-	// Block until the agent exits and extract the artifact.
 	artifact, err := waitFn(m.ctx)
 	if err != nil {
 		p.Send(IntakeCompleteMsg{Err: err})
 		return
 	}
 	p.Send(IntakeCompleteMsg{Artifact: artifact})
+}
+
+// advancePipeline transitions to the next agent phase after the current one completes.
+func (m Model) advancePipeline() (Model, tea.Cmd) {
+	switch m.phase {
+	case PhaseIntake:
+		m.phase = PhasePlanner
+		tabIdx := m.tabsView.AddTermTab("Planner")
+		m.tabsView.active = tabIdx
+		m.tabsView.focused = true
+		m.tabsView.termTabs[tabIdx].focused = true
+		inputs := map[string][]byte{"01.intake.json": m.artifacts["intake"]}
+		go m.startAgent("planner", tabIdx, inputs)
+		return m, nil
+
+	case PhasePlanner:
+		m.phase = PhaseValidator
+		tabIdx := m.tabsView.AddTermTab("Validator")
+		m.tabsView.active = tabIdx
+		m.tabsView.focused = true
+		m.tabsView.termTabs[tabIdx].focused = true
+		inputs := map[string][]byte{
+			"01.intake.json": m.artifacts["intake"],
+			"02.plan.json":   m.artifacts["planner"],
+		}
+		go m.startAgent("plan-validator", tabIdx, inputs)
+		return m, nil
+
+	case PhaseValidator:
+		// Check if validator approved the plan.
+		if !validatorApproved(m.artifacts["plan-validator"]) {
+			m.err = fmt.Errorf("plan rejected by validator")
+			m.state = StateDone
+			return m, nil
+		}
+		m.phase = PhaseWorker
+		tabIdx := m.tabsView.AddTermTab("Worker")
+		m.tabsView.active = tabIdx
+		m.tabsView.focused = true
+		m.tabsView.termTabs[tabIdx].focused = true
+		inputs := map[string][]byte{"02.plan.json": m.artifacts["planner"]}
+		go m.startAgent("worker", tabIdx, inputs)
+		return m, nil
+
+	case PhaseWorker:
+		m.phase = PhaseDone
+		m.state = StateDone
+		return m, nil
+	}
+	return m, nil
+}
+
+// validatorApproved checks if the validator artifact indicates approval.
+func validatorApproved(artifact []byte) bool {
+	if artifact == nil {
+		return true // no artifact = auto-approve (interactive validator)
+	}
+	var v struct {
+		Verdict string `json:"verdict"`
+	}
+	if err := json.Unmarshal(artifact, &v); err != nil {
+		return true // unparseable = assume approved (user handled interactively)
+	}
+	return v.Verdict == "approved" || v.Verdict == ""
 }
 
 // truncID safely truncates an ID for display.
