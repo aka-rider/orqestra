@@ -5,11 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
-	"github.com/xiii/orqestra/internal/sandbox"
 )
 
 // PipelineState tracks which phase the pipeline is currently in.
@@ -66,8 +64,8 @@ type PipelineCallbacks struct {
 	OnAgentBEL func(role Role)
 	// OnAgentDone signals that an agent finished.
 	OnAgentDone func(role Role, exitCode int, err error)
-	// OnSandboxState delivers sandbox lifecycle events.
-	OnSandboxState func(sandboxID string, state sandbox.State)
+	// OnState delivers agent lifecycle events.
+	OnState func(state AgentState)
 }
 
 // PipelineConfig configures the agent pipeline.
@@ -77,19 +75,26 @@ type PipelineConfig struct {
 	Session  SessionDir
 }
 
+// PipelineRunner is the interface the pipeline uses to execute agents.
+// Both Docker Runner and SeatbeltRunner satisfy this.
+type PipelineRunner interface {
+	Run(ctx context.Context, cfg RunConfig) ([]byte, error)
+}
+
 // Pipeline drives the sequence: intake → planner → validator → workers.
 type Pipeline struct {
 	cfg    PipelineConfig
-	runner *Runner
+	runner PipelineRunner
 	cb     PipelineCallbacks
 	state  PipelineState
 }
 
 // NewPipeline creates a new pipeline orchestrator.
-func NewPipeline(cfg PipelineConfig, cb PipelineCallbacks) *Pipeline {
+// The runner is injected so main.go can decide between Docker and seatbelt.
+func NewPipeline(cfg PipelineConfig, runner PipelineRunner, cb PipelineCallbacks) *Pipeline {
 	return &Pipeline{
 		cfg:    cfg,
-		runner: NewRunner(),
+		runner: runner,
 		cb:     cb,
 		state:  PipelineIdle,
 	}
@@ -130,13 +135,12 @@ func (p *Pipeline) RunIntake(ctx context.Context, userPrompt string) ([]byte, er
 	artifact, err := p.runner.Run(ctx, RunConfig{
 		Spec:     spec,
 		Session:  p.cfg.Session,
-		Sandbox:  sandboxCfgFrom(p.cfg.Config.Sandbox),
 		RepoPath: p.cfg.RepoPath,
 		Callbacks: RunCallbacks{
-			OnOutput:       p.makeOnOutput(RoleIntake),
-			OnBEL:          p.makeOnBEL(RoleIntake),
-			OnDone:         p.makeOnDone(RoleIntake),
-			OnSandboxState: p.cb.OnSandboxState,
+			OnOutput: p.makeOnOutput(RoleIntake),
+			OnBEL:    p.makeOnBEL(RoleIntake),
+			OnDone:   p.makeOnDone(RoleIntake),
+			OnState:  p.cb.OnState,
 		},
 	})
 	if err != nil {
@@ -171,13 +175,12 @@ func (p *Pipeline) RunPlanner(ctx context.Context, intakeArtifact []byte) ([]byt
 	artifact, err := p.runner.Run(ctx, RunConfig{
 		Spec:     spec,
 		Session:  p.cfg.Session,
-		Sandbox:  sandboxCfgFrom(p.cfg.Config.Sandbox),
 		RepoPath: p.cfg.RepoPath,
 		Callbacks: RunCallbacks{
-			OnOutput:       p.makeOnOutput(RolePlanner),
-			OnBEL:          p.makeOnBEL(RolePlanner),
-			OnDone:         p.makeOnDone(RolePlanner),
-			OnSandboxState: p.cb.OnSandboxState,
+			OnOutput: p.makeOnOutput(RolePlanner),
+			OnBEL:    p.makeOnBEL(RolePlanner),
+			OnDone:   p.makeOnDone(RolePlanner),
+			OnState:  p.cb.OnState,
 		},
 	})
 	if err != nil {
@@ -214,13 +217,12 @@ func (p *Pipeline) RunValidator(ctx context.Context, intakeArtifact, planArtifac
 	artifact, err := p.runner.Run(ctx, RunConfig{
 		Spec:     spec,
 		Session:  p.cfg.Session,
-		Sandbox:  sandboxCfgFrom(p.cfg.Config.Sandbox),
 		RepoPath: p.cfg.RepoPath,
 		Callbacks: RunCallbacks{
-			OnOutput:       p.makeOnOutput(RolePlanValidator),
-			OnBEL:          p.makeOnBEL(RolePlanValidator),
-			OnDone:         p.makeOnDone(RolePlanValidator),
-			OnSandboxState: p.cb.OnSandboxState,
+			OnOutput: p.makeOnOutput(RolePlanValidator),
+			OnBEL:    p.makeOnBEL(RolePlanValidator),
+			OnDone:   p.makeOnDone(RolePlanValidator),
+			OnState:  p.cb.OnState,
 		},
 	})
 	if err != nil {
@@ -267,13 +269,12 @@ func (p *Pipeline) RunWorker(ctx context.Context, planArtifact []byte) error {
 	_, err = p.runner.Run(ctx, RunConfig{
 		Spec:     spec,
 		Session:  p.cfg.Session,
-		Sandbox:  sandboxCfgFrom(p.cfg.Config.Sandbox),
 		RepoPath: p.cfg.RepoPath,
 		Callbacks: RunCallbacks{
-			OnOutput:       p.makeOnOutput(RoleWorker),
-			OnBEL:          p.makeOnBEL(RoleWorker),
-			OnDone:         p.makeOnDone(RoleWorker),
-			OnSandboxState: p.cb.OnSandboxState,
+			OnOutput: p.makeOnOutput(RoleWorker),
+			OnBEL:    p.makeOnBEL(RoleWorker),
+			OnDone:   p.makeOnDone(RoleWorker),
+			OnState:  p.cb.OnState,
 		},
 	})
 	if err != nil {
@@ -314,40 +315,4 @@ func (p *Pipeline) makeOnDone(role Role) func(int, error) {
 // Non-interactive agents use -p mode; interactive agents launch the full CLI.
 func buildAgentCommand(prompt, systemPromptFile string, interactive bool) []string {
 	return harness.BuildPTYCommandWithPromptFile(prompt, systemPromptFile, interactive)
-}
-
-// sandboxCfgFrom converts the config-layer sandbox config to the sandbox package's Config type.
-func sandboxCfgFrom(cfg config.SandboxConfig) sandbox.Config {
-	sc := sandbox.DefaultConfig()
-	if cfg.Image != "" {
-		sc.Image = cfg.Image
-	}
-	if cfg.Memory != "" {
-		sc.Memory = cfg.Memory
-	}
-	if cfg.CPUs > 0 {
-		sc.CPUs = cfg.CPUs
-	}
-	if cfg.PidsLimit > 0 {
-		sc.PidsLimit = cfg.PidsLimit
-	}
-	if cfg.MaxLifetime.Duration > 0 {
-		sc.MaxLifetime = cfg.MaxLifetime.Duration
-	}
-	sc.Network = cfg.Network
-	sc.AllowedExecutables = cfg.AllowedExecutables
-	if cfg.MCP.SocketPath != "" {
-		sc.MCP.SocketPath = cfg.MCP.SocketPath
-	}
-	for _, m := range cfg.ReadOnlyMounts {
-		sc.ReadOnlyMounts = append(sc.ReadOnlyMounts, sandbox.MountConfig{
-			HostPath: os.ExpandEnv(m.Host), ContainerPath: m.Container,
-		})
-	}
-	for _, m := range cfg.BindMounts {
-		sc.BindMounts = append(sc.BindMounts, sandbox.MountConfig{
-			HostPath: os.ExpandEnv(m.Host), ContainerPath: m.Container,
-		})
-	}
-	return sc
 }

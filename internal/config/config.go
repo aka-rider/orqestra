@@ -56,6 +56,7 @@ type Config struct {
 	ExecutionGraph ExecutionGraphConfig      `yaml:"execution_graph"`
 	Intent         IntentConfig              `yaml:"intent"`
 	Sandbox        SandboxConfig             `yaml:"sandbox"`
+	Seatbelt       SeatbeltConfig            `yaml:"seatbelt"`
 }
 
 type PlannerConfig struct {
@@ -151,6 +152,16 @@ type SandboxConfig struct {
 	BindMounts         []SandboxMount   `yaml:"bind_mounts"`         // read-write bind mounts
 	AllowedExecutables []string         `yaml:"allowed_executables"` // glob patterns
 	MCP                SandboxMCPConfig `yaml:"mcp"`
+}
+
+// SeatbeltConfig configures macOS-native seatbelt (sandbox-exec) agent sandboxing.
+type SeatbeltConfig struct {
+	MaxLifetime Duration          `yaml:"max_lifetime"`
+	ProxyEnv    []string          `yaml:"proxy_env"`
+	ExtraEnv    map[string]string `yaml:"extra_env"`
+	AllowRead   []string          `yaml:"allow_read"`
+	AllowWrite  []string          `yaml:"allow_write"`
+	AllowExec   []string          `yaml:"allow_exec"`
 }
 
 // SandboxMount describes a host path to mount read-only inside the sandbox.

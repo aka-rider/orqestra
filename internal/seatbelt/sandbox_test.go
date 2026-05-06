@@ -472,14 +472,14 @@ func TestExtraPathDirs(t *testing.T) {
 
 func TestSandbox_NewValidation(t *testing.T) {
 	t.Run("empty workspace", func(t *testing.T) {
-		_, err := New(Config{Workspace: ""})
+		_, err := New(Config{RepoPath: ""})
 		if err == nil {
 			t.Fatal("expected error")
 		}
 	})
 
 	t.Run("nonexistent workspace", func(t *testing.T) {
-		_, err := New(Config{Workspace: "/nonexistent/dir/xyz"})
+		_, err := New(Config{RepoPath: "/nonexistent/dir/xyz"})
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -489,7 +489,7 @@ func TestSandbox_NewValidation(t *testing.T) {
 		f, _ := os.CreateTemp("", "ws")
 		f.Close()
 		defer os.Remove(f.Name())
-		_, err := New(Config{Workspace: f.Name()})
+		_, err := New(Config{RepoPath: f.Name()})
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -511,7 +511,7 @@ func TestDeny_ReadFileOutsideAllowlist(t *testing.T) {
 	secretFile := filepath.Join(secretDir, "secret.txt")
 	os.WriteFile(secretFile, []byte("TOP_SECRET_DATA"), 0644)
 
-	sb, err := New(Config{Workspace: workspace})
+	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -542,7 +542,7 @@ func TestDeny_WriteOutsideWorkspace(t *testing.T) {
 	defer os.RemoveAll(targetDir)
 	targetFile := filepath.Join(targetDir, "written.txt")
 
-	sb, err := New(Config{Workspace: workspace})
+	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -578,8 +578,8 @@ func TestAllow_ReadFromProfile(t *testing.T) {
 	p.Allow(resolvedAllowDir, Read)
 
 	sb, err := New(Config{
-		Workspace: workspace,
-		Profiles:  []Snapshot{p.Snapshot()},
+		RepoPath: workspace, RepoWritable: true,
+		Profiles: []Snapshot{p.Snapshot()},
 	})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -606,7 +606,7 @@ func TestAllow_ReadFromProfile(t *testing.T) {
 func TestAllow_WriteInWorkspace(t *testing.T) {
 	workspace := t.TempDir()
 
-	sb, err := New(Config{Workspace: workspace})
+	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -642,8 +642,8 @@ func TestAllow_LocalhostNetwork(t *testing.T) {
 	p.AllowOptional("/Library/Developer/CommandLineTools", Exec)
 
 	sb, err := New(Config{
-		Workspace: workspace,
-		Profiles:  []Snapshot{p.Snapshot()},
+		RepoPath: workspace, RepoWritable: true,
+		Profiles: []Snapshot{p.Snapshot()},
 	})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -685,7 +685,7 @@ print('LOCALHOST_OK')
 
 func TestNecessity_EtcReadable(t *testing.T) {
 	workspace := t.TempDir()
-	sb, err := New(Config{Workspace: workspace})
+	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -710,7 +710,7 @@ func TestNecessity_EtcReadable(t *testing.T) {
 
 func TestNecessity_ProcessFork(t *testing.T) {
 	workspace := t.TempDir()
-	sb, err := New(Config{Workspace: workspace})
+	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -736,7 +736,7 @@ func TestNecessity_ProcessFork(t *testing.T) {
 
 func TestNecessity_TmpWritable(t *testing.T) {
 	workspace := t.TempDir()
-	sb, err := New(Config{Workspace: workspace})
+	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -763,7 +763,7 @@ func TestNecessity_TmpWritable(t *testing.T) {
 
 func TestLimits_RlimitNoFile(t *testing.T) {
 	workspace := t.TempDir()
-	sb, err := New(Config{Workspace: workspace})
+	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -802,7 +802,7 @@ print(f'NO_LIMIT: opened {len(fds)} fds')
 
 func TestLimits_ZombieReaping(t *testing.T) {
 	workspace := t.TempDir()
-	sb, err := New(Config{Workspace: workspace})
+	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -847,7 +847,7 @@ func TestDeny_ExecArbitraryBinary(t *testing.T) {
 	binFile := filepath.Join(binDir, "echo")
 	os.WriteFile(binFile, src, 0755)
 
-	sb, err := New(Config{Workspace: workspace})
+	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -877,7 +877,7 @@ func TestAllow_ExecFromProfile(t *testing.T) {
 	scriptFile := filepath.Join(execDir, "myecho.sh")
 	os.WriteFile(scriptFile, []byte("#!/bin/sh\necho EXEC_OK\n"), 0755)
 
-	sb, err := New(Config{Workspace: workspace})
+	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -902,7 +902,7 @@ func TestAllow_ExecFromProfile(t *testing.T) {
 
 func TestNecessity_EtcNotExecutable(t *testing.T) {
 	workspace := t.TempDir()
-	sb, err := New(Config{Workspace: workspace})
+	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -924,7 +924,7 @@ func TestNecessity_EtcNotExecutable(t *testing.T) {
 
 func TestNecessity_LibraryFrameworks(t *testing.T) {
 	workspace := t.TempDir()
-	sb, err := New(Config{Workspace: workspace})
+	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -950,7 +950,7 @@ func TestNecessity_LibraryFrameworks(t *testing.T) {
 
 func TestNecessity_MachLookup(t *testing.T) {
 	workspace := t.TempDir()
-	sb, err := New(Config{Workspace: workspace})
+	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -976,7 +976,7 @@ func TestNecessity_MachLookup(t *testing.T) {
 
 func TestLimits_RlimitNproc(t *testing.T) {
 	workspace := t.TempDir()
-	sb, err := New(Config{Workspace: workspace})
+	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -1013,8 +1013,8 @@ for p in pids:
 	p.AllowOptional("/Library/Developer/CommandLineTools", Exec)
 
 	sb2, err := New(Config{
-		Workspace: workspace,
-		Profiles:  []Snapshot{p.Snapshot()},
+		RepoPath: workspace, RepoWritable: true,
+		Profiles: []Snapshot{p.Snapshot()},
 	})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -1048,7 +1048,7 @@ func TestPath_MaxLengthExceeded(t *testing.T) {
 
 func TestWrap_EmptyCommand(t *testing.T) {
 	workspace := t.TempDir()
-	sb, err := New(Config{Workspace: workspace})
+	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -1057,5 +1057,205 @@ func TestWrap_EmptyCommand(t *testing.T) {
 	cmd := &exec.Cmd{}
 	if err := sb.Wrap(cmd); err == nil {
 		t.Fatal("expected error wrapping empty command")
+	}
+}
+
+// === Phase 3: Dual-root access model tests ===
+
+func TestSeatbelt_ReadonlyRepoWriteDenied(t *testing.T) {
+	// Use a directory under HOME (not under /tmp or /var/folders) to avoid
+	// the base profile's temp-write allowance.
+	home := os.Getenv("HOME")
+	repoDir := filepath.Join(home, ".seatbelt-test-readonly-repo")
+	os.MkdirAll(repoDir, 0755)
+	defer os.RemoveAll(repoDir)
+
+	sessionDir := t.TempDir()
+
+	// Create a file in repo to prove it exists
+	os.WriteFile(filepath.Join(repoDir, "existing.txt"), []byte("readonly"), 0644)
+
+	sb, err := New(Config{
+		RepoPath:     repoDir,
+		SessionPath:  sessionDir,
+		RepoWritable: false, // readonly
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer sb.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	targetFile := filepath.Join(repoDir, "breach.txt")
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "echo BREACH > '"+targetFile+"'")
+	cmd.Stdout = &bytes.Buffer{}
+	cmd.Stderr = &bytes.Buffer{}
+
+	sb.Run(ctx, cmd)
+
+	if _, err := os.Stat(targetFile); err == nil {
+		os.Remove(targetFile)
+		t.Fatal("SECURITY FAILURE: readonly sandbox wrote to repo root")
+	}
+}
+
+func TestSeatbelt_ReadonlySessionWriteAllowed(t *testing.T) {
+	repoDir := t.TempDir()
+	sessionDir := t.TempDir()
+
+	sb, err := New(Config{
+		RepoPath:     repoDir,
+		SessionPath:  sessionDir,
+		RepoWritable: false,
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer sb.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	targetFile := filepath.Join(sessionDir, "artifact.json")
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "echo '{\"ok\":true}' > '"+targetFile+"'")
+	cmd.Stdout = &bytes.Buffer{}
+	cmd.Stderr = &bytes.Buffer{}
+
+	if err := sb.Run(ctx, cmd); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	data, err := os.ReadFile(targetFile)
+	if err != nil {
+		t.Fatalf("session write failed — file not created: %v", err)
+	}
+	if !strings.Contains(string(data), "ok") {
+		t.Errorf("unexpected content: %s", data)
+	}
+}
+
+func TestSeatbelt_WorkerRepoWriteAllowed(t *testing.T) {
+	repoDir := t.TempDir()
+	sessionDir := t.TempDir()
+
+	sb, err := New(Config{
+		RepoPath:     repoDir,
+		SessionPath:  sessionDir,
+		RepoWritable: true, // worker mode
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer sb.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	targetFile := filepath.Join(repoDir, "new-file.go")
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "echo 'package main' > '"+targetFile+"'")
+	cmd.Stdout = &bytes.Buffer{}
+	cmd.Stderr = &bytes.Buffer{}
+
+	if err := sb.Run(ctx, cmd); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	data, err := os.ReadFile(targetFile)
+	if err != nil {
+		t.Fatalf("worker repo write failed: %v", err)
+	}
+	if !strings.Contains(string(data), "package main") {
+		t.Errorf("unexpected content: %s", data)
+	}
+}
+
+func TestSeatbelt_SymlinkRootsResolved(t *testing.T) {
+	// Create a real directory and a symlink to it
+	realDir := t.TempDir()
+	// Resolve to get the canonical path (macOS adds /private prefix)
+	realDir, _ = filepath.EvalSymlinks(realDir)
+
+	symlinkDir := filepath.Join(t.TempDir(), "link")
+	os.Symlink(realDir, symlinkDir)
+
+	sb, err := New(Config{
+		RepoPath:     symlinkDir,
+		RepoWritable: true,
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer sb.Close()
+
+	// The workspace should be the resolved real path
+	if sb.Workspace() != realDir {
+		t.Errorf("Workspace() = %q, want resolved %q", sb.Workspace(), realDir)
+	}
+}
+
+func TestSeatbelt_EnvPrecedence_HarnessWinsOverBase(t *testing.T) {
+	workspace := t.TempDir()
+
+	// HarnessEnv should override base env (e.g. LANG set by BaseEnv)
+	sb, err := New(Config{
+		RepoPath:     workspace,
+		RepoWritable: true,
+		HarnessEnv:   []string{"LANG=custom-harness-locale"},
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer sb.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "echo $LANG")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &bytes.Buffer{}
+
+	if err := sb.Run(ctx, cmd); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	got := strings.TrimSpace(out.String())
+	if got != "custom-harness-locale" {
+		t.Errorf("LANG = %q, want %q (HarnessEnv should override base)", got, "custom-harness-locale")
+	}
+}
+
+func TestSeatbelt_EnvPrecedence_ExtraWinsOverAll(t *testing.T) {
+	workspace := t.TempDir()
+
+	// ExtraEnv should override both base and harness env
+	sb, err := New(Config{
+		RepoPath:     workspace,
+		RepoWritable: true,
+		HarnessEnv:   []string{"LANG=from-harness"},
+		ExtraEnv:     map[string]string{"LANG": "from-extra-final"},
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer sb.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "echo $LANG")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &bytes.Buffer{}
+
+	if err := sb.Run(ctx, cmd); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	got := strings.TrimSpace(out.String())
+	if got != "from-extra-final" {
+		t.Errorf("LANG = %q, want %q (ExtraEnv should override all)", got, "from-extra-final")
 	}
 }

@@ -11,10 +11,12 @@ import (
 // ProfileBuilder assembles a complete SBPL profile from system base rules,
 // workspace path, home, tmpdir, and zero or more tool snapshots.
 type ProfileBuilder struct {
-	workspace Path
-	home      string
-	tmpDir    string // resolved TMPDIR
-	snapshots []Snapshot
+	workspace    Path
+	home         string
+	tmpDir       string // resolved TMPDIR
+	snapshots    []Snapshot
+	RepoWritable bool  // if false, workspace (repo) is read-only
+	SessionPath  *Path // optional separate session directory (always read+write)
 }
 
 // NewProfileBuilder creates a builder with mandatory system paths.
@@ -128,11 +130,28 @@ func (b *ProfileBuilder) Build() (string, error) {
 	}
 
 	// --- Workspace allow (always last — wins over everything) ---
-	sb.WriteString(`
-;; Workspace (always last)
+	if b.RepoWritable {
+		sb.WriteString(`
+;; Repo (read+write — worker mode)
 (allow file-read* file-write* file-map-executable process-exec
   (subpath "` + b.workspace.Resolved + `"))
 `)
+	} else {
+		sb.WriteString(`
+;; Repo (read-only)
+(allow file-read*
+  (subpath "` + b.workspace.Resolved + `"))
+`)
+	}
+
+	// --- Session directory (always read+write if provided) ---
+	if b.SessionPath != nil {
+		sb.WriteString(`
+;; Session (always read+write)
+(allow file-read* file-write* file-map-executable process-exec
+  (subpath "` + b.SessionPath.Resolved + `"))
+`)
+	}
 
 	return sb.String(), nil
 }

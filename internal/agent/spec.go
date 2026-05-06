@@ -10,6 +10,16 @@ const (
 	RoleWorker        Role = "worker"
 )
 
+// AgentState represents the lifecycle state of an agent execution.
+type AgentState string
+
+const (
+	StateStarting AgentState = "starting"
+	StateRunning  AgentState = "running"
+	StateDone     AgentState = "done"
+	StateFailed   AgentState = "failed"
+)
+
 // AgentSpec defines what to run in a sandbox.
 type AgentSpec struct {
 	Role         Role              // "intake", "planner", "plan-validator", "worker"

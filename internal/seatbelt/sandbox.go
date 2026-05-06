@@ -13,45 +13,68 @@ import (
 
 // Config configures a seatbelt sandbox instance.
 type Config struct {
-	Workspace  string            // absolute path, mandatory
-	Profiles   []Snapshot        // tool snapshots from detect package
-	HarnessEnv []string          // exact key=value env from harness (e.g. ANTHROPIC_BASE_URL=...)
-	ProxyEnv   []string          // env var NAMES to forward from host — MUST exist or error
-	ExtraEnv   map[string]string // explicit key=value pairs
+	RepoPath     string            // absolute path to the repository root, mandatory
+	SessionPath  string            // absolute path to the session directory (optional; if empty, repo is the sole workspace)
+	RepoWritable bool              // if false, repo root is read-only; session root is always read+write
+	Profiles     []Snapshot        // tool snapshots from detect package
+	HarnessEnv   []string          // exact key=value env from harness (e.g. ANTHROPIC_BASE_URL=...)
+	ProxyEnv     []string          // env var NAMES to forward from host — MUST exist or error
+	ExtraEnv     map[string]string // explicit key=value pairs
 }
 
 // Sandbox wraps sandbox-exec execution with an SBPL profile.
 type Sandbox struct {
-	sbplPath  string   // pre-compiled SBPL profile stored in a chmod 0400 temp file
-	env       []string // pre-compiled scrubbed environment
-	workspace string   // resolved workspace path
+	sbplPath    string   // pre-compiled SBPL profile stored in a chmod 0400 temp file
+	env         []string // pre-compiled scrubbed environment
+	repoPath    string   // resolved repo root
+	sessionPath string   // resolved session root (may be empty for legacy single-workspace)
 }
 
 // New creates a Sandbox after validating configuration and compiling the SBPL profile.
 // Returns an error if workspace doesn't exist, sandbox-exec is unavailable,
 // HOME is not set, or any ProxyEnv name is missing from the host.
 func New(cfg Config) (*Sandbox, error) {
-	if cfg.Workspace == "" {
-		return nil, fmt.Errorf("seatbelt: workspace path is required")
+	if cfg.RepoPath == "" {
+		return nil, fmt.Errorf("seatbelt: repo path is required")
 	}
 
-	absWorkspace, err := filepath.Abs(cfg.Workspace)
+	absRepo, err := filepath.Abs(cfg.RepoPath)
 	if err != nil {
-		return nil, fmt.Errorf("seatbelt: resolve workspace path: %w", err)
+		return nil, fmt.Errorf("seatbelt: resolve repo path: %w", err)
 	}
 	// EvalSymlinks to get the real path — SBPL enforces at the kernel/VFS level
 	// on real paths, not symlinks. E.g. /tmp → /private/tmp on macOS.
-	absWorkspace, err = filepath.EvalSymlinks(absWorkspace)
+	absRepo, err = filepath.EvalSymlinks(absRepo)
 	if err != nil {
-		return nil, fmt.Errorf("seatbelt: resolve workspace symlinks: %w", err)
+		return nil, fmt.Errorf("seatbelt: resolve repo symlinks: %w", err)
 	}
 
-	info, err := os.Stat(absWorkspace)
+	info, err := os.Stat(absRepo)
 	if err != nil {
-		return nil, fmt.Errorf("seatbelt: workspace %q: %w", absWorkspace, err)
+		return nil, fmt.Errorf("seatbelt: repo %q: %w", absRepo, err)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("seatbelt: workspace %q is not a directory", absWorkspace)
+		return nil, fmt.Errorf("seatbelt: repo %q is not a directory", absRepo)
+	}
+
+	// Resolve session path if provided.
+	var absSession string
+	if cfg.SessionPath != "" {
+		absSession, err = filepath.Abs(cfg.SessionPath)
+		if err != nil {
+			return nil, fmt.Errorf("seatbelt: resolve session path: %w", err)
+		}
+		absSession, err = filepath.EvalSymlinks(absSession)
+		if err != nil {
+			return nil, fmt.Errorf("seatbelt: resolve session symlinks: %w", err)
+		}
+		sInfo, sErr := os.Stat(absSession)
+		if sErr != nil {
+			return nil, fmt.Errorf("seatbelt: session %q: %w", absSession, sErr)
+		}
+		if !sInfo.IsDir() {
+			return nil, fmt.Errorf("seatbelt: session %q is not a directory", absSession)
+		}
 	}
 
 	// Verify sandbox-exec is available
@@ -70,12 +93,16 @@ func New(cfg Config) (*Sandbox, error) {
 		realTmpDir = resolved
 	}
 
-	workspace := Path{Resolved: absWorkspace, IsDir: true}
+	repoRoot := Path{Resolved: absRepo, IsDir: true}
 
 	// Build SBPL profile
-	builder, err := NewProfileBuilder(workspace, home, realTmpDir)
+	builder, err := NewProfileBuilder(repoRoot, home, realTmpDir)
 	if err != nil {
 		return nil, fmt.Errorf("seatbelt: create profile builder: %w", err)
+	}
+	builder.RepoWritable = cfg.RepoWritable
+	if absSession != "" {
+		builder.SessionPath = &Path{Resolved: absSession, IsDir: true}
 	}
 	for _, snap := range cfg.Profiles {
 		builder.Add(snap)
@@ -108,7 +135,7 @@ func New(cfg Config) (*Sandbox, error) {
 	}
 
 	// Build scrubbed environment
-	base := BaseEnv(home, realTmpDir, absWorkspace)
+	base := BaseEnv(home, realTmpDir, absRepo)
 	extraPath := ExtraPathDirs(cfg.Profiles)
 	env, err := MergeEnv(base, cfg.Profiles, cfg.HarnessEnv, cfg.ProxyEnv, cfg.ExtraEnv, extraPath)
 	if err != nil {
@@ -117,9 +144,10 @@ func New(cfg Config) (*Sandbox, error) {
 	}
 
 	return &Sandbox{
-		sbplPath:  sbplPath,
-		env:       env,
-		workspace: absWorkspace,
+		sbplPath:    sbplPath,
+		env:         env,
+		repoPath:    absRepo,
+		sessionPath: absSession,
 	}, nil
 }
 
@@ -131,9 +159,9 @@ func (s *Sandbox) Close() error {
 	return nil
 }
 
-// Workspace returns the configured workspace path.
+// Workspace returns the configured repo path (primary workspace).
 func (s *Sandbox) Workspace() string {
-	return s.workspace
+	return s.repoPath
 }
 
 // Wrap mutates an *exec.Cmd so it will run inside sandbox-exec with the scrubbed env.
@@ -172,7 +200,7 @@ func (s *Sandbox) Wrap(cmd *exec.Cmd) error {
 
 	// Set working directory to workspace
 	if cmd.Dir == "" {
-		cmd.Dir = s.workspace
+		cmd.Dir = s.repoPath
 	}
 
 	return nil

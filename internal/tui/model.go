@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -63,6 +64,18 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	
+    if _, ok := msg.(tea.KeyMsg); ok {
+        f, _ := os.OpenFile("/tmp/key.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+        f.WriteString(fmt.Sprintf("Key: %v\n", msg))
+        f.Close()
+    }
+    if _, ok := msg.(PulseTickMsg); ok {
+        f, _ := os.OpenFile("/tmp/key.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+        f.WriteString("PulseTickMsg\n")
+        f.Close()
+    }
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -195,6 +208,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // handleKey routes keystrokes.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
+	f, _ := os.OpenFile("/tmp/key.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	tv := m.tabsView
+	f.WriteString(fmt.Sprintf("handleKey: %q. state=%v termTabs=%v active=%v\n", key, m.state, len(tv.termTabs), tv.active))
+	if len(tv.termTabs) > tv.active {
+		f.WriteString(fmt.Sprintf("  activeTab.focused=%v done=%v ptyNil=%v\n", tv.termTabs[tv.active].focused, tv.termTabs[tv.active].done, tv.termTabs[tv.active].ptySession == nil))
+	}
+	f.Close()
 
 	// Global: ctrl+c always quits
 	if key == "ctrl+c" {

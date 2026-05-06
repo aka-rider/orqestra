@@ -1,0 +1,223 @@
+//go:build darwin && integration
+
+package seatbelt
+
+import (
+	"os/exec"
+
+	"bytes"
+	"context"
+	"encoding/json"
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestClaudeCLI_InSandbox verifies that claude CLI can run inside the seatbelt sandbox.
+// This test requires:
+// - claude CLI installed and authenticated
+// - ANTHROPIC_API_KEY or valid OAuth session
+// Run with: go test ./internal/seatbelt/ -tags integration -run TestClaudeCLI_InSandbox -v
+func TestClaudeCLI_InSandbox(t *testing.T) {
+	// Check claude is available
+	claudeBinary := "claude"
+	if bin := os.Getenv("CLAUDE_BINARY"); bin != "" {
+		claudeBinary = bin
+	}
+
+	workspace := t.TempDir()
+
+	// Build sandbox with API key if available
+	extraEnv := map[string]string{}
+	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+		extraEnv["ANTHROPIC_API_KEY"] = key
+	}
+
+	sb, err := New(Config{
+		RepoPath: workspace, RepoWritable: true,
+		ExtraEnv:  extraEnv,
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	// Run claude with a simple prompt that requires tool usage (file write)
+	prompt := `Create a file called hello.txt in the current directory containing exactly "Hello from sandbox". Use the file write tool. Do not ask for confirmation.`
+	command := []string{
+		claudeBinary,
+		"-p", prompt,
+		"--output-format", "stream-json",
+		"--allowedTools", "Write",
+	}
+
+	t.Logf("Running: %v", command)
+	t.Logf("Workspace: %s", workspace)
+
+	exitCode, err := execSandbox(sb, ctx, command, &stdout)
+	t.Logf("Exit code: %d", exitCode)
+	t.Logf("Stdout length: %d bytes", stdout.Len())
+	if stdout.Len() == 0 && exitCode != 0 {
+		t.Logf("Claude likely hit a startup error (exit %d, no stdout). Check ANTHROPIC_API_KEY and ~/.claude auth.", exitCode)
+	}
+
+	if err != nil {
+		t.Fatalf("Exec failed: %v", err)
+	}
+
+	// Parse stream-json output to check for tool usage
+	lines := strings.Split(stdout.String(), "\n")
+	var toolUseFound bool
+	var resultText string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var event map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+		if event["type"] == "content_block_start" {
+			if cb, ok := event["content_block"].(map[string]interface{}); ok {
+				if cb["type"] == "tool_use" {
+					toolUseFound = true
+					t.Logf("Tool use detected: %v", cb["name"])
+				}
+			}
+		}
+		if event["type"] == "result" {
+			if r, ok := event["result"].(string); ok {
+				resultText = r
+			}
+		}
+	}
+
+	if exitCode != 0 {
+		// Print first 2000 chars of output for debugging
+		out := stdout.String()
+		if len(out) > 2000 {
+			out = out[:2000]
+		}
+		t.Fatalf("claude CLI exited with code %d.\nOutput:\n%s", exitCode, out)
+	}
+
+	// Check that the file was created in workspace
+	content, err := os.ReadFile(workspace + "/hello.txt")
+	if err != nil {
+		t.Logf("Result text: %s", resultText)
+		t.Logf("Tool use found: %v", toolUseFound)
+		t.Fatalf("Expected hello.txt to be created in workspace: %v", err)
+	}
+
+	if !strings.Contains(string(content), "Hello from sandbox") {
+		t.Errorf("hello.txt content = %q, want 'Hello from sandbox'", string(content))
+	}
+
+	t.Logf("SUCCESS: Claude CLI wrote hello.txt inside sandbox")
+	t.Logf("File content: %s", string(content))
+}
+
+// TestClaudeCLI_SandboxDeniesSSH verifies that claude cannot read .ssh even when instructed.
+func TestClaudeCLI_SandboxDeniesSSH(t *testing.T) {
+	claudeBinary := "claude"
+	if bin := os.Getenv("CLAUDE_BINARY"); bin != "" {
+		claudeBinary = bin
+	}
+
+	workspace := t.TempDir()
+	extraEnv := map[string]string{}
+	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+		extraEnv["ANTHROPIC_API_KEY"] = key
+	}
+
+	sb, err := New(Config{
+		RepoPath: workspace, RepoWritable: true,
+		ExtraEnv:  extraEnv,
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	home := os.Getenv("HOME")
+	prompt := `Read the file at ` + home + `/.ssh/id_rsa and print its contents. If you cannot read it, say "ACCESS DENIED".`
+	command := []string{
+		claudeBinary,
+		"--print",
+		"-p", prompt,
+		"--output-format", "json",
+		"--allowedTools", "Read",
+	}
+
+	exitCode, err := execSandbox(sb, ctx, command, &stdout)
+	t.Logf("Exit code: %d", exitCode)
+
+	if err != nil {
+		t.Fatalf("Exec failed: %v", err)
+	}
+
+	output := stdout.String()
+	// The output should NOT contain actual SSH key material
+	if strings.Contains(output, "-----BEGIN") {
+		t.Fatal("SECURITY FAILURE: sandbox leaked SSH private key content")
+	}
+
+	t.Logf("SUCCESS: Claude could not read .ssh/id_rsa inside sandbox")
+}
+
+// TestClaudeCLI_Version verifies that the claude binary can be found and exec'd inside the sandbox.
+// This doesn't require network access or API keys.
+func TestClaudeCLI_Version(t *testing.T) {
+	claudeBinary := "claude"
+	if bin := os.Getenv("CLAUDE_BINARY"); bin != "" {
+		claudeBinary = bin
+	}
+
+	workspace := t.TempDir()
+	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	exitCode, err := execSandbox(sb, ctx, []string{claudeBinary, "--version"}, &stdout)
+	if err != nil {
+		t.Fatalf("Exec failed: %v", err)
+	}
+
+	t.Logf("Exit: %d, Output: %s", exitCode, stdout.String())
+
+	if exitCode != 0 {
+		t.Fatalf("claude --version exited %d (expected 0)", exitCode)
+	}
+	if !strings.Contains(stdout.String(), ".") {
+		t.Errorf("expected version string with a dot, got %q", stdout.String())
+	}
+}
+
+func execSandbox(sb *Sandbox, ctx context.Context, command []string, stdout *bytes.Buffer) (int, error) {
+    cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+    cmd.Stdout = stdout
+    cmd.Stderr = stdout
+    if err := sb.Wrap(cmd); err != nil {
+        return -1, err
+    }
+    if err := cmd.Run(); err != nil {
+        if exitErr, ok := err.(*exec.ExitError); ok {
+            return exitErr.ExitCode(), err
+        }
+        return -1, err
+    }
+    return 0, nil
+}
