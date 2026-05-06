@@ -1,6 +1,6 @@
 //go:build darwin && integration
 
-package seatbelt
+package sandbox
 
 import (
 	"os/exec"
@@ -18,7 +18,7 @@ import (
 // This test requires:
 // - claude CLI installed and authenticated
 // - ANTHROPIC_API_KEY or valid OAuth session
-// Run with: go test ./internal/seatbelt/ -tags integration -run TestClaudeCLI_InSandbox -v
+// Run with: go test ./internal/sandbox/ -tags integration -run TestClaudeCLI_InSandbox -v
 func TestClaudeCLI_InSandbox(t *testing.T) {
 	// Check claude is available
 	claudeBinary := "claude"

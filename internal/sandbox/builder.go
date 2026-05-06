@@ -1,6 +1,6 @@
 //go:build darwin
 
-package seatbelt
+package sandbox
 
 import (
 	"fmt"

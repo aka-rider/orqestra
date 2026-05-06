@@ -18,7 +18,7 @@ models:
     provider: llama-cpp
     model: qwen3.6
 
-seatbelt:
+sandbox:
   max_lifetime: 35m
   extra_env:
     DISABLE_NON_ESSENTIAL_MODEL_CALLS: "0"

@@ -11,33 +11,33 @@ import (
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
-	"github.com/xiii/orqestra/internal/seatbelt"
+	"github.com/xiii/orqestra/internal/sandbox"
 )
 
-// SeatbeltCLIRunner implements harness.CLIRunner by running the claude CLI
-// directly on macOS under a seatbelt (sandbox-exec) policy.
+// SandboxCLIRunner implements harness.CLIRunner by running the claude CLI
+// directly on macOS under a sandbox (sandbox-exec) policy.
 // Unlike the Docker SandboxedCLIRunner, it does not need file extraction
 // since workers write directly to the repo.
-type SeatbeltCLIRunner struct {
-	cfg      config.SeatbeltConfig
-	profiles []seatbelt.Snapshot
+type SandboxCLIRunner struct {
+	cfg      config.SandboxConfig
+	profiles []sandbox.Snapshot
 	repoPath string
 	env      []string
 	writable bool // worker mode vs readonly
 }
 
-// SeatbeltCLIRunnerConfig configures the seatbelt CLI runner.
-type SeatbeltCLIRunnerConfig struct {
-	Cfg      config.SeatbeltConfig
-	Profiles []seatbelt.Snapshot
+// SandboxCLIRunnerConfig configures the seatbelt CLI runner.
+type SandboxCLIRunnerConfig struct {
+	Cfg      config.SandboxConfig
+	Profiles []sandbox.Snapshot
 	RepoPath string
 	Env      []string // harness env (model routing)
 	Writable bool     // true for workers
 }
 
-// NewSeatbeltCLIRunner creates a CLI runner backed by seatbelt.
-func NewSeatbeltCLIRunner(cfg SeatbeltCLIRunnerConfig) *SeatbeltCLIRunner {
-	return &SeatbeltCLIRunner{
+// NewSandboxCLIRunner creates a CLI runner backed by seatbelt.
+func NewSandboxCLIRunner(cfg SandboxCLIRunnerConfig) *SandboxCLIRunner {
+	return &SandboxCLIRunner{
 		cfg:      cfg.Cfg,
 		profiles: cfg.Profiles,
 		repoPath: cfg.RepoPath,
@@ -47,20 +47,20 @@ func NewSeatbeltCLIRunner(cfg SeatbeltCLIRunnerConfig) *SeatbeltCLIRunner {
 }
 
 // RunPrint runs the claude CLI with --print under seatbelt.
-func (r *SeatbeltCLIRunner) RunPrint(ctx context.Context, prompt, systemPrompt string) (harness.RunResult, error) {
+func (r *SandboxCLIRunner) RunPrint(ctx context.Context, prompt, systemPrompt string) (harness.RunResult, error) {
 	args := r.buildCommand(prompt, systemPrompt, false)
 	output, err := r.run(ctx, args, nil)
 	return harness.RunResult{Output: output}, err
 }
 
 // RunStreaming runs the claude CLI with streaming output under seatbelt.
-func (r *SeatbeltCLIRunner) RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (harness.RunResult, error) {
+func (r *SandboxCLIRunner) RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (harness.RunResult, error) {
 	args := r.buildCommand(prompt, systemPrompt, true)
 	output, err := r.run(ctx, args, stdout)
 	return harness.RunResult{Output: output}, err
 }
 
-func (r *SeatbeltCLIRunner) buildCommand(prompt, systemPrompt string, streaming bool) []string {
+func (r *SandboxCLIRunner) buildCommand(prompt, systemPrompt string, streaming bool) []string {
 	args := []string{"claude", "--dangerously-skip-permissions", "-p", prompt}
 	if systemPrompt != "" {
 		args = append(args, "--append-system-prompt", systemPrompt)
@@ -73,8 +73,8 @@ func (r *SeatbeltCLIRunner) buildCommand(prompt, systemPrompt string, streaming 
 	return args
 }
 
-func (r *SeatbeltCLIRunner) run(ctx context.Context, args []string, stdout io.Writer) (string, error) {
-	sb, err := seatbelt.New(seatbelt.Config{
+func (r *SandboxCLIRunner) run(ctx context.Context, args []string, stdout io.Writer) (string, error) {
+	sb, err := sandbox.New(sandbox.Config{
 		RepoPath:     r.repoPath,
 		RepoWritable: r.writable,
 		Profiles:     r.profiles,
@@ -83,13 +83,13 @@ func (r *SeatbeltCLIRunner) run(ctx context.Context, args []string, stdout io.Wr
 		ExtraEnv:     r.cfg.ExtraEnv,
 	})
 	if err != nil {
-		return "", fmt.Errorf("seatbelt cli runner: %w", err)
+		return "", fmt.Errorf("sandbox cli runner: %w", err)
 	}
 	defer sb.Close()
 
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	if err := sb.Wrap(cmd); err != nil {
-		return "", fmt.Errorf("seatbelt cli runner wrap: %w", err)
+		return "", fmt.Errorf("sandbox cli runner wrap: %w", err)
 	}
 
 	var outBuf bytes.Buffer
@@ -102,7 +102,7 @@ func (r *SeatbeltCLIRunner) run(ctx context.Context, args []string, stdout io.Wr
 	cmd.Stderr = &errBuf
 
 	if err := sb.Run(ctx, cmd); err != nil {
-		return outBuf.String(), fmt.Errorf("seatbelt cli runner exec: %w (stderr: %s)", err, errBuf.String())
+		return outBuf.String(), fmt.Errorf("sandbox cli runner exec: %w (stderr: %s)", err, errBuf.String())
 	}
 
 	return outBuf.String(), nil

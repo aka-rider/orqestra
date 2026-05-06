@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/xiii/orqestra/internal/config"
-	"github.com/xiii/orqestra/internal/seatbelt"
+	"github.com/xiii/orqestra/internal/sandbox"
 )
 
 func TestUserProfile_ReadWriteExec(t *testing.T) {
@@ -30,7 +30,7 @@ func TestUserProfile_ReadWriteExec(t *testing.T) {
 	os.MkdirAll(writeDir, 0o755)
 	os.MkdirAll(execDir, 0o755)
 
-	cfg := config.SeatbeltConfig{
+	cfg := config.SandboxConfig{
 		AllowRead:  []string{readDir},
 		AllowWrite: []string{writeDir},
 		AllowExec:  []string{execDir},
@@ -51,7 +51,7 @@ func TestUserProfile_MissingOptionalPathsSkipped(t *testing.T) {
 		t.Fatal("HOME not set")
 	}
 
-	cfg := config.SeatbeltConfig{
+	cfg := config.SandboxConfig{
 		AllowRead:  []string{"/nonexistent/path/that/does/not/exist"},
 		AllowWrite: []string{"/another/nonexistent/path"},
 		AllowExec:  []string{"/no/such/dir"},
@@ -75,7 +75,7 @@ func TestUserProfile_ExecRejectsFiles(t *testing.T) {
 	file := filepath.Join(dir, "binary")
 	os.WriteFile(file, []byte("#!/bin/sh"), 0o755)
 
-	cfg := config.SeatbeltConfig{
+	cfg := config.SandboxConfig{
 		AllowExec: []string{file},
 	}
 
@@ -91,7 +91,7 @@ func TestUserProfile_EmptyConfig(t *testing.T) {
 		t.Fatal("HOME not set")
 	}
 
-	cfg := config.SeatbeltConfig{}
+	cfg := config.SandboxConfig{}
 	snap, err := UserProfile(home, cfg)
 	if err != nil {
 		t.Fatalf("UserProfile() error: %v", err)
@@ -106,7 +106,7 @@ func TestAllProfiles_Success(t *testing.T) {
 		t.Fatal("HOME not set")
 	}
 
-	cfg := config.SeatbeltConfig{}
+	cfg := config.SandboxConfig{}
 
 	profiles, err := AllProfiles(home, "claude", cfg)
 	if err != nil {
@@ -134,7 +134,7 @@ func TestUserProfile_PermissionErrorPropagated(t *testing.T) {
 	loopLink := filepath.Join(dir, "loop")
 	os.Symlink(loopLink, loopLink) // self-referential symlink
 
-	cfg := config.SeatbeltConfig{
+	cfg := config.SandboxConfig{
 		AllowRead: []string{loopLink},
 	}
 
@@ -158,8 +158,8 @@ func TestUserProfile_ExtraEnvNotInSnapshot(t *testing.T) {
 	}
 
 	// ExtraEnv should NOT be part of the UserProfile snapshot.
-	// It is applied at the seatbelt.New level, not through profiles.
-	cfg := config.SeatbeltConfig{
+	// It is applied at the sandbox.New level, not through profiles.
+	cfg := config.SandboxConfig{
 		ExtraEnv: map[string]string{
 			"MY_CUSTOM_VAR": "should-not-appear",
 			"NODE_ENV":      "production",
@@ -172,7 +172,7 @@ func TestUserProfile_ExtraEnvNotInSnapshot(t *testing.T) {
 	}
 
 	// Verify by building a sandbox with this profile — ExtraEnv must come
-	// from seatbelt.Config.ExtraEnv, not from the snapshot.
+	// from sandbox.Config.ExtraEnv, not from the snapshot.
 	// We can only verify structurally: UserProfile does not call AddEnv.
 	// The snapshot's env map should be empty.
 	_ = snap
@@ -180,16 +180,16 @@ func TestUserProfile_ExtraEnvNotInSnapshot(t *testing.T) {
 	// If UserProfile had AddEnv calls for ExtraEnv keys, it would show up
 	// in the SBPL env section. We verify by building a full sandbox and
 	// checking the env doesn't get double-applied when ExtraEnv is also
-	// set in seatbelt.Config.
+	// set in sandbox.Config.
 	repoDir := t.TempDir()
-	sb, sbErr := seatbelt.New(seatbelt.Config{
+	sb, sbErr := sandbox.New(sandbox.Config{
 		RepoPath:     repoDir,
 		RepoWritable: true,
-		Profiles:     []seatbelt.Snapshot{snap},
+		Profiles:     []sandbox.Snapshot{snap},
 		ExtraEnv:     cfg.ExtraEnv,
 	})
 	if sbErr != nil {
-		t.Fatalf("seatbelt.New() error: %v", sbErr)
+		t.Fatalf("sandbox.New() error: %v", sbErr)
 	}
 	defer sb.Close()
 

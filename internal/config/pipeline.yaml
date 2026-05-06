@@ -299,5 +299,5 @@ retry:
   plan_validation_repair: 2
   work_validation_repair: 3
 
-seatbelt:
+sandbox:
   max_lifetime: 45m

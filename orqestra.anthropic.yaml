@@ -24,7 +24,7 @@ models:
     provider: anthropic-native
     model: claude-haiku-4-5
 
-seatbelt:
+sandbox:
   max_lifetime: 45m
   allow_read:
     - ~/.claude

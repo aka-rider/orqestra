@@ -55,8 +55,7 @@ type Config struct {
 	Retry          RetryConfig               `yaml:"retry"`
 	ExecutionGraph ExecutionGraphConfig      `yaml:"execution_graph"`
 	Intent         IntentConfig              `yaml:"intent"`
-	Sandbox        SandboxConfig             `yaml:"sandbox"`
-	Seatbelt       SeatbeltConfig            `yaml:"seatbelt"`
+	Sandbox       SandboxConfig            `yaml:"sandbox"`
 }
 
 type PlannerConfig struct {
@@ -113,8 +112,7 @@ type AgentNodeConfig struct {
 	MaxAttempts      int                  `yaml:"max_attempts"`
 	OnFailure        string               `yaml:"on_failure"`
 	Validator        *ValidatorNodeConfig `yaml:"validator"`
-	Sandbox          *SandboxConfig       `yaml:"sandbox"`  // per-agent sandbox override (legacy)
-	Seatbelt         *SeatbeltConfig      `yaml:"seatbelt"` // per-agent seatbelt override
+	Sandbox         *SandboxConfig      `yaml:"sandbox"` // per-agent sandbox override
 }
 
 // ValidatorNodeConfig defines a validator attached to an agent.
@@ -140,40 +138,14 @@ type IntentConfig struct {
 	SystemPrompt string `yaml:"system_prompt"`
 }
 
-// SandboxConfig configures Docker-based agent sandboxing.
-// Sandboxing is always active — there is no opt-out.
+// SandboxConfig configures macOS-native sandbox (sandbox-exec) agent sandboxing.
 type SandboxConfig struct {
-	Image              string           `yaml:"image"`
-	Memory             string           `yaml:"memory"`       // e.g. "4g"
-	CPUs               float64          `yaml:"cpus"`         // e.g. 2.0
-	PidsLimit          int64            `yaml:"pids_limit"`   // max PIDs in container
-	MaxLifetime        Duration         `yaml:"max_lifetime"` // hard kill after this
-	Network            string           `yaml:"network"`      // Docker network mode (e.g. "host", "bridge")
-	ReadOnlyMounts     []SandboxMount   `yaml:"read_only_mounts"`
-	BindMounts         []SandboxMount   `yaml:"bind_mounts"`         // read-write bind mounts
-	AllowedExecutables []string         `yaml:"allowed_executables"` // glob patterns
-	MCP                SandboxMCPConfig `yaml:"mcp"`
-}
-
-// SeatbeltConfig configures macOS-native seatbelt (sandbox-exec) agent sandboxing.
-type SeatbeltConfig struct {
 	MaxLifetime Duration          `yaml:"max_lifetime"`
 	ProxyEnv    []string          `yaml:"proxy_env"`
 	ExtraEnv    map[string]string `yaml:"extra_env"`
 	AllowRead   []string          `yaml:"allow_read"`
 	AllowWrite  []string          `yaml:"allow_write"`
 	AllowExec   []string          `yaml:"allow_exec"`
-}
-
-// SandboxMount describes a host path to mount read-only inside the sandbox.
-type SandboxMount struct {
-	Host      string `yaml:"host"`
-	Container string `yaml:"container"`
-}
-
-// SandboxMCPConfig configures MCP server access from within sandboxes.
-type SandboxMCPConfig struct {
-	SocketPath string `yaml:"socket_path"` // Docker MCP gateway socket path on host
 }
 
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
