@@ -40,18 +40,37 @@ func (sb *StreamBuffer) SetAgent(id string) {
 	sb.lines = nil
 }
 
-// Append adds text to the buffer, splitting on newlines.
+// Append adds text to the buffer, accumulating into the current line
+// until a newline is encountered. This handles streaming where each
+// Write call contains a small text fragment (single token).
 func (sb *StreamBuffer) Append(text string) {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
-	parts := strings.Split(text, "\n")
-	for _, line := range parts {
-		// Merge consecutive blank lines
-		if line == "" && len(sb.lines) > 0 && sb.lines[len(sb.lines)-1] == "" {
-			continue
+
+	for len(text) > 0 {
+		nlIdx := strings.IndexByte(text, '\n')
+		if nlIdx == -1 {
+			// No newline — append to current (last) line
+			if len(sb.lines) == 0 {
+				sb.lines = append(sb.lines, text)
+			} else {
+				sb.lines[len(sb.lines)-1] += text
+			}
+			break
 		}
-		sb.lines = append(sb.lines, line)
+
+		// Complete the current line up to the newline
+		fragment := text[:nlIdx]
+		if len(sb.lines) == 0 {
+			sb.lines = append(sb.lines, fragment)
+		} else {
+			sb.lines[len(sb.lines)-1] += fragment
+		}
+		// Start a new line for content after the newline
+		sb.lines = append(sb.lines, "")
+		text = text[nlIdx+1:]
 	}
+
 	if len(sb.lines) > sb.maxLines {
 		sb.lines = sb.lines[len(sb.lines)-sb.maxLines:]
 	}
@@ -308,7 +327,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			if gwResult.Verdict == agent.GatewayVerdictAccept {
 				emit(Event{Type: EventAgentDone, AgentID: "gateway",
 					InputTokens: usageIn(gwResult.Usage), OutputTokens: usageOut(gwResult.Usage)})
-				plannerInput = gwResult.PlannerQuestion
+				plannerInput = buildPlannerInput(input.Prompt, gwResult.Brief)
 				break
 			}
 
@@ -317,7 +336,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 				// Auto-approve: use current brief as planner input
 				emit(Event{Type: EventAgentDone, AgentID: "gateway",
 					InputTokens: usageIn(gwResult.Usage), OutputTokens: usageOut(gwResult.Usage)})
-				plannerInput = buildPlannerInputFromBrief(gwResult.Brief)
+				plannerInput = buildPlannerInput(input.Prompt, gwResult.Brief)
 				break
 			}
 
@@ -351,7 +370,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			if round == maxCoachingRounds-1 {
 				emit(Event{Type: EventAgentDone, AgentID: "gateway",
 					InputTokens: usageIn(gwResult.Usage), OutputTokens: usageOut(gwResult.Usage)})
-				plannerInput = buildPlannerInputFromBrief(gwResult.Brief)
+				plannerInput = buildPlannerInput(input.Prompt, gwResult.Brief)
 			}
 		}
 	}
@@ -480,11 +499,26 @@ plan:
 }
 
 // buildPlannerInputFromBrief constructs a planner question from a partial brief.
-func buildPlannerInputFromBrief(brief agent.PromptBrief) string {
+// buildPlannerInput constructs the planner prompt from the raw user prompt and
+// gateway brief. The raw prompt is the primary input — the user's original words.
+// The brief supplies lightweight structured context (outcome, scope boundaries)
+// without replacing or rewriting the user's intent.
+func buildPlannerInput(rawPrompt string, brief agent.PromptBrief) string {
+	var b strings.Builder
+	b.WriteString(rawPrompt)
 	if brief.EndState != "" {
-		return fmt.Sprintf("How should %q be implemented such that the end state is: %s?", brief.Task, brief.EndState)
+		b.WriteString("\n\nExpected outcome: ")
+		b.WriteString(brief.EndState)
 	}
-	return brief.Task
+	if len(brief.Scope) > 0 {
+		b.WriteString("\nScope: ")
+		b.WriteString(strings.Join(brief.Scope, ", "))
+	}
+	if len(brief.NonScope) > 0 {
+		b.WriteString("\nOut of scope: ")
+		b.WriteString(strings.Join(brief.NonScope, ", "))
+	}
+	return b.String()
 }
 
 // incorporateAnswers enriches the prompt with user answers to coaching questions.

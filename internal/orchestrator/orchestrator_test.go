@@ -25,11 +25,11 @@ func (m *mockRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (
 }
 
 func acceptGatewayJSON() string {
-	return `{"verdict":"accept","brief":{"task":"Add feature X","end_state":"Feature X works","deliverables":["pkg/x.go"],"scope":["pkg"],"non_scope":[],"acceptance_hints":["go test passes"]},"questions":[],"confidence":0.9,"planner_question":"How should feature X be designed?"}`
+	return `{"verdict":"accept","brief":{"task":"Add feature X","end_state":"Feature X works","scope":["pkg"],"non_scope":[]},"questions":[],"confidence":0.9}`
 }
 
 func coachGatewayJSON() string {
-	return `{"verdict":"coach","brief":{"task":"Improve something","end_state":"","deliverables":[],"scope":[],"non_scope":[],"acceptance_hints":[]},"questions":[{"text":"Which module?","options":["a","b"],"default":"a"}],"confidence":0.3,"planner_question":""}`
+	return `{"verdict":"coach","brief":{"task":"Improve something","end_state":"","scope":[],"non_scope":[]},"questions":[{"text":"Which module?","options":["a","b"],"default":"a"}],"confidence":0.3}`
 }
 
 func validPlanJSON() string {

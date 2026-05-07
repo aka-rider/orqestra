@@ -13,7 +13,7 @@ var (
 			Bold(true)
 
 	elapsedStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("8"))
+			Foreground(lipgloss.Color("244"))
 
 	// Content styles
 	goalStyle = lipgloss.NewStyle().
@@ -34,15 +34,15 @@ var (
 
 	// Input/footer styles
 	keyStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("8"))
+			Foreground(lipgloss.Color("7"))
 
 	dividerStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("8"))
+			Foreground(lipgloss.Color("240"))
 
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("1")).
 			Bold(true)
 
 	streamStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("8"))
+			Foreground(lipgloss.Color("7"))
 )

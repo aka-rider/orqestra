@@ -840,7 +840,10 @@ func (m Model) viewInputZone() string {
 		}
 		return keyStyle.Render(fmt.Sprintf(" viewing %s history (read-only)", agent))
 	case ContentCompletion:
-		return keyStyle.Render(" [N] new run | [Q] quit")
+		if m.lastErr != nil {
+			return errorStyle.Render(fmt.Sprintf(" Error: %v", m.lastErr))
+		}
+		return keyStyle.Render(" Pipeline complete")
 	}
 	return ""
 }
@@ -949,6 +952,10 @@ func (m Model) viewCompletion(_ int) string {
 	var b strings.Builder
 	if m.goal != "" {
 		b.WriteString(fmt.Sprintf(" Goal: %s\n\n", goalStyle.Render(m.goal)))
+	}
+	if m.lastErr != nil {
+		b.WriteString(errorStyle.Render(fmt.Sprintf(" Error: %v", m.lastErr)))
+		b.WriteString("\n")
 	}
 	if m.hasQA {
 		verdictStyle := passStyle

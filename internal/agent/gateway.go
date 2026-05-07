@@ -23,12 +23,10 @@ const (
 
 // PromptBrief is the gateway's structured interpretation of user intent.
 type PromptBrief struct {
-	Task            string   `json:"task"`
-	EndState        string   `json:"end_state"`
-	Deliverables    []string `json:"deliverables"`
-	Scope           []string `json:"scope"`
-	NonScope        []string `json:"non_scope"`
-	AcceptanceHints []string `json:"acceptance_hints"`
+	Task     string   `json:"task"`
+	EndState string   `json:"end_state"`
+	Scope    []string `json:"scope"`
+	NonScope []string `json:"non_scope"`
 }
 
 // Question is a coaching question with options and a pre-filled default.
@@ -40,11 +38,10 @@ type Question struct {
 
 // GatewayResult is the parsed result of gateway evaluation.
 type GatewayResult struct {
-	Verdict         GatewayVerdict `json:"verdict"`
-	Brief           PromptBrief    `json:"brief"`
-	Questions       []Question     `json:"questions"`
-	Confidence      float64        `json:"confidence"`
-	PlannerQuestion string         `json:"planner_question"`
+	Verdict    GatewayVerdict `json:"verdict"`
+	Brief      PromptBrief    `json:"brief"`
+	Questions  []Question     `json:"questions"`
+	Confidence float64        `json:"confidence"`
 
 	// Usage is populated after parsing from the harness RunResult, not from LLM output.
 	Usage *harness.TokenUsage `json:"-"`
@@ -96,9 +93,6 @@ func (g *Gateway) Evaluate(ctx context.Context, rawPrompt string, stdout io.Writ
 	if gwResult.Verdict == GatewayVerdictAccept {
 		if gwResult.Brief.EndState == "" {
 			return GatewayResult{}, errors.New("gateway accepted but returned empty brief.end_state")
-		}
-		if gwResult.PlannerQuestion == "" {
-			return GatewayResult{}, errors.New("gateway accepted but returned empty planner_question")
 		}
 	}
 	if gwResult.Verdict == GatewayVerdictCoach && len(gwResult.Questions) == 0 {

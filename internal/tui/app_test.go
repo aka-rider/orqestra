@@ -19,11 +19,11 @@ import (
 type noopRunner struct{}
 
 func (n *noopRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
-	return harness.RunResult{Output: `{"verdict":"accept","brief":{"task":"t","end_state":"e","deliverables":[],"scope":[],"non_scope":[],"acceptance_hints":[]},"questions":[],"confidence":0.9,"planner_question":"How?"}`}, nil
+	return harness.RunResult{Output: `{"verdict":"accept","brief":{"task":"t","end_state":"e","scope":[],"non_scope":[]},"questions":[],"confidence":0.9}`}, nil
 }
 
 func (n *noopRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
-	return harness.RunResult{Output: `{"verdict":"accept","brief":{"task":"t","end_state":"e","deliverables":[],"scope":[],"non_scope":[],"acceptance_hints":[]},"questions":[],"confidence":0.9,"planner_question":"How?"}`}, nil
+	return harness.RunResult{Output: `{"verdict":"accept","brief":{"task":"t","end_state":"e","scope":[],"non_scope":[]},"questions":[],"confidence":0.9}`}, nil
 }
 
 // testModel creates a Model suitable for testing with a minimal mock engine.
@@ -749,5 +749,39 @@ func TestTUI_StreamingOutputReset(t *testing.T) {
 	}
 	if len(lines2) != 0 {
 		t.Errorf("expected stream buffer cleared on new agent, got %d lines", len(lines2))
+	}
+}
+
+func TestStreamBuffer_TokenAccumulation(t *testing.T) {
+	stream := orchestrator.NewStreamBuffer(200)
+	stream.SetAgent("gateway")
+
+	// Simulate token-level writes (each content_block_delta is a few chars)
+	stream.Append("I")
+	stream.Append("'ll")
+	stream.Append(" analyze")
+	stream.Append(" the")
+	stream.Append(" request")
+
+	_, lines := stream.Snapshot()
+	if len(lines) != 1 {
+		t.Errorf("expected 1 line from token-level writes, got %d: %v", len(lines), lines)
+	}
+	if lines[0] != "I'll analyze the request" {
+		t.Errorf("unexpected accumulated line: %q", lines[0])
+	}
+
+	// Now write a newline to start a new line
+	stream.Append(".\nNext line here")
+
+	_, lines = stream.Snapshot()
+	if len(lines) != 2 {
+		t.Errorf("expected 2 lines after newline, got %d: %v", len(lines), lines)
+	}
+	if lines[0] != "I'll analyze the request." {
+		t.Errorf("unexpected first line: %q", lines[0])
+	}
+	if lines[1] != "Next line here" {
+		t.Errorf("unexpected second line: %q", lines[1])
 	}
 }
