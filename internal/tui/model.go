@@ -373,7 +373,7 @@ func (m Model) handlePlanReviewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "e", "E":
 		// Switch to plan edit mode
 		ta := textarea.New()
-		ta.SetWidth(m.effectiveWidth() - 10)
+		ta.SetWidth(m.effectiveWidth()*3/4 - 10)
 		ta.SetHeight(m.height - 8)
 		ta.CharLimit = 65536
 		if m.hasPlan {
@@ -539,7 +539,7 @@ func (m Model) handleOrchestratorEvent(event orchestrator.Event) (tea.Model, tea
 			m.answerFields = make([]textarea.Model, len(m.gatewayResult.Questions))
 			for i, q := range m.gatewayResult.Questions {
 				ta := textarea.New()
-				ta.SetWidth(m.effectiveWidth() - 10)
+				ta.SetWidth(m.effectiveWidth()*3/4 - 10)
 				ta.SetHeight(1)
 				ta.CharLimit = 512
 				if q.Default != "" {
