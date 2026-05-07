@@ -18,7 +18,7 @@ type GatewayVerdict string
 
 const (
 	GatewayVerdictAccept GatewayVerdict = "accept"
-	GatewayVerdictCoach  GatewayVerdict = "clarify"
+	GatewayVerdictCoach  GatewayVerdict = "coach"
 )
 
 // PromptBrief is the gateway's structured interpretation of user intent.

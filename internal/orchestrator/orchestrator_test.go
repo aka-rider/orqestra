@@ -29,7 +29,7 @@ func acceptGatewayJSON() string {
 }
 
 func coachGatewayJSON() string {
-	return `{"verdict":"clarify","brief":{"task":"Improve something","end_state":"","deliverables":[],"scope":[],"non_scope":[],"acceptance_hints":[]},"questions":[{"text":"Which module?","options":["a","b"],"default":"a"}],"confidence":0.3,"planner_question":""}`
+	return `{"verdict":"coach","brief":{"task":"Improve something","end_state":"","deliverables":[],"scope":[],"non_scope":[],"acceptance_hints":[]},"questions":[{"text":"Which module?","options":["a","b"],"default":"a"}],"confidence":0.3,"planner_question":""}`
 }
 
 func validPlanJSON() string {

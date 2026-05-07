@@ -252,8 +252,8 @@ gateway:
     BEHAVIOR:
     - If the user's intent is clear enough for the planner, verdict = "accept".
     - If multiple materially different implementations could satisfy the request,
-      verdict = "clarify". Ask at most 3 questions with pre-filled defaults.
-    - Impossibly broad prompts → verdict = "clarify" with scope-reducing questions.
+      verdict = "coach". Ask at most 3 questions with pre-filled defaults.
+    - Impossibly broad prompts → verdict = "coach" with scope-reducing questions.
       Suggest "did you mean this slice?" via question defaults.
 
     ACCEPT BIAS:
@@ -290,7 +290,7 @@ gateway:
 
     Output ONLY valid JSON. No markdown, no prose before or after the object.
     {
-      "verdict": "accept|clarify",
+      "verdict": "accept|coach",
       "brief": {
         "task": "string: user intent in LLM specification language",
         "end_state": "string: observable result in repo terms",
@@ -314,11 +314,11 @@ gateway:
 
     Input: "make it better"
     Output:
-    {"verdict":"clarify","brief":{"task":"Improve codebase quality","end_state":"","deliverables":[],"scope":[],"non_scope":[],"acceptance_hints":[]},"questions":[{"text":"Which module or area should be improved?","options":["internal/tui","internal/agent","internal/config","internal/orchestrator"],"default":"internal/tui"},{"text":"What kind of improvement?","options":["reduce complexity","add tests","improve error handling","refactor for readability"],"default":"reduce complexity"}],"confidence":0.2,"planner_question":""}
+    {"verdict":"coach","brief":{"task":"Improve codebase quality","end_state":"","deliverables":[],"scope":[],"non_scope":[],"acceptance_hints":[]},"questions":[{"text":"Which module or area should be improved?","options":["internal/tui","internal/agent","internal/config","internal/orchestrator"],"default":"internal/tui"},{"text":"What kind of improvement?","options":["reduce complexity","add tests","improve error handling","refactor for readability"],"default":"reduce complexity"}],"confidence":0.2,"planner_question":""}
 
     Input: "build me a SaaS platform with billing"
     Output:
-    {"verdict":"clarify","brief":{"task":"Add billing integration","end_state":"","deliverables":[],"scope":[],"non_scope":[],"acceptance_hints":[]},"questions":[{"text":"Did you mean to add a specific billing feature to this repo?","options":["Add Stripe checkout for a single plan","Add usage-based billing API","Something else"],"default":"Add Stripe checkout for a single plan"},{"text":"Which part of the existing codebase should this integrate with?","options":["cmd/orqestra","internal/config","new top-level package"],"default":"new top-level package"}],"confidence":0.15,"planner_question":""}
+    {"verdict":"coach","brief":{"task":"Add billing integration","end_state":"","deliverables":[],"scope":[],"non_scope":[],"acceptance_hints":[]},"questions":[{"text":"Did you mean to add a specific billing feature to this repo?","options":["Add Stripe checkout for a single plan","Add usage-based billing API","Something else"],"default":"Add Stripe checkout for a single plan"},{"text":"Which part of the existing codebase should this integrate with?","options":["cmd/orqestra","internal/config","new top-level package"],"default":"new top-level package"}],"confidence":0.15,"planner_question":""}
 
 retry:
   planner_attempts: 2

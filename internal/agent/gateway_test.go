@@ -48,7 +48,7 @@ func TestGateway_AcceptClearPrompt(t *testing.T) {
 
 func TestGateway_CoachVaguePrompt(t *testing.T) {
 	runner := &gatewayMockRunner{
-		output: `{"verdict":"clarify","brief":{"task":"Improve the codebase","end_state":"","deliverables":[],"scope":[],"non_scope":[],"acceptance_hints":[]},"questions":[{"text":"Which module or package should be improved?","options":["internal/tui","internal/agent","internal/config"],"default":"internal/tui"}],"confidence":0.3,"planner_question":""}`,
+		output: `{"verdict":"coach","brief":{"task":"Improve the codebase","end_state":"","deliverables":[],"scope":[],"non_scope":[],"acceptance_hints":[]},"questions":[{"text":"Which module or package should be improved?","options":["internal/tui","internal/agent","internal/config"],"default":"internal/tui"}],"confidence":0.3,"planner_question":""}`,
 	}
 
 	gw := NewGateway(runner, &config.GatewayConfig{SystemPrompt: "test"})
@@ -57,7 +57,7 @@ func TestGateway_CoachVaguePrompt(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.Verdict != GatewayVerdictCoach {
-		t.Errorf("expected verdict clarify, got %q", result.Verdict)
+		t.Errorf("expected verdict coach, got %q", result.Verdict)
 	}
 	if len(result.Questions) == 0 {
 		t.Error("expected coaching questions")
@@ -115,7 +115,7 @@ func TestGateway_PlannerQuestionIsQuestion(t *testing.T) {
 
 func TestGateway_MaxThreeQuestions(t *testing.T) {
 	runner := &gatewayMockRunner{
-		output: `{"verdict":"clarify","brief":{"task":"Do something","end_state":"","deliverables":[],"scope":[],"non_scope":[],"acceptance_hints":[]},"questions":[{"text":"Q1","options":[],"default":""},{"text":"Q2","options":[],"default":""},{"text":"Q3","options":[],"default":""},{"text":"Q4","options":[],"default":""}],"confidence":0.2,"planner_question":""}`,
+		output: `{"verdict":"coach","brief":{"task":"Do something","end_state":"","deliverables":[],"scope":[],"non_scope":[],"acceptance_hints":[]},"questions":[{"text":"Q1","options":[],"default":""},{"text":"Q2","options":[],"default":""},{"text":"Q3","options":[],"default":""},{"text":"Q4","options":[],"default":""}],"confidence":0.2,"planner_question":""}`,
 	}
 
 	gw := NewGateway(runner, &config.GatewayConfig{SystemPrompt: "test"})
@@ -173,7 +173,7 @@ func TestGateway_RunnerError(t *testing.T) {
 
 func TestGateway_CoachRequiresQuestions(t *testing.T) {
 	runner := &gatewayMockRunner{
-		output: `{"verdict":"clarify","brief":{"task":"Something vague","end_state":"","deliverables":[],"scope":[],"non_scope":[],"acceptance_hints":[]},"questions":[],"confidence":0.3,"planner_question":""}`,
+		output: `{"verdict":"coach","brief":{"task":"Something vague","end_state":"","deliverables":[],"scope":[],"non_scope":[],"acceptance_hints":[]},"questions":[],"confidence":0.3,"planner_question":""}`,
 	}
 
 	gw := NewGateway(runner, &config.GatewayConfig{SystemPrompt: "test"})

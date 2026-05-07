@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -24,10 +25,12 @@ const (
 type ContentMode int
 
 const (
-	ContentStreaming  ContentMode = iota // auto-follows active agent stream
-	ContentCoaching                      // gateway brief + questions
-	ContentPlanReview                    // rendered spec
-	ContentCompletion                    // QA report, summary
+	ContentStreaming    ContentMode = iota // auto-follows active agent stream
+	ContentCoaching                        // gateway brief + questions
+	ContentPlanReview                      // rendered spec
+	ContentPlanEdit                        // editable textarea for plan modification
+	ContentAgentHistory                    // frozen output of a previously-run agent
+	ContentCompletion                      // QA report, summary
 )
 
 // AgentRow tracks a single agent's status in the sidebar.
@@ -68,9 +71,19 @@ type Model struct {
 	answerFields []textarea.Model
 	answerCursor int
 
+	// Plan edit state
+	planEditor    textarea.Model
+	hasPlanEditor bool
+
+	// Agent history navigation
+	focusedAgent int // 0 = live (no agent focused), 1-9 = agent index
+
 	// UI state
-	engine *orchestrator.Engine
-	ctrlC  int
+	engine        *orchestrator.Engine
+	ctrlC         int
+	showDashboard bool
+	showHelp      bool
+	confirmNew    bool // awaiting confirmation to start new run while pipeline active
 }
 
 // NewModel creates the initial TUI model.
@@ -145,6 +158,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	}
+	if m.state == StatePipeline && m.content == ContentPlanEdit && m.hasPlanEditor {
+		var cmd tea.Cmd
+		m.planEditor, cmd = m.planEditor.Update(msg)
+		return m, cmd
+	}
 
 	return m, nil
 }
@@ -201,11 +219,51 @@ func (m Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handlePipelineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Global pipeline keys first
+	switch msg.String() {
+	case "?":
+		m.showHelp = !m.showHelp
+		return m, nil
+	case "d", "D":
+		if m.content != ContentCoaching && m.content != ContentPlanEdit {
+			m.showDashboard = !m.showDashboard
+			return m, nil
+		}
+	}
+
+	// If help is showing, any other key dismisses it
+	if m.showHelp {
+		m.showHelp = false
+		return m, nil
+	}
+
+	// If dashboard is showing, Esc returns to split view
+	if m.showDashboard {
+		if msg.Type == tea.KeyEsc {
+			m.showDashboard = false
+		}
+		return m, nil
+	}
+
+	// Number keys for agent navigation (1-9)
+	if msg.String() >= "1" && msg.String() <= "9" && m.content != ContentCoaching && m.content != ContentPlanEdit {
+		idx := int(msg.String()[0] - '0')
+		if idx <= len(m.agents) {
+			m.focusedAgent = idx
+			m.content = ContentAgentHistory
+			return m, nil
+		}
+	}
+
 	switch m.content {
 	case ContentCoaching:
 		return m.handleCoachingKey(msg)
 	case ContentPlanReview:
 		return m.handlePlanReviewKey(msg)
+	case ContentPlanEdit:
+		return m.handlePlanEditKey(msg)
+	case ContentAgentHistory:
+		return m.handleAgentHistoryKey(msg)
 	case ContentCompletion:
 		return m.handleCompletionKey(msg)
 	case ContentStreaming:
@@ -272,6 +330,21 @@ func (m Model) handlePlanReviewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.content = ContentStreaming
 		return m, nil
+	case "e", "E":
+		// Switch to plan edit mode
+		ta := textarea.New()
+		ta.SetWidth(m.effectiveWidth() - 10)
+		ta.SetHeight(m.height - 8)
+		ta.CharLimit = 65536
+		if m.hasPlan {
+			content, _ := json.MarshalIndent(m.planOutput, "", "  ")
+			ta.SetValue(string(content))
+		}
+		ta.Focus()
+		m.planEditor = ta
+		m.hasPlanEditor = true
+		m.content = ContentPlanEdit
+		return m, nil
 	case "s", "S":
 		if m.decisions != nil {
 			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionCancel}
@@ -281,7 +354,65 @@ func (m Model) handlePlanReviewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) handlePlanEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlS:
+		// Save edits and send to pipeline
+		if m.decisions != nil {
+			m.decisions <- orchestrator.Decision{
+				Type:          orchestrator.DecisionEdit,
+				EditedContent: m.planEditor.Value(),
+			}
+		}
+		m.content = ContentStreaming
+		return m, nil
+	case tea.KeyEsc:
+		// Discard edits, return to plan review
+		m.content = ContentPlanReview
+		return m, nil
+	}
+	// Pass to textarea
+	if m.hasPlanEditor {
+		var cmd tea.Cmd
+		m.planEditor, cmd = m.planEditor.Update(msg)
+		return m, cmd
+	}
+	return m, nil
+}
+
+func (m Model) handleAgentHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.content = ContentStreaming
+		m.focusedAgent = 0
+		return m, nil
+	}
+	return m, nil
+}
+
 func (m Model) handleStreamingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// If awaiting confirmation for new run
+	if m.confirmNew {
+		switch msg.String() {
+		case "y", "Y":
+			// Confirmed: cancel current and start new
+			if m.cancel != nil {
+				m.cancel()
+			}
+			m.confirmNew = false
+			m.state = StatePrompt
+			m.prompt.Reset()
+			if m.goal != "" {
+				m.prompt.SetValue(m.goal)
+			}
+			return m, nil
+		default:
+			// Any other key cancels the confirmation
+			m.confirmNew = false
+			return m, nil
+		}
+	}
+
 	switch msg.String() {
 	case "s", "S":
 		// Cancel running agent
@@ -290,7 +421,11 @@ func (m Model) handleStreamingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "n", "N":
-		// New run
+		// New run — confirm if pipeline is active
+		if m.cancel != nil && m.content == ContentStreaming {
+			m.confirmNew = true
+			return m, nil
+		}
 		m.state = StatePrompt
 		m.prompt.Reset()
 		if m.goal != "" {
@@ -448,6 +583,16 @@ func (m Model) viewPromptScreen() string {
 }
 
 func (m Model) viewPipelineScreen() string {
+	// Help overlay takes precedence
+	if m.showHelp {
+		return m.viewHelp()
+	}
+
+	// Full dashboard override
+	if m.showDashboard {
+		return m.viewDashboard()
+	}
+
 	var b strings.Builder
 
 	// Header
@@ -507,6 +652,10 @@ func (m Model) viewContent(width int) string {
 		return m.viewCoaching(width)
 	case ContentPlanReview:
 		return m.viewPlanReview(width)
+	case ContentPlanEdit:
+		return m.viewPlanEdit(width)
+	case ContentAgentHistory:
+		return m.viewAgentHistory(width)
 	case ContentCompletion:
 		return m.viewCompletion(width)
 	}
@@ -521,6 +670,9 @@ func (m Model) viewStreaming(_ int) string {
 	b.WriteString(fmt.Sprintf(" Phase: %s\n", m.phase))
 	if m.lastErr != nil {
 		b.WriteString(errorStyle.Render(fmt.Sprintf("\n Error: %v\n", m.lastErr)))
+	}
+	if m.confirmNew {
+		b.WriteString(warnStyle.Render("\n Pipeline is active. Start new run? [Y] yes / [any] cancel"))
 	}
 	return b.String()
 }
@@ -584,6 +736,84 @@ func (m Model) viewCompletion(_ int) string {
 	return b.String()
 }
 
+func (m Model) viewPlanEdit(_ int) string {
+	var b strings.Builder
+	b.WriteString(" Editing plan (Ctrl+S to save, Esc to discard):\n\n")
+	if m.hasPlanEditor {
+		b.WriteString(m.planEditor.View())
+	}
+	return b.String()
+}
+
+func (m Model) viewAgentHistory(_ int) string {
+	var b strings.Builder
+	if m.focusedAgent > 0 && m.focusedAgent <= len(m.agents) {
+		a := m.agents[m.focusedAgent-1]
+		b.WriteString(fmt.Sprintf(" Agent: %s (%s)\n", goalStyle.Render(a.ID), a.State))
+		b.WriteString(dividerStyle.Render(strings.Repeat("─", 40)))
+		b.WriteString("\n")
+		b.WriteString(" (output history not captured in this mode)\n")
+	} else {
+		b.WriteString(" No agent selected\n")
+	}
+	return b.String()
+}
+
+func (m Model) viewDashboard() string {
+	var b strings.Builder
+	b.WriteString(" Agent          State     Time\n")
+	b.WriteString(strings.Repeat("─", m.effectiveWidth()))
+	b.WriteString("\n")
+	for _, a := range m.agents {
+		icon := "○"
+		stateStr := "wait"
+		switch a.State {
+		case "running":
+			icon = "▶"
+			stateStr = "run"
+		case "done":
+			icon = "✓"
+			stateStr = "done"
+		case "failed":
+			icon = "✗"
+			stateStr = "fail"
+		case "cancelled":
+			icon = "⊘"
+			stateStr = "cancel"
+		case "gate":
+			icon = "●"
+			stateStr = "gate"
+		}
+		elapsed := "-"
+		if a.Elapsed > 0 {
+			elapsed = a.Elapsed.Truncate(time.Second).String()
+		}
+		b.WriteString(fmt.Sprintf(" %-14s %s %-8s %s\n", a.ID, icon, stateStr, elapsed))
+	}
+	b.WriteString("\n Press [Esc] to return to split view\n")
+	return b.String()
+}
+
+func (m Model) viewHelp() string {
+	return ` Orqestra Keybindings
+─────────────────────────────────
+ [Enter]      Submit prompt / confirm
+ [Ctrl+S]     Skip gateway / save edits
+ [Tab]        Next field (coaching)
+ [Shift+Tab]  Previous field (coaching)
+ [A]          Accept plan
+ [E]          Edit plan
+ [S]          Stop/cancel running agent
+ [N]          New run
+ [D]          Toggle full dashboard
+ [1-9]        View agent output
+ [Esc]        Back / dismiss
+ [?]          Toggle this help
+ [Q]          Quit (at completion)
+ [Ctrl+C x2]  Force quit
+`
+}
+
 func (m Model) viewSidebar(width int) string {
 	var b strings.Builder
 	b.WriteString(" Agents\n")
@@ -614,12 +844,16 @@ func (m Model) viewSidebar(width int) string {
 func (m Model) viewFooter() string {
 	switch m.content {
 	case ContentCoaching:
-		return keyStyle.Render(" [Enter] confirm | [Ctrl+S] skip | [Tab] next field | [^C^C] quit")
+		return keyStyle.Render(" [Enter] confirm | [Ctrl+S] skip | [Tab] next field       [?] help  [D] expand  [S] stop  [^C^C] quit")
 	case ContentPlanReview:
-		return keyStyle.Render(" [A] accept | [S] cancel | [^C^C] quit")
+		return keyStyle.Render(" [A] accept | [E] edit | [S] cancel                        [?] help  [D] expand  [1-9] agent  [^C^C] quit")
+	case ContentPlanEdit:
+		return keyStyle.Render(" [Ctrl+S] save edits | [Esc] discard                       [?] help  [^C^C] quit")
+	case ContentAgentHistory:
+		return keyStyle.Render(" [Esc] back to live                                        [?] help  [D] expand  [S] stop  [N] new  [^C^C] quit")
 	case ContentCompletion:
-		return keyStyle.Render(" [N] new run | [Q] quit")
+		return keyStyle.Render(" [N] new run | [Q] quit                                    [?] help")
 	default:
-		return keyStyle.Render(" [S] stop | [N] new run | [^C^C] quit")
+		return keyStyle.Render(" [S] stop | [N] new run                                    [?] help  [D] expand  [1-9] agent  [^C^C] quit")
 	}
 }
