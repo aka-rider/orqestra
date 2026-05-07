@@ -45,6 +45,9 @@ type GatewayResult struct {
 	Questions       []Question     `json:"questions"`
 	Confidence      float64        `json:"confidence"`
 	PlannerQuestion string         `json:"planner_question"`
+
+	// Usage is populated after parsing from the harness RunResult, not from LLM output.
+	Usage *harness.TokenUsage `json:"-"`
 }
 
 // Gateway uses a CLIRunner to rephrase and coach user prompts.
@@ -102,6 +105,7 @@ func (g *Gateway) Evaluate(ctx context.Context, rawPrompt string) (GatewayResult
 		return GatewayResult{}, fmt.Errorf("gateway returned %d questions, max is 3", len(gwResult.Questions))
 	}
 
+	gwResult.Usage = result.Usage
 	return gwResult, nil
 }
 

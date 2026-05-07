@@ -5,9 +5,11 @@ package harness
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/sandbox"
@@ -47,14 +49,20 @@ func NewSandboxCLIRunner(cfg SandboxCLIRunnerConfig) *SandboxCLIRunner {
 func (r *SandboxCLIRunner) RunPrint(ctx context.Context, prompt, systemPrompt string) (RunResult, error) {
 	args := r.buildCommand(prompt, systemPrompt, false)
 	output, err := r.run(ctx, args, nil)
-	return RunResult{Output: output}, err
+	if err != nil {
+		return RunResult{Output: output}, err
+	}
+	return RunResult{Output: output, Usage: extractJSONUsage(output)}, nil
 }
 
 // RunStreaming runs the claude CLI with streaming output under seatbelt.
 func (r *SandboxCLIRunner) RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (RunResult, error) {
 	args := r.buildCommand(prompt, systemPrompt, true)
 	output, err := r.run(ctx, args, stdout)
-	return RunResult{Output: output}, err
+	if err != nil {
+		return RunResult{Output: output}, err
+	}
+	return RunResult{Output: output, Usage: extractStreamUsage(output)}, nil
 }
 
 func (r *SandboxCLIRunner) buildCommand(prompt, systemPrompt string, streaming bool) []string {
@@ -103,4 +111,45 @@ func (r *SandboxCLIRunner) run(ctx context.Context, args []string, stdout io.Wri
 	}
 
 	return outBuf.String(), nil
+}
+
+// extractJSONUsage parses token usage from a claude --output-format json response.
+func extractJSONUsage(raw string) *TokenUsage {
+	var envelope struct {
+		Usage *streamUsage `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(raw), &envelope); err == nil && envelope.Usage != nil {
+		return &TokenUsage{
+			InputTokens:  envelope.Usage.InputTokens,
+			OutputTokens: envelope.Usage.OutputTokens,
+			TotalTokens:  envelope.Usage.InputTokens + envelope.Usage.OutputTokens,
+		}
+	}
+	return nil
+}
+
+// extractStreamUsage scans stream-json lines for the last result event with usage.
+func extractStreamUsage(raw string) *TokenUsage {
+	var last *TokenUsage
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var event struct {
+			Type  string       `json:"type"`
+			Usage *streamUsage `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+		if event.Type == "result" && event.Usage != nil {
+			last = &TokenUsage{
+				InputTokens:  event.Usage.InputTokens,
+				OutputTokens: event.Usage.OutputTokens,
+				TotalTokens:  event.Usage.InputTokens + event.Usage.OutputTokens,
+			}
+		}
+	}
+	return last
 }

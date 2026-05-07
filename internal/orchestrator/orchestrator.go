@@ -97,6 +97,10 @@ type Event struct {
 	Gate             GateRequest
 	WorkOutput       string
 	Err              error
+
+	// Token usage from the agent's RunResult. Set on EventAgentDone.
+	InputTokens  int64
+	OutputTokens int64
 }
 
 // Input is the user's request to the orchestrator.
@@ -246,7 +250,8 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			}
 
 			if gwResult.Verdict == agent.GatewayVerdictAccept {
-				emit(Event{Type: EventAgentDone, AgentID: "gateway"})
+				emit(Event{Type: EventAgentDone, AgentID: "gateway",
+					InputTokens: usageIn(gwResult.Usage), OutputTokens: usageOut(gwResult.Usage)})
 				plannerInput = gwResult.PlannerQuestion
 				break
 			}
@@ -254,7 +259,8 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			// Coach verdict — gate for user input
 			if input.AutoApprove {
 				// Auto-approve: use current brief as planner input
-				emit(Event{Type: EventAgentDone, AgentID: "gateway"})
+				emit(Event{Type: EventAgentDone, AgentID: "gateway",
+					InputTokens: usageIn(gwResult.Usage), OutputTokens: usageOut(gwResult.Usage)})
 				plannerInput = buildPlannerInputFromBrief(gwResult.Brief)
 				break
 			}
@@ -287,7 +293,8 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 
 			// If this is the last round, auto-accept
 			if round == maxCoachingRounds-1 {
-				emit(Event{Type: EventAgentDone, AgentID: "gateway"})
+				emit(Event{Type: EventAgentDone, AgentID: "gateway",
+					InputTokens: usageIn(gwResult.Usage), OutputTokens: usageOut(gwResult.Usage)})
 				plannerInput = buildPlannerInputFromBrief(gwResult.Brief)
 			}
 		}
@@ -307,7 +314,8 @@ plan:
 	}
 
 	writeArtifact(session, "plan_output.json", planOutput)
-	emit(Event{Type: EventAgentDone, AgentID: "planner"})
+	emit(Event{Type: EventAgentDone, AgentID: "planner",
+		InputTokens: usageIn(planOutput.Usage), OutputTokens: usageOut(planOutput.Usage)})
 
 	// --- Plan Approval Gate ---
 	if !input.AutoApprove {
@@ -354,7 +362,8 @@ plan:
 
 	writeArtifact(session, "validation_report.json", planReport)
 	emit(Event{Type: EventValidationDone, ValidationReport: *planReport, HasValidation: true})
-	emit(Event{Type: EventAgentDone, AgentID: "validator"})
+	emit(Event{Type: EventAgentDone, AgentID: "validator",
+		InputTokens: usageIn(planReport.Usage), OutputTokens: usageOut(planReport.Usage)})
 
 	if planReport.Verdict == agent.VerdictFail {
 		emit(Event{Type: EventError, Err: fmt.Errorf("plan validation failed: %s", planReport.Summary)})
@@ -405,7 +414,8 @@ plan:
 
 	writeArtifact(session, "qa_report.json", qaReport)
 	emit(Event{Type: EventQADone, QAReport: *qaReport, HasQA: true})
-	emit(Event{Type: EventAgentDone, AgentID: "qa"})
+	emit(Event{Type: EventAgentDone, AgentID: "qa",
+		InputTokens: usageIn(qaReport.Usage), OutputTokens: usageOut(qaReport.Usage)})
 
 	// --- Completion ---
 	emit(Event{Type: EventPhaseChange, Phase: PhaseDone})
@@ -443,7 +453,8 @@ func (e *Engine) executeWorkerWaves(ctx context.Context, spec agent.Specificatio
 		if err != nil {
 			return "", err
 		}
-		emit(Event{Type: EventAgentDone, AgentID: "worker", WorkOutput: result.Output})
+		emit(Event{Type: EventAgentDone, AgentID: "worker", WorkOutput: result.Output,
+			InputTokens: usageIn(result.Usage), OutputTokens: usageOut(result.Usage)})
 		return result.Output, nil
 	}
 
@@ -465,7 +476,8 @@ func (e *Engine) executeWorkerWaves(ctx context.Context, spec agent.Specificatio
 				if err != nil {
 					return allOutput.String(), fmt.Errorf("worker %q: %w", pkg.ID, err)
 				}
-				emit(Event{Type: EventAgentDone, AgentID: pkg.ID, WorkOutput: res.Output})
+				emit(Event{Type: EventAgentDone, AgentID: pkg.ID, WorkOutput: res.Output,
+					InputTokens: usageIn(res.Usage), OutputTokens: usageOut(res.Usage)})
 				fmt.Fprintf(&allOutput, "=== Package: %s ===\n%s\n", pkg.ID, res.Output)
 			}
 		} else {
@@ -474,6 +486,7 @@ func (e *Engine) executeWorkerWaves(ctx context.Context, spec agent.Specificatio
 				id     string
 				output string
 				err    error
+				usage  *harness.TokenUsage
 			}
 			sem := make(chan struct{}, parallelism)
 			results := make(chan pkgResult, len(wave))
@@ -492,8 +505,9 @@ func (e *Engine) executeWorkerWaves(ctx context.Context, spec agent.Specificatio
 						results <- pkgResult{id: wp.ID, err: fmt.Errorf("worker %q: %w", wp.ID, err)}
 						return
 					}
-					emit(Event{Type: EventAgentDone, AgentID: wp.ID, WorkOutput: res.Output})
-					results <- pkgResult{id: wp.ID, output: res.Output}
+					emit(Event{Type: EventAgentDone, AgentID: wp.ID, WorkOutput: res.Output,
+						InputTokens: usageIn(res.Usage), OutputTokens: usageOut(res.Usage)})
+					results <- pkgResult{id: wp.ID, output: res.Output, usage: res.Usage}
 				}(pkg)
 			}
 
@@ -537,4 +551,20 @@ func DefaultRunDirFactory() RunDirFactory {
 		}
 		return agent.NewSessionDir(cwd, slug)
 	}
+}
+
+// usageIn extracts InputTokens from a possibly-nil TokenUsage.
+func usageIn(u *harness.TokenUsage) int64 {
+	if u == nil {
+		return 0
+	}
+	return u.InputTokens
+}
+
+// usageOut extracts OutputTokens from a possibly-nil TokenUsage.
+func usageOut(u *harness.TokenUsage) int64 {
+	if u == nil {
+		return 0
+	}
+	return u.OutputTokens
 }

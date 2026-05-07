@@ -130,6 +130,7 @@ func (v *Gate) ValidateWork(ctx context.Context, input *QAInput) (*ValidationRep
 	// Merge command-failure issues
 	report.Issues = append(issues, report.Issues...)
 	report.Verdict = DeriveVerdict(report.Issues)
+	report.Usage = result.Usage
 
 	return &report, nil
 }

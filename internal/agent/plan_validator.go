@@ -57,6 +57,7 @@ func (v *PlanValidator) ValidatePlan(ctx context.Context, spec Specification) (*
 	// Merge deterministic issues into report
 	report.Issues = append(issues, report.Issues...)
 	report.Verdict = DeriveVerdict(report.Issues)
+	report.Usage = result.Usage
 
 	return &report, nil
 }

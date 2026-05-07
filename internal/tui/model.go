@@ -35,9 +35,12 @@ const (
 
 // AgentRow tracks a single agent's status in the sidebar.
 type AgentRow struct {
-	ID      string
-	State   string // "running", "done", "waiting", "failed", "cancelled", "gate"
-	Elapsed time.Duration
+	ID           string
+	State        string // "running", "done", "waiting", "failed", "cancelled", "gate"
+	Elapsed      time.Duration
+	StartedAt    time.Time
+	InputTokens  int64
+	OutputTokens int64
 }
 
 // Model is the top-level Bubble Tea model for the Orqestra TUI.
@@ -81,6 +84,7 @@ type Model struct {
 	// UI state
 	engine        *orchestrator.Engine
 	ctrlC         int
+	scrollOffset  int
 	showDashboard bool
 	showHelp      bool
 	confirmNew    bool // awaiting confirmation to start new run while pipeline active
@@ -231,6 +235,19 @@ func (m Model) handlePipelineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// PgUp / PgDown for content scrolling
+	switch msg.Type {
+	case tea.KeyPgUp:
+		m.scrollOffset -= m.scrollPageSize()
+		if m.scrollOffset < 0 {
+			m.scrollOffset = 0
+		}
+		return m, nil
+	case tea.KeyPgDown:
+		m.scrollOffset += m.scrollPageSize()
+		return m, nil
+	}
+
 	// If help is showing, any other key dismisses it
 	if m.showHelp {
 		m.showHelp = false
@@ -251,6 +268,7 @@ func (m Model) handlePipelineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if idx <= len(m.agents) {
 			m.focusedAgent = idx
 			m.content = ContentAgentHistory
+			m.scrollOffset = 0
 			return m, nil
 		}
 	}
@@ -385,6 +403,7 @@ func (m Model) handleAgentHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc:
 		m.content = ContentStreaming
 		m.focusedAgent = 0
+		m.scrollOffset = 0
 		return m, nil
 	}
 	return m, nil
@@ -461,12 +480,15 @@ func (m Model) handleOrchestratorEvent(event orchestrator.Event) (tea.Model, tea
 		m.phase = event.Phase
 
 	case orchestrator.EventAgentStarted:
-		m.agents = append(m.agents, AgentRow{ID: event.AgentID, State: "running"})
+		m.agents = append(m.agents, AgentRow{ID: event.AgentID, State: "running", StartedAt: time.Now()})
 
 	case orchestrator.EventAgentDone:
 		for i := range m.agents {
 			if m.agents[i].ID == event.AgentID {
 				m.agents[i].State = "done"
+				m.agents[i].Elapsed = time.Since(m.agents[i].StartedAt)
+				m.agents[i].InputTokens = event.InputTokens
+				m.agents[i].OutputTokens = event.OutputTokens
 			}
 		}
 
@@ -486,6 +508,7 @@ func (m Model) handleOrchestratorEvent(event orchestrator.Event) (tea.Model, tea
 		}
 
 	case orchestrator.EventGateRequest:
+		m.scrollOffset = 0
 		switch event.Gate.Type {
 		case orchestrator.GateGatewayCoach:
 			m.content = ContentCoaching
@@ -525,6 +548,7 @@ func (m Model) handleOrchestratorEvent(event orchestrator.Event) (tea.Model, tea
 
 	case orchestrator.EventComplete:
 		m.content = ContentCompletion
+		m.scrollOffset = 0
 		if event.HasQA {
 			m.qaReport = event.QAReport
 			m.hasQA = true
@@ -568,58 +592,81 @@ func (m Model) effectiveWidth() int {
 }
 
 func (m Model) viewPromptScreen() string {
-	var b strings.Builder
-	b.WriteString(headerStyle.Render(" Orqestra"))
-	b.WriteString("\n")
-	b.WriteString(dividerStyle.Render(strings.Repeat("─", m.effectiveWidth())))
-	b.WriteString("\n\n")
-	b.WriteString(" Enter a task description. Be specific about the end state.\n\n")
-	b.WriteString(m.prompt.View())
-	b.WriteString("\n\n")
-	b.WriteString(dividerStyle.Render(strings.Repeat("─", m.effectiveWidth())))
-	b.WriteString("\n")
-	b.WriteString(keyStyle.Render(" [Enter] submit | [Ctrl+S] skip gateway | [^C^C] quit"))
-	return b.String()
-}
-
-func (m Model) viewPipelineScreen() string {
-	// Help overlay takes precedence
-	if m.showHelp {
-		return m.viewHelp()
+	w := m.effectiveWidth()
+	h := m.height
+	if h < 10 {
+		h = 24
 	}
-
-	// Full dashboard override
-	if m.showDashboard {
-		return m.viewDashboard()
-	}
-
-	var b strings.Builder
 
 	// Header
-	elapsed := time.Since(m.startTime).Truncate(time.Second)
-	title := headerStyle.Render(" Orqestra")
-	phase := phaseStyle.Render(fmt.Sprintf("▶ %s", m.phase))
-	timeStr := elapsedStyle.Render(elapsed.String())
-	b.WriteString(fmt.Sprintf("%s  %s  %s\n", title, phase, timeStr))
-	b.WriteString(dividerStyle.Render(strings.Repeat("─", m.effectiveWidth())))
-	b.WriteString("\n")
+	var header strings.Builder
+	header.WriteString(headerStyle.Render(" Orqestra"))
+	header.WriteString("\n")
+	header.WriteString(dividerStyle.Render(strings.Repeat("─", w)))
+	header.WriteString("\n")
 
-	// Split: content (75%) | sidebar (25%)
-	contentWidth := m.effectiveWidth() * 3 / 4
-	sidebarWidth := m.effectiveWidth() - contentWidth - 1 // -1 for separator
+	// Footer (2 lines: divider + keys)
+	var footer strings.Builder
+	footer.WriteString(dividerStyle.Render(strings.Repeat("─", w)))
+	footer.WriteString("\n")
+	footer.WriteString(keyStyle.Render(" [Enter] submit | [Ctrl+S] skip gateway | [^C^C] quit"))
 
-	contentView := m.viewContent(contentWidth)
-	sidebarView := m.viewSidebar(sidebarWidth)
+	// Input line (prompt textarea + label, 5 lines total)
+	var input strings.Builder
+	input.WriteString(dividerStyle.Render(strings.Repeat("─", w)))
+	input.WriteString("\n")
+	input.WriteString(" Enter a task description. Be specific about the end state.\n")
+	input.WriteString(m.prompt.View())
+	input.WriteString("\n")
 
-	// Join horizontally
-	contentLines := strings.Split(contentView, "\n")
-	sidebarLines := strings.Split(sidebarView, "\n")
-
-	maxLines := len(contentLines)
-	if len(sidebarLines) > maxLines {
-		maxLines = len(sidebarLines)
+	// Split zone dimensions
+	headerLines := 2
+	inputLines := 5
+	footerLines := 2
+	contentHeight := h - headerLines - inputLines - footerLines
+	if contentHeight < 4 {
+		contentHeight = 4
 	}
 
+	contentWidth := w * 3 / 4
+	sidebarWidth := w - contentWidth - 1 // -1 for separator
+
+	// Content: mascot art centered
+	mascot := renderMascot(contentWidth-2, contentHeight)
+	mascotLines := strings.Split(mascot, "\n")
+	// Vertically center the mascot
+	padTop := 0
+	if len(mascotLines) < contentHeight {
+		padTop = (contentHeight - len(mascotLines)) / 2
+	}
+	var contentLines []string
+	for i := 0; i < contentHeight; i++ {
+		mi := i - padTop
+		if mi >= 0 && mi < len(mascotLines) {
+			contentLines = append(contentLines, " "+mascotLines[mi])
+		} else {
+			contentLines = append(contentLines, "")
+		}
+	}
+
+	// Sidebar: gateway agent waiting
+	var sidebarLines []string
+	sidebarLines = append(sidebarLines, " Agents")
+	sidebarLines = append(sidebarLines, strings.Repeat("─", sidebarWidth))
+	sidebarLines = append(sidebarLines, " ● gateway     gate")
+	sidebarLines = append(sidebarLines, "   awaiting input")
+	sidebarLines = append(sidebarLines, "")
+	sidebarLines = append(sidebarLines, " ○ planner        -")
+	sidebarLines = append(sidebarLines, " ○ workers        -")
+	sidebarLines = append(sidebarLines, " ○ qa             -")
+	// Pad sidebar to content height
+	for len(sidebarLines) < contentHeight {
+		sidebarLines = append(sidebarLines, "")
+	}
+
+	// Compose split view
+	var body strings.Builder
+	maxLines := contentHeight
 	for i := 0; i < maxLines; i++ {
 		cl := ""
 		if i < len(contentLines) {
@@ -630,18 +677,148 @@ func (m Model) viewPipelineScreen() string {
 			sl = sidebarLines[i]
 		}
 		// Pad content to width
-		if len(cl) < contentWidth {
-			cl += strings.Repeat(" ", contentWidth-len(cl))
+		clRunes := []rune(cl)
+		if len(clRunes) < contentWidth {
+			cl = cl + strings.Repeat(" ", contentWidth-len(clRunes))
 		}
-		b.WriteString(fmt.Sprintf("%s│%s\n", cl, sl))
+		body.WriteString(fmt.Sprintf("%s│%s\n", cl, sl))
 	}
 
-	// Footer
-	b.WriteString(dividerStyle.Render(strings.Repeat("─", m.effectiveWidth())))
-	b.WriteString("\n")
-	b.WriteString(m.viewFooter())
+	return header.String() + body.String() + input.String() + footer.String()
+}
 
-	return b.String()
+func (m Model) viewPipelineScreen() string {
+	w := m.effectiveWidth()
+	h := m.height
+	if h < 10 {
+		h = 24
+	}
+
+	// Header (2 lines)
+	var header strings.Builder
+	elapsed := time.Since(m.startTime).Truncate(time.Second)
+	title := headerStyle.Render(" Orqestra")
+	phase := phaseStyle.Render(fmt.Sprintf("▶ %s", m.phase))
+	timeStr := elapsedStyle.Render(elapsed.String())
+	header.WriteString(fmt.Sprintf("%s  %s  %s\n", title, phase, timeStr))
+	header.WriteString(dividerStyle.Render(strings.Repeat("─", w)))
+	header.WriteString("\n")
+
+	// Footer (2 lines: divider + keys)
+	var footer strings.Builder
+	footer.WriteString(dividerStyle.Render(strings.Repeat("─", w)))
+	footer.WriteString("\n")
+	footer.WriteString(m.viewFooter())
+
+	// Input zone (2 lines: divider + status)
+	var input strings.Builder
+	input.WriteString(dividerStyle.Render(strings.Repeat("─", w)))
+	input.WriteString("\n")
+	input.WriteString(m.viewInputZone())
+	input.WriteString("\n")
+
+	// Layout math
+	headerLines := 2
+	inputLines := 3
+	footerLines := 2
+	contentHeight := h - headerLines - inputLines - footerLines
+	if contentHeight < 4 {
+		contentHeight = 4
+	}
+
+	contentWidth := w * 3 / 4
+	sidebarWidth := w - contentWidth - 1 // -1 for separator
+
+	// Resolve content and sidebar views
+	var contentView string
+	if m.showHelp {
+		contentView = m.viewHelp()
+	} else if m.showDashboard {
+		contentView = m.viewDashboard()
+	} else {
+		contentView = m.viewContent(contentWidth)
+	}
+	sidebarView := m.viewSidebar(sidebarWidth)
+
+	// Apply scroll offset to content (clamped to valid range)
+	contentLines := strings.Split(contentView, "\n")
+	offset := m.scrollOffset
+	maxOff := len(contentLines) - 1
+	if maxOff < 0 {
+		maxOff = 0
+	}
+	if offset > maxOff {
+		offset = maxOff
+	}
+	if offset > 0 {
+		contentLines = contentLines[offset:]
+	}
+
+	// Clamp content+sidebar to contentHeight
+	sidebarLines := strings.Split(sidebarView, "\n")
+	if len(contentLines) > contentHeight {
+		contentLines = contentLines[:contentHeight]
+	}
+	if len(sidebarLines) > contentHeight {
+		sidebarLines = sidebarLines[:contentHeight]
+	}
+
+	// Compose split view
+	var body strings.Builder
+	for i := 0; i < contentHeight; i++ {
+		cl := ""
+		if i < len(contentLines) {
+			cl = contentLines[i]
+		}
+		sl := ""
+		if i < len(sidebarLines) {
+			sl = sidebarLines[i]
+		}
+		// Pad content to width using rune count
+		clRunes := []rune(cl)
+		if len(clRunes) < contentWidth {
+			cl = cl + strings.Repeat(" ", contentWidth-len(clRunes))
+		}
+		body.WriteString(fmt.Sprintf("%s│%s\n", cl, sl))
+	}
+
+	return header.String() + body.String() + input.String() + footer.String()
+}
+
+// viewInputZone renders the input/status line between split and footer.
+func (m Model) viewInputZone() string {
+	if m.showHelp {
+		return keyStyle.Render(" Press any key to dismiss help")
+	}
+	if m.showDashboard {
+		return keyStyle.Render(" [Esc] return to split view")
+	}
+	switch m.content {
+	case ContentStreaming:
+		status := fmt.Sprintf(" %s running...", m.phase)
+		if m.lastErr != nil {
+			status = errorStyle.Render(fmt.Sprintf(" Error: %v", m.lastErr))
+		}
+		if m.confirmNew {
+			status = warnStyle.Render(" Pipeline is active. Start new run? [Y] yes / [any] cancel")
+		}
+		return status
+	case ContentCoaching:
+		return keyStyle.Render(" Answer the questions above, then [Enter] to confirm")
+	case ContentPlanReview:
+		return keyStyle.Render(" [A] accept | [E] edit | [S] cancel")
+	case ContentPlanEdit:
+		return keyStyle.Render(" [Ctrl+S] save edits | [Esc] discard")
+	case ContentAgentHistory:
+		agent := ""
+		if m.focusedAgent > 0 && m.focusedAgent <= len(m.agents) {
+			agent = m.agents[m.focusedAgent-1].ID
+		}
+		return keyStyle.Render(fmt.Sprintf(" viewing %s history (read-only)", agent))
+	case ContentCompletion:
+		return keyStyle.Render(" [N] new run | [Q] quit")
+	}
+	return ""
 }
 
 func (m Model) viewContent(width int) string {
@@ -668,12 +845,6 @@ func (m Model) viewStreaming(_ int) string {
 		b.WriteString(fmt.Sprintf(" Goal: %s\n\n", goalStyle.Render(m.goal)))
 	}
 	b.WriteString(fmt.Sprintf(" Phase: %s\n", m.phase))
-	if m.lastErr != nil {
-		b.WriteString(errorStyle.Render(fmt.Sprintf("\n Error: %v\n", m.lastErr)))
-	}
-	if m.confirmNew {
-		b.WriteString(warnStyle.Render("\n Pipeline is active. Start new run? [Y] yes / [any] cancel"))
-	}
 	return b.String()
 }
 
@@ -733,6 +904,17 @@ func (m Model) viewCompletion(_ int) string {
 	}
 	elapsed := time.Since(m.startTime).Truncate(time.Second)
 	b.WriteString(fmt.Sprintf("\n Elapsed: %s\n", elapsed))
+
+	// Token summary
+	var totalIn, totalOut int64
+	for _, a := range m.agents {
+		totalIn += a.InputTokens
+		totalOut += a.OutputTokens
+	}
+	if totalIn+totalOut > 0 {
+		b.WriteString(fmt.Sprintf(" Tokens: %s in, %s out (%s total)\n",
+			formatTokens(totalIn), formatTokens(totalOut), formatTokens(totalIn+totalOut)))
+	}
 	return b.String()
 }
 
@@ -761,7 +943,8 @@ func (m Model) viewAgentHistory(_ int) string {
 
 func (m Model) viewDashboard() string {
 	var b strings.Builder
-	b.WriteString(" Agent          State     Time\n")
+	b.WriteString(fmt.Sprintf(" %-14s   %-7s %5s %8s %8s %7s  %s\n",
+		"Agent", "State", "Time", "In Tok", "Out Tok", "Tok/s", "Context"))
 	b.WriteString(strings.Repeat("─", m.effectiveWidth()))
 	b.WriteString("\n")
 	for _, a := range m.agents {
@@ -784,14 +967,65 @@ func (m Model) viewDashboard() string {
 			icon = "●"
 			stateStr = "gate"
 		}
+
 		elapsed := "-"
-		if a.Elapsed > 0 {
+		if a.State == "running" && !a.StartedAt.IsZero() {
+			elapsed = time.Since(a.StartedAt).Truncate(time.Second).String()
+		} else if a.Elapsed > 0 {
 			elapsed = a.Elapsed.Truncate(time.Second).String()
 		}
-		b.WriteString(fmt.Sprintf(" %-14s %s %-8s %s\n", a.ID, icon, stateStr, elapsed))
+
+		inTok := "-"
+		outTok := "-"
+		tokPS := "-"
+		ctxBar := "░░░░░░░░  -"
+		if a.InputTokens > 0 || a.OutputTokens > 0 {
+			inTok = fmt.Sprintf("%s", formatTokenCount(a.InputTokens))
+			outTok = fmt.Sprintf("%s", formatTokenCount(a.OutputTokens))
+			if a.Elapsed.Seconds() > 0 {
+				tokPS = fmt.Sprintf("%.1f", float64(a.OutputTokens)/a.Elapsed.Seconds())
+			}
+			// Context bar: estimate % of 200k context window
+			pct := float64(a.InputTokens+a.OutputTokens) / 200000.0 * 100
+			if pct > 100 {
+				pct = 100
+			}
+			filled := int(pct / 12.5) // 8 chars total
+			empty := 8 - filled
+			if empty < 0 {
+				empty = 0
+			}
+			ctxBar = fmt.Sprintf("%s%s %2.0f%%",
+				strings.Repeat("█", filled),
+				strings.Repeat("░", empty),
+				pct)
+		}
+
+		b.WriteString(fmt.Sprintf(" %-14s %s %-7s %5s %8s %8s %7s  %s\n",
+			a.ID, icon, stateStr, elapsed, inTok, outTok, tokPS, ctxBar))
 	}
-	b.WriteString("\n Press [Esc] to return to split view\n")
+
 	return b.String()
+}
+
+// formatTokenCount formats a token count with comma separators.
+func formatTokenCount(n int64) string {
+	if n == 0 {
+		return "-"
+	}
+	s := fmt.Sprintf("%d", n)
+	if len(s) <= 3 {
+		return s
+	}
+	// Insert commas
+	var result []byte
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			result = append(result, ',')
+		}
+		result = append(result, byte(c))
+	}
+	return string(result)
 }
 
 func (m Model) viewHelp() string {
@@ -801,6 +1035,7 @@ func (m Model) viewHelp() string {
  [Ctrl+S]     Skip gateway / save edits
  [Tab]        Next field (coaching)
  [Shift+Tab]  Previous field (coaching)
+ [PgUp/PgDn]  Scroll content
  [A]          Accept plan
  [E]          Edit plan
  [S]          Stop/cancel running agent
@@ -819,6 +1054,8 @@ func (m Model) viewSidebar(width int) string {
 	b.WriteString(" Agents\n")
 	b.WriteString(strings.Repeat("─", width))
 	b.WriteString("\n")
+
+	var totalTokens int64
 	for _, a := range m.agents {
 		icon := "○"
 		switch a.State {
@@ -833,12 +1070,72 @@ func (m Model) viewSidebar(width int) string {
 		case "gate":
 			icon = "●"
 		}
-		b.WriteString(fmt.Sprintf(" %s %s\n", icon, a.ID))
+
+		elapsed := "-"
+		if a.State == "running" && !a.StartedAt.IsZero() {
+			elapsed = time.Since(a.StartedAt).Truncate(time.Second).String()
+		} else if a.Elapsed > 0 {
+			elapsed = a.Elapsed.Truncate(time.Second).String()
+		}
+
+		tokens := "-"
+		total := a.InputTokens + a.OutputTokens
+		if total > 0 {
+			tokens = formatTokens(total)
+		}
+		totalTokens += total
+
+		// Truncate ID to fit sidebar
+		id := a.ID
+		maxID := width - 16
+		if maxID < 4 {
+			maxID = 4
+		}
+		if len(id) > maxID {
+			id = id[:maxID]
+		}
+
+		b.WriteString(fmt.Sprintf(" %s %-*s %5s %6s\n", icon, maxID, id, elapsed, tokens))
 	}
 	if len(m.agents) == 0 {
 		b.WriteString(" (waiting)\n")
 	}
+
+	// Totals row
+	if totalTokens > 0 || len(m.agents) > 0 {
+		b.WriteString(strings.Repeat("─", width))
+		b.WriteString("\n")
+		totalElapsed := time.Since(m.startTime).Truncate(time.Second)
+		b.WriteString(fmt.Sprintf(" total: %s | %s\n", formatTokens(totalTokens), totalElapsed))
+	}
+
 	return b.String()
+}
+
+// formatTokens renders a token count in compact form (e.g., 1.2k, 12.4k, 128k).
+func formatTokens(n int64) string {
+	if n == 0 {
+		return "-"
+	}
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	if n < 10000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	if n < 1000000 {
+		return fmt.Sprintf("%.0fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%.1fM", float64(n)/1000000)
+}
+
+// scrollPageSize returns the number of lines to scroll per PgUp/PgDown.
+func (m Model) scrollPageSize() int {
+	page := m.height - 6 // header + footer + margins
+	if page < 5 {
+		page = 5
+	}
+	return page
 }
 
 func (m Model) viewFooter() string {

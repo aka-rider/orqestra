@@ -28,7 +28,12 @@ func (p *Planner) Plan(ctx context.Context, prompt string) (PlanOutput, error) {
 	if err != nil {
 		return PlanOutput{}, err
 	}
-	return p.ParsePlanOutput(result.Output)
+	po, err := p.ParsePlanOutput(result.Output)
+	if err != nil {
+		return PlanOutput{}, err
+	}
+	po.Usage = result.Usage
+	return po, nil
 }
 
 // PlanStreaming uses RunStreaming and parses the accumulated output.
@@ -37,7 +42,12 @@ func (p *Planner) PlanStreaming(ctx context.Context, prompt string, stdout io.Wr
 	if err != nil {
 		return PlanOutput{}, err
 	}
-	return p.ParsePlanOutput(result.Output)
+	po, err := p.ParsePlanOutput(result.Output)
+	if err != nil {
+		return PlanOutput{}, err
+	}
+	po.Usage = result.Usage
+	return po, nil
 }
 
 // ParsePlanOutput parses a raw claude response into a PlanOutput.

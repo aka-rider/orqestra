@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/xiii/orqestra/internal/harness"
 )
 
 // Specification is the shared contract between Planner, Worker, and Validator.
@@ -37,6 +39,9 @@ type PlanOutput struct {
 
 	// ExpectedArtifacts lists files that should exist after execution.
 	ExpectedArtifacts []string `json:"expected_artifacts,omitempty"`
+
+	// Usage is populated after parsing from the harness RunResult, not from LLM output.
+	Usage *harness.TokenUsage `json:"-"`
 }
 
 // UnmarshalJSON handles flexible LLM output for Specification fields.

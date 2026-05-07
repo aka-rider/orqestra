@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
@@ -574,4 +575,93 @@ func makeAnswerFields(questions []agent.Question, width int) []textarea.Model {
 		fields[i] = ta
 	}
 	return fields
+}
+
+func TestTUI_PgUpPgDown(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.content = ContentStreaming
+	m.goal = "test scroll"
+
+	// PgDown should increase scrollOffset
+	result, _ := sendKey(m, tea.KeyPgDown)
+	model := result.(Model)
+	if model.scrollOffset == 0 {
+		t.Error("expected scrollOffset > 0 after PgDown")
+	}
+
+	// PgUp should decrease scrollOffset
+	result2, _ := sendKey(model, tea.KeyPgUp)
+	model2 := result2.(Model)
+	if model2.scrollOffset != 0 {
+		t.Errorf("expected scrollOffset=0 after PgUp from first page, got %d", model2.scrollOffset)
+	}
+
+	// PgUp at 0 should stay at 0
+	result3, _ := sendKey(model2, tea.KeyPgUp)
+	model3 := result3.(Model)
+	if model3.scrollOffset != 0 {
+		t.Errorf("expected scrollOffset=0, got %d", model3.scrollOffset)
+	}
+}
+
+func TestTUI_SidebarTokens(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.content = ContentStreaming
+	m.width = 120
+	m.height = 40
+	m.agents = []AgentRow{
+		{ID: "gateway", State: "done", Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402},
+		{ID: "planner", State: "running", StartedAt: time.Now().Add(-24 * time.Second), InputTokens: 0, OutputTokens: 0},
+	}
+
+	view := m.View()
+
+	if !strings.Contains(view, "1.6k") {
+		t.Error("expected sidebar to show formatted token count '1.6k' for gateway")
+	}
+	if !strings.Contains(view, "total:") {
+		t.Error("expected sidebar to show totals row")
+	}
+}
+
+func TestTUI_DashboardTokens(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.content = ContentStreaming
+	m.showDashboard = true
+	m.width = 120
+	m.height = 40
+	m.agents = []AgentRow{
+		{ID: "gateway", State: "done", Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402},
+	}
+
+	view := m.View()
+	if !strings.Contains(view, "In Tok") {
+		t.Error("expected dashboard header with 'In Tok'")
+	}
+	if !strings.Contains(view, "1,218") {
+		t.Error("expected dashboard to show input tokens '1,218'")
+	}
+}
+
+func TestFormatTokens(t *testing.T) {
+	tests := []struct {
+		n    int64
+		want string
+	}{
+		{0, "-"},
+		{500, "500"},
+		{1200, "1.2k"},
+		{12400, "12k"},
+		{128000, "128k"},
+		{1500000, "1.5M"},
+	}
+	for _, tt := range tests {
+		got := formatTokens(tt.n)
+		if got != tt.want {
+			t.Errorf("formatTokens(%d) = %q, want %q", tt.n, got, tt.want)
+		}
+	}
 }

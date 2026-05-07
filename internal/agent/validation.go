@@ -1,6 +1,10 @@
 package agent
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/xiii/orqestra/internal/harness"
+)
 
 // ValidationReport is the unified result shape for all validators.
 type ValidationReport struct {
@@ -9,6 +13,9 @@ type ValidationReport struct {
 	Summary       string   `json:"summary"`
 	Issues        []Issue  `json:"issues,omitempty"`
 	Suggestions   []string `json:"suggestions,omitempty"`
+
+	// Usage is populated after parsing from the harness RunResult, not from LLM output.
+	Usage *harness.TokenUsage `json:"-"`
 }
 
 // Verdict represents the overall outcome of validation.

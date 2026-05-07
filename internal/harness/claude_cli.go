@@ -159,7 +159,22 @@ func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (
 		return RunResult{}, fmt.Errorf("claude CLI error: %w (stderr: %s)", err, stderr.String())
 	}
 
-	return RunResult{Output: stdout.String()}, nil
+	raw := stdout.String()
+
+	// Extract token usage from JSON envelope if present.
+	var envelope struct {
+		Usage *streamUsage `json:"usage"`
+	}
+	var usage *TokenUsage
+	if err := json.Unmarshal([]byte(raw), &envelope); err == nil && envelope.Usage != nil {
+		usage = &TokenUsage{
+			InputTokens:  envelope.Usage.InputTokens,
+			OutputTokens: envelope.Usage.OutputTokens,
+			TotalTokens:  envelope.Usage.InputTokens + envelope.Usage.OutputTokens,
+		}
+	}
+
+	return RunResult{Output: raw, Usage: usage}, nil
 }
 
 // RunStreaming runs `claude -p <prompt> --system-prompt <systemPrompt> --output-format stream-json --verbose`
