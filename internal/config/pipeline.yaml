@@ -190,7 +190,7 @@ project_manager:
       ]
     }
 
-work_validator:
+qa:
   model_ref: small
   system_prompt: |
     You are Orqestra's independent work validator. You receive up to three inputs:

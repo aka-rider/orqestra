@@ -34,7 +34,7 @@ func DetectClaude(home string, binary string) (sandbox.Snapshot, error) {
 
 	optionals := []struct {
 		path string
-		perm seatbelt.Permission
+		perm sandbox.Permission
 	}{
 		{"~/.claude.json", sandbox.Write},
 		{"~/.claude.json.lock", sandbox.Write},

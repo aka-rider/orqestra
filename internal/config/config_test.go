@@ -18,8 +18,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Worker.ModelRef != "large" {
 		t.Errorf("worker model_ref = %q, want %q", cfg.Worker.ModelRef, "large")
 	}
-	if cfg.WorkValidator.ModelRef != "small" {
-		t.Errorf("work_validator model_ref = %q, want %q", cfg.WorkValidator.ModelRef, "small")
+	if cfg.QA.ModelRef != "small" {
+		t.Errorf("qa model_ref = %q, want %q", cfg.QA.ModelRef, "small")
 	}
 	if cfg.Intent.ModelRef != "x-small" {
 		t.Errorf("intent model_ref = %q, want %q", cfg.Intent.ModelRef, "x-small")

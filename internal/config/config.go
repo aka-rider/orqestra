@@ -50,12 +50,12 @@ type Config struct {
 	Planner        PlannerConfig             `yaml:"planner"`
 	Validator      ValidatorConfig           `yaml:"validator"`
 	Worker         WorkerConfig              `yaml:"worker"`
-	WorkValidator  ValidatorConfig           `yaml:"work_validator"`
+	QA             ValidatorConfig           `yaml:"qa"`
 	ProjectManager ProjectManagerConfig      `yaml:"project_manager"`
 	Retry          RetryConfig               `yaml:"retry"`
 	ExecutionGraph ExecutionGraphConfig      `yaml:"execution_graph"`
 	Intent         IntentConfig              `yaml:"intent"`
-	Sandbox       SandboxConfig            `yaml:"sandbox"`
+	Sandbox        SandboxConfig             `yaml:"sandbox"`
 }
 
 type PlannerConfig struct {
@@ -80,7 +80,7 @@ type WorkerConfig struct {
 type RetryConfig struct {
 	PlannerAttempts      int `yaml:"planner_attempts"`
 	PlanValidationRepair int `yaml:"plan_validation_repair"`
-	WorkValidationRepair int `yaml:"work_validation_repair"`
+	QARepair int `yaml:"qa_repair"`
 }
 
 // Duration wraps time.Duration for YAML unmarshaling.
@@ -112,7 +112,7 @@ type AgentNodeConfig struct {
 	MaxAttempts      int                  `yaml:"max_attempts"`
 	OnFailure        string               `yaml:"on_failure"`
 	Validator        *ValidatorNodeConfig `yaml:"validator"`
-	Sandbox         *SandboxConfig      `yaml:"sandbox"` // per-agent sandbox override
+	Sandbox          *SandboxConfig       `yaml:"sandbox"` // per-agent sandbox override
 }
 
 // ValidatorNodeConfig defines a validator attached to an agent.
@@ -197,7 +197,7 @@ func Load(path string) (*Config, error) {
 		cfg.Validator.ModelRef = v
 	}
 	if v := os.Getenv("ORQESTRA_WORK_VALIDATOR_MODEL_REF"); v != "" {
-		cfg.WorkValidator.ModelRef = v
+		cfg.QA.ModelRef = v
 	}
 
 	// Validate: every model's provider key must exist
@@ -237,7 +237,7 @@ func (c *Config) validate() error {
 	if c.Validator.ModelRef == "" {
 		return fmt.Errorf("missing mandatory validator.model_ref parameter")
 	}
-	if c.WorkValidator.ModelRef == "" {
+	if c.QA.ModelRef == "" {
 		return fmt.Errorf("missing mandatory work_validator.model_ref parameter")
 	}
 
@@ -246,7 +246,7 @@ func (c *Config) validate() error {
 		{"planner", c.Planner.ModelRef},
 		{"worker", c.Worker.ModelRef},
 		{"validator", c.Validator.ModelRef},
-		{"work_validator", c.WorkValidator.ModelRef},
+		{"qa", c.QA.ModelRef},
 	} {
 		if _, ok := c.Models[ref.ref]; !ok {
 			return fmt.Errorf("%s.model_ref %q not found in models (define model tier %q in your provider config)", ref.role, ref.ref, ref.ref)

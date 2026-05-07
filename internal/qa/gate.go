@@ -1,4 +1,4 @@
-package validator
+package qa
 
 import (
 	"bytes"
@@ -14,8 +14,8 @@ import (
 	"github.com/xiii/orqestra/internal/types"
 )
 
-// WorkValidationInput contains everything needed to validate work output.
-type WorkValidationInput struct {
+// Input contains everything needed to validate work output.
+type Input struct {
 	Spec       types.Specification
 	WorkOutput string
 }
@@ -45,16 +45,16 @@ var defaultAllowedCommands = map[string]bool{
 	"tail":   true,
 }
 
-// WorkValidator independently validates the work output against the specification.
-type WorkValidator struct {
+// Gate independently validates the work output against the specification.
+type Gate struct {
 	runner          harness.CLIRunner
 	cfg             *config.ValidatorConfig
 	allowedCommands map[string]bool
 }
 
-// NewWorkValidator creates a work validator using the given CLIRunner.
-func NewWorkValidator(runner harness.CLIRunner, cfg *config.ValidatorConfig) *WorkValidator {
-	return &WorkValidator{
+// NewGate creates a work validator using the given CLIRunner.
+func NewGate(runner harness.CLIRunner, cfg *config.ValidatorConfig) *Gate {
+	return &Gate{
 		runner:          runner,
 		cfg:             cfg,
 		allowedCommands: defaultAllowedCommands,
@@ -62,7 +62,7 @@ func NewWorkValidator(runner harness.CLIRunner, cfg *config.ValidatorConfig) *Wo
 }
 
 // Validate runs validation commands and then CLI-based assessment.
-func (v *WorkValidator) Validate(ctx context.Context, input *WorkValidationInput) (*types.ValidationReport, error) {
+func (v *Gate) Validate(ctx context.Context, input *Input) (*types.ValidationReport, error) {
 	var issues []types.Issue
 	var cmdResults []types.ValidationCommandResult
 
@@ -122,7 +122,7 @@ func (v *WorkValidator) Validate(ctx context.Context, input *WorkValidationInput
 
 // runValidationCommand executes a single validation command and captures the result.
 // It enforces the command allowlist to prevent execution of arbitrary commands from LLM output.
-func (v *WorkValidator) runValidationCommand(ctx context.Context, vc types.ValidationCommand) types.ValidationCommandResult {
+func (v *Gate) runValidationCommand(ctx context.Context, vc types.ValidationCommand) types.ValidationCommandResult {
 	result := types.ValidationCommandResult{
 		Command:      vc.Command,
 		Args:         vc.Args,

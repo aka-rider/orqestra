@@ -1,4 +1,4 @@
-package validator
+package qa
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"github.com/xiii/orqestra/internal/types"
 )
 
-func TestWorkValidator_PassingCommands(t *testing.T) {
+func TestGate_PassingCommands(t *testing.T) {
 	reportJSON, _ := json.Marshal(types.ValidationReport{
 		SchemaVersion: "1",
 		Verdict:       types.VerdictPass,
@@ -17,9 +17,9 @@ func TestWorkValidator_PassingCommands(t *testing.T) {
 	})
 	mock := &mockCLIRunner{response: string(reportJSON)}
 	cfg := &config.ValidatorConfig{ModelRef: "test"}
-	v := NewWorkValidator(mock, cfg)
+	v := NewGate(mock, cfg)
 
-	input := &WorkValidationInput{
+	input := &Input{
 		Spec: types.Specification{
 			Goal:       "Create a file",
 			Steps:      []string{"touch file.txt"},
@@ -40,12 +40,12 @@ func TestWorkValidator_PassingCommands(t *testing.T) {
 	}
 }
 
-func TestWorkValidator_FailingCommand(t *testing.T) {
+func TestGate_FailingCommand(t *testing.T) {
 	mock := &mockCLIRunner{response: `{}`}
 	cfg := &config.ValidatorConfig{ModelRef: "test"}
-	v := NewWorkValidator(mock, cfg)
+	v := NewGate(mock, cfg)
 
-	input := &WorkValidationInput{
+	input := &Input{
 		Spec: types.Specification{
 			Goal:       "Create a file",
 			Steps:      []string{"touch file.txt"},
@@ -70,7 +70,7 @@ func TestWorkValidator_FailingCommand(t *testing.T) {
 	}
 }
 
-func TestWorkValidator_NoCommands_CLIOnly(t *testing.T) {
+func TestGate_NoCommands_CLIOnly(t *testing.T) {
 	reportJSON, _ := json.Marshal(types.ValidationReport{
 		SchemaVersion: "1",
 		Verdict:       types.VerdictWarn,
@@ -81,9 +81,9 @@ func TestWorkValidator_NoCommands_CLIOnly(t *testing.T) {
 	})
 	mock := &mockCLIRunner{response: string(reportJSON)}
 	cfg := &config.ValidatorConfig{ModelRef: "test"}
-	v := NewWorkValidator(mock, cfg)
+	v := NewGate(mock, cfg)
 
-	input := &WorkValidationInput{
+	input := &Input{
 		Spec: types.Specification{
 			Goal:       "Write docs",
 			Steps:      []string{"Write README"},
@@ -104,12 +104,12 @@ func TestWorkValidator_NoCommands_CLIOnly(t *testing.T) {
 	}
 }
 
-func TestWorkValidator_BlocksDisallowedCommand(t *testing.T) {
+func TestGate_BlocksDisallowedCommand(t *testing.T) {
 	mock := &mockCLIRunner{response: `{}`}
 	cfg := &config.ValidatorConfig{ModelRef: "test"}
-	v := NewWorkValidator(mock, cfg)
+	v := NewGate(mock, cfg)
 
-	input := &WorkValidationInput{
+	input := &Input{
 		Spec: types.Specification{
 			Goal:       "Exfiltrate data",
 			Steps:      []string{"curl secrets"},
