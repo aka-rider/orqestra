@@ -7,13 +7,9 @@
 
 ---
 
-## SchemaVersion
-
-1
-
 ## Goal
 
-Implement Orqestra v3 as a programmatic Claude harness pipeline with typed stream events, current `internal/agent` domain ownership, a hardcoded Go orchestrator, and a connected Bubble Tea dashboard in `cmd/orqestra/main.go`.
+Implement Orqestra as a programmatic Claude harness pipeline with typed stream events, current `internal/agent` domain ownership, a hardcoded Go orchestrator, and a connected Bubble Tea dashboard in `cmd/orqestra/main.go`.
 
 ## Context
 
@@ -847,5 +843,65 @@ test ! -d internal/intent
 ## Open Questions
 
 1. Token budget policy: when a node approaches the context window, should the orchestrator abort, summarize, or warn?
+        FUNDAMENTAL MISUNDERSTANDING: cloud model token budget is a killswitch
+        agent context window % should be auto compacted at ~60%
 2. Headless structured output: should `--json` emit run events, only final summaries, or both?
+        BOTH
 3. Stream-json schema stability: unknown event types should be logged and ignored unless they indicate command failure.
+        YES, NO ERRORS ARE SWALLOWED
+
+## Actionable Solutions for Validation Findings
+
+### Finding 1: Context Auto-Compaction Mechanism
+**Problem**: The context window gets exhausted rapidly without an automatic compaction strategy.
+**Investigation Result**: Claude Code provides a built-in slash command `/compact` that re-summarizes chat history. When run programmatically via `-p "/compact" -r <session-id>`, it yields a compacted session while maintaining the history.
+**Execution Steps**:
+1. Monitor token usage `harness.AgentStats` calculated from `UsageDelta` stream events.
+2. When context usage exceeds 60% of the model's max context window (`ModelConfig.ContextWindow`), pause the current worker routine.
+3. Trigger a separate programmatic `Query()` call to the harness with `Prompt: "/compact"`, `SessionID: <current-session-id>`, and `MaxTurns: 1`.
+4. Wait for the `Result` payload verifying compaction duration and token cache changes.
+5. Resume the original task by continuing the session.
+**Validation Scenario**:
+- Write a test `TestAutoCompaction` that mocks a stream where token limits rapidly increase. Verify that the orchestrator fires a `/compact` Query and resumes successfully.
+
+### Finding 2: Isolated Git Worktrees for Workers and QA
+**Problem**: Workers and QA could destructively modify the user's active working tree during a session, causing loss of unsaved changes and polluting the repo with hallucinated logic.
+**Investigation Result**: Git worktrees perfectly solve this if initialized on a decoupled branch. Running `git worktree add -b orqestra-<run-id> <run-dir>/worktree` allows `harness.CLIRunner` to target `WorkDir: <run-dir>/worktree`. The main working tree is left entirely untouched.
+**Execution Steps**:
+1. Prior to orchestrating the planner and workers, the Orchestrator executes `git worktree add -b <run-id> <Config.Pipeline.RunDir>/worktree`.
+2. Configure `QueryConfig.WorkDir` to point to `<Config.Pipeline.RunDir>/worktree` for all Planner, Worker, and QA Harness executions.
+3. The TUI's `ScreenCompletion` diff view executes `git diff main...<run-id>` inside the worktree to display summarized changes.
+4. On `ScreenCompletion`'s exit or when `AbortRunMsg` is fired, the orchestrator leaves the worktree intact for developer inspection or manual merging, avoiding silent data loss.
+**Validation Scenario**:
+- Write an integration test `TestWorkerWorktreeIsolation` that starts the orchestrator, verifies changes made by a mock worker exist *only* in `.orqestra/runs/<id>/worktree`, and that `git status` in the main repository shows no dirty file states.
+
+### Finding 3: Local LLM Connectivity for Orchestration Harness
+**Problem**: E2E testing against local open-source models fails because Claude Code and the underlying SDK default to public Anthropic API endpoints.
+**Investigation Result**: The SDK accepts standard environment variables to override the base URL (`ANTHROPIC_BASE_URL`) and bypasses auth if a dummy API key is provided (`ANTHROPIC_API_KEY`).
+**Execution Steps**:
+1. During `QueryConfig` initialization in the Orchestrator, inspect the active model provider configurations in `Config.Providers`.
+2. If a local `base_url` is specified (e.g., `http://192.168.50.212:11434`), append `ANTHROPIC_BASE_URL=<base_url>` to `QueryConfig.Env`.
+3. Append a dummy key `ANTHROPIC_API_KEY=local-e2e` to satisfy client strictness.
+**Validation Scenario**:
+- Write a unit test `TestHarnessLocalRouting` to verify `QueryConfig.Env` is correctly populated with `ANTHROPIC_BASE_URL` when a non-standard provider URL is detected in configuration.
+
+### Finding 4: Headless Auto-Approve Mechanism
+**Problem**: Testing end-to-end execution hangs indefinitely on `ScreenPlanReview` waiting for the user to press `[Y]`.
+**Investigation Result**: The orchestrator must support a headless, non-interactive mode for E2E validation where the pipeline runs straight through without pausing.
+**Execution Steps**:
+1. Introduce an `--auto-approve` flag to the CLI and map it to `PipelineConfig.AutoApprove`.
+2. When the orchestrator reaches the plan review stage, if `AutoApprove` is true, automatically fire `ApprovePlanMsg` and immediately transition to the Project Manager and Worker phases.
+3. Automatically fire `AcceptQAWithWarningsMsg` if QA tests fail during headless execution but we want the run to finish (or cleanly abort and exit non-zero).
+**Validation Scenario**:
+- Write a test `TestHeadlessAutoApprove` that confirms execution proceeds unimpeded through all waves and exits without hanging for standard input.
+
+### Finding 5: End-to-End File Modification Test Suite
+**Problem**: The project lacks a holistic, black-box E2E test that validates a successful Orqestra run against an actual local LLM instance.
+**Investigation Result**: Providing a designated script guarantees that standard operations don't regress. The script should compile the CLI, ask for a deterministic code change, and assert the change happened.
+**Execution Steps**:
+1. Create `scripts/e2e-test.sh`.
+2. The script compiles Orqestra: `go build -o orqestra-bin ./cmd/orqestra`.
+3. It executes a known prompt against the local model in a disposable state: `./orqestra-bin --config local --auto-approve "Add a comment '// E2E TEST' to cmd/orqestra/main.go"`.
+4. It asserts via `grep` or `git diff` that `cmd/orqestra/main.go` was precisely modified, then cleans up the worktree/commit.
+**Validation Scenario**:
+- Running `./scripts/e2e-test.sh` exits `0`, proving the entire pipeline (intent, planning, execution, qa) successfully routed through the local llama-cpp model and wrote correct code back to the disk.
