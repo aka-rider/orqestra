@@ -434,7 +434,7 @@ func incorporateAnswers(prompt string, gwResult agent.GatewayResult, answers []G
 	return b.String()
 }
 
-// executeWorkerWaves runs work packages in dependency waves.
+// executeWorkerWaves runs work packages in dependency waves with config-controlled concurrency.
 func (e *Engine) executeWorkerWaves(ctx context.Context, spec agent.Specification, projectPlan *agent.ProjectPlan, emit func(Event)) (string, error) {
 	if projectPlan == nil || len(projectPlan.Packages) == 0 {
 		// Single execution
@@ -447,42 +447,65 @@ func (e *Engine) executeWorkerWaves(ctx context.Context, spec agent.Specificatio
 		return result.Output, nil
 	}
 
+	parallelism := e.Config.Worker.Parallelism
+	if parallelism <= 0 {
+		parallelism = 1
+	}
+
 	waves := agent.TopoWaves(projectPlan.Packages)
 	var allOutput strings.Builder
 
 	for _, wave := range waves {
-		type pkgResult struct {
-			id     string
-			output string
-			err    error
-		}
-		results := make(chan pkgResult, len(wave))
-		var wg sync.WaitGroup
-
-		for _, pkg := range wave {
-			wg.Add(1)
-			go func(wp agent.WorkPackage) {
-				defer wg.Done()
-				wSpec := wp.ToSpecification(spec)
-				emit(Event{Type: EventAgentStarted, AgentID: wp.ID})
+		if parallelism == 1 {
+			// Sequential — no goroutines
+			for _, pkg := range wave {
+				wSpec := pkg.ToSpecification(spec)
+				emit(Event{Type: EventAgentStarted, AgentID: pkg.ID})
 				res, err := e.Runners.Worker.RunStreaming(ctx, agent.BuildExecutionPrompt(wSpec), "", io.Discard)
 				if err != nil {
-					results <- pkgResult{id: wp.ID, err: fmt.Errorf("worker %q: %w", wp.ID, err)}
-					return
+					return allOutput.String(), fmt.Errorf("worker %q: %w", pkg.ID, err)
 				}
-				emit(Event{Type: EventAgentDone, AgentID: wp.ID, WorkOutput: res.Output})
-				results <- pkgResult{id: wp.ID, output: res.Output}
-			}(pkg)
-		}
-
-		wg.Wait()
-		close(results)
-
-		for r := range results {
-			if r.err != nil {
-				return allOutput.String(), r.err
+				emit(Event{Type: EventAgentDone, AgentID: pkg.ID, WorkOutput: res.Output})
+				fmt.Fprintf(&allOutput, "=== Package: %s ===\n%s\n", pkg.ID, res.Output)
 			}
-			fmt.Fprintf(&allOutput, "=== Package: %s ===\n%s\n", r.id, r.output)
+		} else {
+			// Parallel with semaphore
+			type pkgResult struct {
+				id     string
+				output string
+				err    error
+			}
+			sem := make(chan struct{}, parallelism)
+			results := make(chan pkgResult, len(wave))
+			var wg sync.WaitGroup
+
+			for _, pkg := range wave {
+				wg.Add(1)
+				go func(wp agent.WorkPackage) {
+					defer wg.Done()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+					wSpec := wp.ToSpecification(spec)
+					emit(Event{Type: EventAgentStarted, AgentID: wp.ID})
+					res, err := e.Runners.Worker.RunStreaming(ctx, agent.BuildExecutionPrompt(wSpec), "", io.Discard)
+					if err != nil {
+						results <- pkgResult{id: wp.ID, err: fmt.Errorf("worker %q: %w", wp.ID, err)}
+						return
+					}
+					emit(Event{Type: EventAgentDone, AgentID: wp.ID, WorkOutput: res.Output})
+					results <- pkgResult{id: wp.ID, output: res.Output}
+				}(pkg)
+			}
+
+			wg.Wait()
+			close(results)
+
+			for r := range results {
+				if r.err != nil {
+					return allOutput.String(), r.err
+				}
+				fmt.Fprintf(&allOutput, "=== Package: %s ===\n%s\n", r.id, r.output)
+			}
 		}
 	}
 

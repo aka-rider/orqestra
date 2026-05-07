@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"strings"
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
@@ -63,8 +65,15 @@ func (g *Gateway) Evaluate(ctx context.Context, rawPrompt string) (GatewayResult
 		return GatewayResult{}, fmt.Errorf("gateway evaluation failed: %w", err)
 	}
 
+	slog.Debug("gateway raw output", "len", len(result.Output), "first_200", truncate(result.Output, 200))
+
+	jsonStr := extractJSON(result.Output)
+	if jsonStr == "" {
+		return GatewayResult{}, fmt.Errorf("parsing gateway response: no JSON object found in output")
+	}
+
 	var gwResult GatewayResult
-	if err := json.Unmarshal([]byte(result.Output), &gwResult); err != nil {
+	if err := json.Unmarshal([]byte(jsonStr), &gwResult); err != nil {
 		return GatewayResult{}, fmt.Errorf("parsing gateway response: %w", err)
 	}
 
@@ -94,4 +103,60 @@ func (g *Gateway) Evaluate(ctx context.Context, rawPrompt string) (GatewayResult
 	}
 
 	return gwResult, nil
+}
+
+// extractJSON finds the outermost JSON object in s.
+// Small models often wrap JSON in prose ("I'll help...\n{...}\n").
+// Returns the extracted JSON string, or empty string if none found.
+func extractJSON(s string) string {
+	// Fast path: output is already valid JSON.
+	s = strings.TrimSpace(s)
+	if len(s) > 0 && s[0] == '{' {
+		return s
+	}
+
+	// Find first '{' and match to its closing '}'.
+	start := strings.IndexByte(s, '{')
+	if start < 0 {
+		return ""
+	}
+
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' && inString {
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		switch c {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	return ""
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }

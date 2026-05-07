@@ -185,3 +185,26 @@ func TestGateway_CoachRequiresQuestions(t *testing.T) {
 		t.Errorf("expected question-required error, got: %v", err)
 	}
 }
+
+func TestGateway_ProseWrappedJSON(t *testing.T) {
+	// Simulates a model that wraps JSON in prose (common with small local models)
+	runner := &gatewayMockRunner{
+		output: `I'll analyze this request for you.
+
+{"verdict":"accept","brief":{"task":"Add E2E comment to main.go","end_state":"Comment exists on line 1","deliverables":["cmd/orqestra/main.go"],"scope":["cmd/orqestra"],"non_scope":[],"acceptance_hints":["comment present"]},"questions":[],"confidence":0.95,"planner_question":"How should a single-line comment be added to cmd/orqestra/main.go such that it appears on line 1?"}
+
+That should cover it!`,
+	}
+
+	gw := NewGateway(runner, &config.GatewayConfig{SystemPrompt: "test"})
+	result, err := gw.Evaluate(context.Background(), "add a comment")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Verdict != GatewayVerdictAccept {
+		t.Errorf("expected accept, got %q", result.Verdict)
+	}
+	if result.Brief.Task == "" {
+		t.Error("expected non-empty brief.task")
+	}
+}

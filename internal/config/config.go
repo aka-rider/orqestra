@@ -79,6 +79,7 @@ type WorkerConfig struct {
 	PermissionMode  string   `yaml:"permission_mode"`
 	Timeout         Duration `yaml:"timeout"`
 	MaxTurns        int      `yaml:"max_turns"`
+	Parallelism     int      `yaml:"parallelism"` // max concurrent workers per wave; 0 or 1 = sequential
 }
 
 type RetryConfig struct {

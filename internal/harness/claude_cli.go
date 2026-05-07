@@ -300,3 +300,5 @@ func (c *ClaudeCLI) buildEnv() []string {
 	env = append(env, BuildModelEnv(c.resolved, c.small)...)
 	return env
 }
+
+

@@ -27,3 +27,4 @@ sandbox:
 
 worker:
   timeout: 30m
+  parallelism: 0
