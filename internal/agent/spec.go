@@ -7,6 +7,7 @@ import (
 )
 
 // Specification is the shared contract between Planner, Worker, and Validator.
+// It defines WHAT to do — goal, steps, acceptance. Not HOW to validate or execute.
 type Specification struct {
 	SchemaVersion string   `json:"schema_version,omitempty"`
 	ID            string   `json:"id,omitempty"`
@@ -23,21 +24,24 @@ type Specification struct {
 	Constraints []string `json:"constraints,omitempty"`
 	Assumptions []string `json:"assumptions,omitempty"`
 	Risks       []string `json:"risks,omitempty"`
+}
 
-	// ValidationCommands are shell commands the validator can run to check work.
+// PlanOutput is the full planner response: spec + pipeline metadata.
+// The planner LLM produces validation commands and artifact expectations,
+// but those are not part of the spec contract — they're aids for the QA gate.
+type PlanOutput struct {
+	Spec Specification
+
+	// ValidationCommands are shell commands the QA gate runs to verify work.
 	ValidationCommands []ValidationCommand `json:"validation_commands,omitempty"`
 
-	// AllowedOperations restricts what the worker harness may do.
-	AllowedOperations []string `json:"allowed_operations,omitempty"`
-
-	// ExpectedArtifacts lists files or outputs that should exist after execution.
+	// ExpectedArtifacts lists files that should exist after execution.
 	ExpectedArtifacts []string `json:"expected_artifacts,omitempty"`
 }
 
 // UnmarshalJSON handles flexible LLM output for Specification fields.
 // LLMs may return "context" as an object, "steps" as structured objects, etc.
 func (s *Specification) UnmarshalJSON(data []byte) error {
-	// Use a raw map to handle heterogeneous field types.
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -79,17 +83,28 @@ func (s *Specification) UnmarshalJSON(data []byte) error {
 	if v, ok := raw["risks"]; ok {
 		s.Risks = flexStringSlice(v)
 	}
+	return nil
+}
+
+// UnmarshalJSON parses the full planner LLM output into spec + pipeline metadata.
+func (p *PlanOutput) UnmarshalJSON(data []byte) error {
+	// Parse spec fields first.
+	if err := json.Unmarshal(data, &p.Spec); err != nil {
+		return err
+	}
+	// Extract pipeline metadata from the same JSON.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
 	if v, ok := raw["validation_commands"]; ok {
 		var cmds []ValidationCommand
 		if err := json.Unmarshal(v, &cmds); err == nil {
-			s.ValidationCommands = cmds
+			p.ValidationCommands = cmds
 		}
 	}
-	if v, ok := raw["allowed_operations"]; ok {
-		s.AllowedOperations = flexStringSlice(v)
-	}
 	if v, ok := raw["expected_artifacts"]; ok {
-		s.ExpectedArtifacts = flexStringSlice(v)
+		p.ExpectedArtifacts = flexStringSlice(v)
 	}
 	return nil
 }

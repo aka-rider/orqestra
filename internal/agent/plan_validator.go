@@ -26,7 +26,7 @@ func (v *PlanValidator) ValidatePlan(ctx context.Context, spec Specification) (*
 	// Phase 1: Deterministic pre-checks
 	issues := v.deterministicChecks(spec)
 	for _, issue := range issues {
-		if issue.Severity == SeverityError {
+		if issue.Blocking {
 			report := &ValidationReport{
 				SchemaVersion: "1",
 				Verdict:       VerdictFail,
@@ -68,7 +68,7 @@ func (v *PlanValidator) deterministicChecks(spec Specification) []Issue {
 	if spec.Goal == "" {
 		issues = append(issues, Issue{
 			ID:       "MISSING_GOAL",
-			Severity: SeverityError,
+			Blocking: true,
 			Message:  "Specification has no goal",
 		})
 	}
@@ -76,7 +76,7 @@ func (v *PlanValidator) deterministicChecks(spec Specification) []Issue {
 	if len(spec.Steps) == 0 {
 		issues = append(issues, Issue{
 			ID:       "NO_STEPS",
-			Severity: SeverityError,
+			Blocking: true,
 			Message:  "Specification has no steps",
 		})
 	}
@@ -84,7 +84,7 @@ func (v *PlanValidator) deterministicChecks(spec Specification) []Issue {
 	if len(spec.Acceptance) == 0 {
 		issues = append(issues, Issue{
 			ID:       "NO_ACCEPTANCE",
-			Severity: SeverityError,
+			Blocking: true,
 			Message:  "Specification has no acceptance criteria",
 		})
 	}
@@ -94,7 +94,7 @@ func (v *PlanValidator) deterministicChecks(spec Specification) []Issue {
 		if step == "" {
 			issues = append(issues, Issue{
 				ID:       fmt.Sprintf("EMPTY_STEP_%d", i),
-				Severity: SeverityError,
+				Blocking: true,
 				Message:  fmt.Sprintf("Step %d is empty", i+1),
 			})
 		}

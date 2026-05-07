@@ -209,45 +209,47 @@ func goalSlug(goal string) string {
 	return s
 }
 
-// FromSpecification converts a types.Specification to a plan.Spec for serialisation.
-func FromSpecification(ts agent.Specification) Spec {
-	sv := ts.SchemaVersion
+// FromPlanOutput converts a PlanOutput to a plan.Spec for markdown serialisation.
+func FromPlanOutput(po agent.PlanOutput) Spec {
+	sv := po.Spec.SchemaVersion
 	if sv == "" {
 		sv = currentSchemaVersion
 	}
 	var valCmds []string
-	for _, vc := range ts.ValidationCommands {
+	for _, vc := range po.ValidationCommands {
 		if vc.Command != "" {
 			valCmds = append(valCmds, vc.Command)
 		}
 	}
 	return Spec{
 		SchemaVersion:      sv,
-		Goal:               ts.Goal,
-		Context:            ts.Context,
-		Steps:              ts.Steps,
-		Acceptance:         ts.Acceptance,
-		Constraints:        ts.Constraints,
-		Risks:              ts.Risks,
+		Goal:               po.Spec.Goal,
+		Context:            po.Spec.Context,
+		Steps:              po.Spec.Steps,
+		Acceptance:         po.Spec.Acceptance,
+		Constraints:        po.Spec.Constraints,
+		Risks:              po.Spec.Risks,
 		ValidationCommands: valCmds,
-		ExpectedArtifacts:  ts.ExpectedArtifacts,
+		ExpectedArtifacts:  po.ExpectedArtifacts,
 	}
 }
 
-// ToSpecification converts a plan.Spec to a types.Specification.
-func ToSpecification(s Spec) agent.Specification {
+// ToPlanOutput converts a plan.Spec to a PlanOutput (spec + pipeline metadata).
+func ToPlanOutput(s Spec) agent.PlanOutput {
 	var valCmds []agent.ValidationCommand
 	for _, cmd := range s.ValidationCommands {
 		valCmds = append(valCmds, agent.ValidationCommand{Command: cmd})
 	}
-	return agent.Specification{
-		SchemaVersion:      s.SchemaVersion,
-		Goal:               s.Goal,
-		Context:            s.Context,
-		Steps:              s.Steps,
-		Acceptance:         s.Acceptance,
-		Constraints:        s.Constraints,
-		Risks:              s.Risks,
+	return agent.PlanOutput{
+		Spec: agent.Specification{
+			SchemaVersion: s.SchemaVersion,
+			Goal:          s.Goal,
+			Context:       s.Context,
+			Steps:         s.Steps,
+			Acceptance:    s.Acceptance,
+			Constraints:   s.Constraints,
+			Risks:         s.Risks,
+		},
 		ValidationCommands: valCmds,
 		ExpectedArtifacts:  s.ExpectedArtifacts,
 	}

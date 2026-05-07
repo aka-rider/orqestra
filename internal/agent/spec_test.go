@@ -19,14 +19,9 @@ func TestSpecification_JSONRoundtrip(t *testing.T) {
 			IncludeGlobs: []string{"src/**"},
 			ExcludeGlobs: []string{"vendor/**"},
 		},
-		Constraints:       []string{"No external deps"},
-		Assumptions:       []string{"Go installed"},
-		Risks:             []string{"Might be slow"},
-		AllowedOperations: []string{"read", "write"},
-		ExpectedArtifacts: []string{"main.go"},
-		ValidationCommands: []ValidationCommand{
-			{Command: "go", Args: []string{"test", "./..."}, ExpectedExit: 0},
-		},
+		Constraints: []string{"No external deps"},
+		Assumptions: []string{"Go installed"},
+		Risks:       []string{"Might be slow"},
 	}
 
 	data, err := json.Marshal(spec)
@@ -47,9 +42,6 @@ func TestSpecification_JSONRoundtrip(t *testing.T) {
 	}
 	if decoded.Scope == nil {
 		t.Fatal("scope should not be nil")
-	}
-	if len(decoded.ValidationCommands) != 1 {
-		t.Errorf("validation commands: got %d, want 1", len(decoded.ValidationCommands))
 	}
 }
 

@@ -108,7 +108,7 @@ func TestPlanValidator_CLIValidation_Fail(t *testing.T) {
 		Verdict:       VerdictFail,
 		Summary:       "Steps are contradictory",
 		Issues: []Issue{
-			{ID: "CONTRADICTORY", Severity: SeverityError, Message: "Step 2 contradicts step 1"},
+			{ID: "CONTRADICTORY", Blocking: true, Message: "Step 2 contradicts step 1"},
 		},
 	})
 	mock := &validatorMockCLIRunner{response: string(reportJSON)}

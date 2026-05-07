@@ -15,8 +15,22 @@ import (
 
 // QAInput contains everything needed to validate work output.
 type QAInput struct {
-	Spec       Specification
-	WorkOutput string
+	Spec               Specification
+	WorkOutput         string
+	ValidationCommands []ValidationCommand
+}
+
+// validationCommandResult captures the outcome of a single validation command.
+// Internal to the QA gate — not part of the shared type surface.
+type validationCommandResult struct {
+	Command      string   `json:"command"`
+	Args         []string `json:"args,omitempty"`
+	Cwd          string   `json:"cwd,omitempty"`
+	ExpectedExit int      `json:"expected_exit"`
+	ActualExit   int      `json:"actual_exit"`
+	Stdout       string   `json:"stdout,omitempty"`
+	Stderr       string   `json:"stderr,omitempty"`
+	Passed       bool     `json:"passed"`
 }
 
 // defaultAllowedCommands is the allowlist of commands permitted for validation execution.
@@ -63,16 +77,16 @@ func NewGate(runner harness.CLIRunner, cfg *config.ValidatorConfig) *Gate {
 // ValidateWork runs validation commands and then CLI-based assessment.
 func (v *Gate) ValidateWork(ctx context.Context, input *QAInput) (*ValidationReport, error) {
 	var issues []Issue
-	var cmdResults []ValidationCommandResult
+	var cmdResults []validationCommandResult
 
 	// Phase 1: Run validation commands
-	for i, vc := range input.Spec.ValidationCommands {
+	for i, vc := range input.ValidationCommands {
 		result := v.runValidationCommand(ctx, vc)
 		cmdResults = append(cmdResults, result)
 		if !result.Passed {
 			issues = append(issues, Issue{
 				ID:       fmt.Sprintf("CMD_FAIL_%d", i),
-				Severity: SeverityError,
+				Blocking: true,
 				Message:  fmt.Sprintf("Validation command %q exited %d (expected %d)", vc.Command, result.ActualExit, vc.ExpectedExit),
 			})
 		}
@@ -121,8 +135,8 @@ func (v *Gate) ValidateWork(ctx context.Context, input *QAInput) (*ValidationRep
 
 // runValidationCommand executes a single validation command and captures the result.
 // It enforces the command allowlist to prevent execution of arbitrary commands from LLM output.
-func (v *Gate) runValidationCommand(ctx context.Context, vc ValidationCommand) ValidationCommandResult {
-	result := ValidationCommandResult{
+func (v *Gate) runValidationCommand(ctx context.Context, vc ValidationCommand) validationCommandResult {
+	result := validationCommandResult{
 		Command:      vc.Command,
 		Args:         vc.Args,
 		Cwd:          vc.Cwd,

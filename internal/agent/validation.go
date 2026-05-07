@@ -22,51 +22,23 @@ const (
 
 // Issue is a single problem found during validation.
 type Issue struct {
-	ID       string   `json:"id"`
-	Severity Severity `json:"severity"`
-	Message  string   `json:"message"`
-	Location string   `json:"location,omitempty"`
+	ID       string `json:"id"`
+	Blocking bool   `json:"blocking"`
+	Message  string `json:"message"`
+	Location string `json:"location,omitempty"`
 }
 
-// Severity indicates how critical an issue is.
-type Severity string
-
-const (
-	SeverityError   Severity = "error"
-	SeverityWarning Severity = "warning"
-	SeverityInfo    Severity = "info"
-)
-
 // DeriveVerdict computes the overall verdict from a set of issues.
+// Any blocking issue → fail. Non-blocking issues only → warn. No issues → pass.
 func DeriveVerdict(issues []Issue) Verdict {
 	verdict := VerdictPass
 	for _, issue := range issues {
-		switch issue.Severity {
-		case SeverityError:
+		if issue.Blocking {
 			return VerdictFail
-		case SeverityWarning:
-			verdict = VerdictWarn
 		}
+		verdict = VerdictWarn
 	}
 	return verdict
-}
-
-// ValidationCommandResult captures the outcome of running a validation command.
-type ValidationCommandResult struct {
-	Command      string   `json:"command"`
-	Args         []string `json:"args,omitempty"`
-	Cwd          string   `json:"cwd,omitempty"`
-	ExpectedExit int      `json:"expected_exit"`
-	ActualExit   int      `json:"actual_exit"`
-	Stdout       string   `json:"stdout,omitempty"`
-	Stderr       string   `json:"stderr,omitempty"`
-	Passed       bool     `json:"passed"`
-}
-
-// FailedCriterion describes an acceptance criterion that was not met.
-type FailedCriterion struct {
-	Criterion string `json:"criterion"`
-	Reason    string `json:"reason"`
 }
 
 // FormatValidationFeedback renders a ValidationReport into text feedback for re-planning.
@@ -75,7 +47,11 @@ func FormatValidationFeedback(report *ValidationReport) string {
 	if len(report.Issues) > 0 {
 		result += "Issues:\n"
 		for _, issue := range report.Issues {
-			result += fmt.Sprintf("  [%s] %s: %s\n", issue.Severity, issue.ID, issue.Message)
+			tag := "info"
+			if issue.Blocking {
+				tag = "blocker"
+			}
+			result += fmt.Sprintf("  [%s] %s: %s\n", tag, issue.ID, issue.Message)
 		}
 	}
 	if len(report.Suggestions) > 0 {

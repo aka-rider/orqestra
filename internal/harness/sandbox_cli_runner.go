@@ -1,6 +1,6 @@
 //go:build darwin
 
-package agent
+package harness
 
 import (
 	"bytes"
@@ -10,20 +10,17 @@ import (
 	"os/exec"
 
 	"github.com/xiii/orqestra/internal/config"
-	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/sandbox"
 )
 
-// SandboxCLIRunner implements harness.CLIRunner by running the claude CLI
+// SandboxCLIRunner implements CLIRunner by running the claude CLI
 // directly on macOS under a sandbox (sandbox-exec) policy.
-// Unlike the Docker SandboxedCLIRunner, it does not need file extraction
-// since workers write directly to the repo.
 type SandboxCLIRunner struct {
 	cfg      config.SandboxConfig
 	profiles []sandbox.Snapshot
 	repoPath string
 	env      []string
-	writable bool // worker mode vs readonly
+	writable bool
 }
 
 // SandboxCLIRunnerConfig configures the seatbelt CLI runner.
@@ -47,17 +44,17 @@ func NewSandboxCLIRunner(cfg SandboxCLIRunnerConfig) *SandboxCLIRunner {
 }
 
 // RunPrint runs the claude CLI with --print under seatbelt.
-func (r *SandboxCLIRunner) RunPrint(ctx context.Context, prompt, systemPrompt string) (harness.RunResult, error) {
+func (r *SandboxCLIRunner) RunPrint(ctx context.Context, prompt, systemPrompt string) (RunResult, error) {
 	args := r.buildCommand(prompt, systemPrompt, false)
 	output, err := r.run(ctx, args, nil)
-	return harness.RunResult{Output: output}, err
+	return RunResult{Output: output}, err
 }
 
 // RunStreaming runs the claude CLI with streaming output under seatbelt.
-func (r *SandboxCLIRunner) RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (harness.RunResult, error) {
+func (r *SandboxCLIRunner) RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (RunResult, error) {
 	args := r.buildCommand(prompt, systemPrompt, true)
 	output, err := r.run(ctx, args, stdout)
-	return harness.RunResult{Output: output}, err
+	return RunResult{Output: output}, err
 }
 
 func (r *SandboxCLIRunner) buildCommand(prompt, systemPrompt string, streaming bool) []string {

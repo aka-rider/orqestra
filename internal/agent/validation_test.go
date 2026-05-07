@@ -13,10 +13,9 @@ func TestDeriveVerdict(t *testing.T) {
 		want   Verdict
 	}{
 		{"no issues", nil, VerdictPass},
-		{"info only", []Issue{{Severity: SeverityInfo}}, VerdictPass},
-		{"warning only", []Issue{{Severity: SeverityWarning}}, VerdictWarn},
-		{"error", []Issue{{Severity: SeverityError}}, VerdictFail},
-		{"error overrides warning", []Issue{{Severity: SeverityWarning}, {Severity: SeverityError}}, VerdictFail},
+		{"non-blocking only", []Issue{{Blocking: false, Message: "minor"}}, VerdictWarn},
+		{"blocking", []Issue{{Blocking: true, Message: "broken"}}, VerdictFail},
+		{"blocking overrides non-blocking", []Issue{{Blocking: false}, {Blocking: true}}, VerdictFail},
 	}
 
 	for _, tt := range tests {
@@ -35,7 +34,7 @@ func TestValidationReport_JSONRoundtrip(t *testing.T) {
 		Verdict:       VerdictWarn,
 		Summary:       "Minor issues",
 		Issues: []Issue{
-			{ID: "WARN_1", Severity: SeverityWarning, Message: "Could be better"},
+			{ID: "WARN_1", Blocking: false, Message: "Could be better"},
 		},
 		Suggestions: []string{"Add more tests"},
 	}
@@ -63,7 +62,7 @@ func TestFormatValidationFeedback(t *testing.T) {
 		Verdict: VerdictFail,
 		Summary: "Plan is incomplete",
 		Issues: []Issue{
-			{ID: "MISSING", Severity: SeverityError, Message: "no tests"},
+			{ID: "MISSING", Blocking: true, Message: "no tests"},
 		},
 		Suggestions: []string{"Add test steps"},
 	}
