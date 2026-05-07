@@ -104,6 +104,34 @@ func WithExtraArgs(args ...string) ClaudeCLIOption {
 	}
 }
 
+// WithNoTools disables all built-in and MCP tools, making the CLI a pure
+// text-in/text-out runner. This dramatically reduces input token count and
+// prevents the model from entering agentic tool-use mode.
+func WithNoTools() ClaudeCLIOption {
+	return WithExtraArgs("--tools", "", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`)
+}
+
+// WithMCPServers restricts which MCP servers start. Reads the user's MCP config
+// and passes only the named servers via --strict-mcp-config. Servers not in the
+// list never start and their tool definitions never reach the model.
+// An empty slice means no MCP servers (equivalent to WithNoTools for MCP).
+func WithMCPServers(names []string) ClaudeCLIOption {
+	mcpCfg := filterMCPConfig(names)
+	return WithExtraArgs("--strict-mcp-config", "--mcp-config", mcpCfg)
+}
+
+// WithAllowedTools restricts the CLI to only the specified tools.
+// Tool names support patterns (e.g. "mcp__context7__*", "Read", "Grep").
+func WithAllowedTools(tools []string) ClaudeCLIOption {
+	return WithExtraArgs("--allowed-tools", strings.Join(tools, ","))
+}
+
+// WithDisallowedTools blocks the specified tools from the CLI.
+// Tool names support patterns (e.g. "mcp__MCP_DOCKER__*", "Bash").
+func WithDisallowedTools(tools []string) ClaudeCLIOption {
+	return WithExtraArgs("--disallowed-tools", strings.Join(tools, ","))
+}
+
 // WithBinary overrides the claude binary path.
 func WithBinary(path string) ClaudeCLIOption {
 	return func(c *ClaudeCLI) {
@@ -159,6 +187,7 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 	}
 
 	var result string
+	var resultIsError bool
 	var usage *TokenUsage
 	scanner := bufio.NewScanner(cmdStdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large lines
@@ -189,6 +218,7 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 			}
 		case "result":
 			result = event.Result
+			resultIsError = event.IsError
 			if event.Usage != nil {
 				usage = &TokenUsage{
 					InputTokens:  event.Usage.InputTokens,
@@ -202,7 +232,15 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 
 	cmdErr := cmd.Wait()
 	if cmdErr != nil {
+		// If we got a result with is_error:true, surface that as the error message
+		if resultIsError && result != "" {
+			return RunResult{}, fmt.Errorf("claude CLI error: %s", result)
+		}
 		return RunResult{}, fmt.Errorf("claude CLI error: %w (stderr: %s)", cmdErr, stderr.String())
+	}
+
+	if resultIsError {
+		return RunResult{}, fmt.Errorf("claude CLI error: %s", result)
 	}
 
 	if result == "" {
@@ -217,6 +255,7 @@ type streamEvent struct {
 	Type    string          `json:"type"`
 	Subtype string          `json:"subtype,omitempty"`
 	Result  string          `json:"result,omitempty"`
+	IsError bool            `json:"is_error,omitempty"`
 	Delta   streamDeltaText `json:"delta,omitempty"`
 	Message json.RawMessage `json:"message,omitempty"`
 	Usage   *streamUsage    `json:"usage,omitempty"`
@@ -301,4 +340,45 @@ func (c *ClaudeCLI) buildEnv() []string {
 	return env
 }
 
+// filterMCPConfig reads the user's ~/.claude.json MCP server definitions and
+// returns a JSON string containing only the named servers. This is passed to
+// --mcp-config so only selected servers start, keeping token overhead minimal.
+func filterMCPConfig(names []string) string {
+	type mcpConfig struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
 
+	home, err := os.UserHomeDir()
+	if err != nil {
+		slog.Warn("cannot determine home dir for MCP config", "err", err)
+		return `{"mcpServers":{}}`
+	}
+
+	data, err := os.ReadFile(home + "/.claude.json")
+	if err != nil {
+		slog.Debug("no ~/.claude.json found, using empty MCP config")
+		return `{"mcpServers":{}}`
+	}
+
+	var cfg mcpConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		slog.Warn("failed to parse ~/.claude.json", "err", err)
+		return `{"mcpServers":{}}`
+	}
+
+	filtered := make(map[string]json.RawMessage, len(names))
+	for _, name := range names {
+		if server, ok := cfg.MCPServers[name]; ok {
+			filtered[name] = server
+		} else {
+			slog.Warn("MCP server not found in ~/.claude.json", "name", name)
+		}
+	}
+
+	result := mcpConfig{MCPServers: filtered}
+	out, err := json.Marshal(result)
+	if err != nil {
+		return `{"mcpServers":{}}`
+	}
+	return string(out)
+}

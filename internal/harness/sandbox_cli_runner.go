@@ -63,7 +63,7 @@ func (r *SandboxCLIRunner) buildCommand(prompt, systemPrompt string, streaming b
 		args = append(args, "--append-system-prompt", systemPrompt)
 	}
 	if streaming {
-		args = append(args, "--output-format", "stream-json")
+		args = append(args, "--output-format", "stream-json", "--verbose")
 	} else {
 		args = append(args, "--output-format", "json")
 	}

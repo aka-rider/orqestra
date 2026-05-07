@@ -28,3 +28,10 @@ sandbox:
 worker:
   timeout: 30m
   parallelism: 0
+
+gateway:
+  mcp_servers: []
+
+planner:
+  mcp_servers:
+    - MCP_DOCKER

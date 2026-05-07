@@ -61,15 +61,20 @@ type Config struct {
 }
 
 type PlannerConfig struct {
-	ModelRef     string   `yaml:"model_ref"`
-	SystemPrompt string   `yaml:"system_prompt"`
-	AllowedTools []string `yaml:"allowed_tools"`
+	ModelRef        string   `yaml:"model_ref"`
+	SystemPrompt    string   `yaml:"system_prompt"`
+	AllowedTools    []string `yaml:"allowed_tools"`
+	DisallowedTools []string `yaml:"disallowed_tools"`
+	MCPServers      *[]string `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
 }
 
 // ValidatorConfig is used for both plan and work validation.
 type ValidatorConfig struct {
-	ModelRef     string `yaml:"model_ref"`
-	SystemPrompt string `yaml:"system_prompt"`
+	ModelRef        string    `yaml:"model_ref"`
+	SystemPrompt    string    `yaml:"system_prompt"`
+	AllowedTools    []string  `yaml:"allowed_tools"`
+	DisallowedTools []string  `yaml:"disallowed_tools"`
+	MCPServers      *[]string `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
 }
 
 type WorkerConfig struct {
@@ -146,8 +151,11 @@ type PipelineConfig struct {
 
 // GatewayConfig configures the gateway evaluation layer.
 type GatewayConfig struct {
-	ModelRef     string `yaml:"model_ref"`
-	SystemPrompt string `yaml:"system_prompt"`
+	ModelRef        string    `yaml:"model_ref"`
+	SystemPrompt    string    `yaml:"system_prompt"`
+	AllowedTools    []string  `yaml:"allowed_tools"`
+	DisallowedTools []string  `yaml:"disallowed_tools"`
+	MCPServers      *[]string `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
 }
 
 // SandboxConfig configures macOS-native sandbox (sandbox-exec) agent sandboxing.
