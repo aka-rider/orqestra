@@ -42,4 +42,7 @@ var (
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("1")).
 			Bold(true)
+
+	streamStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("8"))
 )

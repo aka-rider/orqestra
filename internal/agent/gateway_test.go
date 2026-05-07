@@ -31,7 +31,7 @@ func TestGateway_AcceptClearPrompt(t *testing.T) {
 	}
 
 	gw := NewGateway(runner, &config.GatewayConfig{SystemPrompt: "test"})
-	result, err := gw.Evaluate(context.Background(), "Add token-bucket rate limiting to internal/api/gateway.go")
+	result, err := gw.Evaluate(context.Background(), "Add token-bucket rate limiting to internal/api/gateway.go", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestGateway_CoachVaguePrompt(t *testing.T) {
 	}
 
 	gw := NewGateway(runner, &config.GatewayConfig{SystemPrompt: "test"})
-	result, err := gw.Evaluate(context.Background(), "make it better")
+	result, err := gw.Evaluate(context.Background(), "make it better", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestGateway_NeverRejects(t *testing.T) {
 	}
 
 	gw := NewGateway(runner, &config.GatewayConfig{SystemPrompt: "test"})
-	_, err := gw.Evaluate(context.Background(), "build me a SaaS platform")
+	_, err := gw.Evaluate(context.Background(), "build me a SaaS platform", nil)
 	if err == nil {
 		t.Fatal("expected error for reject verdict (which is no longer valid), got nil")
 	}
@@ -88,7 +88,7 @@ func TestGateway_BriefAlwaysPopulated(t *testing.T) {
 	}
 
 	gw := NewGateway(runner, &config.GatewayConfig{SystemPrompt: "test"})
-	_, err := gw.Evaluate(context.Background(), "do a thing")
+	_, err := gw.Evaluate(context.Background(), "do a thing", nil)
 	if err == nil {
 		t.Fatal("expected error when brief.task is empty")
 	}
@@ -103,7 +103,7 @@ func TestGateway_PlannerQuestionIsQuestion(t *testing.T) {
 	}
 
 	gw := NewGateway(runner, &config.GatewayConfig{SystemPrompt: "test"})
-	result, err := gw.Evaluate(context.Background(), "add rate limiting")
+	result, err := gw.Evaluate(context.Background(), "add rate limiting", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestGateway_MaxThreeQuestions(t *testing.T) {
 	}
 
 	gw := NewGateway(runner, &config.GatewayConfig{SystemPrompt: "test"})
-	_, err := gw.Evaluate(context.Background(), "vague input")
+	_, err := gw.Evaluate(context.Background(), "vague input", nil)
 	if err == nil {
 		t.Fatal("expected error for more than 3 questions")
 	}
@@ -134,7 +134,7 @@ func TestGateway_InvalidJSON(t *testing.T) {
 	}
 
 	gw := NewGateway(runner, &config.GatewayConfig{SystemPrompt: "test"})
-	_, err := gw.Evaluate(context.Background(), "do something")
+	_, err := gw.Evaluate(context.Background(), "do something", nil)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
 	}
@@ -147,7 +147,7 @@ func TestGateway_StreamingParse(t *testing.T) {
 	}
 
 	gw := NewGateway(runner, &config.GatewayConfig{SystemPrompt: "test"})
-	result, err := gw.Evaluate(context.Background(), "refactor auth")
+	result, err := gw.Evaluate(context.Background(), "refactor auth", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestGateway_RunnerError(t *testing.T) {
 	}
 
 	gw := NewGateway(runner, &config.GatewayConfig{SystemPrompt: "test"})
-	_, err := gw.Evaluate(context.Background(), "do something")
+	_, err := gw.Evaluate(context.Background(), "do something", nil)
 	if err == nil {
 		t.Fatal("expected error when runner fails, got nil")
 	}
@@ -177,7 +177,7 @@ func TestGateway_CoachRequiresQuestions(t *testing.T) {
 	}
 
 	gw := NewGateway(runner, &config.GatewayConfig{SystemPrompt: "test"})
-	_, err := gw.Evaluate(context.Background(), "be vague")
+	_, err := gw.Evaluate(context.Background(), "be vague", nil)
 	if err == nil {
 		t.Fatal("expected error when coach verdict has no questions")
 	}
@@ -197,7 +197,7 @@ That should cover it!`,
 	}
 
 	gw := NewGateway(runner, &config.GatewayConfig{SystemPrompt: "test"})
-	result, err := gw.Evaluate(context.Background(), "add a comment")
+	result, err := gw.Evaluate(context.Background(), "add a comment", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

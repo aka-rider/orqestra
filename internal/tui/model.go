@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
@@ -69,6 +70,9 @@ type Model struct {
 	hasQA         bool
 	lastErr       error
 
+	// Streaming output — shared buffer polled on tick, not via channel events
+	streamBuf *orchestrator.StreamBuffer
+
 	// Input state
 	prompt       textarea.Model
 	answerFields []textarea.Model
@@ -112,6 +116,17 @@ func (m Model) Init() tea.Cmd {
 	return textarea.Blink
 }
 
+const (
+	tickInterval = time.Second
+)
+
+// tickCmd returns a tea.Cmd that fires a tickMsg after tickInterval.
+func tickCmd() tea.Cmd {
+	return tea.Tick(tickInterval, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
+
 // waitForEvent returns a tea.Cmd that waits for the next pipeline event.
 func waitForEvent(events <-chan orchestrator.Event) tea.Cmd {
 	return func() tea.Msg {
@@ -137,6 +152,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tickMsg:
+		// Tick only matters during pipeline execution — triggers View refresh.
+		if m.state == StatePipeline {
+			return m, tickCmd()
+		}
+		return m, nil
 
 	case OrchestratorEventMsg:
 		return m.handleOrchestratorEvent(msg.Event)
@@ -569,8 +591,10 @@ func (m *Model) startPipeline(prompt string, skipGateway bool) tea.Cmd {
 	})
 	m.events = channels.Events
 	m.decisions = channels.Decisions
+	m.streamBuf = channels.Stream
 
-	return waitForEvent(channels.Events)
+	// Start event listener + tick timer concurrently
+	return tea.Batch(waitForEvent(channels.Events), tickCmd())
 }
 
 // View renders the current screen.
@@ -676,10 +700,10 @@ func (m Model) viewPromptScreen() string {
 		if i < len(sidebarLines) {
 			sl = sidebarLines[i]
 		}
-		// Pad content to width
-		clRunes := []rune(cl)
-		if len(clRunes) < contentWidth {
-			cl = cl + strings.Repeat(" ", contentWidth-len(clRunes))
+		// Pad content to width using visual width (handles ANSI escapes)
+		visW := lipgloss.Width(cl)
+		if visW < contentWidth {
+			cl = cl + strings.Repeat(" ", contentWidth-visW)
 		}
 		body.WriteString(fmt.Sprintf("%s│%s\n", cl, sl))
 	}
@@ -774,10 +798,10 @@ func (m Model) viewPipelineScreen() string {
 		if i < len(sidebarLines) {
 			sl = sidebarLines[i]
 		}
-		// Pad content to width using rune count
-		clRunes := []rune(cl)
-		if len(clRunes) < contentWidth {
-			cl = cl + strings.Repeat(" ", contentWidth-len(clRunes))
+		// Pad content to width using visual width (handles ANSI escapes)
+		visW := lipgloss.Width(cl)
+		if visW < contentWidth {
+			cl = cl + strings.Repeat(" ", contentWidth-visW)
 		}
 		body.WriteString(fmt.Sprintf("%s│%s\n", cl, sl))
 	}
@@ -839,12 +863,46 @@ func (m Model) viewContent(width int) string {
 	return ""
 }
 
-func (m Model) viewStreaming(_ int) string {
+func (m Model) viewStreaming(width int) string {
 	var b strings.Builder
 	if m.goal != "" {
-		b.WriteString(fmt.Sprintf(" Goal: %s\n\n", goalStyle.Render(m.goal)))
+		b.WriteString(fmt.Sprintf(" Goal: %s\n", goalStyle.Render(m.goal)))
 	}
-	b.WriteString(fmt.Sprintf(" Phase: %s\n", m.phase))
+
+	var streamAgent string
+	var streamLines []string
+	if m.streamBuf != nil {
+		streamAgent, streamLines = m.streamBuf.Snapshot()
+	}
+
+	b.WriteString(fmt.Sprintf(" Phase: %s", m.phase))
+	if streamAgent != "" {
+		b.WriteString(fmt.Sprintf("  (%s)", streamAgent))
+	}
+	b.WriteString("\n")
+
+	if len(streamLines) > 0 {
+		b.WriteString(dividerStyle.Render(strings.Repeat("─", width-2)))
+		b.WriteString("\n")
+		// Show tail of stream output that fits in available height
+		maxVisible := m.height - 10
+		if maxVisible < 4 {
+			maxVisible = 4
+		}
+		start := 0
+		if len(streamLines) > maxVisible {
+			start = len(streamLines) - maxVisible
+		}
+		for _, line := range streamLines[start:] {
+			// Truncate long lines to content width
+			if len(line) > width-2 {
+				line = line[:width-2]
+			}
+			b.WriteString(" ")
+			b.WriteString(streamStyle.Render(line))
+			b.WriteString("\n")
+		}
+	}
 	return b.String()
 }
 

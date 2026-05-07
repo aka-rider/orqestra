@@ -62,8 +62,11 @@ func NewGateway(runner harness.CLIRunner, cfg *config.GatewayConfig) *Gateway {
 }
 
 // Evaluate sends the raw prompt to the LLM and parses the structured response.
-func (g *Gateway) Evaluate(ctx context.Context, rawPrompt string) (GatewayResult, error) {
-	result, err := g.runner.RunStreaming(ctx, rawPrompt, g.cfg.SystemPrompt, io.Discard)
+func (g *Gateway) Evaluate(ctx context.Context, rawPrompt string, stdout io.Writer) (GatewayResult, error) {
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	result, err := g.runner.RunStreaming(ctx, rawPrompt, g.cfg.SystemPrompt, stdout)
 	if err != nil {
 		return GatewayResult{}, fmt.Errorf("gateway evaluation failed: %w", err)
 	}

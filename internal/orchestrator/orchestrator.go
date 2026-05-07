@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -15,6 +14,58 @@ import (
 	"github.com/xiii/orqestra/internal/harness"
 )
 
+// StreamBuffer is a concurrent-safe line buffer shared between the orchestrator
+// (writer) and the TUI (reader). The TUI polls it on tick to avoid channel
+// backpressure that would block the subprocess.
+type StreamBuffer struct {
+	mu       sync.Mutex
+	lines    []string
+	agentID  string
+	maxLines int
+}
+
+// NewStreamBuffer creates a StreamBuffer with the given line capacity.
+func NewStreamBuffer(maxLines int) *StreamBuffer {
+	if maxLines <= 0 {
+		maxLines = 200
+	}
+	return &StreamBuffer{maxLines: maxLines}
+}
+
+// SetAgent resets the buffer for a new active agent.
+func (sb *StreamBuffer) SetAgent(id string) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	sb.agentID = id
+	sb.lines = nil
+}
+
+// Append adds text to the buffer, splitting on newlines.
+func (sb *StreamBuffer) Append(text string) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	parts := strings.Split(text, "\n")
+	for _, line := range parts {
+		// Merge consecutive blank lines
+		if line == "" && len(sb.lines) > 0 && sb.lines[len(sb.lines)-1] == "" {
+			continue
+		}
+		sb.lines = append(sb.lines, line)
+	}
+	if len(sb.lines) > sb.maxLines {
+		sb.lines = sb.lines[len(sb.lines)-sb.maxLines:]
+	}
+}
+
+// Snapshot returns the current agent ID and a copy of buffered lines.
+func (sb *StreamBuffer) Snapshot() (agentID string, lines []string) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	cp := make([]string, len(sb.lines))
+	copy(cp, sb.lines)
+	return sb.agentID, cp
+}
+
 // EventType classifies orchestrator events emitted to the TUI.
 type EventType int
 
@@ -24,6 +75,7 @@ const (
 	EventAgentDone
 	EventAgentFailed
 	EventAgentCancelled
+	EventAgentOutput
 	EventPlanReady
 	EventValidationDone
 	EventQADone
@@ -96,6 +148,7 @@ type Event struct {
 	HasQA            bool
 	Gate             GateRequest
 	WorkOutput       string
+	OutputChunk      string // text fragment for EventAgentOutput
 	Err              error
 
 	// Token usage from the agent's RunResult. Set on EventAgentDone.
@@ -156,6 +209,7 @@ type Engine struct {
 type RunChannels struct {
 	Events    <-chan Event
 	Decisions chan<- Decision
+	Stream    *StreamBuffer // shared output buffer, polled by TUI on tick
 }
 
 // Start launches the pipeline in a goroutine. Returns channels immediately.
@@ -164,13 +218,14 @@ type RunChannels struct {
 func (e *Engine) Start(ctx context.Context, input Input) RunChannels {
 	events := make(chan Event, 16)
 	decisions := make(chan Decision, 1)
+	stream := NewStreamBuffer(200)
 
 	go func() {
 		defer close(events)
-		e.run(ctx, input, events, decisions)
+		e.run(ctx, input, events, decisions, stream)
 	}()
 
-	return RunChannels{Events: events, Decisions: decisions}
+	return RunChannels{Events: events, Decisions: decisions, Stream: stream}
 }
 
 // Run executes the full pipeline synchronously (legacy callback API).
@@ -210,7 +265,7 @@ func (e *Engine) Run(ctx context.Context, input Input, emit func(Event)) (Result
 
 const maxCoachingRounds = 3
 
-func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, decisions <-chan Decision) {
+func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, decisions <-chan Decision, stream *StreamBuffer) {
 	emit := func(ev Event) {
 		select {
 		case events <- ev:
@@ -237,12 +292,13 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 	} else {
 		emit(Event{Type: EventPhaseChange, Phase: PhaseGateway})
 		emit(Event{Type: EventAgentStarted, AgentID: "gateway"})
+		stream.SetAgent("gateway")
 
 		gw := agent.NewGateway(e.Runners.Gateway, &e.Config.Gateway)
 		prompt := input.Prompt
 
 		for round := 0; round < maxCoachingRounds; round++ {
-			gwResult, err := gw.Evaluate(ctx, prompt)
+			gwResult, err := gw.Evaluate(ctx, prompt, &streamWriter{buf: stream})
 			if err != nil {
 				emit(Event{Type: EventAgentFailed, AgentID: "gateway", Err: err})
 				emit(Event{Type: EventError, Err: err})
@@ -304,9 +360,10 @@ plan:
 	// --- Planning ---
 	emit(Event{Type: EventPhaseChange, Phase: PhasePlanning})
 	emit(Event{Type: EventAgentStarted, AgentID: "planner"})
+	stream.SetAgent("planner")
 
 	planner := agent.NewPlanner(e.Runners.Planner, &e.Config.Planner)
-	planOutput, err := planner.Plan(ctx, plannerInput)
+	planOutput, err := planner.PlanStreaming(ctx, plannerInput, &streamWriter{buf: stream})
 	if err != nil {
 		emit(Event{Type: EventAgentFailed, AgentID: "planner", Err: err})
 		emit(Event{Type: EventError, Err: fmt.Errorf("planning: %w", err)})
@@ -388,7 +445,7 @@ plan:
 	// --- Worker Execution ---
 	emit(Event{Type: EventPhaseChange, Phase: PhaseExecuting})
 
-	workOutput, execErr := e.executeWorkerWaves(ctx, spec, projectPlan, emit)
+	workOutput, execErr := e.executeWorkerWaves(ctx, spec, projectPlan, emit, stream)
 	if execErr != nil {
 		emit(Event{Type: EventAgentFailed, AgentID: "worker", Err: execErr})
 		emit(Event{Type: EventError, Err: execErr})
@@ -445,11 +502,12 @@ func incorporateAnswers(prompt string, gwResult agent.GatewayResult, answers []G
 }
 
 // executeWorkerWaves runs work packages in dependency waves with config-controlled concurrency.
-func (e *Engine) executeWorkerWaves(ctx context.Context, spec agent.Specification, projectPlan *agent.ProjectPlan, emit func(Event)) (string, error) {
+func (e *Engine) executeWorkerWaves(ctx context.Context, spec agent.Specification, projectPlan *agent.ProjectPlan, emit func(Event), stream *StreamBuffer) (string, error) {
 	if projectPlan == nil || len(projectPlan.Packages) == 0 {
 		// Single execution
 		emit(Event{Type: EventAgentStarted, AgentID: "worker"})
-		result, err := e.Runners.Worker.RunStreaming(ctx, agent.BuildExecutionPrompt(spec), "", io.Discard)
+		stream.SetAgent("worker")
+		result, err := e.Runners.Worker.RunStreaming(ctx, agent.BuildExecutionPrompt(spec), "", &streamWriter{buf: stream})
 		if err != nil {
 			return "", err
 		}
@@ -472,7 +530,8 @@ func (e *Engine) executeWorkerWaves(ctx context.Context, spec agent.Specificatio
 			for _, pkg := range wave {
 				wSpec := pkg.ToSpecification(spec)
 				emit(Event{Type: EventAgentStarted, AgentID: pkg.ID})
-				res, err := e.Runners.Worker.RunStreaming(ctx, agent.BuildExecutionPrompt(wSpec), "", io.Discard)
+				stream.SetAgent(pkg.ID)
+				res, err := e.Runners.Worker.RunStreaming(ctx, agent.BuildExecutionPrompt(wSpec), "", &streamWriter{buf: stream})
 				if err != nil {
 					return allOutput.String(), fmt.Errorf("worker %q: %w", pkg.ID, err)
 				}
@@ -500,7 +559,8 @@ func (e *Engine) executeWorkerWaves(ctx context.Context, spec agent.Specificatio
 					defer func() { <-sem }()
 					wSpec := wp.ToSpecification(spec)
 					emit(Event{Type: EventAgentStarted, AgentID: wp.ID})
-					res, err := e.Runners.Worker.RunStreaming(ctx, agent.BuildExecutionPrompt(wSpec), "", io.Discard)
+					stream.SetAgent(wp.ID)
+					res, err := e.Runners.Worker.RunStreaming(ctx, agent.BuildExecutionPrompt(wSpec), "", &streamWriter{buf: stream})
 					if err != nil {
 						results <- pkgResult{id: wp.ID, err: fmt.Errorf("worker %q: %w", wp.ID, err)}
 						return
@@ -567,4 +627,17 @@ func usageOut(u *harness.TokenUsage) int64 {
 		return 0
 	}
 	return u.OutputTokens
+}
+
+// streamWriter implements io.Writer by appending to a StreamBuffer.
+// Unlike channel-based approaches, this never blocks the subprocess.
+type streamWriter struct {
+	buf *StreamBuffer
+}
+
+func (w *streamWriter) Write(p []byte) (int, error) {
+	if len(p) > 0 {
+		w.buf.Append(string(p))
+	}
+	return len(p), nil
 }

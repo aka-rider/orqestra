@@ -665,3 +665,89 @@ func TestFormatTokens(t *testing.T) {
 		}
 	}
 }
+
+func TestTUI_TickRefreshesView(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.content = ContentStreaming
+	m.goal = "test tick"
+
+	// tickMsg should return another tick command during pipeline
+	result, cmd := m.Update(tickMsg(time.Now()))
+	model := result.(Model)
+
+	if model.state != StatePipeline {
+		t.Errorf("expected StatePipeline, got %d", model.state)
+	}
+	if cmd == nil {
+		t.Error("expected tick to return another tick command during pipeline")
+	}
+}
+
+func TestTUI_TickStopsAfterPrompt(t *testing.T) {
+	m := testModel()
+	m.state = StatePrompt
+
+	// tickMsg should not schedule another tick when not in pipeline
+	_, cmd := m.Update(tickMsg(time.Now()))
+	if cmd != nil {
+		t.Error("expected no tick command when not in pipeline state")
+	}
+}
+
+func TestTUI_StreamingOutput(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.content = ContentStreaming
+	m.goal = "stream test"
+	m.width = 120
+	m.height = 40
+	m.events = make(chan orchestrator.Event, 5)
+
+	// Create a shared stream buffer (like the orchestrator would)
+	stream := orchestrator.NewStreamBuffer(200)
+	m.streamBuf = stream
+
+	// Simulate agent start + streaming output via the shared buffer
+	stream.SetAgent("gateway")
+	stream.Append("Analyzing prompt...\nProcessing request...")
+
+	// Verify the view renders the streamed content
+	view := m.View()
+	if !strings.Contains(view, "Analyzing prompt") {
+		t.Error("expected streaming output to appear in view")
+	}
+	if !strings.Contains(view, "Processing request") {
+		t.Error("expected second line of streaming output in view")
+	}
+	if !strings.Contains(view, "gateway") {
+		t.Error("expected agent name in streaming view")
+	}
+}
+
+func TestTUI_StreamingOutputReset(t *testing.T) {
+	stream := orchestrator.NewStreamBuffer(200)
+
+	// Simulate first agent
+	stream.SetAgent("gateway")
+	stream.Append("gateway output line")
+
+	agentID, lines := stream.Snapshot()
+	if agentID != "gateway" {
+		t.Errorf("expected agent 'gateway', got %q", agentID)
+	}
+	if len(lines) == 0 {
+		t.Fatal("expected stream lines from gateway")
+	}
+
+	// Simulate second agent — buffer should reset
+	stream.SetAgent("planner")
+
+	agentID2, lines2 := stream.Snapshot()
+	if agentID2 != "planner" {
+		t.Errorf("expected agent 'planner', got %q", agentID2)
+	}
+	if len(lines2) != 0 {
+		t.Errorf("expected stream buffer cleared on new agent, got %d lines", len(lines2))
+	}
+}
