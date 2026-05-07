@@ -21,8 +21,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.QA.ModelRef != "small" {
 		t.Errorf("qa model_ref = %q, want %q", cfg.QA.ModelRef, "small")
 	}
-	if cfg.Intent.ModelRef != "x-small" {
-		t.Errorf("intent model_ref = %q, want %q", cfg.Intent.ModelRef, "x-small")
+	if cfg.Gateway.ModelRef != "x-small" {
+		t.Errorf("gateway model_ref = %q, want %q", cfg.Gateway.ModelRef, "x-small")
 	}
 	if cfg.Retry.PlannerAttempts < 1 {
 		t.Error("planner attempts should be at least 1")

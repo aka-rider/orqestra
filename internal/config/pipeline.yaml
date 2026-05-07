@@ -242,7 +242,7 @@ qa:
     Judge only what is shown in the execution output and command results. Do not
     speculate about files, tests, commands, or repo state you were not shown.
 
-intent:
+gateway:
   model_ref: x-small
   system_prompt: |
     Classify whether the user's prompt is ready for Orqestra's expensive planner.

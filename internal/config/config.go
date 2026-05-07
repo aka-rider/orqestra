@@ -25,10 +25,11 @@ type ProviderConfig struct {
 
 // ModelConfig references a provider and model name.
 type ModelConfig struct {
-	Provider   string `yaml:"provider"`
-	Model      string `yaml:"model"`
-	Binary     string `yaml:"binary"`
-	TokenLimit string `yaml:"token_limit"` // e.g. "300K", "1M", "1.5M", "unlimited", or ""
+	Provider      string `yaml:"provider"`
+	Model         string `yaml:"model"`
+	Binary        string `yaml:"binary"`
+	TokenLimit    string `yaml:"token_limit"`    // e.g. "300K", "1M", "1.5M", "unlimited", or ""
+	ContextWindow int64  `yaml:"context_window"` // context window size in tokens
 }
 
 // ResolvedModel is a fully-resolved model with all connection details.
@@ -47,6 +48,7 @@ type ModelRuntimeOptions struct {
 type Config struct {
 	Providers      map[string]ProviderConfig `yaml:"providers"`
 	Models         map[string]ModelConfig    `yaml:"models"`
+	Pipeline       PipelineConfig            `yaml:"pipeline"`
 	Planner        PlannerConfig             `yaml:"planner"`
 	Validator      ValidatorConfig           `yaml:"validator"`
 	Worker         WorkerConfig              `yaml:"worker"`
@@ -54,7 +56,7 @@ type Config struct {
 	ProjectManager ProjectManagerConfig      `yaml:"project_manager"`
 	Retry          RetryConfig               `yaml:"retry"`
 	ExecutionGraph ExecutionGraphConfig      `yaml:"execution_graph"`
-	Intent         IntentConfig              `yaml:"intent"`
+	Gateway        GatewayConfig             `yaml:"gateway"`
 	Sandbox        SandboxConfig             `yaml:"sandbox"`
 }
 
@@ -71,16 +73,18 @@ type ValidatorConfig struct {
 }
 
 type WorkerConfig struct {
-	ModelRef       string   `yaml:"model_ref"`
-	AllowedTools   []string `yaml:"allowed_tools"`
-	PermissionMode string   `yaml:"permission_mode"`
-	Timeout        Duration `yaml:"timeout"`
+	ModelRef        string   `yaml:"model_ref"`
+	AllowedTools    []string `yaml:"allowed_tools"`
+	DisallowedTools []string `yaml:"disallowed_tools"`
+	PermissionMode  string   `yaml:"permission_mode"`
+	Timeout         Duration `yaml:"timeout"`
+	MaxTurns        int      `yaml:"max_turns"`
 }
 
 type RetryConfig struct {
 	PlannerAttempts      int `yaml:"planner_attempts"`
 	PlanValidationRepair int `yaml:"plan_validation_repair"`
-	QARepair int `yaml:"qa_repair"`
+	QARepair             int `yaml:"qa_repair"`
 }
 
 // Duration wraps time.Duration for YAML unmarshaling.
@@ -132,8 +136,15 @@ type ProjectManagerConfig struct {
 	SystemPrompt string `yaml:"system_prompt"`
 }
 
-// IntentConfig configures the intent recognition layer.
-type IntentConfig struct {
+// PipelineConfig controls global pipeline behavior.
+type PipelineConfig struct {
+	TokenBudget       int64  `yaml:"token_budget"`       // total token budget for a run
+	RunDir            string `yaml:"run_dir"`            // base directory for run artifacts
+	WorkerConcurrency int    `yaml:"worker_concurrency"` // max concurrent workers
+}
+
+// GatewayConfig configures the gateway evaluation layer.
+type GatewayConfig struct {
 	ModelRef     string `yaml:"model_ref"`
 	SystemPrompt string `yaml:"system_prompt"`
 }
@@ -252,9 +263,9 @@ func (c *Config) validate() error {
 			return fmt.Errorf("%s.model_ref %q not found in models (define model tier %q in your provider config)", ref.role, ref.ref, ref.ref)
 		}
 	}
-	if c.Intent.ModelRef != "" {
-		if _, ok := c.Models[c.Intent.ModelRef]; !ok {
-			return fmt.Errorf("intent.model_ref %q not found in models (define model tier %q in your provider config)", c.Intent.ModelRef, c.Intent.ModelRef)
+	if c.Gateway.ModelRef != "" {
+		if _, ok := c.Models[c.Gateway.ModelRef]; !ok {
+			return fmt.Errorf("gateway.model_ref %q not found in models (define model tier %q in your provider config)", c.Gateway.ModelRef, c.Gateway.ModelRef)
 		}
 	}
 	if c.ProjectManager.ModelRef != "" {

@@ -18,6 +18,7 @@ type QAInput struct {
 	Spec               Specification
 	WorkOutput         string
 	ValidationCommands []ValidationCommand
+	ExpectedArtifacts  []string
 }
 
 // validationCommandResult captures the outcome of a single validation command.

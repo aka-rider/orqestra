@@ -46,16 +46,16 @@ func TestPlan_Success(t *testing.T) {
 	}
 
 	p := NewPlanner(mock, cfg)
-	spec, err := p.Plan(context.Background(), "build a REST API")
+	po, err := p.Plan(context.Background(), "build a REST API")
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if spec.Goal != "Build a REST API" {
-		t.Errorf("goal = %q, want %q", spec.Goal, "Build a REST API")
+	if po.Spec.Goal != "Build a REST API" {
+		t.Errorf("goal = %q, want %q", po.Spec.Goal, "Build a REST API")
 	}
-	if len(spec.Steps) != 3 {
-		t.Errorf("steps = %d, want 3", len(spec.Steps))
+	if len(po.Spec.Steps) != 3 {
+		t.Errorf("steps = %d, want 3", len(po.Spec.Steps))
 	}
 }
 
@@ -71,13 +71,13 @@ func TestPlan_JsonEnvelope(t *testing.T) {
 
 	cfg := &config.PlannerConfig{ModelRef: "test-model", SystemPrompt: "Plan."}
 	p := NewPlanner(mock, cfg)
-	spec, err := p.Plan(context.Background(), "refactor auth")
+	po, err := p.Plan(context.Background(), "refactor auth")
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if spec.Goal != "Refactor auth" {
-		t.Errorf("goal = %q, want %q", spec.Goal, "Refactor auth")
+	if po.Spec.Goal != "Refactor auth" {
+		t.Errorf("goal = %q, want %q", po.Spec.Goal, "Refactor auth")
 	}
 }
 
@@ -119,13 +119,13 @@ func TestPlan_MarkdownFencedJSON(t *testing.T) {
 
 	cfg := &config.PlannerConfig{ModelRef: "test-model", SystemPrompt: "Plan."}
 	p := NewPlanner(mock, cfg)
-	spec, err := p.Plan(context.Background(), "deploy")
+	po, err := p.Plan(context.Background(), "deploy")
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if spec.Goal != "Deploy app" {
-		t.Errorf("goal = %q, want %q", spec.Goal, "Deploy app")
+	if po.Spec.Goal != "Deploy app" {
+		t.Errorf("goal = %q, want %q", po.Spec.Goal, "Deploy app")
 	}
 }
 

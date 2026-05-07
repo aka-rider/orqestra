@@ -41,5 +41,5 @@ The PM (`agent.ProjectManager`) parses specifications (`agent.Specification`) in
 - **PlanValidator** (`agent.PlanValidator`): Phase 1 ensures structural existence (goal, acceptance criteria). Phase 2 offloads to LLM inference to score logic flow.
 - **WorkValidator** (`agent.Gate`): Bounded severely. When executing tasks against shell commands internally (e.g. assessing completion), strictly abide by the internal `allowlist` (e.g., `go`, `make`, `pytest`, `grep`).
 - **Artifact Frontmatter**: Specifications passed over session networks MUST contain verifiable YAML frontmatter `ArtifactMeta` to cryptographically prove input hash alignments.
-- **Type ownership**: All agent domain types (`Specification`, `ValidationReport`, `ProjectPlan`, `WorkPackage`, `Intent`) live in `internal/agent/`. The `plan/` package is a markdown persistence adapter that imports `agent.Specification` for conversion.
+- **Type ownership**: All agent domain types (`Specification`, `ValidationReport`, `ProjectPlan`, `WorkPackage`, `GatewayResult`) live in `internal/agent/`. The `plan/` package is a markdown persistence adapter that imports `agent.Specification` for conversion.
 </validation_boundaries>

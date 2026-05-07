@@ -22,47 +22,27 @@ func NewPlanner(runner harness.CLIRunner, cfg *config.PlannerConfig) *Planner {
 	return &Planner{runner: runner, cfg: cfg}
 }
 
-// Plan sends the user prompt to claude CLI and parses the structured specification.
-func (p *Planner) Plan(ctx context.Context, prompt string) (Specification, error) {
+// Plan sends the user prompt to claude CLI and parses the structured plan output.
+func (p *Planner) Plan(ctx context.Context, prompt string) (PlanOutput, error) {
 	result, err := p.runner.RunPrint(ctx, prompt, p.cfg.SystemPrompt)
 	if err != nil {
-		return Specification{}, err
+		return PlanOutput{}, err
 	}
-
-	// claude --output-format json wraps output in {"type":"result","result":"..."}
-	content := strings.TrimSpace(result.Output)
-	content = stripCodeFences(content)
-	var envelope struct {
-		Result string `json:"result"`
-	}
-	if err := json.Unmarshal([]byte(content), &envelope); err == nil && envelope.Result != "" {
-		content = stripCodeFences(strings.TrimSpace(envelope.Result))
-	}
-
-	var spec Specification
-	if err := json.Unmarshal([]byte(content), &spec); err != nil {
-		return Specification{}, fmt.Errorf("parse specification JSON: %w (raw: %s)", err, content)
-	}
-
-	if spec.Goal == "" || len(spec.Steps) == 0 || len(spec.Acceptance) == 0 {
-		return Specification{}, fmt.Errorf("incomplete specification: missing goal, steps, or acceptance criteria")
-	}
-
-	return spec, nil
+	return p.ParsePlanOutput(result.Output)
 }
 
 // PlanStreaming uses RunStreaming and parses the accumulated output.
-func (p *Planner) PlanStreaming(ctx context.Context, prompt string, stdout io.Writer) (Specification, error) {
+func (p *Planner) PlanStreaming(ctx context.Context, prompt string, stdout io.Writer) (PlanOutput, error) {
 	result, err := p.runner.RunStreaming(ctx, prompt, p.cfg.SystemPrompt, stdout)
 	if err != nil {
-		return Specification{}, err
+		return PlanOutput{}, err
 	}
-	return p.ParseSpec(result.Output)
+	return p.ParsePlanOutput(result.Output)
 }
 
-// ParseSpec parses a raw claude response into a Specification.
+// ParsePlanOutput parses a raw claude response into a PlanOutput.
 // Exported for use by the TUI streaming flow.
-func (p *Planner) ParseSpec(raw string) (Specification, error) {
+func (p *Planner) ParsePlanOutput(raw string) (PlanOutput, error) {
 	content := strings.TrimSpace(raw)
 
 	// Strip markdown code fences if present
@@ -75,21 +55,32 @@ func (p *Planner) ParseSpec(raw string) (Specification, error) {
 		content = stripCodeFences(strings.TrimSpace(envelope.Result))
 	}
 
-	// First try direct unmarshal (steps as []string)
-	var spec Specification
-	if err := json.Unmarshal([]byte(content), &spec); err != nil {
-		// If steps are objects, parse with a flexible intermediate type
-		spec, err = parseFlexibleSpec(content)
-		if err != nil {
-			return Specification{}, fmt.Errorf("parse specification JSON: %w (raw: %s)", err, content)
+	// Parse the full PlanOutput (spec + pipeline metadata)
+	var po PlanOutput
+	if err := json.Unmarshal([]byte(content), &po); err != nil {
+		// If steps are objects, try flexible spec parsing
+		spec, specErr := parseFlexibleSpec(content)
+		if specErr != nil {
+			return PlanOutput{}, fmt.Errorf("parse plan output JSON: %w (raw: %s)", err, content)
 		}
+		po.Spec = spec
 	}
 
-	if spec.Goal == "" || len(spec.Steps) == 0 || len(spec.Acceptance) == 0 {
-		return Specification{}, fmt.Errorf("incomplete specification: missing goal, steps, or acceptance criteria")
+	if po.Spec.Goal == "" || len(po.Spec.Steps) == 0 || len(po.Spec.Acceptance) == 0 {
+		return PlanOutput{}, fmt.Errorf("incomplete specification: missing goal, steps, or acceptance criteria")
 	}
 
-	return spec, nil
+	return po, nil
+}
+
+// ParseSpec parses a raw claude response into a Specification.
+// Exported for backward compatibility.
+func (p *Planner) ParseSpec(raw string) (Specification, error) {
+	po, err := p.ParsePlanOutput(raw)
+	if err != nil {
+		return Specification{}, err
+	}
+	return po.Spec, nil
 }
 
 // parseFlexibleSpec handles LLM responses where steps are objects instead of strings.
