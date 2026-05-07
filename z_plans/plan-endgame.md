@@ -1,455 +1,142 @@
-# Plan: Orqestra End-to-End Interactive Pipeline (v2)
-
-**TL;DR**: Wire 4 sequential interactive Claude Code agents (intake → planner → validator → worker) through the TUI, each in its own tab, with artifact passing via session directory files, system prompts templated with absolute paths, and all agents interactive.
-
----
-
-## Current State (2026-05-06)
-
-**Done:**
-
-- `go build ./cmd/orqestra` ✓
-- `go test ./internal/tui/...` ✓
-- Junk files cleaned (test_keys.go, update_test.go, .orig, .rej)
-- `cmd/sandbox` fixed: `Foreground=true` + `Ctty` enables interactive TTY in sandbox
-
-**Proven working (cmd/sandbox):**
-
-```bash
-go run ./cmd/sandbox --workspace=$(pwd) \
-  --anthropic-base-url=http://192.168.50.212:11434 \
-  --anthropic-auth-token=dummy \
-  --anthropic-model=qwen3.6 \
-  --env=DISABLE_NON_ESSENTIAL_MODEL_CALLS=1 \
-  --env=CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-  -- claude
-```
-
-Result: Claude Code → `❯` prompt immediately. Responds to "say hello". No screens.
-
-**Remaining broken:**
-
-1. `tryLaunch` uses `*Model` receiver (compiles via internal address-taking but is technically wrong)
-2. Debug `/tmp/key.log` writes still in model.go and view_term.go
-3. Single-agent dead end: `IntakeCompleteMsg` → `StateDone`, no next phase
-4. `harness.BuildModelEnv` uses `ANTHROPIC_API_KEY` (triggers "custom API key" screen)
-
-**NOT broken (keep as-is):**
-
-- `--dangerously-skip-permissions` STAYS — required for autonomous agent operation (file edits, shell commands without per-action prompts). The seatbelt sandbox is the hard security boundary. On first launch, the user approves the workspace interactively via the intake tab. Subsequent agents (planner, validator, worker) inherit the workspace trust.
-
----
-
-## Phase 1: Fix Harness for Zero-Prompt Launch (PREREQUISITE)
-
-Two changes to eliminate Claude Code startup screens:
-
-### Step 1.1: Fix env in BuildModelEnv — no auth tokens
-
-`BuildModelEnv` must NOT emit `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. Claude Code uses existing OAuth/keychain auth (the sandbox allows `~/.claude` + XPC forwarding). Just set routing env:
-
-- `ANTHROPIC_BASE_URL` — redirects API calls to Ollama
-- `ANTHROPIC_MODEL` — model name at the endpoint
-- `ANTHROPIC_SMALL_FAST_MODEL` — for fast completions
-
-### Step 1.2: Remove hardcoded operational env vars from BuildModelEnv
-
-Remove `DISABLE_NON_ESSENTIAL_MODEL_CALLS=1` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` from `BuildModelEnv`. These are deployment-specific knobs that belong in `seatbelt.extra_env` or `--env` CLI flags, not hardcoded in the harness.
-
-### Acceptance criteria
-
-```bash
-# Non-interactive (regression):
-go run ./cmd/sandbox --workspace=$(pwd) \
-  --anthropic-base-url=http://192.168.50.212:11434 \
-  --anthropic-model=qwen36 \
-  --env=ANTHROPIC_SMALL_FAST_MODEL=qwen36 \
-  --env=DISABLE_NON_ESSENTIAL_MODEL_CALLS=0 \
-  --env=CLAUDE_CODE_ATTRIBUTION_HEADER=0 \
-  -- claude -p "say hello"
-# Expected: prints response, exit 0
-
-# Interactive:
-go run ./cmd/sandbox --workspace=$(pwd) \
-  --anthropic-base-url=http://192.168.50.212:11434 \
-  --anthropic-model=qwen36 \
-  --env=ANTHROPIC_SMALL_FAST_MODEL=qwen36 \
-  --env=DISABLE_NON_ESSENTIAL_MODEL_CALLS=0 \
-  --env=CLAUDE_CODE_ATTRIBUTION_HEADER=0 \
-  -- claude
-# Expected: Claude Code shows ❯ prompt within 3s. No dialog screens.
-# Auth: "Claude Team" (existing OAuth via keychain). Ollama ignores the auth header.
-```
-
-### Step 1.3: Remove debug logging
-
-Remove all `/tmp/key.log` writes from `model.go` and `view_term.go`. Remove `"os"` import if no longer needed.
-
-### Step 1.4: Fix tryLaunch receiver
-
-Convert `func (m *Model) tryLaunch() tea.Cmd` to value-return pattern: `func tryLaunch(m Model) (Model, tea.Cmd)`. Update callsites in `Update()` to use returned model. This is NOT cosmetic — pointer receiver in a Bubble Tea `Update` violates the Elm architecture contract. Mutations via `*Model` work today by accident (interface boxing), but are technically unsound.
-
-### Acceptance criteria
-
-```bash
-go build ./cmd/orqestra && go test ./internal/tui/...
-# Both must pass with zero errors
-```
-
----
-
-## Phase 2: Single Agent via TUI (orqestra launch → Claude Code ready)
-
-**Goal**: `./orqestra --config orqestra.local.yaml` starts the TUI, spawns Claude Code inside seatbelt sandbox via PTY, and the user sees Claude Code's `❯` prompt rendered in the VT emulator tab — ready for input.
-
-### Step 2.1: Apply harness changes and rebuild
-
-After Phase 1 changes, the launch chain becomes:
-
-1. `main()` → `config.Load("orqestra.local.yaml")`
-2. `detect.AllProfiles(home, "claude", cfg.Seatbelt)` → discovers `claude` binary + dylibs
-3. `runTUI()` → bubbletea starts → `WindowSizeMsg` + `setProgramMsg` → `tryLaunch` fires
-4. `go startInteractiveAgent("")` → closure builds:
-
-   ```
-   AgentSpec.Command = ["claude", "--dangerously-skip-permissions", "--append-system-prompt-file", "<session>/intake/agent.md"]
-   AgentSpec.Env includes: ANTHROPIC_BASE_URL, ANTHROPIC_MODEL
-   (plus any extra env from seatbelt.extra_env config)
-   ```
-
-5. `seatbeltRunner.RunInteractive()` → `seatbelt.New()` → SBPL → `StartNativePTY(cmd, cols, rows)`
-6. PTY output flows: `readLoop` → `OnOutput` → `PTYOutputMsg` → `vt.Write(data)` → renders
-
-### Step 2.2: Validate startup (no dialog screens)
-
-**Test scenario**: Launch orqestra. Within 5 seconds, the "Claude" tab must show Claude Code's banner and `❯` prompt. No intermediate screens.
-
-**What can go wrong and how to diagnose**:
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| Tab shows "⟳ Provisioning sandbox..." forever | `seatbeltRunner.RunInteractive()` failed, no `attachPTYMsg` sent | Check `m.logPanel` for error. Run `seatbelt-trace.sh` to trace SBPL denials |
-| Claude Code shows "Detected a custom API key" dialog | `ANTHROPIC_API_KEY` set in env | Verify `BuildModelEnv` emits no auth tokens |
-| Claude Code shows "WARNING: Bypass Permissions" dialog | First launch in this workspace — expected | User approves once; subsequent agents inherit trust |
-| Claude Code shows "Do you trust this folder?" | New directory never trusted before | Run `claude` once manually in that dir to accept; OR use `--bare` |
-| Tab shows garbled escape sequences | VT emulator doesn't support sequences Claude uses | Cosmetic only — not a blocker |
-| No output at all, PTY attached but blank | Claude Code process stopped (SIGTTOU) | PTY mode doesn't have this issue (PTY IS its own terminal). Only cmd/sandbox with raw TTY needs `Foreground=true` |
-| Claude exits immediately (PTYDoneMsg with exit code != 0) | SBPL denying access to needed paths | Run `scripts/seatbelt-trace.sh` → check sandbox violations |
-
-### Step 2.3: Validate input forwarding
-
-**Test scenario**: With Claude Code showing `❯`, type "say hello" and press Enter.
-
-**Expected**: Claude Code processes the message, shows a response, returns to `❯`.
-
-**What can go wrong**:
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| Characters don't appear in Claude Code | `keyToBytes` not converting keys, or `ptySession.Write` failing | Add debug log before Write, check `keyToBytes` handles runes |
-| Enter doesn't submit | `keyToBytes` returns `\n` instead of `\r` | Verify it returns `\r` for Enter |
-| Claude Code receives input but no response | Ollama not running or model not loaded | `curl http://192.168.50.212:11434/v1/models` |
-| Response renders garbled | VT emulator issue | Cosmetic, not blocking |
-
-### Step 2.4: Validate exit and BEL
-
-**Test scenario**: Type `/exit` in Claude Code prompt.
-
-**Expected**:
-
-1. Claude Code exits → PTY master gets EOF
-2. `readLoop` in `seatbelt_runner.go` returns → `npty.Wait()` returns exit code → `close(done)`
-3. `NativeLiveSession.Wait()` returns artifact (nil for intake) → goroutine sends `IntakeCompleteMsg`
-4. Model transitions to `StateDone` → tab shows "✓ Exited (code 0)"
-
-**BEL test**: During Claude Code's response (while it's "thinking"), if it emits `\x07`, the `scanForBEL` in `readLoop` fires `OnBEL` → `AttentionMsg` → tab shows ⚠. Verify by checking tab header during response generation.
-
-### Acceptance criteria (all must pass)
-
-1. `./orqestra --config orqestra.local.yaml` → TUI renders within 1s
-2. "Claude" tab shows Claude Code banner + `❯` within 5s (no dialog screens)
-3. Type "say hello" + Enter → response appears in VT emulator
-4. Type `/exit` → tab shows "✓ Exited (code 0)" → TUI shows "Agent session complete"
-
----
-
-## Phase 3: Multi-Agent Pipeline
-
-### Step 3.1: Replace PipelineFuncs.LaunchInteractive with LaunchAgent
-
-```go
-// messages.go
-type PipelineFuncs struct {
-    LaunchAgent func(ctx context.Context, role string, inputFiles map[string][]byte, send func(tea.Msg), tabIndex int) (PTYWriter, WaitFunc, error)
-    Send func(tea.Msg)
-}
-```
-
-### Step 3.2: Add pipeline state to Model
-
-```go
-// model.go
-type PipelinePhase int
-const (
-    PhaseIntake PipelinePhase = iota
-    PhasePlanner
-    PhaseValidator
-    PhaseWorker
-    PhaseDone
-)
-
-// Add to Model struct:
-phase     PipelinePhase
-artifacts map[string][]byte // keyed by role name
-```
-
-### Step 3.3: Add AgentCompleteMsg
-
-```go
-// messages.go
-type AgentCompleteMsg struct {
-    Role     string
-    TabIndex int
-    Artifact []byte
-    Err      error
-}
-```
-
-In `Update()`:
-
-```go
-case AgentCompleteMsg:
-    if msg.Err != nil {
-        m.err = msg.Err; m.state = StateDone; return m, nil
-    }
-    if m.artifacts == nil { m.artifacts = make(map[string][]byte) }
-    m.artifacts[msg.Role] = msg.Artifact
-    return m.advancePipeline()
-```
-
-### Step 3.4: Implement advancePipeline()
-
-```go
-func (m Model) advancePipeline() (tea.Model, tea.Cmd) {
-    switch m.phase {
-    case PhaseIntake:
-        m.phase = PhasePlanner
-        tabIdx := m.tabsView.AddTermTab("Planner")
-        m.tabsView.active = tabIdx
-        m.tabsView.termTabs[tabIdx].focused = true
-        inputs := map[string][]byte{"01.intake.json": m.artifacts["intake"]}
-        go m.startAgent("planner", tabIdx, inputs)
-        return m, nil
-    case PhasePlanner:
-        m.phase = PhaseValidator
-        tabIdx := m.tabsView.AddTermTab("Validator")
-        m.tabsView.active = tabIdx
-        m.tabsView.termTabs[tabIdx].focused = true
-        inputs := map[string][]byte{
-            "01.intake.json": m.artifacts["intake"],
-            "02.plan.json":   m.artifacts["planner"],
-        }
-        go m.startAgent("plan-validator", tabIdx, inputs)
-        return m, nil
-    case PhaseValidator:
-        var v struct{ Verdict string `json:"verdict"` }
-        if json.Unmarshal(m.artifacts["plan-validator"], &v) == nil && v.Verdict != "approved" {
-            m.err = fmt.Errorf("plan rejected"); m.state = StateDone; return m, nil
-        }
-        m.phase = PhaseWorker
-        tabIdx := m.tabsView.AddTermTab("Worker")
-        m.tabsView.active = tabIdx
-        m.tabsView.termTabs[tabIdx].focused = true
-        inputs := map[string][]byte{"02.plan.json": m.artifacts["planner"]}
-        go m.startAgent("worker", tabIdx, inputs)
-        return m, nil
-    case PhaseWorker:
-        m.phase = PhaseDone; m.state = StateDone; return m, nil
-    }
-    return m, nil
-}
-```
-
-**Why `go m.startAgent(...)` is safe**: The goroutine captures `m.program` (pointer to live `tea.Program`), `m.ctx` (context with cancel), and `m.pipeline.LaunchAgent` (closure). All are stable references set at startup. The goroutine only READS these and calls `p.Send()`. It never writes to model fields.
-
-### Step 3.5: Implement startAgent goroutine
-
-```go
-func (m Model) startAgent(role string, tabIdx int, inputFiles map[string][]byte) {
-    p := m.program
-    pty, wait, err := m.pipeline.LaunchAgent(m.ctx, role, inputFiles, p.Send, tabIdx)
-    if err != nil {
-        p.Send(AgentCompleteMsg{Role: role, TabIndex: tabIdx, Err: err})
-        return
-    }
-    p.Send(attachPTYMsg{tabIndex: tabIdx, pty: pty})
-    artifact, err := wait(m.ctx)
-    p.Send(AgentCompleteMsg{Role: role, TabIndex: tabIdx, Artifact: artifact, Err: err})
-}
-```
-
-### Step 3.6: Build the LaunchAgent closure in cmd/orqestra/main.go
-
-This is the critical wiring. **The key problem**: system prompts from `pipeline.yaml` reference Docker paths (`/workspace/.orqestra/agent/input/01.intake.json`). For seatbelt mode, the agent's CWD is `repoPath` and input files are at absolute paths under the session dir. The closure MUST template the system prompt with correct paths.
-
-```go
-func runTUI(_ context.Context, cfg *config.Config, seatbeltRunner *agent.SeatbeltRunner, noExecute, jsonOutput bool) {
-    repoPath, _ := os.Getwd()
-
-    // Shared session dir for all phases
-    sessDir, err := agent.NewSessionDir(repoPath, "pipeline")
-    if err != nil { /* fatal */ }
-
-    pipeline := tui.PipelineFuncs{
-        LaunchAgent: func(ctx context.Context, role string, inputFiles map[string][]byte, send func(tea.Msg), tabIndex int) (tui.PTYWriter, tui.WaitFunc, error) {
-
-            // 1. Resolve model for this role
-            var modelRef, basePrompt, outputFile string
-            switch agent.Role(role) {
-            case agent.RoleIntake:
-                modelRef = cfg.Intent.ModelRef
-                basePrompt = cfg.Intent.SystemPrompt
-                outputFile = "01.intake.json"
-            case agent.RolePlanner:
-                modelRef = cfg.Planner.ModelRef
-                basePrompt = cfg.Planner.SystemPrompt
-                outputFile = "02.plan.json"
-            case agent.RolePlanValidator:
-                modelRef = cfg.Validator.ModelRef
-                basePrompt = cfg.Validator.SystemPrompt
-                outputFile = "03.validation.json"
-            case agent.RoleWorker:
-                modelRef = cfg.Worker.ModelRef
-                basePrompt = cfg.Worker.SystemPrompt
-                outputFile = "" // worker modifies repo, no artifact
-            }
-
-            resolved, err := cfg.ResolveModel(modelRef)
-            if err != nil { return nil, nil, err }
-
-            // 2. Template the system prompt with actual paths
-            roleDir := filepath.Join(sessDir.Path, role)
-            inputDir := filepath.Join(roleDir, "input")
-            outputDir := filepath.Join(roleDir, "output")
-            systemPrompt := basePrompt + fmt.Sprintf(
-                "\n\n---\nRuntime paths:\n- Input directory: %s\n- Output directory: %s\n- Output file: %s/%s\n- Working directory (repo): %s\n",
-                inputDir, outputDir, outputDir, outputFile, repoPath,
-            )
-
-            // 3. Build AgentSpec
-            promptFile := filepath.Join(roleDir, "agent.md")
-            spec := agent.AgentSpec{
-                Role:         agent.Role(role),
-                ModelRef:     modelRef,
-                SystemPrompt: systemPrompt,
-                InputFiles:   inputFiles,
-                OutputFile:   outputFile,
-                Command:      harness.BuildPTYCommandWithPromptFile("", promptFile, true),
-                Env:          harness.BuildModelEnv(resolved, cfg.ResolveSmallModel()),
-                Interactive:  true,
-            }
-
-            // 4. Launch via seatbelt runner
-            liveSession, err := seatbeltRunner.RunInteractive(ctx, agent.RunConfig{
-                Spec:     spec,
-                Session:  sessDir,
-                RepoPath: repoPath,
-                Callbacks: agent.RunCallbacks{
-                    OnOutput: func(data []byte) { send(tui.PTYOutputMsg{TabIndex: tabIndex, Data: data}) },
-                    OnBEL:    func() { send(tui.AttentionMsg{TabIndex: tabIndex}) },
-                    OnDone:   func(exitCode int, exitErr error) {
-                        send(tui.PTYDoneMsg{TabIndex: tabIndex, ExitCode: exitCode, Err: exitErr})
-                    },
-                },
-            })
-            if err != nil { return nil, nil, err }
-
-            return liveSession, func(waitCtx context.Context) ([]byte, error) {
-                return liveSession.Wait(waitCtx)
-            }, nil
-        },
-    }
-
-    tuiErr := tui.Run(pipeline)
-    ...
-}
-```
-
-**Critical detail on OnDone ordering**: The `OnDone` callback fires INSIDE `NativeLiveSession.Wait()` (seatbelt_runner.go:72-78) BEFORE `Wait()` returns the artifact. So `PTYDoneMsg` arrives FIRST (updates tab status to "✓ Exited"), then `AgentCompleteMsg` arrives (advances pipeline). Correct ordering.
-
-**Critical detail on session dir reuse**: `sharedSessionDir` is created once. Each role gets subdirectory `<session>/<role>/` with `input/` and `output/`. `SeatbeltRunner.start()` creates these dirs from `cfg.Session.Path + "/" + spec.Role`. Artifacts accumulate across phases.
-
----
-
-## Phase 4: End-to-End Validation
-
-### Step 4.1: Run
-
-```bash
-make build && ./orqestra --config orqestra.local.yaml
-```
-
-### Step 4.2: Intake
-
-In the "Intake" tab, Claude Code starts. The intent system prompt classifies the user's message. Type: "Create a CONTRIBUTING.md with build instructions from the Makefile". Agent classifies as ACCEPT, writes structured JSON to `<session>/intake/output/01.intake.json`, exits.
-
-### Step 4.3: Planner
-
-"Planner" tab appears. Reads `01.intake.json`, generates engineering spec (goal, steps, acceptance), writes to `<session>/planner/output/02.plan.json`, exits.
-
-### Step 4.4: Validator
-
-"Validator" tab appears. Reads both artifacts, evaluates plan quality, presents to user. User interacts (approve/reject). Writes verdict JSON, exits.
-
-### Step 4.5: Worker
-
-"Worker" tab appears. Reads plan, executes (creates CONTRIBUTING.md in repo), exits. No artifact — the work IS the repo changes.
-
-### Step 4.6: Verify
-
-```bash
-git diff  # Shows CONTRIBUTING.md created by worker
-```
-
-### Verification gate
-
-`git diff` shows file changes made by the worker agent.
-
----
-
-## Files Modified
-
-| File                         | What changes                                                                                                                                                                                                             |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `cmd/sandbox/main.go`        | Add `Foreground=true` + `Ctty` for interactive TTY. Use `Wrap` + manual Start/Wait instead of `sb.Run()`. ✅ DONE                                                                                                         |
-| `internal/harness/claude_cli.go` | Keep `--dangerously-skip-permissions`. Remove `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` from `BuildModelEnv`. Remove hardcoded `DISABLE_NON_ESSENTIAL_MODEL_CALLS` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` (move to config-level extra_env). |
-| `internal/tui/model.go`      | Fix `tryLaunch` → free function returning (Model, tea.Cmd). Add `PipelinePhase`, `artifacts`. Replace `IntakeCompleteMsg` handler with `AgentCompleteMsg` → `advancePipeline()`. Add `startAgent`. Remove debug logging. |
-| `internal/tui/messages.go`   | Replace `LaunchInteractive` with `LaunchAgent` in `PipelineFuncs`. Add `AgentCompleteMsg`. Remove `IntakeCompleteMsg` (replaced).                                                                                        |
-| `internal/tui/view_term.go`  | Remove `/tmp/key.log` debug writes.                                                                                                                                                                                      |
-| `internal/tui/model_test.go` | Update to `LaunchAgent` signature. Fix type assertions if needed.                                                                                                                                                        |
-| `cmd/orqestra/main.go`       | Rewrite `runTUI()`: shared session dir, role-dispatching `LaunchAgent` closure with path templating.                                                                                                                     |
-
----
+# Orqestra Plan
+
+## ValidationVerdict
+
+fail
+
+## ValidationSummary
+
+The previous plan described the intended architecture, but a worker could not execute it without clarification because it referenced packages that do not exist in this checkout, mixed design notes with implementation steps, and kept execution-critical boundaries outside the worker-visible goal, steps, and acceptance fields.
+
+## ValidationIssues
+
+1. GOAL_CLARITY: The previous goal was spread across the title, TL;DR, and core insight instead of one concrete sentence.
+2. STEP_SPECIFICITY: Several implementation bullets used broad phrases such as "Implement", "Extend", and "Develop" without naming the exact current files to edit.
+3. WORKER_VISIBILITY: Critical boundaries, including "YAML controls parameters, not topology" and "execution-critical boundaries must appear in steps or acceptance", were present in prose but not repeated in worker-visible steps or acceptance.
+4. CONTRADICTIONS: The previous current-codebase section named split packages such as `internal/planner`, `internal/pm`, `internal/qa`, `internal/types`, and `internal/validator`, but this checkout currently stores those concepts under `internal/agent`.
+5. VALIDATION_COMMANDS: The previous verification section included useful commands, but it did not define them as a concrete command list for automated validation.
+
+## SchemaVersion
+
+1
+
+## Goal
+
+Implement Orqestra v3 as a programmatic Claude harness pipeline with typed stream events, a hardcoded Go orchestrator, and a Bubble Tea dashboard wired into `cmd/orqestra/main.go`.
+
+## Context
+
+The current repository uses `internal/agent` for planner, project manager, intent, plan validation, worker execution, QA validation, and session artifacts; `internal/harness/claude_cli.go` wraps Claude CLI calls; `internal/config/config.go` still exposes dynamic `ExecutionGraphConfig`; `cmd/orqestra/main.go` has headless command paths and a TUI stub; `go.mod` currently lacks Bubble Tea dependencies.
+
+## Steps
+
+1. Add `internal/harness/output.go` and `internal/harness/output_test.go` with `ParseLLMOutput(raw string, target any) error` that strips markdown fences, unwraps Claude JSON result envelopes, unmarshals into `target`, and returns wrapped parse errors containing the operation name and raw payload.
+2. Replace duplicated fence and envelope parsing in `internal/agent/planner.go`, `internal/agent/pm.go`, `internal/agent/qa.go`, and `internal/agent/intent.go` with calls to `harness.ParseLLMOutput`, while preserving `agent.Specification.UnmarshalJSON` and `parseFlexibleSpec` behavior for flexible planner output.
+3. Add `internal/harness/query.go` and `internal/harness/query_test.go` defining `QueryConfig`, `StreamEvent`, `TextDelta`, `ToolUse`, `ToolResult`, `UsageDelta`, `Result`, and `ErrorEvent`, and implement `Query(ctx, QueryConfig) (<-chan StreamEvent, error)` to launch `claude --print --output-format stream-json --verbose` with `--max-turns`, `--allowedTools`, `--disallowedTools`, `--continue`, `--system-prompt`, `WorkDir`, and `Env` from `QueryConfig`.
+4. Implement the stream-json scanner in `internal/harness/query.go` with a 1 MiB scanner buffer, JSON-line decoding for Claude `assistant`, `content_block_delta`, `tool_use`, `tool_result`, `result`, and `usage` shapes, and an `ErrorEvent` sent before channel close when the process, scanner, or JSON parsing fails.
+5. Add `internal/harness/ringbuf.go`, `internal/harness/ringbuf_test.go`, `internal/harness/stats.go`, and `internal/harness/stats_test.go` with a mutex-protected circular buffer for the last 1000 `StreamEvent` values and an `AgentStats` type that updates state, token counts, token rate, session ID, turn count, tool call summaries, and context percentage from `StreamEvent` values.
+6. Update `internal/config/config.go`, `internal/config/pipeline.yaml`, and `internal/config/config_test.go` by adding `PipelineConfig{TokenBudget int64, RunDir string, WorkerConcurrency int}`, adding `MaxTurns int` and `DisallowedTools []string` to worker-capable agent config, adding `ContextWindow int64` to `ModelConfig`, and removing `ExecutionGraphConfig`, `AgentNodeConfig`, `ValidatorNodeConfig`, and validation logic for `execution_graph`.
+7. Keep `internal/scheduler` files compiling but detach `cmd/orqestra/main.go` and `internal/config` from dynamic `execution_graph` configuration; do not delete `internal/scheduler` in this plan.
+8. Add `internal/agent/run_dir.go` and `internal/agent/run_dir_test.go` by renaming the behavior of `SessionDir` into `RunDir`, writing runs under `Config.Pipeline.RunDir`, and preserving artifact read and write error wrapping; update existing callers in `cmd/orqestra/main.go` to use `RunDir` names.
+9. Add `internal/orchestrator/orchestrator.go` and `internal/orchestrator/orchestrator_test.go` with a typed `Engine.Run(ctx, input, emit)` pipeline ordered as intent, planner, plan validator, project manager, dependency-wave workers, and QA gate, using `agent.Recognizer`, `agent.Planner`, `agent.PlanValidator`, `agent.ProjectManager`, `agent.WorkPackage.ToSpecification`, `agent.TopoWaves`, `harness.CLIRunner`, and `agent.Gate` from the current `internal/agent` package.
+10. In `internal/orchestrator/orchestrator.go`, run worker dependency waves with `errgroup.WithContext(ctx)`, copy each loop variable before `g.Go`, stop the pipeline on the first worker error returned by `g.Wait`, and return an error that includes the failed package ID.
+11. In `internal/orchestrator/orchestrator.go`, persist `specification.json`, `project_plan.json`, `validation_report.json`, `qa_report.json`, and `summary.json` into the `RunDir` using `encoding/json` after each stage completes; return the first write error with the artifact path in the error message.
+12. Add Bubble Tea dependencies by importing `github.com/charmbracelet/bubbletea`, `github.com/charmbracelet/bubbles/textarea`, and `github.com/charmbracelet/lipgloss` from new `internal/tui` files, then run `go mod tidy` to update `go.mod` and `go.sum`.
+13. Add `internal/tui/app.go`, `internal/tui/screens.go`, `internal/tui/styles.go`, and `internal/tui/app_test.go` implementing Bubble Tea screens for prompt entry, clarification, dashboard, agent detail, plan review, failure action, QA result, and completion summary with a fixed header, scrollable content area, fixed input line, and fixed key legend.
+14. Implement `internal/tui.Model.Update` handlers for `Enter`, arrow keys, `Space`, `Tab`, `Esc`, `S`, `F`, `Y`, `N`, `E`, `R`, `A`, `D`, `Q`, `Ctrl+C`, and `Ctrl+D`, including double `Ctrl+C` and double `Ctrl+D` exit confirmation text in the key legend.
+15. Add `cmd/tui_test/main.go` that constructs a mock `internal/tui` model, sends mock orchestrator events through a channel, and exercises screens 1 through 8 without calling Claude or touching the network.
+16. Update `cmd/orqestra/main.go` so the no-argument interactive path constructs the orchestrator engine, starts `orchestrator.Engine.Run` in a goroutine, sends orchestrator updates to the Bubble Tea program with `Program.Send`, and runs `tea.NewProgram(model, tea.WithAltScreen())` on the main goroutine.
+17. Keep the existing `cmd/orqestra/main.go` headless subcommands `plan`, `validate`, `exec`, `usage`, `reset-usage`, and `--plan` working with the new config fields and without requiring a TUI terminal.
+18. Update tests in `internal/agent`, `internal/config`, `internal/harness`, `internal/orchestrator`, `internal/tui`, and `cmd/orqestra` so they use current package paths under `internal/agent` and do not import nonexistent packages such as `internal/types`, `internal/planner`, `internal/pm`, `internal/qa`, or `internal/validator`.
+
+## Acceptance
+
+1. `internal/harness/output_test.go` verifies that `ParseLLMOutput` parses direct JSON, fenced JSON, and Claude `{"type":"result","result":"..."}` envelopes into `agent.Specification` and `agent.ValidationReport` values.
+2. `internal/harness/query_test.go` verifies that a hardcoded stream-json fixture emits `TextDelta`, `ToolUse`, `ToolResult`, `UsageDelta`, `Result`, and `ErrorEvent` values without invoking the real `claude` binary.
+3. `internal/harness/ringbuf_test.go` verifies that the ring buffer retains exactly the newest 1000 stream events after more than 1000 appends.
+4. `internal/harness/stats_test.go` verifies that `AgentStats` reports running, done, failed, token totals, token rate, context percentage from `ModelConfig.ContextWindow`, session ID, turn count, and tool summaries from stream events.
+5. `internal/config/config_test.go` verifies that `pipeline.token_budget`, `pipeline.run_dir`, `pipeline.worker_concurrency`, worker `max_turns`, worker `disallowed_tools`, and model `context_window` load from YAML and that an invalid `model_ref` returns an error during `config.Load`.
+6. `go test ./internal/config` passes without any references to `ExecutionGraphConfig`, `AgentNodeConfig`, `ValidatorNodeConfig`, or YAML key `execution_graph`.
+7. `internal/orchestrator/orchestrator_test.go` verifies that the engine runs intent, planner, validator, project manager, two worker dependency waves, and QA in order using mocks.
+8. `internal/orchestrator/orchestrator_test.go` verifies that `errgroup.WithContext` waits for all workers in the current wave and prevents later waves and QA from running after any worker returns an error.
+9. `internal/orchestrator/orchestrator_test.go` verifies that the engine writes `specification.json`, `project_plan.json`, `validation_report.json`, `qa_report.json`, and `summary.json` under the configured run directory.
+10. `internal/tui/app_test.go` verifies that key handling moves through prompt entry, clarification, dashboard, agent detail, plan review, failure action, QA result, and completion summary without panics.
+11. `cmd/tui_test/main.go` runs with `go run ./cmd/tui_test` and displays mock data without invoking Claude, reading provider API keys, or modifying repository files.
+12. `cmd/orqestra/main.go` no longer prints "interactive TUI is not yet implemented in v3" when run with no subcommand in a TTY.
+13. `cmd/orqestra/main.go` still supports `orqestra plan <prompt>`, `orqestra validate <spec-json-file>`, `orqestra exec <spec-json-file>`, `orqestra usage`, `orqestra reset-usage`, and `orqestra --plan <file.md>`.
+14. `go test ./internal/harness` passes.
+15. `go test ./internal/agent` passes.
+16. `go test ./internal/orchestrator` passes.
+17. `go test ./internal/tui` passes.
+18. `go test ./cmd/orqestra` passes if command package tests exist; if no command package tests exist, `go test ./cmd/orqestra` exits 0 with no test files.
+19. `go build ./cmd/orqestra` exits 0.
+20. `go test ./...` exits 0.
+21. No directories named `internal/planner`, `internal/pm`, `internal/qa`, `internal/types`, or `internal/validator` exist after implementation.
+22. The interactive TUI path in `cmd/orqestra/main.go` does not contain stdin `[y/N]` approval prompts and does not import `creack/pty`.
+
+## Constraints
+
+1. Do not create split packages named `internal/planner`, `internal/pm`, `internal/qa`, `internal/types`, or `internal/validator`; use the current `internal/agent` package for those types and constructors.
+2. Do not reintroduce `creack/pty`, old terminal passthrough mux code, OpenAI raw HTTP harness clients, or stdin `[y/N]` gates in the interactive TUI path.
+3. Do not delete `internal/scheduler` in this plan; only remove dynamic execution graph configuration from `internal/config` and stop using it from the v3 orchestrator path.
+4. Do not silently fall back to another model, provider, config path, run directory, or Claude binary when the user or config specifies one that cannot be resolved.
+5. Do not place execution-critical boundaries only in `Context`, `Constraints`, `Risks`, `ValidationCommands`, or `ExpectedArtifacts`; steps and acceptance must repeat critical file boundaries and non-goals.
+6. Do not use validation commands with shell operators `&&`, `||`, `|`, `;`, `>`, or `<`.
+7. Do not parse YAML, JSON, or stream-json with ad hoc string slicing when `encoding/json`, `yaml.v3`, or typed structs can parse the data.
+8. Do not add package-level mutable orchestration state; pass `context.Context`, config, channels, and callbacks through constructors or method arguments.
+9. Do not use `time.Sleep` in tests; use channels, contexts, fake clocks, or deterministic test hooks.
+10. Do not swallow errors from process execution, scanner errors, artifact writes, config loading, model resolution, or TUI startup.
+
+## Assumptions
+
+1. The worker can add Go dependencies with `go mod tidy` after new imports are present.
+2. The Claude CLI stream-json fixture can be represented in tests without requiring the actual Claude binary.
+3. The first implementation can keep headless commands and the interactive TUI in the same `cmd/orqestra/main.go` file before later refactoring.
+4. The TUI can use mock orchestrator events for tests and `cmd/tui_test/main.go` instead of a real Claude session.
 
 ## Risks
 
-1. **System prompt path injection**: The appended "Runtime paths" section tells the agent where to read/write. If the agent ignores this (LLM doesn't follow), artifacts won't be produced. **Mitigation**: Make the path instructions very explicit and test with intake first.
+1. Claude CLI stream-json event shapes may differ by version; `internal/harness/query.go` must pass through unknown event types as debug-safe `ErrorEvent` or ignore them with tests documenting the behavior.
+2. Removing `ExecutionGraphConfig` from `internal/config` may break tests or YAML files that still contain `execution_graph`; update fixtures and repository configs in the same change.
+3. Bubble Tea keyboard behavior differs across terminals; keep key handling tests at the message level and reserve full terminal behavior for manual verification.
+4. Concurrent workers write to the same checkout; `internal/orchestrator` must rely on project-manager package boundaries and fail on worker errors rather than merging conflicting edits silently.
 
-2. **OutputFile empty for worker**: `NativeLiveSession.Wait()` returns `nil` when `spec.OutputFile == ""`. `AgentCompleteMsg{Artifact: nil}` triggers `advancePipeline()` → `PhaseDone`. Correct.
+## ValidationCommands
 
-3. **Validator doesn't produce valid JSON**: `json.Unmarshal` fails → plan treated as rejected → pipeline halts. Acceptable for v1.
+```sh
+go test ./internal/harness
+go test ./internal/agent
+go test ./internal/config
+go test ./internal/orchestrator
+go test ./internal/tui
+go test ./cmd/orqestra
+go run ./cmd/tui_test
+go build ./cmd/orqestra
+go test ./...
+```
 
-4. **tabsView.AddTermTab called from Update is safe**: Synchronous call inside `advancePipeline()` which runs inside `Update()`. No concurrency issue.
+## ExpectedArtifacts
 
----
-
-## Decisions
-
-- **SeatbeltRunner only** — `internal/agent/pipeline.go` (Docker runner) is NOT used. All agents go through `SeatbeltRunner.RunInteractive`.
-- **Sequential execution** — agents run one at a time. No parallelism.
-- **Shared session dir** — one `SessionDir` per orqestra run, all roles write into it.
-- **All agents are interactive** — even planner/worker get full PTY. User CAN interact with any.
-- **Keep `--dangerously-skip-permissions`** — required for autonomous operation (no per-action prompts). The seatbelt sandbox is the hard security boundary. User approves workspace trust once on first interactive launch (intake); subsequent agents inherit the permission.
-- **No auth env vars** — Claude Code uses existing OAuth/keychain. Sandbox allows `~/.claude` + XPC for keychain IPC. Ollama ignores the auth header sent.
-- **Agent CWD = repoPath** — confirmed via `sandbox.Wrap()` setting `cmd.Dir = s.repoPath`.
-- **PTY mode doesn't need `Foreground=true`** — only `cmd/sandbox` (direct TTY sharing) needed that fix. `SeatbeltRunner.RunInteractive` uses `StartNativePTY` which creates its own pseudo-terminal.
+1. `internal/harness/output.go`
+2. `internal/harness/output_test.go`
+3. `internal/harness/query.go`
+4. `internal/harness/query_test.go`
+5. `internal/harness/ringbuf.go`
+6. `internal/harness/ringbuf_test.go`
+7. `internal/harness/stats.go`
+8. `internal/harness/stats_test.go`
+9. `internal/config/config.go`
+10. `internal/config/pipeline.yaml`
+11. `internal/config/config_test.go`
+12. `internal/agent/run_dir.go`
+13. `internal/agent/run_dir_test.go`
+14. `internal/orchestrator/orchestrator.go`
+15. `internal/orchestrator/orchestrator_test.go`
+16. `internal/tui/app.go`
+17. `internal/tui/screens.go`
+18. `internal/tui/styles.go`
+19. `internal/tui/app_test.go`
+20. `cmd/tui_test/main.go`
+21. `cmd/orqestra/main.go`
+22. `go.mod`
+23. `go.sum`

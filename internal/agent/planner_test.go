@@ -1,4 +1,4 @@
-package planner_test
+package agent
 
 import (
 	"context"
@@ -9,23 +9,22 @@ import (
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
-	"github.com/xiii/orqestra/internal/planner"
 )
 
-// mockCLIRunner is a test double for the CLIRunner interface.
-type mockCLIRunner struct {
+// plannerMockCLIRunner is a test double for the CLIRunner interface.
+type plannerMockCLIRunner struct {
 	response string
 	err      error
 }
 
-func (m *mockCLIRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
+func (m *plannerMockCLIRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
 	if m.err != nil {
 		return harness.RunResult{}, m.err
 	}
 	return harness.RunResult{Output: m.response}, nil
 }
 
-func (m *mockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
+func (m *plannerMockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
 	if m.err != nil {
 		return harness.RunResult{}, m.err
 	}
@@ -39,14 +38,14 @@ func TestPlan_Success(t *testing.T) {
 		"acceptance": []string{"Server starts", "GET /health returns 200"},
 	}
 	specJSON, _ := json.Marshal(specData)
-	mock := &mockCLIRunner{response: string(specJSON)}
+	mock := &plannerMockCLIRunner{response: string(specJSON)}
 
 	cfg := &config.PlannerConfig{
 		ModelRef:     "test-model",
 		SystemPrompt: "Plan mode.",
 	}
 
-	p := planner.New(mock, cfg)
+	p := NewPlanner(mock, cfg)
 	spec, err := p.Plan(context.Background(), "build a REST API")
 
 	if err != nil {
@@ -68,10 +67,10 @@ func TestPlan_JsonEnvelope(t *testing.T) {
 	}
 	specJSON, _ := json.Marshal(specData)
 	envelope := fmt.Sprintf(`{"type":"result","result":%q}`, string(specJSON))
-	mock := &mockCLIRunner{response: envelope}
+	mock := &plannerMockCLIRunner{response: envelope}
 
 	cfg := &config.PlannerConfig{ModelRef: "test-model", SystemPrompt: "Plan."}
-	p := planner.New(mock, cfg)
+	p := NewPlanner(mock, cfg)
 	spec, err := p.Plan(context.Background(), "refactor auth")
 
 	if err != nil {
@@ -83,10 +82,10 @@ func TestPlan_JsonEnvelope(t *testing.T) {
 }
 
 func TestPlan_InvalidJSON(t *testing.T) {
-	mock := &mockCLIRunner{response: "not json at all"}
+	mock := &plannerMockCLIRunner{response: "not json at all"}
 
 	cfg := &config.PlannerConfig{ModelRef: "test-model", SystemPrompt: "Plan."}
-	p := planner.New(mock, cfg)
+	p := NewPlanner(mock, cfg)
 	_, err := p.Plan(context.Background(), "do something")
 
 	if err == nil {
@@ -97,10 +96,10 @@ func TestPlan_InvalidJSON(t *testing.T) {
 func TestPlan_IncompleteSpec(t *testing.T) {
 	specData := map[string]any{"goal": "Missing steps and acceptance"}
 	specJSON, _ := json.Marshal(specData)
-	mock := &mockCLIRunner{response: string(specJSON)}
+	mock := &plannerMockCLIRunner{response: string(specJSON)}
 
 	cfg := &config.PlannerConfig{ModelRef: "test-model", SystemPrompt: "Plan."}
-	p := planner.New(mock, cfg)
+	p := NewPlanner(mock, cfg)
 	_, err := p.Plan(context.Background(), "incomplete")
 
 	if err == nil {
@@ -116,10 +115,10 @@ func TestPlan_MarkdownFencedJSON(t *testing.T) {
 	}
 	specJSON, _ := json.Marshal(specData)
 	fenced := "```json\n" + string(specJSON) + "\n```"
-	mock := &mockCLIRunner{response: fenced}
+	mock := &plannerMockCLIRunner{response: fenced}
 
 	cfg := &config.PlannerConfig{ModelRef: "test-model", SystemPrompt: "Plan."}
-	p := planner.New(mock, cfg)
+	p := NewPlanner(mock, cfg)
 	spec, err := p.Plan(context.Background(), "deploy")
 
 	if err != nil {
@@ -140,7 +139,7 @@ func TestParseSpec_MarkdownFencedJSON(t *testing.T) {
 	fenced := "```json\n" + string(specJSON) + "\n```"
 
 	cfg := &config.PlannerConfig{ModelRef: "test-model", SystemPrompt: "Plan."}
-	p := planner.New(&mockCLIRunner{}, cfg)
+	p := NewPlanner(&plannerMockCLIRunner{}, cfg)
 	parsed, err := p.ParseSpec(fenced)
 
 	if err != nil {

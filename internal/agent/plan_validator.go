@@ -1,4 +1,4 @@
-package validator
+package agent
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
-	"github.com/xiii/orqestra/internal/types"
 )
 
 // PlanValidator independently judges whether a specification is complete,
@@ -22,15 +21,15 @@ func NewPlanValidator(runner harness.CLIRunner, cfg *config.ValidatorConfig) *Pl
 	return &PlanValidator{runner: runner, cfg: cfg}
 }
 
-// Validate runs deterministic checks and then a CLI-based validation.
-func (v *PlanValidator) Validate(ctx context.Context, spec types.Specification) (*types.ValidationReport, error) {
+// ValidatePlan runs deterministic checks and then a CLI-based validation.
+func (v *PlanValidator) ValidatePlan(ctx context.Context, spec Specification) (*ValidationReport, error) {
 	// Phase 1: Deterministic pre-checks
 	issues := v.deterministicChecks(spec)
 	for _, issue := range issues {
-		if issue.Severity == types.SeverityError {
-			report := &types.ValidationReport{
+		if issue.Severity == SeverityError {
+			report := &ValidationReport{
 				SchemaVersion: "1",
-				Verdict:       types.VerdictFail,
+				Verdict:       VerdictFail,
 				Summary:       "Specification failed deterministic checks",
 				Issues:        issues,
 			}
@@ -50,42 +49,42 @@ func (v *PlanValidator) Validate(ctx context.Context, spec types.Specification) 
 		return nil, fmt.Errorf("validator CLI call: %w", err)
 	}
 
-	var report types.ValidationReport
+	var report ValidationReport
 	if err := json.Unmarshal([]byte(result.Output), &report); err != nil {
 		return nil, fmt.Errorf("parse validation report: %w (raw: %s)", err, result.Output)
 	}
 
 	// Merge deterministic issues into report
 	report.Issues = append(issues, report.Issues...)
-	report.Verdict = types.DeriveVerdict(report.Issues)
+	report.Verdict = DeriveVerdict(report.Issues)
 
 	return &report, nil
 }
 
 // deterministicChecks performs structural validation that doesn't need an LLM.
-func (v *PlanValidator) deterministicChecks(spec types.Specification) []types.Issue {
-	var issues []types.Issue
+func (v *PlanValidator) deterministicChecks(spec Specification) []Issue {
+	var issues []Issue
 
 	if spec.Goal == "" {
-		issues = append(issues, types.Issue{
+		issues = append(issues, Issue{
 			ID:       "MISSING_GOAL",
-			Severity: types.SeverityError,
+			Severity: SeverityError,
 			Message:  "Specification has no goal",
 		})
 	}
 
 	if len(spec.Steps) == 0 {
-		issues = append(issues, types.Issue{
+		issues = append(issues, Issue{
 			ID:       "NO_STEPS",
-			Severity: types.SeverityError,
+			Severity: SeverityError,
 			Message:  "Specification has no steps",
 		})
 	}
 
 	if len(spec.Acceptance) == 0 {
-		issues = append(issues, types.Issue{
+		issues = append(issues, Issue{
 			ID:       "NO_ACCEPTANCE",
-			Severity: types.SeverityError,
+			Severity: SeverityError,
 			Message:  "Specification has no acceptance criteria",
 		})
 	}
@@ -93,9 +92,9 @@ func (v *PlanValidator) deterministicChecks(spec types.Specification) []types.Is
 	// Check for empty steps
 	for i, step := range spec.Steps {
 		if step == "" {
-			issues = append(issues, types.Issue{
+			issues = append(issues, Issue{
 				ID:       fmt.Sprintf("EMPTY_STEP_%d", i),
-				Severity: types.SeverityError,
+				Severity: SeverityError,
 				Message:  fmt.Sprintf("Step %d is empty", i+1),
 			})
 		}

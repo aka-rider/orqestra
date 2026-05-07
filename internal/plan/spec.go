@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xiii/orqestra/internal/types"
+	"github.com/xiii/orqestra/internal/agent"
 )
 
 const currentSchemaVersion = "1"
@@ -210,7 +210,7 @@ func goalSlug(goal string) string {
 }
 
 // FromSpecification converts a types.Specification to a plan.Spec for serialisation.
-func FromSpecification(ts types.Specification) Spec {
+func FromSpecification(ts agent.Specification) Spec {
 	sv := ts.SchemaVersion
 	if sv == "" {
 		sv = currentSchemaVersion
@@ -235,12 +235,12 @@ func FromSpecification(ts types.Specification) Spec {
 }
 
 // ToSpecification converts a plan.Spec to a types.Specification.
-func ToSpecification(s Spec) types.Specification {
-	var valCmds []types.ValidationCommand
+func ToSpecification(s Spec) agent.Specification {
+	var valCmds []agent.ValidationCommand
 	for _, cmd := range s.ValidationCommands {
-		valCmds = append(valCmds, types.ValidationCommand{Command: cmd})
+		valCmds = append(valCmds, agent.ValidationCommand{Command: cmd})
 	}
-	return types.Specification{
+	return agent.Specification{
 		SchemaVersion:      s.SchemaVersion,
 		Goal:               s.Goal,
 		Context:            s.Context,

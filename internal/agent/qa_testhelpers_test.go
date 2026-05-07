@@ -1,4 +1,4 @@
-package qa
+package agent
 
 import (
 	"context"
@@ -7,14 +7,14 @@ import (
 	"github.com/xiii/orqestra/internal/harness"
 )
 
-// mockCLIRunner is a test double for harness.CLIRunner.
-type mockCLIRunner struct {
+// qaMockCLIRunner is a test double for harness.CLIRunner in QA tests.
+type qaMockCLIRunner struct {
 	response  string
 	err       error
 	callCount int
 }
 
-func (m *mockCLIRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
+func (m *qaMockCLIRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
 	m.callCount++
 	if m.err != nil {
 		return harness.RunResult{}, m.err
@@ -22,7 +22,7 @@ func (m *mockCLIRunner) RunPrint(_ context.Context, _, _ string) (harness.RunRes
 	return harness.RunResult{Output: m.response}, nil
 }
 
-func (m *mockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
+func (m *qaMockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
 	m.callCount++
 	if m.err != nil {
 		return harness.RunResult{}, m.err

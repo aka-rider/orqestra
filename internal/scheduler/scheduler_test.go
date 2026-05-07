@@ -7,8 +7,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/xiii/orqestra/internal/types"
 )
 
 func TestDAGExecutionOrder(t *testing.T) {
@@ -29,14 +27,14 @@ func TestDAGExecutionOrder(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 
-	runner := func(ctx context.Context, node AgentNode, spec types.Specification) error {
+	runner := func(ctx context.Context, node AgentNode, spec any) error {
 		mu.Lock()
 		order = append(order, node.Role)
 		mu.Unlock()
 		return nil
 	}
 
-	err = s.Run(context.Background(), types.Specification{}, runner, nil)
+	err = s.Run(context.Background(), nil, runner, nil)
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
@@ -82,7 +80,7 @@ func TestSerialExecution(t *testing.T) {
 	var maxConcurrent atomic.Int32
 	release := make(chan struct{})
 
-	runner := func(ctx context.Context, node AgentNode, spec types.Specification) error {
+	runner := func(ctx context.Context, node AgentNode, spec any) error {
 		cur := running.Add(1)
 		// Track max concurrency
 		for {
@@ -103,7 +101,7 @@ func TestSerialExecution(t *testing.T) {
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- s.Run(ctx, types.Specification{}, runner, nil) }()
+	go func() { done <- s.Run(ctx, nil, runner, nil) }()
 
 	// Release each agent one at a time
 	for i := 0; i < 3; i++ {
@@ -139,7 +137,7 @@ func TestUnlimitedParallel(t *testing.T) {
 	allStarted := make(chan struct{})
 	release := make(chan struct{})
 
-	runner := func(ctx context.Context, node AgentNode, spec types.Specification) error {
+	runner := func(ctx context.Context, node AgentNode, spec any) error {
 		cur := running.Add(1)
 		for {
 			old := maxConcurrent.Load()
@@ -163,7 +161,7 @@ func TestUnlimitedParallel(t *testing.T) {
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- s.Run(ctx, types.Specification{}, runner, nil) }()
+	go func() { done <- s.Run(ctx, nil, runner, nil) }()
 
 	// Wait for all to be running concurrently
 	select {
@@ -198,7 +196,7 @@ func TestAgentFailureDoesNotCrash(t *testing.T) {
 		t.Fatalf("New() error: %v", err)
 	}
 
-	runner := func(ctx context.Context, node AgentNode, spec types.Specification) error {
+	runner := func(ctx context.Context, node AgentNode, spec any) error {
 		if node.Role == "A" {
 			return errors.New("agent A failed")
 		}
@@ -210,7 +208,7 @@ func TestAgentFailureDoesNotCrash(t *testing.T) {
 		events = append(events, e)
 	}
 
-	err = s.Run(context.Background(), types.Specification{}, runner, notify)
+	err = s.Run(context.Background(), nil, runner, notify)
 	if err != nil {
 		t.Fatalf("Run() should not return error for agent failure: %v", err)
 	}
@@ -234,7 +232,7 @@ func TestEmptyGraph(t *testing.T) {
 		t.Fatalf("New() error: %v", err)
 	}
 
-	err = s.Run(context.Background(), types.Specification{}, func(ctx context.Context, node AgentNode, spec types.Specification) error {
+	err = s.Run(context.Background(), nil, func(ctx context.Context, node AgentNode, spec any) error {
 		t.Fatal("runner should not be called for empty graph")
 		return nil
 	}, nil)
@@ -257,11 +255,11 @@ func TestSingleAgentNoDeps(t *testing.T) {
 	}
 
 	var events []Event
-	runner := func(ctx context.Context, node AgentNode, spec types.Specification) error {
+	runner := func(ctx context.Context, node AgentNode, spec any) error {
 		return nil
 	}
 
-	err = s.Run(context.Background(), types.Specification{}, runner, func(e Event) {
+	err = s.Run(context.Background(), nil, runner, func(e Event) {
 		events = append(events, e)
 	})
 	if err != nil {

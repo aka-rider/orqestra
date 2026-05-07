@@ -1,4 +1,4 @@
-package validator
+package agent
 
 import (
 	"context"
@@ -8,17 +8,16 @@ import (
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
-	"github.com/xiii/orqestra/internal/types"
 )
 
-// mockCLIRunner is a test double for harness.CLIRunner.
-type mockCLIRunner struct {
+// validatorMockCLIRunner is a test double for harness.CLIRunner in validator tests.
+type validatorMockCLIRunner struct {
 	response  string
 	err       error
 	callCount int
 }
 
-func (m *mockCLIRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
+func (m *validatorMockCLIRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
 	m.callCount++
 	if m.err != nil {
 		return harness.RunResult{}, m.err
@@ -26,7 +25,7 @@ func (m *mockCLIRunner) RunPrint(_ context.Context, _, _ string) (harness.RunRes
 	return harness.RunResult{Output: m.response}, nil
 }
 
-func (m *mockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
+func (m *validatorMockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
 	m.callCount++
 	if m.err != nil {
 		return harness.RunResult{}, m.err
@@ -35,18 +34,18 @@ func (m *mockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer
 }
 
 func TestPlanValidator_DeterministicCheck_MissingGoal(t *testing.T) {
-	mock := &mockCLIRunner{response: `{"schema_version":"1","verdict":"pass","summary":"ok"}`}
+	mock := &validatorMockCLIRunner{response: `{"schema_version":"1","verdict":"pass","summary":"ok"}`}
 	cfg := &config.ValidatorConfig{ModelRef: "test"}
 	v := NewPlanValidator(mock, cfg)
 
-	report, err := v.Validate(context.Background(), types.Specification{
+	report, err := v.ValidatePlan(context.Background(), Specification{
 		Steps:      []string{"do something"},
 		Acceptance: []string{"done"},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if report.Verdict != types.VerdictFail {
+	if report.Verdict != VerdictFail {
 		t.Errorf("expected fail verdict for missing goal, got %q", report.Verdict)
 	}
 	// Should not have called CLI
@@ -56,46 +55,46 @@ func TestPlanValidator_DeterministicCheck_MissingGoal(t *testing.T) {
 }
 
 func TestPlanValidator_DeterministicCheck_NoSteps(t *testing.T) {
-	mock := &mockCLIRunner{response: `{}`}
+	mock := &validatorMockCLIRunner{response: `{}`}
 	cfg := &config.ValidatorConfig{ModelRef: "test"}
 	v := NewPlanValidator(mock, cfg)
 
-	report, err := v.Validate(context.Background(), types.Specification{
+	report, err := v.ValidatePlan(context.Background(), Specification{
 		Goal:       "something",
 		Acceptance: []string{"done"},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if report.Verdict != types.VerdictFail {
+	if report.Verdict != VerdictFail {
 		t.Errorf("expected fail, got %q", report.Verdict)
 	}
 }
 
 func TestPlanValidator_CLIValidation_Pass(t *testing.T) {
-	reportJSON, _ := json.Marshal(types.ValidationReport{
+	reportJSON, _ := json.Marshal(ValidationReport{
 		SchemaVersion: "1",
-		Verdict:       types.VerdictPass,
+		Verdict:       VerdictPass,
 		Summary:       "Plan is clear and executable",
 	})
-	mock := &mockCLIRunner{response: string(reportJSON)}
+	mock := &validatorMockCLIRunner{response: string(reportJSON)}
 	cfg := &config.ValidatorConfig{
 		ModelRef:     "test-model",
 		SystemPrompt: "validate",
 	}
 	v := NewPlanValidator(mock, cfg)
 
-	spec := types.Specification{
+	spec := Specification{
 		Goal:       "Build a REST API",
 		Steps:      []string{"Create server", "Add routes", "Test"},
 		Acceptance: []string{"Server responds to healthcheck"},
 	}
 
-	report, err := v.Validate(context.Background(), spec)
+	report, err := v.ValidatePlan(context.Background(), spec)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if report.Verdict != types.VerdictPass {
+	if report.Verdict != VerdictPass {
 		t.Errorf("expected pass, got %q", report.Verdict)
 	}
 	if mock.callCount != 1 {
@@ -104,29 +103,29 @@ func TestPlanValidator_CLIValidation_Pass(t *testing.T) {
 }
 
 func TestPlanValidator_CLIValidation_Fail(t *testing.T) {
-	reportJSON, _ := json.Marshal(types.ValidationReport{
+	reportJSON, _ := json.Marshal(ValidationReport{
 		SchemaVersion: "1",
-		Verdict:       types.VerdictFail,
+		Verdict:       VerdictFail,
 		Summary:       "Steps are contradictory",
-		Issues: []types.Issue{
-			{ID: "CONTRADICTORY", Severity: types.SeverityError, Message: "Step 2 contradicts step 1"},
+		Issues: []Issue{
+			{ID: "CONTRADICTORY", Severity: SeverityError, Message: "Step 2 contradicts step 1"},
 		},
 	})
-	mock := &mockCLIRunner{response: string(reportJSON)}
+	mock := &validatorMockCLIRunner{response: string(reportJSON)}
 	cfg := &config.ValidatorConfig{ModelRef: "test"}
 	v := NewPlanValidator(mock, cfg)
 
-	spec := types.Specification{
+	spec := Specification{
 		Goal:       "Do stuff",
 		Steps:      []string{"Create file", "Delete same file"},
 		Acceptance: []string{"File exists"},
 	}
 
-	report, err := v.Validate(context.Background(), spec)
+	report, err := v.ValidatePlan(context.Background(), spec)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if report.Verdict != types.VerdictFail {
+	if report.Verdict != VerdictFail {
 		t.Errorf("expected fail, got %q", report.Verdict)
 	}
 }

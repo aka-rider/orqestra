@@ -1,4 +1,4 @@
-package pm
+package agent
 
 import (
 	"context"
@@ -8,22 +8,21 @@ import (
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
-	"github.com/xiii/orqestra/internal/types"
 )
 
-type mockRunner struct {
+type pmMockRunner struct {
 	response string
 	err      error
 }
 
-func (m *mockRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
+func (m *pmMockRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
 	if m.err != nil {
 		return harness.RunResult{}, m.err
 	}
 	return harness.RunResult{Output: m.response}, nil
 }
 
-func (m *mockRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
+func (m *pmMockRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
 	if m.err != nil {
 		return harness.RunResult{}, m.err
 	}
@@ -31,9 +30,9 @@ func (m *mockRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (
 }
 
 func TestDecompose_SinglePackage(t *testing.T) {
-	plan := types.ProjectPlan{
+	plan := ProjectPlan{
 		SchemaVersion: "1",
-		Packages: []types.WorkPackage{
+		Packages: []WorkPackage{
 			{
 				ID:         "all",
 				Title:      "Implement feature",
@@ -43,9 +42,9 @@ func TestDecompose_SinglePackage(t *testing.T) {
 		},
 	}
 	data, _ := json.Marshal(plan)
-	pm := New(&mockRunner{response: string(data)}, &config.ProjectManagerConfig{})
+	pmInst := NewProjectManager(&pmMockRunner{response: string(data)}, &config.ProjectManagerConfig{})
 
-	got, err := pm.Decompose(context.Background(), types.Specification{
+	got, err := pmInst.Decompose(context.Background(), Specification{
 		Goal:  "Add feature",
 		Steps: []string{"Create file", "Add tests"},
 	})
@@ -61,9 +60,9 @@ func TestDecompose_SinglePackage(t *testing.T) {
 }
 
 func TestDecompose_MultiPackage(t *testing.T) {
-	plan := types.ProjectPlan{
+	plan := ProjectPlan{
 		SchemaVersion: "1",
-		Packages: []types.WorkPackage{
+		Packages: []WorkPackage{
 			{
 				ID:         "backend",
 				Title:      "Implement API",
@@ -80,9 +79,9 @@ func TestDecompose_MultiPackage(t *testing.T) {
 		},
 	}
 	data, _ := json.Marshal(plan)
-	pm := New(&mockRunner{response: string(data)}, &config.ProjectManagerConfig{})
+	pmInst := NewProjectManager(&pmMockRunner{response: string(data)}, &config.ProjectManagerConfig{})
 
-	got, err := pm.Decompose(context.Background(), types.Specification{
+	got, err := pmInst.Decompose(context.Background(), Specification{
 		Goal:  "Full-stack app",
 		Steps: []string{"Create server", "Add routes", "Add middleware", "Create components", "Add styles", "Wire API"},
 	})
@@ -95,11 +94,11 @@ func TestDecompose_MultiPackage(t *testing.T) {
 }
 
 func TestDecompose_EmptyPackages(t *testing.T) {
-	plan := types.ProjectPlan{SchemaVersion: "1", Packages: nil}
+	plan := ProjectPlan{SchemaVersion: "1", Packages: nil}
 	data, _ := json.Marshal(plan)
-	pm := New(&mockRunner{response: string(data)}, &config.ProjectManagerConfig{})
+	pmInst := NewProjectManager(&pmMockRunner{response: string(data)}, &config.ProjectManagerConfig{})
 
-	_, err := pm.Decompose(context.Background(), types.Specification{
+	_, err := pmInst.Decompose(context.Background(), Specification{
 		Goal:  "Do thing",
 		Steps: []string{"step"},
 	})
@@ -109,17 +108,17 @@ func TestDecompose_EmptyPackages(t *testing.T) {
 }
 
 func TestDecompose_InvalidCycle(t *testing.T) {
-	plan := types.ProjectPlan{
+	plan := ProjectPlan{
 		SchemaVersion: "1",
-		Packages: []types.WorkPackage{
+		Packages: []WorkPackage{
 			{ID: "a", Title: "A", Steps: []string{"s1"}, DependsOn: []string{"b"}},
 			{ID: "b", Title: "B", Steps: []string{"s2"}, DependsOn: []string{"a"}},
 		},
 	}
 	data, _ := json.Marshal(plan)
-	pm := New(&mockRunner{response: string(data)}, &config.ProjectManagerConfig{})
+	pmInst := NewProjectManager(&pmMockRunner{response: string(data)}, &config.ProjectManagerConfig{})
 
-	_, err := pm.Decompose(context.Background(), types.Specification{
+	_, err := pmInst.Decompose(context.Background(), Specification{
 		Goal:  "Do thing",
 		Steps: []string{"s1", "s2"},
 	})
@@ -129,16 +128,16 @@ func TestDecompose_InvalidCycle(t *testing.T) {
 }
 
 func TestDecompose_MissingDependency(t *testing.T) {
-	plan := types.ProjectPlan{
+	plan := ProjectPlan{
 		SchemaVersion: "1",
-		Packages: []types.WorkPackage{
+		Packages: []WorkPackage{
 			{ID: "a", Title: "A", Steps: []string{"s1"}, DependsOn: []string{"nonexistent"}},
 		},
 	}
 	data, _ := json.Marshal(plan)
-	pm := New(&mockRunner{response: string(data)}, &config.ProjectManagerConfig{})
+	pmInst := NewProjectManager(&pmMockRunner{response: string(data)}, &config.ProjectManagerConfig{})
 
-	_, err := pm.Decompose(context.Background(), types.Specification{
+	_, err := pmInst.Decompose(context.Background(), Specification{
 		Goal:  "Do thing",
 		Steps: []string{"s1"},
 	})
@@ -148,17 +147,17 @@ func TestDecompose_MissingDependency(t *testing.T) {
 }
 
 func TestDecompose_DuplicateID(t *testing.T) {
-	plan := types.ProjectPlan{
+	plan := ProjectPlan{
 		SchemaVersion: "1",
-		Packages: []types.WorkPackage{
+		Packages: []WorkPackage{
 			{ID: "a", Title: "A", Steps: []string{"s1"}},
 			{ID: "a", Title: "B", Steps: []string{"s2"}},
 		},
 	}
 	data, _ := json.Marshal(plan)
-	pm := New(&mockRunner{response: string(data)}, &config.ProjectManagerConfig{})
+	pmInst := NewProjectManager(&pmMockRunner{response: string(data)}, &config.ProjectManagerConfig{})
 
-	_, err := pm.Decompose(context.Background(), types.Specification{
+	_, err := pmInst.Decompose(context.Background(), Specification{
 		Goal:  "Do thing",
 		Steps: []string{"s1", "s2"},
 	})
@@ -168,17 +167,17 @@ func TestDecompose_DuplicateID(t *testing.T) {
 }
 
 func TestDecompose_CodeFencedOutput(t *testing.T) {
-	plan := types.ProjectPlan{
+	plan := ProjectPlan{
 		SchemaVersion: "1",
-		Packages: []types.WorkPackage{
+		Packages: []WorkPackage{
 			{ID: "core", Title: "Core", Steps: []string{"s1"}, Acceptance: []string{"ok"}},
 		},
 	}
 	data, _ := json.Marshal(plan)
 	wrapped := "```json\n" + string(data) + "\n```"
-	pm := New(&mockRunner{response: wrapped}, &config.ProjectManagerConfig{})
+	pmInst := NewProjectManager(&pmMockRunner{response: wrapped}, &config.ProjectManagerConfig{})
 
-	got, err := pm.Decompose(context.Background(), types.Specification{
+	got, err := pmInst.Decompose(context.Background(), Specification{
 		Goal:  "Do thing",
 		Steps: []string{"s1"},
 	})
@@ -187,31 +186,5 @@ func TestDecompose_CodeFencedOutput(t *testing.T) {
 	}
 	if len(got.Packages) != 1 {
 		t.Fatalf("packages: got %d, want 1", len(got.Packages))
-	}
-}
-
-func TestValidatePlan_SelfDependency(t *testing.T) {
-	plan := types.ProjectPlan{
-		SchemaVersion: "1",
-		Packages: []types.WorkPackage{
-			{ID: "a", Title: "A", Steps: []string{"s1"}, DependsOn: []string{"a"}},
-		},
-	}
-	err := validatePlan(plan)
-	if err == nil {
-		t.Fatal("expected error for self-dependency")
-	}
-}
-
-func TestValidatePlan_MissingSteps(t *testing.T) {
-	plan := types.ProjectPlan{
-		SchemaVersion: "1",
-		Packages: []types.WorkPackage{
-			{ID: "a", Title: "A", Steps: nil},
-		},
-	}
-	err := validatePlan(plan)
-	if err == nil {
-		t.Fatal("expected error for package with no steps")
 	}
 }

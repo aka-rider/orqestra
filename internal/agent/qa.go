@@ -1,4 +1,4 @@
-package qa
+package agent
 
 import (
 	"bytes"
@@ -11,12 +11,11 @@ import (
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
-	"github.com/xiii/orqestra/internal/types"
 )
 
-// Input contains everything needed to validate work output.
-type Input struct {
-	Spec       types.Specification
+// QAInput contains everything needed to validate work output.
+type QAInput struct {
+	Spec       Specification
 	WorkOutput string
 }
 
@@ -61,29 +60,29 @@ func NewGate(runner harness.CLIRunner, cfg *config.ValidatorConfig) *Gate {
 	}
 }
 
-// Validate runs validation commands and then CLI-based assessment.
-func (v *Gate) Validate(ctx context.Context, input *Input) (*types.ValidationReport, error) {
-	var issues []types.Issue
-	var cmdResults []types.ValidationCommandResult
+// ValidateWork runs validation commands and then CLI-based assessment.
+func (v *Gate) ValidateWork(ctx context.Context, input *QAInput) (*ValidationReport, error) {
+	var issues []Issue
+	var cmdResults []ValidationCommandResult
 
 	// Phase 1: Run validation commands
 	for i, vc := range input.Spec.ValidationCommands {
 		result := v.runValidationCommand(ctx, vc)
 		cmdResults = append(cmdResults, result)
 		if !result.Passed {
-			issues = append(issues, types.Issue{
+			issues = append(issues, Issue{
 				ID:       fmt.Sprintf("CMD_FAIL_%d", i),
-				Severity: types.SeverityError,
+				Severity: SeverityError,
 				Message:  fmt.Sprintf("Validation command %q exited %d (expected %d)", vc.Command, result.ActualExit, vc.ExpectedExit),
 			})
 		}
 	}
 
 	// If deterministic command checks failed, return early
-	if types.DeriveVerdict(issues) == types.VerdictFail {
-		return &types.ValidationReport{
+	if DeriveVerdict(issues) == VerdictFail {
+		return &ValidationReport{
 			SchemaVersion: "1",
-			Verdict:       types.VerdictFail,
+			Verdict:       VerdictFail,
 			Summary:       "Validation commands failed",
 			Issues:        issues,
 		}, nil
@@ -96,7 +95,7 @@ func (v *Gate) Validate(ctx context.Context, input *Input) (*types.ValidationRep
 	}
 
 	prompt := fmt.Sprintf("Original Specification:\n%s\n\nExecution Output:\n%s",
-		string(specJSON), truncate(input.WorkOutput, 8000))
+		string(specJSON), qatruncate(input.WorkOutput, 8000))
 
 	if len(cmdResults) > 0 {
 		cmdJSON, _ := json.MarshalIndent(cmdResults, "", "  ")
@@ -108,22 +107,22 @@ func (v *Gate) Validate(ctx context.Context, input *Input) (*types.ValidationRep
 		return nil, fmt.Errorf("work validator CLI call: %w", err)
 	}
 
-	var report types.ValidationReport
+	var report ValidationReport
 	if err := json.Unmarshal([]byte(result.Output), &report); err != nil {
 		return nil, fmt.Errorf("parse work validation report: %w (raw: %s)", err, result.Output)
 	}
 
 	// Merge command-failure issues
 	report.Issues = append(issues, report.Issues...)
-	report.Verdict = types.DeriveVerdict(report.Issues)
+	report.Verdict = DeriveVerdict(report.Issues)
 
 	return &report, nil
 }
 
 // runValidationCommand executes a single validation command and captures the result.
 // It enforces the command allowlist to prevent execution of arbitrary commands from LLM output.
-func (v *Gate) runValidationCommand(ctx context.Context, vc types.ValidationCommand) types.ValidationCommandResult {
-	result := types.ValidationCommandResult{
+func (v *Gate) runValidationCommand(ctx context.Context, vc ValidationCommand) ValidationCommandResult {
+	result := ValidationCommandResult{
 		Command:      vc.Command,
 		Args:         vc.Args,
 		Cwd:          vc.Cwd,
@@ -158,8 +157,8 @@ func (v *Gate) runValidationCommand(ctx context.Context, vc types.ValidationComm
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
-	result.Stdout = truncate(stdout.String(), 2000)
-	result.Stderr = truncate(stderr.String(), 2000)
+	result.Stdout = qatruncate(stdout.String(), 2000)
+	result.Stderr = qatruncate(stderr.String(), 2000)
 
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -181,8 +180,8 @@ func containsShellOperator(s string) bool {
 		strings.Contains(s, ">") || strings.Contains(s, "<")
 }
 
-// truncate limits a string to maxLen characters.
-func truncate(s string, maxLen int) string {
+// qatruncate limits a string to maxLen characters.
+func qatruncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}

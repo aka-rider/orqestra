@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/xiii/orqestra/internal/types"
 	"golang.org/x/sync/semaphore"
 )
 
 // AgentRunner is the callback that executes a single agent's work.
-type AgentRunner func(ctx context.Context, node AgentNode, spec types.Specification) error
+// The spec parameter is an opaque value passed through from Run.
+type AgentRunner func(ctx context.Context, node AgentNode, spec any) error
 
 // Scheduler orchestrates agent execution based on an ExecutionGraph DAG.
 type Scheduler struct {
@@ -29,7 +29,7 @@ func New(graph ExecutionGraph) (*Scheduler, error) {
 
 // Run executes the graph using the provided runner callback.
 // It emits events via the notify function as agents progress.
-func (s *Scheduler) Run(ctx context.Context, spec types.Specification, runner AgentRunner, notify func(Event)) error {
+func (s *Scheduler) Run(ctx context.Context, spec any, runner AgentRunner, notify func(Event)) error {
 	if notify == nil {
 		notify = func(Event) {}
 	}

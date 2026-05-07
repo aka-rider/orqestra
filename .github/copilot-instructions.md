@@ -6,7 +6,7 @@ When working on the codebase, ALWAYS check if your task falls into these domains
 
 1. **Terminal UI & Elm Architecture**: If editing `internal/tui/`
    👉 Read `.github/tui-instructions.md` first.
-2. **Execution, Pipelines, Sandboxing, PM, or Validators**: If editing `internal/agent/`, `internal/seatbelt/`, `internal/harness/`, `internal/pm/`, `internal/tokenlimit/`, `internal/plan/`, or `internal/validator/`
+2. **Execution, Pipelines, Sandboxing, or Validators**: If editing `internal/agent/`, `internal/seatbelt/`, `internal/harness/`, `internal/tokenlimit/`, or `internal/plan/`
    👉 Read `.github/agent-instructions.md` first.
    </system_router>
 
@@ -55,7 +55,7 @@ These are concrete code patterns that violate the core principles. Reject them i
 - Wrap errors with operation and resource context: `fmt.Errorf("resolve worker model %q: %w", ref, err)`.
 - Use table-driven tests for validation matrices and state transitions. Name cases after the behavior, not the implementation detail.
 - Prefer channels, `sync.WaitGroup`, contexts, or deterministic test hooks for goroutine coordination.
-- Keep package boundaries honest: config resolves config, harnesses run harnesses, TUI renders state, sandbox owns isolation.
+- Keep package boundaries honest: `agent` owns all agent types (Specification, ValidationReport, ProjectPlan) and implementations (Planner, PlanValidator, Gate, ProjectManager, Recognizer), `plan` handles markdown persistence, `config` resolves config, `harness` runs harnesses, `sandbox` owns isolation, `scheduler` orchestrates execution graphs.
 - Treat LLM text, file paths, command args, JSON, YAML, and streamed events as hostile until parsed and validated.
 
 ### DON'T
@@ -78,6 +78,7 @@ These are concrete code patterns that violate the core principles. Reject them i
 - **Scanner token limits**: `bufio.Scanner` has a small default token limit. Set an explicit buffer for streamed LLM JSON lines and handle `scanner.Err()`.
 - **Map iteration order**: never rely on map order in rendered output, logs, tests, or generated specs. Sort keys before display or comparison.
 - **Context cancellation**: subprocesses, validators, sandboxes, and harness sessions must accept and respect `context.Context`.
+- **Catch-all packages**: never create `types`, `utils`, `helpers`, or `misc` packages. Types belong in the package that owns the domain concept. If a type is shared, it belongs in the package that defines the behavior.
   </common_gotchas>
 
 <mcp_servers>
