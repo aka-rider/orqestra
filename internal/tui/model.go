@@ -9,67 +9,68 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xiii/orqestra/internal/agent"
-	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
-// DashboardState tracks agent rows in the pipeline dashboard.
-type DashboardState struct {
-	Agents   []harness.AgentStats
-	Selected int
-}
+// AppState represents the top-level TUI mode.
+type AppState int
 
-// ClarificationState holds the clarification UI state.
-type ClarificationState struct {
-	Questions []string
-	Answers   []string
-	Current   int
-}
+const (
+	StatePrompt   AppState = iota // full-screen prompt entry
+	StatePipeline                 // 3-zone split layout (pipeline running/done)
+)
 
-// FailureState holds the failure screen state.
-type FailureState struct {
-	AgentID string
-	Err     error
-}
+// ContentMode represents what the content zone shows during pipeline execution.
+type ContentMode int
 
-// QAState holds the QA result screen state.
-type QAState struct {
-	Report   *agent.ValidationReport
-	ShowFull bool
-}
+const (
+	ContentStreaming  ContentMode = iota // auto-follows active agent stream
+	ContentCoaching                      // gateway brief + questions
+	ContentPlanReview                    // rendered spec
+	ContentCompletion                    // QA report, summary
+)
 
-// CompletionState holds the completion screen state.
-type CompletionState struct {
-	Result   orchestrator.Result
-	ShowDiff bool
+// AgentRow tracks a single agent's status in the sidebar.
+type AgentRow struct {
+	ID      string
+	State   string // "running", "done", "waiting", "failed", "cancelled", "gate"
+	Elapsed time.Duration
 }
 
 // Model is the top-level Bubble Tea model for the Orqestra TUI.
 type Model struct {
-	screen    Screen
-	previous  Screen
+	state     AppState
+	content   ContentMode
 	width     int
 	height    int
 	startTime time.Time
 	goal      string
 	phase     orchestrator.Phase
 
-	// Sub-states
-	prompt        textarea.Model
-	clarification ClarificationState
-	dashboard     DashboardState
-	planOutput    *agent.PlanOutput
-	failure       FailureState
-	qa            QAState
-	completion    CompletionState
+	// Pipeline communication
+	events    <-chan orchestrator.Event
+	decisions chan<- orchestrator.Decision
+	cancel    context.CancelFunc
 
-	// Pipeline references
+	// Sidebar state
+	agents []AgentRow
+
+	// Content state (held by value to prevent races)
+	gatewayResult agent.GatewayResult
+	planOutput    agent.PlanOutput
+	hasPlan       bool
+	qaReport      agent.ValidationReport
+	hasQA         bool
+	lastErr       error
+
+	// Input state
+	prompt       textarea.Model
+	answerFields []textarea.Model
+	answerCursor int
+
+	// UI state
 	engine *orchestrator.Engine
-	ctrlC  int                // double-press counter
-	cancel context.CancelFunc // cancels the running pipeline
-
-	// Last error for display
-	lastErr error
+	ctrlC  int
 }
 
 // NewModel creates the initial TUI model.
@@ -82,7 +83,7 @@ func NewModel(engine *orchestrator.Engine) Model {
 	ta.CharLimit = 4096
 
 	return Model{
-		screen:    ScreenPrompt,
+		state:     StatePrompt,
 		startTime: time.Now(),
 		prompt:    ta,
 		engine:    engine,
@@ -93,6 +94,20 @@ func NewModel(engine *orchestrator.Engine) Model {
 func (m Model) Init() tea.Cmd {
 	return textarea.Blink
 }
+
+// waitForEvent returns a tea.Cmd that waits for the next pipeline event.
+func waitForEvent(events <-chan orchestrator.Event) tea.Cmd {
+	return func() tea.Msg {
+		event, ok := <-events
+		if !ok {
+			return pipelineClosedMsg{}
+		}
+		return OrchestratorEventMsg{Event: event}
+	}
+}
+
+// pipelineClosedMsg signals the events channel was closed.
+type pipelineClosedMsg struct{}
 
 // Update handles messages and returns the updated model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -109,29 +124,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case OrchestratorEventMsg:
 		return m.handleOrchestratorEvent(msg.Event)
 
-	case RunCompleteMsg:
-		if msg.Err != nil {
-			m.screen = ScreenFailure
-			m.failure = FailureState{AgentID: "pipeline", Err: msg.Err}
-			return m, nil
+	case pipelineClosedMsg:
+		// Pipeline finished — stay in current content mode
+		if m.content != ContentCompletion {
+			m.content = ContentCompletion
 		}
-		m.screen = ScreenCompletion
-		m.completion = CompletionState{Result: msg.Result}
 		return m, nil
 	}
 
 	// Pass to sub-models
-	switch m.screen {
-	case ScreenPrompt:
+	if m.state == StatePrompt {
 		var cmd tea.Cmd
 		m.prompt, cmd = m.prompt.Update(msg)
 		return m, cmd
+	}
+	if m.state == StatePipeline && m.content == ContentCoaching {
+		if m.answerCursor < len(m.answerFields) {
+			var cmd tea.Cmd
+			m.answerFields[m.answerCursor], cmd = m.answerFields[m.answerCursor].Update(msg)
+			return m, cmd
+		}
 	}
 
 	return m, nil
 }
 
-// handleKey processes key events based on the current screen.
+// handleKey processes key events.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Global: Ctrl+C double-press to exit
 	if msg.Type == tea.KeyCtrlC {
@@ -143,23 +161,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	m.ctrlC = 0
 
-	switch m.screen {
-	case ScreenPrompt:
+	switch m.state {
+	case StatePrompt:
 		return m.handlePromptKey(msg)
-	case ScreenClarification:
-		return m.handleClarificationKey(msg)
-	case ScreenDashboard:
-		return m.handleDashboardKey(msg)
-	case ScreenAgentDetail:
-		return m.handleAgentDetailKey(msg)
-	case ScreenPlanReview:
-		return m.handlePlanReviewKey(msg)
-	case ScreenFailure:
-		return m.handleFailureKey(msg)
-	case ScreenQAResult:
-		return m.handleQAResultKey(msg)
-	case ScreenCompletion:
-		return m.handleCompletionKey(msg)
+	case StatePipeline:
+		return m.handlePipelineKey(msg)
 	}
 	return m, nil
 }
@@ -172,15 +178,21 @@ func (m Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.goal = prompt
-		m.screen = ScreenDashboard
+		m.state = StatePipeline
+		m.content = ContentStreaming
 		m.startTime = time.Now()
-		return m, m.startPipeline(prompt)
-	case tea.KeyCtrlD:
-		m.ctrlC++
-		if m.ctrlC >= 2 {
-			return m, tea.Quit
+		return m, m.startPipeline(prompt, false)
+	case tea.KeyCtrlS:
+		// Skip gateway
+		prompt := strings.TrimSpace(m.prompt.Value())
+		if prompt == "" {
+			return m, nil
 		}
-		return m, nil
+		m.goal = prompt
+		m.state = StatePipeline
+		m.content = ContentStreaming
+		m.startTime = time.Now()
+		return m, m.startPipeline(prompt, true)
 	default:
 		var cmd tea.Cmd
 		m.prompt, cmd = m.prompt.Update(msg)
@@ -188,118 +200,102 @@ func (m Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m Model) handleClarificationKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handlePipelineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.content {
+	case ContentCoaching:
+		return m.handleCoachingKey(msg)
+	case ContentPlanReview:
+		return m.handlePlanReviewKey(msg)
+	case ContentCompletion:
+		return m.handleCompletionKey(msg)
+	case ContentStreaming:
+		return m.handleStreamingKey(msg)
+	}
+	return m, nil
+}
+
+func (m Model) handleCoachingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEnter:
-		answers := make([]ClarificationAnswer, len(m.clarification.Questions))
-		for i, q := range m.clarification.Questions {
-			answers[i] = ClarificationAnswer{Question: q, Answer: m.clarification.Answers[i]}
+		// Submit answers
+		answers := make([]orchestrator.GatewayAnswer, len(m.answerFields))
+		for i, f := range m.answerFields {
+			answers[i] = orchestrator.GatewayAnswer{
+				QuestionIndex: i,
+				Answer:        strings.TrimSpace(f.Value()),
+			}
 		}
-		m.screen = ScreenDashboard
-		return m, func() tea.Msg { return SubmitClarificationMsg{Answers: answers} }
-	case tea.KeyEsc:
-		m.screen = ScreenPrompt
+		if m.decisions != nil {
+			m.decisions <- orchestrator.Decision{
+				Type:           orchestrator.DecisionApprove,
+				GatewayAnswers: answers,
+			}
+		}
+		m.content = ContentStreaming
+		return m, nil
+	case tea.KeyCtrlS:
+		// Skip coaching
+		if m.decisions != nil {
+			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionSkip}
+		}
+		m.content = ContentStreaming
+		return m, nil
+	case tea.KeyTab:
+		if m.answerCursor < len(m.answerFields)-1 {
+			m.answerFields[m.answerCursor].Blur()
+			m.answerCursor++
+			m.answerFields[m.answerCursor].Focus()
+		}
+		return m, nil
+	case tea.KeyShiftTab:
+		if m.answerCursor > 0 {
+			m.answerFields[m.answerCursor].Blur()
+			m.answerCursor--
+			m.answerFields[m.answerCursor].Focus()
+		}
 		return m, nil
 	}
-	return m, nil
-}
-
-func (m Model) handleDashboardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "enter":
-		m.previous = m.screen
-		m.screen = ScreenAgentDetail
-		return m, nil
-	case "s", "S":
-		m.previous = m.screen
-		m.screen = ScreenFailure
-		m.failure = FailureState{AgentID: "pipeline", Err: fmt.Errorf("user stopped pipeline")}
-		if m.cancel != nil {
-			m.cancel()
-		}
-		return m, nil
-	case "q", "Q":
-		return m, tea.Quit
-	}
-	switch msg.Type {
-	case tea.KeyUp:
-		if m.dashboard.Selected > 0 {
-			m.dashboard.Selected--
-		}
-	case tea.KeyDown:
-		if m.dashboard.Selected < len(m.dashboard.Agents)-1 {
-			m.dashboard.Selected++
-		}
-	}
-	return m, nil
-}
-
-func (m Model) handleAgentDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
-		m.screen = ScreenDashboard
-		return m, nil
-	}
-	switch msg.String() {
-	case "f", "F":
-		// Toggle follow mode (future: scroll to bottom)
-		return m, nil
-	case "s", "S":
-		m.previous = m.screen
-		m.screen = ScreenFailure
-		if m.cancel != nil {
-			m.cancel()
-		}
-		return m, nil
+	// Pass to active answer field
+	if m.answerCursor < len(m.answerFields) {
+		var cmd tea.Cmd
+		m.answerFields[m.answerCursor], cmd = m.answerFields[m.answerCursor].Update(msg)
+		return m, cmd
 	}
 	return m, nil
 }
 
 func (m Model) handlePlanReviewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "y", "Y":
-		m.screen = ScreenDashboard
-		return m, func() tea.Msg { return ApprovePlanMsg{} }
-	case "n", "N":
-		// Pre-fill prompt with the prior goal and validator feedback
-		m.screen = ScreenPrompt
-		if m.planOutput != nil {
-			m.prompt.SetValue(m.planOutput.Spec.Goal)
+	case "a", "A":
+		if m.decisions != nil {
+			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionApprove}
 		}
-		return m, func() tea.Msg { return RejectPlanMsg{Feedback: m.goal} }
-	case "e", "E":
-		return m, func() tea.Msg { return EditPlanMsg{} }
-	}
-	return m, nil
-}
-
-func (m Model) handleFailureKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "r", "R":
-		m.screen = ScreenDashboard
-		return m, func() tea.Msg { return RetryAgentMsg{AgentID: m.failure.AgentID} }
+		m.content = ContentStreaming
+		return m, nil
 	case "s", "S":
-		m.screen = ScreenDashboard
-		return m, func() tea.Msg { return SkipAgentMsg{AgentID: m.failure.AgentID} }
-	case "a", "A":
-		m.screen = ScreenCompletion
-		m.completion = CompletionState{Result: orchestrator.Result{Status: orchestrator.StatusAborted}}
+		if m.decisions != nil {
+			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionCancel}
+		}
 		return m, nil
 	}
 	return m, nil
 }
 
-func (m Model) handleQAResultKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleStreamingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "f", "F":
-		m.screen = ScreenDashboard
-		return m, func() tea.Msg { return RepairWorkMsg{} }
-	case "a", "A":
-		m.screen = ScreenCompletion
-		m.completion = CompletionState{Result: orchestrator.Result{Status: orchestrator.StatusAcceptedWithWarn}}
+	case "s", "S":
+		// Cancel running agent
+		if m.cancel != nil {
+			m.cancel()
+		}
 		return m, nil
-	case "r", "R":
-		m.qa.ShowFull = !m.qa.ShowFull
+	case "n", "N":
+		// New run
+		m.state = StatePrompt
+		m.prompt.Reset()
+		if m.goal != "" {
+			m.prompt.SetValue(m.goal)
+		}
 		return m, nil
 	}
 	return m, nil
@@ -307,16 +303,12 @@ func (m Model) handleQAResultKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleCompletionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "enter":
-		// Reset for new task
-		m.screen = ScreenPrompt
+	case "n", "N":
+		m.state = StatePrompt
 		m.prompt.Reset()
-		m.goal = ""
-		m.planOutput = nil
-		m.dashboard = DashboardState{}
-		return m, nil
-	case "d", "D":
-		m.completion.ShowDiff = !m.completion.ShowDiff
+		if m.goal != "" {
+			m.prompt.SetValue(m.goal)
+		}
 		return m, nil
 	case "q", "Q":
 		return m, tea.Quit
@@ -326,63 +318,111 @@ func (m Model) handleCompletionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleOrchestratorEvent updates the model based on orchestrator events.
 func (m Model) handleOrchestratorEvent(event orchestrator.Event) (tea.Model, tea.Cmd) {
+	// Always re-subscribe to the next event
+	nextCmd := waitForEvent(m.events)
+
 	switch event.Type {
 	case orchestrator.EventPhaseChange:
 		m.phase = event.Phase
+
+	case orchestrator.EventAgentStarted:
+		m.agents = append(m.agents, AgentRow{ID: event.AgentID, State: "running"})
+
+	case orchestrator.EventAgentDone:
+		for i := range m.agents {
+			if m.agents[i].ID == event.AgentID {
+				m.agents[i].State = "done"
+			}
+		}
+
+	case orchestrator.EventAgentFailed:
+		for i := range m.agents {
+			if m.agents[i].ID == event.AgentID {
+				m.agents[i].State = "failed"
+			}
+		}
+		m.lastErr = event.Err
+
+	case orchestrator.EventAgentCancelled:
+		for i := range m.agents {
+			if m.agents[i].ID == event.AgentID {
+				m.agents[i].State = "cancelled"
+			}
+		}
+
+	case orchestrator.EventGateRequest:
+		switch event.Gate.Type {
+		case orchestrator.GateGatewayCoach:
+			m.content = ContentCoaching
+			m.gatewayResult = event.Gate.GatewayResult
+			// Create answer fields pre-filled with defaults
+			m.answerFields = make([]textarea.Model, len(m.gatewayResult.Questions))
+			for i, q := range m.gatewayResult.Questions {
+				ta := textarea.New()
+				ta.SetWidth(m.effectiveWidth() - 10)
+				ta.SetHeight(1)
+				ta.CharLimit = 512
+				if q.Default != "" {
+					ta.SetValue(q.Default)
+				}
+				if i == 0 {
+					ta.Focus()
+				}
+				m.answerFields[i] = ta
+			}
+			m.answerCursor = 0
+
+		case orchestrator.GatePlanApproval:
+			m.content = ContentPlanReview
+			m.planOutput = event.Gate.PlanOutput
+			m.hasPlan = true
+		}
+
 	case orchestrator.EventPlanReady:
 		m.planOutput = event.PlanOutput
-		m.screen = ScreenPlanReview
+		m.hasPlan = true
+
 	case orchestrator.EventQADone:
-		m.qa.Report = event.QAReport
-		if event.QAReport.Verdict != agent.VerdictPass {
-			m.screen = ScreenQAResult
+		if event.HasQA {
+			m.qaReport = event.QAReport
+			m.hasQA = true
 		}
-	case orchestrator.EventAgentFailed:
-		m.screen = ScreenFailure
-		m.failure = FailureState{AgentID: event.AgentID, Err: event.Err}
+
 	case orchestrator.EventComplete:
-		m.screen = ScreenCompletion
+		m.content = ContentCompletion
+		if event.HasQA {
+			m.qaReport = event.QAReport
+			m.hasQA = true
+		}
 	}
-	return m, nil
+
+	return m, nextCmd
 }
 
-// startPipeline launches the orchestrator in a goroutine and sends events as tea.Msg.
-func (m Model) startPipeline(prompt string) tea.Cmd {
-	engine := m.engine
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		_ = cancel // stored on model via OrchestratorEventMsg in production
-		result, err := engine.Run(
-			ctx,
-			orchestrator.Input{Prompt: prompt},
-			func(event orchestrator.Event) {
-				// In production: p.Send(OrchestratorEventMsg{Event: event})
-			},
-		)
-		return RunCompleteMsg{Result: result, Err: err}
-	}
+// startPipeline launches the orchestrator and returns a command to start listening.
+func (m *Model) startPipeline(prompt string, skipGateway bool) tea.Cmd {
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+
+	channels := m.engine.Start(ctx, orchestrator.Input{
+		Prompt:      prompt,
+		SkipGateway: skipGateway,
+	})
+	m.events = channels.Events
+	m.decisions = channels.Decisions
+
+	return waitForEvent(channels.Events)
 }
 
 // View renders the current screen.
 func (m Model) View() string {
-	var b strings.Builder
-
-	// Header
-	b.WriteString(m.viewHeader())
-	b.WriteString("\n")
-	b.WriteString(dividerStyle.Render(strings.Repeat("─", m.effectiveWidth())))
-	b.WriteString("\n")
-
-	// Content
-	b.WriteString(m.viewContent())
-
-	// Footer
-	b.WriteString("\n")
-	b.WriteString(dividerStyle.Render(strings.Repeat("─", m.effectiveWidth())))
-	b.WriteString("\n")
-	b.WriteString(m.viewFooter())
-
-	return b.String()
+	switch m.state {
+	case StatePrompt:
+		return m.viewPromptScreen()
+	case StatePipeline:
+		return m.viewPipelineScreen()
+	}
+	return ""
 }
 
 func (m Model) effectiveWidth() int {
@@ -392,106 +432,122 @@ func (m Model) effectiveWidth() int {
 	return 80
 }
 
-func (m Model) viewHeader() string {
-	elapsed := time.Since(m.startTime).Truncate(time.Second)
-	title := headerStyle.Render(" Orqestra v3")
-	phase := ""
-	if m.phase != "" {
-		phase = phaseStyle.Render(fmt.Sprintf("▶ %s", m.phase))
-	} else {
-		switch m.screen {
-		case ScreenPrompt:
-			phase = phaseStyle.Render("ready")
-		case ScreenPlanReview:
-			phase = phaseStyle.Render("○ review plan")
-		case ScreenCompletion:
-			phase = phaseStyle.Render("✓ complete")
-		case ScreenFailure:
-			phase = failStyle.Render("✗ failed")
-		case ScreenQAResult:
-			phase = phaseStyle.Render("○ QA review")
-		}
-	}
-	time := elapsedStyle.Render(elapsed.String())
-	return fmt.Sprintf("%s  %s  %s", title, phase, time)
+func (m Model) viewPromptScreen() string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render(" Orqestra"))
+	b.WriteString("\n")
+	b.WriteString(dividerStyle.Render(strings.Repeat("─", m.effectiveWidth())))
+	b.WriteString("\n\n")
+	b.WriteString(" Enter a task description. Be specific about the end state.\n\n")
+	b.WriteString(m.prompt.View())
+	b.WriteString("\n\n")
+	b.WriteString(dividerStyle.Render(strings.Repeat("─", m.effectiveWidth())))
+	b.WriteString("\n")
+	b.WriteString(keyStyle.Render(" [Enter] submit | [Ctrl+S] skip gateway | [^C^C] quit"))
+	return b.String()
 }
 
-func (m Model) viewContent() string {
-	switch m.screen {
-	case ScreenPrompt:
-		return m.viewPrompt()
-	case ScreenClarification:
-		return m.viewClarification()
-	case ScreenDashboard:
-		return m.viewDashboard()
-	case ScreenAgentDetail:
-		return m.viewAgentDetail()
-	case ScreenPlanReview:
-		return m.viewPlanReview()
-	case ScreenFailure:
-		return m.viewFailure()
-	case ScreenQAResult:
-		return m.viewQAResult()
-	case ScreenCompletion:
-		return m.viewCompletion()
+func (m Model) viewPipelineScreen() string {
+	var b strings.Builder
+
+	// Header
+	elapsed := time.Since(m.startTime).Truncate(time.Second)
+	title := headerStyle.Render(" Orqestra")
+	phase := phaseStyle.Render(fmt.Sprintf("▶ %s", m.phase))
+	timeStr := elapsedStyle.Render(elapsed.String())
+	b.WriteString(fmt.Sprintf("%s  %s  %s\n", title, phase, timeStr))
+	b.WriteString(dividerStyle.Render(strings.Repeat("─", m.effectiveWidth())))
+	b.WriteString("\n")
+
+	// Split: content (75%) | sidebar (25%)
+	contentWidth := m.effectiveWidth() * 3 / 4
+	sidebarWidth := m.effectiveWidth() - contentWidth - 1 // -1 for separator
+
+	contentView := m.viewContent(contentWidth)
+	sidebarView := m.viewSidebar(sidebarWidth)
+
+	// Join horizontally
+	contentLines := strings.Split(contentView, "\n")
+	sidebarLines := strings.Split(sidebarView, "\n")
+
+	maxLines := len(contentLines)
+	if len(sidebarLines) > maxLines {
+		maxLines = len(sidebarLines)
+	}
+
+	for i := 0; i < maxLines; i++ {
+		cl := ""
+		if i < len(contentLines) {
+			cl = contentLines[i]
+		}
+		sl := ""
+		if i < len(sidebarLines) {
+			sl = sidebarLines[i]
+		}
+		// Pad content to width
+		if len(cl) < contentWidth {
+			cl += strings.Repeat(" ", contentWidth-len(cl))
+		}
+		b.WriteString(fmt.Sprintf("%s│%s\n", cl, sl))
+	}
+
+	// Footer
+	b.WriteString(dividerStyle.Render(strings.Repeat("─", m.effectiveWidth())))
+	b.WriteString("\n")
+	b.WriteString(m.viewFooter())
+
+	return b.String()
+}
+
+func (m Model) viewContent(width int) string {
+	switch m.content {
+	case ContentStreaming:
+		return m.viewStreaming(width)
+	case ContentCoaching:
+		return m.viewCoaching(width)
+	case ContentPlanReview:
+		return m.viewPlanReview(width)
+	case ContentCompletion:
+		return m.viewCompletion(width)
 	}
 	return ""
 }
 
-func (m Model) viewPrompt() string {
-	return " Enter a task description. Be specific about the end state.\n\n" + m.prompt.View()
-}
-
-func (m Model) viewClarification() string {
-	var b strings.Builder
-	b.WriteString(" The following needs clarification:\n\n")
-	for i, q := range m.clarification.Questions {
-		marker := "  "
-		if i == m.clarification.Current {
-			marker = "> "
-		}
-		b.WriteString(fmt.Sprintf("%s%s\n", marker, q))
-	}
-	return b.String()
-}
-
-func (m Model) viewDashboard() string {
+func (m Model) viewStreaming(_ int) string {
 	var b strings.Builder
 	if m.goal != "" {
 		b.WriteString(fmt.Sprintf(" Goal: %s\n\n", goalStyle.Render(m.goal)))
 	}
-	if len(m.dashboard.Agents) == 0 {
-		b.WriteString(" Pipeline running...\n")
-	} else {
-		for i, a := range m.dashboard.Agents {
-			marker := "  "
-			if i == m.dashboard.Selected {
-				marker = "▶ "
-			}
-			b.WriteString(fmt.Sprintf("%s%-12s | %5d in | %5d out | %.1f tok/s | %.0f%% ctx\n",
-				marker, a.AgentID, a.InputTokens, a.OutputTokens, a.ThroughputPS, a.CtxPercent))
+	b.WriteString(fmt.Sprintf(" Phase: %s\n", m.phase))
+	if m.lastErr != nil {
+		b.WriteString(errorStyle.Render(fmt.Sprintf("\n Error: %v\n", m.lastErr)))
+	}
+	return b.String()
+}
+
+func (m Model) viewCoaching(_ int) string {
+	var b strings.Builder
+	brief := m.gatewayResult.Brief
+	b.WriteString(fmt.Sprintf(" Task: %s\n", goalStyle.Render(brief.Task)))
+	if brief.EndState != "" {
+		b.WriteString(fmt.Sprintf(" End State: %s\n", brief.EndState))
+	}
+	b.WriteString("\n Questions:\n")
+	for i, q := range m.gatewayResult.Questions {
+		marker := "  "
+		if i == m.answerCursor {
+			marker = "▶ "
+		}
+		b.WriteString(fmt.Sprintf("%s%s\n", marker, q.Text))
+		if i < len(m.answerFields) {
+			b.WriteString(fmt.Sprintf("   %s\n", m.answerFields[i].View()))
 		}
 	}
 	return b.String()
 }
 
-func (m Model) viewAgentDetail() string {
-	if m.dashboard.Selected >= len(m.dashboard.Agents) {
-		return " No agent selected.\n"
-	}
-	a := m.dashboard.Agents[m.dashboard.Selected]
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf(" ▶ %s | %d in | %d out | %.1f tok/s | %.0f%% ctx\n\n",
-		a.AgentID, a.InputTokens, a.OutputTokens, a.ThroughputPS, a.CtxPercent))
-	b.WriteString(" Tool Calls:\n")
-	for _, tc := range a.ToolCalls {
-		b.WriteString(fmt.Sprintf("   %s (%s)\n", tc.Name, tc.Duration))
-	}
-	return b.String()
-}
-
-func (m Model) viewPlanReview() string {
-	if m.planOutput == nil {
+func (m Model) viewPlanReview(_ int) string {
+	if !m.hasPlan {
 		return " Waiting for plan...\n"
 	}
 	spec := m.planOutput.Spec
@@ -501,86 +557,69 @@ func (m Model) viewPlanReview() string {
 	for i, s := range spec.Steps {
 		b.WriteString(fmt.Sprintf("   %d. %s\n", i+1, stepStyle.Render(s)))
 	}
-	b.WriteString("\n Acceptance Criteria:\n")
+	b.WriteString("\n Acceptance:\n")
 	for _, a := range spec.Acceptance {
 		b.WriteString(fmt.Sprintf("   • %s\n", a))
 	}
 	return b.String()
 }
 
-func (m Model) viewFailure() string {
+func (m Model) viewCompletion(_ int) string {
 	var b strings.Builder
 	if m.goal != "" {
 		b.WriteString(fmt.Sprintf(" Goal: %s\n\n", goalStyle.Render(m.goal)))
 	}
-	b.WriteString(errorStyle.Render(fmt.Sprintf(" Error: %v\n", m.failure.Err)))
-	b.WriteString(fmt.Sprintf("\n Agent: %s\n", m.failure.AgentID))
-	return b.String()
-}
-
-func (m Model) viewQAResult() string {
-	if m.qa.Report == nil {
-		return " Waiting for QA results...\n"
-	}
-	var b strings.Builder
-	verdictStyle := warnStyle
-	if m.qa.Report.Verdict == agent.VerdictFail {
-		verdictStyle = failStyle
-	}
-	b.WriteString(fmt.Sprintf(" QA Gate: %s\n\n", verdictStyle.Render(string(m.qa.Report.Verdict))))
-	b.WriteString(fmt.Sprintf(" Summary: %s\n\n", m.qa.Report.Summary))
-	if m.qa.ShowFull {
-		for _, issue := range m.qa.Report.Issues {
-			tag := "info"
-			if issue.Blocking {
-				tag = "blocker"
-			}
-			b.WriteString(fmt.Sprintf("   [%s] %s: %s\n", tag, issue.ID, issue.Message))
+	if m.hasQA {
+		verdictStyle := passStyle
+		if m.qaReport.Verdict == agent.VerdictFail {
+			verdictStyle = failStyle
+		} else if m.qaReport.Verdict == agent.VerdictWarn {
+			verdictStyle = warnStyle
 		}
-	}
-	return b.String()
-}
-
-func (m Model) viewCompletion() string {
-	var b strings.Builder
-	if m.goal != "" {
-		b.WriteString(fmt.Sprintf(" Goal: %s\n\n", goalStyle.Render(m.goal)))
-	}
-	status := m.completion.Result.Status
-	statusStyle := passStyle
-	switch status {
-	case orchestrator.StatusFailed, orchestrator.StatusAborted:
-		statusStyle = failStyle
-	case orchestrator.StatusAcceptedWithWarn:
-		statusStyle = warnStyle
-	}
-	b.WriteString(fmt.Sprintf(" Status: %s\n", statusStyle.Render(string(status))))
-	if m.completion.Result.RunDir != "" {
-		b.WriteString(fmt.Sprintf(" Run: %s\n", m.completion.Result.RunDir))
+		b.WriteString(fmt.Sprintf(" QA: %s\n", verdictStyle.Render(string(m.qaReport.Verdict))))
+		b.WriteString(fmt.Sprintf(" %s\n", m.qaReport.Summary))
 	}
 	elapsed := time.Since(m.startTime).Truncate(time.Second)
-	b.WriteString(fmt.Sprintf(" Elapsed: %s\n", elapsed))
+	b.WriteString(fmt.Sprintf("\n Elapsed: %s\n", elapsed))
+	return b.String()
+}
+
+func (m Model) viewSidebar(width int) string {
+	var b strings.Builder
+	b.WriteString(" Agents\n")
+	b.WriteString(strings.Repeat("─", width))
+	b.WriteString("\n")
+	for _, a := range m.agents {
+		icon := "○"
+		switch a.State {
+		case "running":
+			icon = "▶"
+		case "done":
+			icon = "✓"
+		case "failed":
+			icon = "✗"
+		case "cancelled":
+			icon = "⊘"
+		case "gate":
+			icon = "●"
+		}
+		b.WriteString(fmt.Sprintf(" %s %s\n", icon, a.ID))
+	}
+	if len(m.agents) == 0 {
+		b.WriteString(" (waiting)\n")
+	}
 	return b.String()
 }
 
 func (m Model) viewFooter() string {
-	switch m.screen {
-	case ScreenPrompt:
-		return keyStyle.Render(" [Enter] submit | [Ctrl+C Ctrl+C] exit")
-	case ScreenClarification:
-		return keyStyle.Render(" [↑↓] navigate | [Space] toggle | [Tab] next | [Enter] submit | [Esc] back")
-	case ScreenDashboard:
-		return keyStyle.Render(" [Enter] expand agent | [S] stop | [Ctrl+C Ctrl+C] exit")
-	case ScreenAgentDetail:
-		return keyStyle.Render(" [↑↓] scroll | [F] follow | [S] stop | [Esc] back")
-	case ScreenPlanReview:
-		return keyStyle.Render(" [Y] approve | [N] reject | [E] edit | [↑↓] scroll")
-	case ScreenFailure:
-		return keyStyle.Render(" [R] retry | [S] skip | [A] abort")
-	case ScreenQAResult:
-		return keyStyle.Render(" [A] accept anyway | [F] fix | [R] full report | [↑↓] scroll")
-	case ScreenCompletion:
-		return keyStyle.Render(" [Enter] new task | [D] diff detail | [Q] quit")
+	switch m.content {
+	case ContentCoaching:
+		return keyStyle.Render(" [Enter] confirm | [Ctrl+S] skip | [Tab] next field | [^C^C] quit")
+	case ContentPlanReview:
+		return keyStyle.Render(" [A] accept | [S] cancel | [^C^C] quit")
+	case ContentCompletion:
+		return keyStyle.Render(" [N] new run | [Q] quit")
+	default:
+		return keyStyle.Render(" [S] stop | [N] new run | [^C^C] quit")
 	}
-	return ""
 }

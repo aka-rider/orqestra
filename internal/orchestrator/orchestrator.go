@@ -23,9 +23,11 @@ const (
 	EventAgentStarted
 	EventAgentDone
 	EventAgentFailed
+	EventAgentCancelled
 	EventPlanReady
 	EventValidationDone
 	EventQADone
+	EventGateRequest
 	EventComplete
 	EventError
 )
@@ -43,24 +45,65 @@ const (
 	PhaseDone       Phase = "done"
 )
 
+// GateType identifies which interactive gate the pipeline is waiting at.
+type GateType int
+
+const (
+	GateGatewayCoach GateType = iota
+	GatePlanApproval
+)
+
+// GateRequest is emitted when the pipeline needs user input. Passed by value.
+type GateRequest struct {
+	Type          GateType
+	GatewayResult agent.GatewayResult
+	PlanOutput    agent.PlanOutput
+}
+
+// DecisionType classifies user decisions at gates.
+type DecisionType int
+
+const (
+	DecisionApprove DecisionType = iota
+	DecisionEdit
+	DecisionSkip
+	DecisionCancel
+)
+
+// GatewayAnswer holds a user's response to a coaching question.
+type GatewayAnswer struct {
+	QuestionIndex int
+	Answer        string
+}
+
+// Decision is sent from TUI to pipeline at gates.
+type Decision struct {
+	Type           DecisionType
+	GatewayAnswers []GatewayAnswer
+	EditedContent  string
+}
+
 // Event is emitted by the orchestrator to notify the TUI of progress.
+// All payload fields are values (not pointers) to prevent data races across channels.
 type Event struct {
 	Type             EventType
 	Phase            Phase
 	AgentID          string
-	AgentStats       *harness.AgentStats
-	PlanOutput       *agent.PlanOutput
-	ValidationReport *agent.ValidationReport
-	QAReport         *agent.ValidationReport
+	PlanOutput       agent.PlanOutput
+	ValidationReport agent.ValidationReport
+	HasValidation    bool
+	QAReport         agent.ValidationReport
+	HasQA            bool
+	Gate             GateRequest
 	WorkOutput       string
 	Err              error
 }
 
 // Input is the user's request to the orchestrator.
 type Input struct {
-	Prompt             string
-	ClarificationInput []string
-	SkipExecution      bool
+	Prompt      string
+	AutoApprove bool
+	SkipGateway bool
 }
 
 // RunStatus classifies the final outcome.
@@ -69,6 +112,7 @@ type RunStatus string
 const (
 	StatusSuccess          RunStatus = "success"
 	StatusFailed           RunStatus = "failed"
+	StatusCancelled        RunStatus = "cancelled"
 	StatusAborted          RunStatus = "aborted"
 	StatusAcceptedWithWarn RunStatus = "accepted_with_warnings"
 )
@@ -77,7 +121,7 @@ const (
 type Result struct {
 	Status      RunStatus
 	Spec        agent.Specification
-	PlanOutput  *agent.PlanOutput
+	PlanOutput  agent.PlanOutput
 	ProjectPlan *agent.ProjectPlan
 	QAReport    *agent.ValidationReport
 	WorkOutput  string
@@ -104,73 +148,217 @@ type Engine struct {
 	RunDirFactory RunDirFactory
 }
 
-// Run executes the full pipeline: gateway → plan → validate → decompose → execute → QA.
+// RunChannels provides bidirectional communication between Engine and TUI.
+type RunChannels struct {
+	Events    <-chan Event
+	Decisions chan<- Decision
+}
+
+// Start launches the pipeline in a goroutine. Returns channels immediately.
+// Pipeline sends events, blocks at gates waiting for decisions.
+// The Events channel is closed when the pipeline exits.
+func (e *Engine) Start(ctx context.Context, input Input) RunChannels {
+	events := make(chan Event, 16)
+	decisions := make(chan Decision, 1)
+
+	go func() {
+		defer close(events)
+		e.run(ctx, input, events, decisions)
+	}()
+
+	return RunChannels{Events: events, Decisions: decisions}
+}
+
+// Run executes the full pipeline synchronously (legacy callback API).
 func (e *Engine) Run(ctx context.Context, input Input, emit func(Event)) (Result, error) {
+	channels := e.Start(ctx, Input{
+		Prompt:      input.Prompt,
+		AutoApprove: true, // Legacy API auto-approves all gates
+	})
+
+	var result Result
+	var lastErr error
+	for event := range channels.Events {
+		if emit != nil {
+			emit(event)
+		}
+		if event.Type == EventError && event.Err != nil {
+			lastErr = event.Err
+		}
+		if event.Type == EventComplete {
+			var qaPtr *agent.ValidationReport
+			if event.HasQA {
+				rpt := event.QAReport
+				qaPtr = &rpt
+			}
+			result = Result{
+				Status:     StatusSuccess,
+				PlanOutput: event.PlanOutput,
+				QAReport:   qaPtr,
+			}
+		}
+	}
+	if lastErr != nil {
+		return Result{Status: StatusFailed}, lastErr
+	}
+	return result, nil
+}
+
+const maxCoachingRounds = 3
+
+func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, decisions <-chan Decision) {
+	emit := func(ev Event) {
+		select {
+		case events <- ev:
+		case <-ctx.Done():
+		}
+	}
+
 	// Create run directory
 	var session agent.SessionDir
 	if e.RunDirFactory != nil {
 		var err error
 		session, err = e.RunDirFactory("run")
 		if err != nil {
-			return Result{}, fmt.Errorf("create run directory: %w", err)
+			emit(Event{Type: EventError, Err: fmt.Errorf("create run directory: %w", err)})
+			return
 		}
 	}
 
 	// --- Gateway Evaluation ---
-	emit(Event{Type: EventPhaseChange, Phase: PhaseGateway})
+	var plannerInput string
 
-	gw := agent.NewGateway(e.Runners.Gateway, &e.Config.Gateway)
-	gwResult, err := gw.Evaluate(ctx, input.Prompt)
-	if err != nil {
-		emit(Event{Type: EventError, Err: err})
-		return Result{Status: StatusFailed}, fmt.Errorf("gateway evaluation: %w", err)
-	}
+	if input.SkipGateway {
+		plannerInput = input.Prompt
+	} else {
+		emit(Event{Type: EventPhaseChange, Phase: PhaseGateway})
+		emit(Event{Type: EventAgentStarted, AgentID: "gateway"})
 
-	switch gwResult.Verdict {
-	case agent.GatewayVerdictCoach:
-		// In interactive mode the TUI handles coaching loops.
-		// For the orchestrator, we proceed with the rephrased version.
-		if len(input.ClarificationInput) == 0 {
-			emit(Event{Type: EventError, Err: fmt.Errorf("coaching needed but no answers provided")})
-			return Result{Status: StatusFailed}, fmt.Errorf("coaching needed: %v", gwResult.Questions)
+		gw := agent.NewGateway(e.Runners.Gateway, &e.Config.Gateway)
+		prompt := input.Prompt
+
+		for round := 0; round < maxCoachingRounds; round++ {
+			gwResult, err := gw.Evaluate(ctx, prompt)
+			if err != nil {
+				emit(Event{Type: EventAgentFailed, AgentID: "gateway", Err: err})
+				emit(Event{Type: EventError, Err: err})
+				return
+			}
+
+			if gwResult.Verdict == agent.GatewayVerdictAccept {
+				emit(Event{Type: EventAgentDone, AgentID: "gateway"})
+				plannerInput = gwResult.PlannerQuestion
+				break
+			}
+
+			// Coach verdict — gate for user input
+			if input.AutoApprove {
+				// Auto-approve: use current brief as planner input
+				emit(Event{Type: EventAgentDone, AgentID: "gateway"})
+				plannerInput = buildPlannerInputFromBrief(gwResult.Brief)
+				break
+			}
+
+			emit(Event{Type: EventGateRequest, Gate: GateRequest{
+				Type:          GateGatewayCoach,
+				GatewayResult: gwResult,
+			}})
+
+			// Block waiting for decision
+			select {
+			case decision := <-decisions:
+				switch decision.Type {
+				case DecisionCancel:
+					emit(Event{Type: EventAgentCancelled, AgentID: "gateway"})
+					emit(Event{Type: EventComplete, Phase: PhaseDone})
+					return
+				case DecisionSkip:
+					emit(Event{Type: EventAgentDone, AgentID: "gateway"})
+					plannerInput = input.Prompt
+					goto plan
+				case DecisionApprove:
+					// Incorporate answers and re-evaluate
+					prompt = incorporateAnswers(prompt, gwResult, decision.GatewayAnswers)
+				}
+			case <-ctx.Done():
+				emit(Event{Type: EventAgentCancelled, AgentID: "gateway"})
+				return
+			}
+
+			// If this is the last round, auto-accept
+			if round == maxCoachingRounds-1 {
+				emit(Event{Type: EventAgentDone, AgentID: "gateway"})
+				plannerInput = buildPlannerInputFromBrief(gwResult.Brief)
+			}
 		}
 	}
 
+plan:
 	// --- Planning ---
 	emit(Event{Type: EventPhaseChange, Phase: PhasePlanning})
+	emit(Event{Type: EventAgentStarted, AgentID: "planner"})
 
 	planner := agent.NewPlanner(e.Runners.Planner, &e.Config.Planner)
-	planOutput, err := planner.Plan(ctx, gwResult.Rephrased)
+	planOutput, err := planner.Plan(ctx, plannerInput)
 	if err != nil {
-		emit(Event{Type: EventError, Err: err})
-		return Result{Status: StatusFailed}, fmt.Errorf("planning: %w", err)
+		emit(Event{Type: EventAgentFailed, AgentID: "planner", Err: err})
+		emit(Event{Type: EventError, Err: fmt.Errorf("planning: %w", err)})
+		return
 	}
 
 	writeArtifact(session, "plan_output.json", planOutput)
-	emit(Event{Type: EventPlanReady, PlanOutput: &planOutput})
+	emit(Event{Type: EventAgentDone, AgentID: "planner"})
+
+	// --- Plan Approval Gate ---
+	if !input.AutoApprove {
+		emit(Event{Type: EventGateRequest, Gate: GateRequest{
+			Type:       GatePlanApproval,
+			PlanOutput: planOutput,
+		}})
+
+		select {
+		case decision := <-decisions:
+			switch decision.Type {
+			case DecisionCancel:
+				emit(Event{Type: EventComplete, Phase: PhaseDone})
+				return
+			case DecisionEdit:
+				// Re-parse the edited content as a plan
+				edited, parseErr := planner.ParsePlanOutput(decision.EditedContent)
+				if parseErr == nil {
+					planOutput = edited
+				}
+			case DecisionApprove:
+				// proceed
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
 
 	spec := planOutput.Spec
 	writeArtifact(session, "specification.json", spec)
+	emit(Event{Type: EventPlanReady, PlanOutput: planOutput})
 
 	// --- Plan Validation ---
 	emit(Event{Type: EventPhaseChange, Phase: PhaseValidating})
+	emit(Event{Type: EventAgentStarted, AgentID: "validator"})
 
 	validator := agent.NewPlanValidator(e.Runners.Validator, &e.Config.Validator)
 	planReport, err := validator.ValidatePlan(ctx, spec)
 	if err != nil {
-		emit(Event{Type: EventError, Err: err})
-		return Result{Status: StatusFailed}, fmt.Errorf("plan validation: %w", err)
+		emit(Event{Type: EventAgentFailed, AgentID: "validator", Err: err})
+		emit(Event{Type: EventError, Err: fmt.Errorf("plan validation: %w", err)})
+		return
 	}
 
 	writeArtifact(session, "validation_report.json", planReport)
-	emit(Event{Type: EventValidationDone, ValidationReport: planReport})
+	emit(Event{Type: EventValidationDone, ValidationReport: *planReport, HasValidation: true})
+	emit(Event{Type: EventAgentDone, AgentID: "validator"})
 
 	if planReport.Verdict == agent.VerdictFail {
-		return Result{Status: StatusFailed, Spec: spec, PlanOutput: &planOutput}, nil
-	}
-
-	if input.SkipExecution {
-		return Result{Status: StatusSuccess, Spec: spec, PlanOutput: &planOutput, RunDir: session.Path}, nil
+		emit(Event{Type: EventError, Err: fmt.Errorf("plan validation failed: %s", planReport.Summary)})
+		return
 	}
 
 	// --- Project Management Decomposition ---
@@ -194,11 +382,13 @@ func (e *Engine) Run(ctx context.Context, input Input, emit func(Event)) (Result
 	workOutput, execErr := e.executeWorkerWaves(ctx, spec, projectPlan, emit)
 	if execErr != nil {
 		emit(Event{Type: EventAgentFailed, AgentID: "worker", Err: execErr})
-		return Result{Status: StatusFailed, Spec: spec, PlanOutput: &planOutput, ProjectPlan: projectPlan}, execErr
+		emit(Event{Type: EventError, Err: execErr})
+		return
 	}
 
 	// --- QA Gate ---
 	emit(Event{Type: EventPhaseChange, Phase: PhaseQA})
+	emit(Event{Type: EventAgentStarted, AgentID: "qa"})
 
 	gate := agent.NewGate(e.Runners.QA, &e.Config.QA)
 	qaReport, qaErr := gate.ValidateWork(ctx, &agent.QAInput{
@@ -208,37 +398,40 @@ func (e *Engine) Run(ctx context.Context, input Input, emit func(Event)) (Result
 		ExpectedArtifacts:  planOutput.ExpectedArtifacts,
 	})
 	if qaErr != nil {
+		emit(Event{Type: EventAgentFailed, AgentID: "qa", Err: qaErr})
 		emit(Event{Type: EventError, Err: qaErr})
-		return Result{Status: StatusFailed, Spec: spec, WorkOutput: workOutput}, qaErr
+		return
 	}
 
 	writeArtifact(session, "qa_report.json", qaReport)
-	emit(Event{Type: EventQADone, QAReport: qaReport})
+	emit(Event{Type: EventQADone, QAReport: *qaReport, HasQA: true})
+	emit(Event{Type: EventAgentDone, AgentID: "qa"})
 
 	// --- Completion ---
 	emit(Event{Type: EventPhaseChange, Phase: PhaseDone})
+	emit(Event{Type: EventComplete, Phase: PhaseDone, PlanOutput: planOutput, QAReport: *qaReport, HasQA: true})
+}
 
-	status := StatusSuccess
-	if qaReport.Verdict == agent.VerdictFail {
-		status = StatusFailed
-	} else if qaReport.Verdict == agent.VerdictWarn {
-		status = StatusAcceptedWithWarn
+// buildPlannerInputFromBrief constructs a planner question from a partial brief.
+func buildPlannerInputFromBrief(brief agent.PromptBrief) string {
+	if brief.EndState != "" {
+		return fmt.Sprintf("How should %q be implemented such that the end state is: %s?", brief.Task, brief.EndState)
 	}
+	return brief.Task
+}
 
-	result := Result{
-		Status:      status,
-		Spec:        spec,
-		PlanOutput:  &planOutput,
-		ProjectPlan: projectPlan,
-		QAReport:    qaReport,
-		WorkOutput:  workOutput,
-		RunDir:      session.Path,
+// incorporateAnswers enriches the prompt with user answers to coaching questions.
+func incorporateAnswers(prompt string, gwResult agent.GatewayResult, answers []GatewayAnswer) string {
+	var b strings.Builder
+	b.WriteString(prompt)
+	b.WriteString("\n\nClarifications:\n")
+	for _, ans := range answers {
+		if ans.QuestionIndex < len(gwResult.Questions) {
+			q := gwResult.Questions[ans.QuestionIndex]
+			b.WriteString(fmt.Sprintf("- %s: %s\n", q.Text, ans.Answer))
+		}
 	}
-
-	writeArtifact(session, "summary.json", result)
-	emit(Event{Type: EventComplete})
-
-	return result, nil
+	return b.String()
 }
 
 // executeWorkerWaves runs work packages in dependency waves.

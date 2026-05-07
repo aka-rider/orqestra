@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
@@ -18,15 +19,30 @@ const (
 	GatewayVerdictCoach  GatewayVerdict = "clarify"
 )
 
+// PromptBrief is the gateway's structured interpretation of user intent.
+type PromptBrief struct {
+	Task            string   `json:"task"`
+	EndState        string   `json:"end_state"`
+	Deliverables    []string `json:"deliverables"`
+	Scope           []string `json:"scope"`
+	NonScope        []string `json:"non_scope"`
+	AcceptanceHints []string `json:"acceptance_hints"`
+}
+
+// Question is a coaching question with options and a pre-filled default.
+type Question struct {
+	Text    string   `json:"text"`
+	Options []string `json:"options"`
+	Default string   `json:"default"`
+}
+
 // GatewayResult is the parsed result of gateway evaluation.
 type GatewayResult struct {
-	Verdict                GatewayVerdict `json:"verdict"`
-	Rephrased              string         `json:"rephrased"`
-	EndState               string         `json:"end_state"`
-	Reason                 string         `json:"reason"`
-	Questions              []string       `json:"questions"`
-	ImprovedPromptExamples []string       `json:"improved_prompt_examples"`
-	Confidence             float64        `json:"confidence"`
+	Verdict         GatewayVerdict `json:"verdict"`
+	Brief           PromptBrief    `json:"brief"`
+	Questions       []Question     `json:"questions"`
+	Confidence      float64        `json:"confidence"`
+	PlannerQuestion string         `json:"planner_question"`
 }
 
 // Gateway uses a CLIRunner to rephrase and coach user prompts.
@@ -42,7 +58,7 @@ func NewGateway(runner harness.CLIRunner, cfg *config.GatewayConfig) *Gateway {
 
 // Evaluate sends the raw prompt to the LLM and parses the structured response.
 func (g *Gateway) Evaluate(ctx context.Context, rawPrompt string) (GatewayResult, error) {
-	result, err := g.runner.RunPrint(ctx, rawPrompt, g.cfg.SystemPrompt)
+	result, err := g.runner.RunStreaming(ctx, rawPrompt, g.cfg.SystemPrompt, io.Discard)
 	if err != nil {
 		return GatewayResult{}, fmt.Errorf("gateway evaluation failed: %w", err)
 	}
@@ -59,11 +75,22 @@ func (g *Gateway) Evaluate(ctx context.Context, rawPrompt string) (GatewayResult
 		return GatewayResult{}, fmt.Errorf("gateway evaluation returned invalid verdict %q", gwResult.Verdict)
 	}
 
-	if gwResult.Rephrased == "" {
-		return GatewayResult{}, errors.New("gateway evaluation returned empty rephrased field")
+	if gwResult.Brief.Task == "" {
+		return GatewayResult{}, errors.New("gateway evaluation returned empty brief.task")
 	}
-	if gwResult.Verdict == GatewayVerdictAccept && gwResult.EndState == "" {
-		return GatewayResult{}, errors.New("gateway evaluation accepted but returned empty end_state")
+	if gwResult.Verdict == GatewayVerdictAccept {
+		if gwResult.Brief.EndState == "" {
+			return GatewayResult{}, errors.New("gateway accepted but returned empty brief.end_state")
+		}
+		if gwResult.PlannerQuestion == "" {
+			return GatewayResult{}, errors.New("gateway accepted but returned empty planner_question")
+		}
+	}
+	if gwResult.Verdict == GatewayVerdictCoach && len(gwResult.Questions) == 0 {
+		return GatewayResult{}, errors.New("gateway coach verdict requires at least one question")
+	}
+	if len(gwResult.Questions) > 3 {
+		return GatewayResult{}, fmt.Errorf("gateway returned %d questions, max is 3", len(gwResult.Questions))
 	}
 
 	return gwResult, nil

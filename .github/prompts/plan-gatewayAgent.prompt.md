@@ -109,6 +109,8 @@ Gateway calls `RunStreaming` so the TUI can display the brief as it generates in
 
 ### 3.1 Types — `internal/orchestrator/orchestrator.go`
 
+**Critical Rewrite Rule for Data Races:** Ensure `Event`, `GateRequest` and `Decision` payload struct fields contain **values, not pointers** (no `*agent.GatewayResult` or `*agent.PlanOutput`). When emitting these across channels between the Engine and Bubble Tea, passing by value prevents GC pressure and inherently eliminates shared state race conditions.
+
 ```go
 // GateType identifies which interactive gate the pipeline is waiting at.
 type GateType int
@@ -116,29 +118,27 @@ type GateType int
 const (
     GateGatewayCoach GateType = iota
     GatePlanApproval
-    GateQAReview
 )
 
-// GateRequest is emitted when the pipeline needs user input.
+// GateRequest is emitted when the pipeline needs user input. Passed by value.
 type GateRequest struct {
     Type           GateType
-    GatewayResult  *agent.GatewayResult  // for GateGatewayCoach
-    PlanOutput     *agent.PlanOutput     // for GatePlanApproval
-    QAReport       *agent.ValidationReport // for GateQAReview
+    GatewayResult  agent.GatewayResult  // passed by value
+    PlanOutput     agent.PlanOutput     // passed by value
 }
 
 // Decision is sent from TUI to pipeline at gates.
 type Decision struct {
     Type            DecisionType
     GatewayAnswers  []GatewayAnswer       // for coaching gate
-    EditedContent   string                // for [E] edit at Plan/QA gates
+    EditedContent   string                // for [E] edit at Plan gate
 }
 
 type DecisionType int
 
 const (
     DecisionApprove  DecisionType = iota  // proceed
-    DecisionEdit                          // proceed with modified payload
+    DecisionEdit                          // proceed with modified payload (Plan phase)
     DecisionSkip                          // skip gateway, use current brief
     DecisionCancel                        // cancel current agent / run
 )
@@ -153,7 +153,7 @@ type GatewayAnswer struct {
 
 ```go
 type Engine struct {
-    Config        *config.Config
+    Config        config.Config
     Runners       Runners
     RunDirFactory RunDirFactory
 }
@@ -262,10 +262,8 @@ const (
     ContentCoaching                       // gateway brief + questions
     ContentPlanReview                     // rendered spec
     ContentPlanEdit                       // editable spec in full-screen textarea
-    ContentQAReview                       // QA report
-    ContentQAEdit                         // editable QA context in full-screen textarea
     ContentAgentHistory                   // read-only past agent output (user navigated)
-    ContentCompletion                     // summary + files changed
+    ContentCompletion                     // QA report, summary, files changed
 )
 
 type Model struct {
@@ -285,11 +283,11 @@ type Model struct {
     sidebarScroll int
     focusedAgent  int  // -1 = auto (follow active), 0+ = user-selected
 
-    // Content state
-    gatewayResult  *agent.GatewayResult
-    planOutput     *agent.PlanOutput
-    qaReport       *agent.ValidationReport
-    completionResult *orchestrator.Result
+    // Content state (held by value to prevent races)
+    gatewayResult  agent.GatewayResult
+    planOutput     agent.PlanOutput
+    qaReport       agent.ValidationReport
+    completionResult orchestrator.Result
     agentStreams   map[string]*ringbuf.Buffer  // agent output history
 
     // Input state
@@ -311,10 +309,8 @@ type Model struct {
 | `ContentCoaching`     | Gateway's Brief + Questions with pre-filled defaults | Answer fields (editable)                      | `EventGateRequest{GateGatewayCoach}` |
 | `ContentPlanReview`   | Rendered spec (goal, steps, acceptance)              | Status: "[A] accept \| [E] edit"              | `EventGateRequest{GatePlanApproval}` |
 | `ContentPlanEdit`     | Bubble Tea `textarea` containing Markdown spec       | Status: "[Ctrl+S] save edits \| [Esc] cancel" | User presses [E] during Review       |
-| `ContentQAReview`     | QA validation report                                 | Status: "[A] accept \| [F] fix \| [E] edit"   | `EventGateRequest{GateQAReview}`     |
-| `ContentQAEdit`       | Bubble Tea `textarea` for additional fix context     | Status: "[Ctrl+S] fix with edits \| [Esc]"    | User presses [E] during QA Review    |
 | `ContentAgentHistory` | Selected agent's frozen output (scrollable)          | Status: "viewing gateway history (read-only)" | User presses [1-9]                   |
-| `ContentCompletion`   | Summary, files changed, token totals                 | "[N] new run \| [Q] quit"                     | `EventComplete`                      |
+| `ContentCompletion`   | QA validation report, summary, files changed         | "[N] new run \| [Q] quit"                     | `EventComplete`                      |
 
 ### 4.4 Sidebar Rendering
 
@@ -344,10 +340,8 @@ Context keys change per content mode:
 - Coaching: `[Enter] confirm | [Ctrl+S] skip`
 - Plan review: `[A] accept | [E] edit`
 - Plan edit: `[Ctrl+S] save edits | [Esc] discard edits`
-- QA review: `[A] accept | [F] fix | [E] edit instruction`
-- QA edit: `[Ctrl+S] fix with edits | [Esc] discard edits`
 - Agent history: `[Esc] back to live`
-- Streaming: (none, just persistent keys)
+- Streaming & Completion: (none, just persistent keys)
 
 ### 4.6 Key Bindings
 
@@ -363,11 +357,6 @@ Context keys change per content mode:
 | `E`               | Plan review        | Switch to ContentPlanEdit mode for text modification                |
 | `Ctrl+S`          | Plan edit          | Send DecisionEdit with modified plan content                        |
 | `Esc`             | Plan edit          | Discard edits, return to ContentPlanReview                          |
-| `A`               | QA review          | Accept with warnings                                                |
-| `F`               | QA review          | Re-run workers with existing QA feedback                            |
-| `E`               | QA review          | Switch to ContentQAEdit to append instructions                      |
-| `Ctrl+S`          | QA edit            | Send DecisionEdit with modified QA instructions                     |
-| `Esc`             | QA edit            | Discard edits, return to ContentQAReview                            |
 | `S`               | Any pipeline state | Cancel current agent. Run marked cancelled.                         |
 | `N`               | Any state          | New run. Pre-fills prompt. Confirms if pipeline active.             |
 | `D`               | Pipeline state     | Toggle full dashboard (expand sidebar to full screen)               |
@@ -378,15 +367,21 @@ Context keys change per content mode:
 | `Q`               | Completion         | Quit app                                                            |
 | `Ctrl+C Ctrl+C`   | Any state          | Quit app                                                            |
 
-### 4.7 Forward-Correction vs. Plan Rejection
+### 4.7 Strict Forward-Correction (No Time Travel)
 
-There is no formal "reject plan" action. Instead, the workflow defaults to forward-correction. Users can either:
+Orqestra pipelines are strictly forward-only. There is no internal rewinding or "reject" functionality.
 
-- **Accept** (`A`) and pipeline continues
-- **Edit** (`E`) to manually tweak, prune, or augment the plan inline before proceeding
-- **Cancel** (`S`) the run entirely → pipeline stops, UI shows cancelled, prompt pre-filled for new run
+**Pre-Execution (Plan Gate)**
+Files have not been touched. Users can:
 
-Rationale: Hard rejection implies navigating backwards state machines. Orqestra runs are forward-only. If the gateway/planner misses the mark slightly, `[E] edit` fixes it locally. If it completely hallucinates, cancel and restart with a better prompt.
+- **Accept** (`A`): The pipeline proceeds with the plan.
+- **Edit** (`E`): Manually tweak, prune, or augment the plan inline. The pipeline proceeds with the modified plan.
+- **Cancel** (`S`): The run dies cleanly. Start a new run.
+
+**Post-Execution (QA Output)**
+The workers have modified the repository. There is NO time travel, NO internal looping back to workers, and NO interactive review gate.
+The pipeline simply runs QA, injects the `ValidationReport` into the final UI state (`ContentCompletion`), and immediately terminates with `StatusComplete`.
+If the QA report highlights fatal flaws, the user must observe them in the final output, explicitly press `[N] new run`, and write a new prompt to fix the issues left behind in the dirty workspace.
 
 ### 4.8 Full Dashboard Override ([D])
 
@@ -425,7 +420,7 @@ Esc returns to split view. This is the only place workers are shown individually
 | `TestTUI_DoubleCtrlC`       | Press Ctrl+C twice             | Program exits                                                      |
 | `TestTUI_PlanEditSave`      | Modifies plan textarea, Accept | `DecisionEdit` sent with updated plan payload                      |
 | `TestTUI_PlanEditDiscard`   | Press Esc in PlanEdit mode     | Mode reverts to `ContentPlanReview`, payload unchanged             |
-| `TestTUI_QAEditSave`        | Modifies QA textarea, Fix      | `DecisionEdit` sent with attached instruction string               |
+| `TestTUI_CompletionQA`      | Pipeline emits Completion      | Mode switches to `ContentCompletion`, QA report visible            |
 
 ---
 
@@ -489,7 +484,7 @@ start:
     if gwResult.Verdict == "coach":
         emit(GateRequest{GateGatewayCoach, gwResult})
         decision := <-decisions                   // BLOCK
-        if decision == Skip:
+        if decision.Type == DecisionSkip:
             plannerInput = prompt
             goto plan
         answers := decision.GatewayAnswers
@@ -504,29 +499,19 @@ plan:
 plan_gate:
     emit(GateRequest{GatePlanApproval, planOutput})
     decision := <-decisions                       // BLOCK
-    if decision == Cancel:
+    if decision.Type == DecisionCancel:
         return StatusCancelled
-    if decision == Edit:
+    if decision.Type == DecisionEdit:
         planOutput.RawContent = decision.EditedContent
         // Proceed with modified plan
 
-qa_loop:
     emit(PhaseValidating)
-    ...workers...QA...
+    // ...workers execute, mutating the repo...
     qaReport := validator.Run(planOutput)
-    emit(GateRequest{GateQAReview, qaReport})
-    
-    // Bubble Tea textarea intercepts keymaps to allow Tab focus cycling
-    // Textarea bindings for edit saves are Ctrl+S.
-    
-    decision = <-decisions
-    if decision == Cancel:
-        return StatusCancelled
-    if decision == Edit:
-        qaReport.Instructions = append(qaReport.Instructions, decision.EditedContent)
-        goto qa_loop // (Assuming Fix semantics implied)
-    if decision == Fix:
-        goto qa_loop
+
+    // Complete run immediately. No interactive loop or gate.
+    emit(EventComplete{Status: StatusComplete, QAReport: qaReport})
+    return StatusComplete
 ```
 
 ---
