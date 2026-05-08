@@ -188,8 +188,13 @@ func (s *Sandbox) Wrap(cmd *exec.Cmd) error {
 
 	// Trampoline script: sets limits, then execs sandbox-exec which replaces the shell process.
 	// $1 = sbpl path, $2 = original binary, $3.. = original args
+	//
+	// NOTE: ulimit -u (RLIMIT_NPROC) is intentionally omitted. On macOS it is a
+	// per-USER limit, not per-process-tree, so setting it to a low value kills
+	// the sandbox when the host already has many processes running. Containment
+	// is provided by the SBPL profile + process-group isolation instead.
 
-	trampolineScript := `ulimit -u 512 2>/dev/null; ulimit -n 4096 2>/dev/null; SB="$1"; BIN="$2"; shift 2; exec sandbox-exec -f "$SB" "$BIN" "$@"`
+	trampolineScript := `ulimit -n 4096 2>/dev/null; SB="$1"; BIN="$2"; shift 2; exec sandbox-exec -f "$SB" "$BIN" "$@"`
 
 	// Build args: sh -c <trampoline> sh <sbpl_path> <original_bin> <original_args...>
 	newArgs := []string{"sh", "-c", trampolineScript, "sh", s.sbplPath, originalBin}

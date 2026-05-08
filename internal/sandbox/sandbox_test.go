@@ -974,66 +974,10 @@ func TestNecessity_MachLookup(t *testing.T) {
 	}
 }
 
-func TestLimits_RlimitNproc(t *testing.T) {
-	workspace := t.TempDir()
-	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-	defer sb.Close()
-
-	var stdout bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	// Fork-bomb bounded sleep processes — should hit NPROC limit
-	script := `python3 -c "
-import subprocess, sys, os
-pids = []
-try:
-    for i in range(600):
-        p = subprocess.Popen(['sleep', '30'])
-        pids.append(p)
-except OSError as e:
-    print(f'HIT_LIMIT at {len(pids)}: {e}')
-    for p in pids:
-        p.kill()
-    sys.exit(0)
-print(f'NO_LIMIT: spawned {len(pids)} processes')
-for p in pids:
-    p.kill()
-"`
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &bytes.Buffer{}
-
-	// Need CLT for python3
-	home := os.Getenv("HOME")
-	p := NewToolProfile("clt", home)
-	p.AllowOptional("/Library/Developer/CommandLineTools", Exec)
-
-	sb2, err := New(Config{
-		RepoPath: workspace, RepoWritable: true,
-		Profiles: []Snapshot{p.Snapshot()},
-	})
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-	defer sb2.Close()
-
-	cmd2 := exec.CommandContext(ctx, "/bin/sh", "-c", script)
-	cmd2.Stdout = &stdout
-	cmd2.Stderr = &bytes.Buffer{}
-	sb2.Run(ctx, cmd2)
-
-	output := stdout.String()
-	if strings.Contains(output, "NO_LIMIT") {
-		t.Error("RLIMIT_NPROC not enforced — spawned 600+ processes")
-	}
-	if strings.Contains(output, "HIT_LIMIT") {
-		t.Logf("RLIMIT_NPROC enforced: %s", output)
-	}
-}
+// TestLimits_RlimitNproc is removed: ulimit -u (RLIMIT_NPROC) is a per-USER
+// limit on macOS, not per-process-tree. Setting it to a low value breaks the
+// sandbox when the host already has many processes. Containment is provided by
+// SBPL profile + pgid isolation.
 
 func TestPath_MaxLengthExceeded(t *testing.T) {
 	// PATH_MAX on macOS is 1024
