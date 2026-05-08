@@ -334,14 +334,19 @@ func BuildModelEnv(resolved config.ResolvedModel, small *config.ResolvedModel) [
 		// an OpenAI-compatible server (Ollama, vLLM, etc.) that also speaks the
 		// Anthropic messages format, route via ANTHROPIC_BASE_URL so the CLI
 		// handles auth and streaming correctly.
+		// ANTHROPIC_DEFAULT_SONNET_MODEL pins the model used for background/
+		// non-essential calls; without it, the CLI falls back to a hardcoded
+		// default (e.g. claude-sonnet-4-5) which the proxy doesn't recognise.
 		baseURL := strings.TrimRight(resolved.BaseURL, "/")
 		env = append(env,
 			"ANTHROPIC_BASE_URL="+baseURL,
 			"ANTHROPIC_MODEL="+resolved.Model,
+			"ANTHROPIC_DEFAULT_SONNET_MODEL="+resolved.Model,
 		)
 		if small != nil {
 			env = append(env,
 				"ANTHROPIC_SMALL_FAST_MODEL="+small.Model,
+				"ANTHROPIC_DEFAULT_HAIKU_MODEL="+small.Model,
 			)
 		}
 	}

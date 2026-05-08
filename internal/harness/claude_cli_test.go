@@ -50,8 +50,22 @@ func TestBuildEnv_OpenAI(t *testing.T) {
 	env := cli.buildEnv()
 	assertEnvContains(t, env, "ANTHROPIC_BASE_URL=http://192.168.50.212:11434")
 	assertEnvContains(t, env, "ANTHROPIC_MODEL=qwen36")
+	assertEnvContains(t, env, "ANTHROPIC_DEFAULT_SONNET_MODEL=qwen36")
 	assertEnvNotContains(t, env, "ANTHROPIC_API_KEY")
 	assertEnvNotContains(t, env, "ANTHROPIC_AUTH_TOKEN")
+}
+
+func TestBuildEnv_OpenAI_WithSmallModel(t *testing.T) {
+	small := config.ResolvedModel{Model: "qwen36-fast"}
+	cli := NewClaudeCLI(config.ResolvedModel{
+		BaseURL: "http://192.168.50.212:11434",
+		Model:   "qwen36",
+		Type:    "openai",
+	}, WithSmallModel(small))
+
+	env := cli.buildEnv()
+	assertEnvContains(t, env, "ANTHROPIC_SMALL_FAST_MODEL=qwen36-fast")
+	assertEnvContains(t, env, "ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen36-fast")
 }
 
 func TestBuildEnv_NoOperationalFlags(t *testing.T) {

@@ -25,3 +25,4 @@ clipproxy.yaml
 node_modules/
 copilot-data
 .tmp-integration-test/
+.serena/
