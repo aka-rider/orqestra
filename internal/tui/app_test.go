@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -582,26 +583,37 @@ func TestTUI_PgUpPgDown(t *testing.T) {
 	m.state = StatePipeline
 	m.content = ContentStreaming
 	m.goal = "test scroll"
+	// Initialize layout so viewports have dimensions
+	m.width = 120
+	m.height = 40
+	m.recalculateLayout()
 
-	// PgDown should increase scrollOffset
+	// Set content taller than viewport to enable scrolling
+	var longContent strings.Builder
+	for i := 0; i < 100; i++ {
+		longContent.WriteString(fmt.Sprintf("line %d\n", i))
+	}
+	m.contentVP.SetContent(longContent.String())
+
+	// PgDown should change viewport offset
 	result, _ := sendKey(m, tea.KeyPgDown)
 	model := result.(Model)
-	if model.scrollOffset == 0 {
-		t.Error("expected scrollOffset > 0 after PgDown")
+	if model.contentVP.YOffset == 0 {
+		t.Error("expected viewport YOffset > 0 after PgDown")
 	}
 
-	// PgUp should decrease scrollOffset
+	// PgUp should return to top
 	result2, _ := sendKey(model, tea.KeyPgUp)
 	model2 := result2.(Model)
-	if model2.scrollOffset != 0 {
-		t.Errorf("expected scrollOffset=0 after PgUp from first page, got %d", model2.scrollOffset)
+	if model2.contentVP.YOffset != 0 {
+		t.Errorf("expected YOffset=0 after PgUp from first page, got %d", model2.contentVP.YOffset)
 	}
 
 	// PgUp at 0 should stay at 0
 	result3, _ := sendKey(model2, tea.KeyPgUp)
 	model3 := result3.(Model)
-	if model3.scrollOffset != 0 {
-		t.Errorf("expected scrollOffset=0, got %d", model3.scrollOffset)
+	if model3.contentVP.YOffset != 0 {
+		t.Errorf("expected YOffset=0, got %d", model3.contentVP.YOffset)
 	}
 }
 

@@ -25,6 +25,7 @@ When working on the codebase, ALWAYS check if your task falls into these domains
 9. **User sees truth** — The TUI must never show stale state. If something is running, show what and for how long. If something failed, show why. Activity is always observable.
 10. **Security boundary at LLM output** — LLM-generated content (specs, commands, file paths) is untrusted input. Validate, sanitize, or gate before execution. Never exec() LLM output without strict validation buffers.
 11. **Idiomatic Go** — `(T, error)` over Result types. Value receivers in Bubble Tea models. No generics where interfaces suffice. Blend into the ecosystem; no surprises.
+12. **No magic numbers in layout** — Dimensions must be derived from measurement (`lipgloss.Height`, `lipgloss.Width`, `GetFrameSize`) or from explicit design constraints (min terminal size, split ratio). Bare arithmetic offsets that account for unmeasured chrome are layout bugs.
     </core_principles>
 
 <banned_patterns>
@@ -40,6 +41,7 @@ These are concrete code patterns that violate the core principles. Reject them i
 5. **`err != nil` followed by `log` but no `return`** — Log-and-continue is silent degradation. If you log an error, you must also return it or surface it to the user.
 6. **Default values that mask misconfiguration** — If a config field is required for operation, its zero value must cause a clear error at startup, not silently produce broken behavior at runtime.
 7. **Fallback model/provider resolution** — If `model_ref` doesn't resolve, fail. Don't silently try a different resolution path or return a degraded runner.
+8. **Manual chrome accounting** — `height - headerLines - footerLines` where line counts are hardcoded inline. Use named constants for chrome zones and derive content dimensions via subtraction. If chrome changes, only the constant needs updating.
    </banned_patterns>
 
 <go_engineering>

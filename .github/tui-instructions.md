@@ -1,6 +1,7 @@
 # Orqestra — TUI Instructions
 
 <bubble_tea_architecture>
+
 ## Bubble Tea (TUI) Architecture
 
 The TUI uses the **Elm architecture** (Model-View-Update) via `charmbracelet/bubbletea`.
@@ -11,48 +12,52 @@ The TUI uses the **Elm architecture** (Model-View-Update) via `charmbracelet/bub
 
 ### Package Layout (`internal/tui/`)
 
-- `tui.go` — entry point (`Run`), program setup, panic recovery, `programWriter`
+- `tui.go` — entry point (`Run`), program setup, panic recovery
 - `model.go` — main model, state routing
-- `messages.go` — all custom message types (one file, easy to find)
-- `styles.go` — shared lipgloss styles (tab, border, color definitions)
+- `messages.go` — custom message types (centralized data structures)
+- `styles.go` — shared lipgloss styles
 </bubble_tea_architecture>
 
-<tui_patterns>
-## Patterns & Best Practices
+<tui_core_rules>
 
-- **Composing models**: Sub-views are plain structs with `Update(msg) (self, tea.Cmd)` and `View() string`. Parent owns routing.
-- **Parent-child communication**: Children emit custom messages (e.g., `ConfirmMsg`); parent handles them in its `Update`.
-- **Async work**: Return a `tea.Cmd` (a `func() tea.Msg`). Never block in `Update`.
-- **Streaming from goroutines**: Use `p.Send(msg)` from external goroutines (e.g., standard out logging loops).
-- **Tab navigation**: `tab`/`shift+tab` to cycle, number keys for direct access.
-- **State enum routing**: Main model uses strongly typed `State` enum; `Update` and `View` switch on it.
-</tui_patterns>
+## Core Rules & Anti-Patterns (BANNED)
 
-<tui_anti_patterns>
-## TUI Anti-Patterns (BANNED)
+- **CRITICAL: `View()` Must Be 100% Pure**: NEVER call `.SetWidth()`, `.SetHeight()`, `.SetContent()`, or alter any state (like viewports/textareas) inside `View()`. Performing layout math or state mutation inside `View()` causes race conditions and cursor bugs.
+- **CRITICAL: Never Block in `Update()`**: Do not perform IO, sleeps, or network calls inside `Update()`. Always delegate to `tea.Cmd`.
+- **No Pointers in IO Messages**: NEVER pass structs containing mutable pointers in `tea.Msg` (via `p.Send()`) when streaming from goroutines. BubbleTea requires deep immutability. Pass copies or values to prevent concurrent map panics.
+- **No Direct IO in `Init()`**: `Init()` should only return a `tea.Cmd`.
+- **No Goroutine Mutations**: Never mutate the model directly from an external goroutine. Always use `program.Send(msg)`.
+- **Massive Switch Statements**: Split giant switch blocks into sub-model `Update` calls routed by state enum.
+</tui_core_rules>
 
-- **Blocking in Update**: Never do IO, sleep, or network calls inside `Update`. Use `tea.Cmd`.
-- **Mutating model from goroutines**: Never. Use `p.Send()` to deliver messages.
-- **Passing Pointers in Messages**: Never pass structs containing mutable pointers in `tea.Msg` (via `p.Send()`) when streaming from goroutines. BubbleTea requires deep immutability to avoid concurrent map read/write panics. Pass copies or values.
-- **Massive switch statements**: Split into sub-model `Update` calls routed by state.
-- **Direct IO in Init**: `Init` should only return a `tea.Cmd`, not perform IO directly.
-- **Ignoring WindowSizeMsg**: Always handle it — viewport and layout depend on terminal size. Recalculate viewports on every resize msg, clamping sizes before applying.
-</tui_anti_patterns>
+<tui_layout_and_rendering>
+
+## Layout, State & Rendering
+
+- **Calculate Layouts in `Update()`**: Handle `tea.WindowSizeMsg` explicitly. Calculate sizes, clamp bounds (e.g., `max(0, width)`), and apply `.SetWidth()` to sub-models **before** passing the message down (synchronous delegation).
+- **Do NOT Render to Measure**: NEVER call view-rendering methods (e.g., `renderHeader()`) inside `Update()` just to calculate `lipgloss.Height()`. This causes severe CPU exhaustion. Use predefined constants (`headerHeight`) and component properties (`textarea.Height()`).
+- **No Magic Numbers**: Avoid arithmetic layout guesses (e.g., `height - 8`). Measure available layout space explicitly (`contentHeight := height - usedHeight`).
+- **Viewport Scroll Reset Bug**: `viewport.SetContent()` forcefully resets `YOffset` to 0. To prevent scroll snapping, capture `atBottom := vp.AtBottom()` before calling, and restore with `vp.GotoBottom()` afterwards. Only call `SetContent()` when data or window dimensions actually change.
+- **Spatial Mouse Routing**: For multi-pane UIs, track component bounding boxes (`image.Rect`). Check `msg.X` and `msg.Y` against these bounds before forwarding `tea.MouseMsg` to sub-models, preventing background logs from scrolling when interacting with foreground inputs.
+</tui_layout_and_rendering>
 
 <tui_gotchas>
+
 ## Gotchas & Crash Prevention
 
-- **`tea.Quit` timing**: `tea.Quit` is a command, not immediate. The model will receive one more `Update` after sending it.
-- **`WindowSizeMsg` on startup**: Sent automatically by bubbletea on program start. Sub-models must be ready for it before other messages. Never rely on zero-dimensions.
-- **Alt screen buffer panic recovery**: `tea.WithAltScreen()` uses the alternate screen. If the program panics, the terminal stays in alt screen — **always use panic recovery with `p.Kill()` in `Run()`**.
-```go
-defer func() {
-    if r := recover(); r != nil {
-        p.Kill()
-        fmt.Fprintf(os.Stderr, "TUI panic recovered: %v\n", r)
-    }
-}()
-```
-- **`Batch` vs `Sequence`**: `tea.Batch` runs commands concurrently; `tea.Sequence` runs them in order. Use Batch for independent work.
-- **Transient errors**: Do not let transient errors disappear from the UI. Store the error in model state and keep it visible.
+- **`WindowSizeMsg` on Startup**: Bubble Tea sends this immediately upon program start. Sub-models must not crash if dimensions are zero prior to this message arriving.
+- **Alt Screen Panic Recovery**: If using `tea.WithAltScreen()`, panics destroy the terminal state. ALWAYS implement a panic recovery block in `Run()`:
+
+  ```go
+  defer func() {
+      if r := recover(); r != nil {
+          p.Kill()
+          fmt.Fprintf(os.Stderr, "TUI panic recovered: %v\n", r)
+      }
+  }()
+  ```
+
+- **Transient Errors**: Do not let temporal errors disappear. Store them in the model state to ensure user visibility.
+- **`tea.Quit` Timing**: `tea.Quit` is a command, not an instant exit. The model will receive one final `Update` tick.
+- **Command Concurrency**: Use `tea.Batch` for simultaneous async tasks, and `tea.Sequence` for ordered execution.
 </tui_gotchas>

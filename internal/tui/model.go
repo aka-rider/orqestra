@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
@@ -88,10 +89,15 @@ type Model struct {
 	// UI state
 	engine        *orchestrator.Engine
 	ctrlC         int
-	scrollOffset  int
 	showDashboard bool
 	showHelp      bool
 	confirmNew    bool // awaiting confirmation to start new run while pipeline active
+
+	// Viewports — scrollable zones managed by recalculateLayout()
+	contentVP   viewport.Model
+	sidebarVP   viewport.Model
+	dashboardVP viewport.Model
+	bounds      layoutBounds
 }
 
 // NewModel creates the initial TUI model.
@@ -103,11 +109,22 @@ func NewModel(engine *orchestrator.Engine) Model {
 	ta.SetHeight(3)
 	ta.CharLimit = 4096
 
+	// Initialize viewports with zero size — recalculateLayout sets real dims on first WindowSizeMsg
+	cvp := viewport.New(0, 0)
+	cvp.MouseWheelEnabled = true
+	svp := viewport.New(0, 0)
+	svp.MouseWheelEnabled = true
+	dvp := viewport.New(0, 0)
+	dvp.MouseWheelEnabled = true
+
 	return Model{
-		state:     StatePrompt,
-		startTime: time.Now(),
-		prompt:    ta,
-		engine:    engine,
+		state:       StatePrompt,
+		startTime:   time.Now(),
+		prompt:      ta,
+		engine:      engine,
+		contentVP:   cvp,
+		sidebarVP:   svp,
+		dashboardVP: dvp,
 	}
 }
 
@@ -147,8 +164,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.prompt.SetWidth(msg.Width - 4)
+		m.recalculateLayout()
 		return m, nil
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -191,6 +211,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// handleMouse routes mouse events to the viewport whose bounds enclose the cursor.
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.state != StatePipeline {
+		return m, nil
+	}
+
+	p := image.Pt(msg.X, msg.Y)
+
+	if p.In(m.bounds.textarea) {
+		// Don't scroll viewports if hovering the input zone
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	if m.showDashboard {
+		m.dashboardVP, cmd = m.dashboardVP.Update(msg)
+	} else if p.In(m.bounds.sidebar) {
+		m.sidebarVP, cmd = m.sidebarVP.Update(msg)
+	} else if p.In(m.bounds.content) {
+		m.contentVP, cmd = m.contentVP.Update(msg)
+	}
+	return m, cmd
 }
 
 // handleKey processes key events.
@@ -257,17 +301,16 @@ func (m Model) handlePipelineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// PgUp / PgDown for content scrolling
+	// PgUp / PgDown — delegate to active viewport
 	switch msg.Type {
-	case tea.KeyPgUp:
-		m.scrollOffset -= m.scrollPageSize()
-		if m.scrollOffset < 0 {
-			m.scrollOffset = 0
+	case tea.KeyPgUp, tea.KeyPgDown:
+		var cmd tea.Cmd
+		if m.showDashboard {
+			m.dashboardVP, cmd = m.dashboardVP.Update(msg)
+		} else {
+			m.contentVP, cmd = m.contentVP.Update(msg)
 		}
-		return m, nil
-	case tea.KeyPgDown:
-		m.scrollOffset += m.scrollPageSize()
-		return m, nil
+		return m, cmd
 	}
 
 	// If help is showing, any other key dismisses it
@@ -290,7 +333,7 @@ func (m Model) handlePipelineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if idx <= len(m.agents) {
 			m.focusedAgent = idx
 			m.content = ContentAgentHistory
-			m.scrollOffset = 0
+			m.contentVP.GotoTop()
 			return m, nil
 		}
 	}
@@ -372,9 +415,11 @@ func (m Model) handlePlanReviewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "e", "E":
 		// Switch to plan edit mode
+		contentWidth := max(1, int(float64(m.width)*splitRatio))
+		contentHeight := max(4, m.height-constHeaderHeight-constPipelineInputHeight-constFooterHeight)
 		ta := textarea.New()
-		ta.SetWidth(m.effectiveWidth()*3/4 - 10)
-		ta.SetHeight(m.height - 8)
+		ta.SetWidth(max(1, contentWidth-2))
+		ta.SetHeight(max(1, contentHeight-2))
 		ta.CharLimit = 65536
 		if m.hasPlan {
 			content, _ := json.MarshalIndent(m.planOutput, "", "  ")
@@ -425,7 +470,7 @@ func (m Model) handleAgentHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc:
 		m.content = ContentStreaming
 		m.focusedAgent = 0
-		m.scrollOffset = 0
+		m.contentVP.GotoTop()
 		return m, nil
 	}
 	return m, nil
@@ -530,16 +575,17 @@ func (m Model) handleOrchestratorEvent(event orchestrator.Event) (tea.Model, tea
 		}
 
 	case orchestrator.EventGateRequest:
-		m.scrollOffset = 0
+		m.contentVP.GotoTop()
 		switch event.Gate.Type {
 		case orchestrator.GateGatewayCoach:
 			m.content = ContentCoaching
 			m.gatewayResult = event.Gate.GatewayResult
 			// Create answer fields pre-filled with defaults
+			contentWidth := max(1, int(float64(m.width)*splitRatio))
 			m.answerFields = make([]textarea.Model, len(m.gatewayResult.Questions))
 			for i, q := range m.gatewayResult.Questions {
 				ta := textarea.New()
-				ta.SetWidth(m.effectiveWidth()*3/4 - 10)
+				ta.SetWidth(max(1, contentWidth-4))
 				ta.SetHeight(1)
 				ta.CharLimit = 512
 				if q.Default != "" {
@@ -570,7 +616,7 @@ func (m Model) handleOrchestratorEvent(event orchestrator.Event) (tea.Model, tea
 
 	case orchestrator.EventComplete:
 		m.content = ContentCompletion
-		m.scrollOffset = 0
+		m.contentVP.GotoTop()
 		if event.HasQA {
 			m.qaReport = event.QAReport
 			m.hasQA = true
@@ -609,204 +655,140 @@ func (m Model) View() string {
 }
 
 func (m Model) effectiveWidth() int {
-	if m.width > 0 {
+	if m.width >= minWidth {
 		return m.width
 	}
-	return 80
+	return minWidth
 }
 
 func (m Model) viewPromptScreen() string {
 	w := m.effectiveWidth()
 	h := m.height
-	if h < 10 {
-		h = 24
+	if h < minHeight {
+		return " Terminal too small. Please resize."
 	}
 
-	// Header
-	var header strings.Builder
-	header.WriteString(headerStyle.Render(" Orqestra"))
-	header.WriteString("\n")
-	header.WriteString(dividerStyle.Render(strings.Repeat("─", w)))
-	header.WriteString("\n")
+	// Header (2 lines)
+	header := headerStyle.Render(" Orqestra") + "\n" +
+		dividerStyle.Render(strings.Repeat("─", w)) + "\n"
 
-	// Footer (2 lines: divider + keys)
-	var footer strings.Builder
-	footer.WriteString(dividerStyle.Render(strings.Repeat("─", w)))
-	footer.WriteString("\n")
-	footer.WriteString(keyStyle.Render(" [Enter] submit | [Ctrl+S] skip gateway | [^C^C] quit"))
+	// Footer (2 lines)
+	footer := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
+		keyStyle.Render(" [Enter] submit | [Ctrl+S] skip gateway | [^C^C] quit")
 
-	// Input line (prompt textarea + label, 5 lines total)
-	var input strings.Builder
-	input.WriteString(dividerStyle.Render(strings.Repeat("─", w)))
-	input.WriteString("\n")
-	input.WriteString(" Enter a task description. Be specific about the end state.\n")
-	input.WriteString(m.prompt.View())
-	input.WriteString("\n")
+	// Input zone (divider + instruction + textarea + newline)
+	input := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
+		" Enter a task description. Be specific about the end state.\n" +
+		m.prompt.View() + "\n"
 
-	// Split zone dimensions
-	headerLines := 2
-	inputLines := 5
-	footerLines := 2
-	contentHeight := h - headerLines - inputLines - footerLines
-	if contentHeight < 4 {
-		contentHeight = 4
+	// Content zone dimensions — derived from constants
+	contentHeight := max(0, h-constHeaderHeight-constPromptInputHeight-constFooterHeight)
+	contentWidth := max(0, int(float64(w)*splitRatio))
+	sidebarWidth := max(0, w-contentWidth-1)
+
+	// If content zone too small, skip split view — just render chrome
+	if contentHeight < 2 {
+		return header + input + footer
 	}
 
-	contentWidth := w * 3 / 4
-	sidebarWidth := w - contentWidth - 1 // -1 for separator
-
-	// Content: mascot art centered
+	// Content: mascot art centered vertically
 	mascot := renderMascot(contentWidth-2, contentHeight)
 	mascotLines := strings.Split(mascot, "\n")
-	// Vertically center the mascot
 	padTop := 0
 	if len(mascotLines) < contentHeight {
 		padTop = (contentHeight - len(mascotLines)) / 2
 	}
-	var contentLines []string
+	var contentBuf strings.Builder
 	for i := 0; i < contentHeight; i++ {
 		mi := i - padTop
 		if mi >= 0 && mi < len(mascotLines) {
-			contentLines = append(contentLines, " "+mascotLines[mi])
-		} else {
-			contentLines = append(contentLines, "")
+			contentBuf.WriteString(" " + mascotLines[mi])
+		}
+		if i < contentHeight-1 {
+			contentBuf.WriteString("\n")
 		}
 	}
 
-	// Sidebar: gateway agent waiting
-	var sidebarLines []string
-	sidebarLines = append(sidebarLines, " Agents")
-	sidebarLines = append(sidebarLines, strings.Repeat("─", sidebarWidth))
-	sidebarLines = append(sidebarLines, " ● gateway     gate")
-	sidebarLines = append(sidebarLines, "   awaiting input")
-	sidebarLines = append(sidebarLines, "")
-	sidebarLines = append(sidebarLines, " ○ planner        -")
-	sidebarLines = append(sidebarLines, " ○ workers        -")
-	sidebarLines = append(sidebarLines, " ○ qa             -")
-	// Pad sidebar to content height
-	for len(sidebarLines) < contentHeight {
-		sidebarLines = append(sidebarLines, "")
-	}
+	// Sidebar: static agent list
+	var sidebarBuf strings.Builder
+	sidebarBuf.WriteString(" Agents\n")
+	sidebarBuf.WriteString(strings.Repeat("─", max(1, sidebarWidth-1)) + "\n")
+	sidebarBuf.WriteString(" ● gateway     gate\n")
+	sidebarBuf.WriteString("   awaiting input\n")
+	sidebarBuf.WriteString("\n")
+	sidebarBuf.WriteString(" ○ planner        -\n")
+	sidebarBuf.WriteString(" ○ workers        -\n")
+	sidebarBuf.WriteString(" ○ qa             -")
 
-	// Compose split view
-	var body strings.Builder
-	maxLines := contentHeight
-	for i := 0; i < maxLines; i++ {
-		cl := ""
-		if i < len(contentLines) {
-			cl = contentLines[i]
-		}
-		sl := ""
-		if i < len(sidebarLines) {
-			sl = sidebarLines[i]
-		}
-		// Pad content to width using visual width (handles ANSI escapes)
-		visW := lipgloss.Width(cl)
-		if visW < contentWidth {
-			cl = cl + strings.Repeat(" ", contentWidth-visW)
-		}
-		body.WriteString(fmt.Sprintf("%s│%s\n", cl, sl))
-	}
+	body := joinSplitView(contentBuf.String(), sidebarBuf.String(), contentWidth, sidebarWidth, contentHeight)
 
-	return header.String() + body.String() + input.String() + footer.String()
+	return header + body + "\n" + input + footer
 }
 
 func (m Model) viewPipelineScreen() string {
 	w := m.effectiveWidth()
 	h := m.height
-	if h < 10 {
-		h = 24
+	if h < minHeight {
+		return " Terminal too small. Please resize."
 	}
 
 	// Header (2 lines)
-	var header strings.Builder
 	elapsed := time.Since(m.startTime).Truncate(time.Second)
 	title := headerStyle.Render(" Orqestra")
 	phase := phaseStyle.Render(fmt.Sprintf("▶ %s", m.phase))
 	timeStr := elapsedStyle.Render(elapsed.String())
-	header.WriteString(fmt.Sprintf("%s  %s  %s\n", title, phase, timeStr))
-	header.WriteString(dividerStyle.Render(strings.Repeat("─", w)))
-	header.WriteString("\n")
+	header := fmt.Sprintf("%s  %s  %s\n", title, phase, timeStr) +
+		dividerStyle.Render(strings.Repeat("─", w)) + "\n"
 
-	// Footer (2 lines: divider + keys)
-	var footer strings.Builder
-	footer.WriteString(dividerStyle.Render(strings.Repeat("─", w)))
-	footer.WriteString("\n")
-	footer.WriteString(m.viewFooter())
+	// Footer (2 lines)
+	footer := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
+		m.viewFooter()
 
-	// Input zone (2 lines: divider + status)
-	var input strings.Builder
-	input.WriteString(dividerStyle.Render(strings.Repeat("─", w)))
-	input.WriteString("\n")
-	input.WriteString(m.viewInputZone())
-	input.WriteString("\n")
+	// Input zone (3 lines)
+	input := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
+		m.viewInputZone() + "\n"
 
-	// Layout math
-	headerLines := 2
-	inputLines := 3
-	footerLines := 2
-	contentHeight := h - headerLines - inputLines - footerLines
-	if contentHeight < 4 {
-		contentHeight = 4
-	}
+	// Content zone dimensions
+	contentHeight := max(0, h-constHeaderHeight-constPipelineInputHeight-constFooterHeight)
+	contentWidth := max(0, int(float64(w)*splitRatio))
+	sidebarWidth := max(0, w-contentWidth-1)
 
-	contentWidth := w * 3 / 4
-	sidebarWidth := w - contentWidth - 1 // -1 for separator
-
-	// Resolve content and sidebar views
-	var contentView string
-	if m.showHelp {
-		contentView = m.viewHelp()
-	} else if m.showDashboard {
-		contentView = m.viewDashboard()
+	// Render body depending on mode
+	var body string
+	if m.showDashboard {
+		// Full-width dashboard via viewport
+		m.dashboardVP.Width = w
+		m.dashboardVP.Height = contentHeight
+		m.dashboardVP.SetContent(m.viewDashboard())
+		body = m.dashboardVP.View()
 	} else {
-		contentView = m.viewContent(contentWidth)
-	}
-	sidebarView := m.viewSidebar(sidebarWidth)
-
-	// Apply scroll offset to content (clamped to valid range)
-	contentLines := strings.Split(contentView, "\n")
-	offset := m.scrollOffset
-	maxOff := len(contentLines) - 1
-	if maxOff < 0 {
-		maxOff = 0
-	}
-	if offset > maxOff {
-		offset = maxOff
-	}
-	if offset > 0 {
-		contentLines = contentLines[offset:]
-	}
-
-	// Clamp content+sidebar to contentHeight
-	sidebarLines := strings.Split(sidebarView, "\n")
-	if len(contentLines) > contentHeight {
-		contentLines = contentLines[:contentHeight]
-	}
-	if len(sidebarLines) > contentHeight {
-		sidebarLines = sidebarLines[:contentHeight]
-	}
-
-	// Compose split view
-	var body strings.Builder
-	for i := 0; i < contentHeight; i++ {
-		cl := ""
-		if i < len(contentLines) {
-			cl = contentLines[i]
+		// Resolve content and sidebar
+		var contentView string
+		if m.showHelp {
+			contentView = m.viewHelp()
+		} else {
+			contentView = m.viewContent(contentWidth)
 		}
-		sl := ""
-		if i < len(sidebarLines) {
-			sl = sidebarLines[i]
+		sidebarView := m.viewSidebar(sidebarWidth)
+
+		// Feed content into viewports
+		// Preserve scroll position: auto-follow bottom for streaming
+		atBottom := m.contentVP.AtBottom()
+		m.contentVP.Width = contentWidth
+		m.contentVP.Height = contentHeight
+		m.contentVP.SetContent(contentView)
+		if atBottom && m.content == ContentStreaming {
+			m.contentVP.GotoBottom()
 		}
-		// Pad content to width using visual width (handles ANSI escapes)
-		visW := lipgloss.Width(cl)
-		if visW < contentWidth {
-			cl = cl + strings.Repeat(" ", contentWidth-visW)
-		}
-		body.WriteString(fmt.Sprintf("%s│%s\n", cl, sl))
+
+		m.sidebarVP.Width = sidebarWidth
+		m.sidebarVP.Height = contentHeight
+		m.sidebarVP.SetContent(sidebarView)
+
+		body = joinSplitView(m.contentVP.View(), m.sidebarVP.View(), contentWidth, sidebarWidth, contentHeight)
 	}
 
-	return header.String() + body.String() + input.String() + footer.String()
+	return header + body + "\n" + input + footer
 }
 
 // viewInputZone renders the input/status line between split and footer.
@@ -887,16 +869,8 @@ func (m Model) viewStreaming(width int) string {
 	if len(streamLines) > 0 {
 		b.WriteString(dividerStyle.Render(strings.Repeat("─", width-2)))
 		b.WriteString("\n")
-		// Show tail of stream output that fits in available height
-		maxVisible := m.height - 10
-		if maxVisible < 4 {
-			maxVisible = 4
-		}
-		start := 0
-		if len(streamLines) > maxVisible {
-			start = len(streamLines) - maxVisible
-		}
-		for _, line := range streamLines[start:] {
+		// Render all lines — viewport handles clipping and scrolling
+		for _, line := range streamLines {
 			// Truncate long lines to content width
 			if len(line) > width-2 {
 				line = line[:width-2]
@@ -1192,15 +1166,6 @@ func formatTokens(n int64) string {
 		return fmt.Sprintf("%.0fk", float64(n)/1000)
 	}
 	return fmt.Sprintf("%.1fM", float64(n)/1000000)
-}
-
-// scrollPageSize returns the number of lines to scroll per PgUp/PgDown.
-func (m Model) scrollPageSize() int {
-	page := m.height - 6 // header + footer + margins
-	if page < 5 {
-		page = 5
-	}
-	return page
 }
 
 func (m Model) viewFooter() string {

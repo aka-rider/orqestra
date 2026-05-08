@@ -12,7 +12,7 @@ import (
 // Run starts the full-screen Bubble Tea TUI.
 func Run(engine *orchestrator.Engine) error {
 	model := NewModel(engine)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	defer func() {
 		if r := recover(); r != nil {
