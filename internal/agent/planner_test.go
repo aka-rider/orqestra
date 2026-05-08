@@ -149,3 +149,65 @@ func TestParseSpec_MarkdownFencedJSON(t *testing.T) {
 		t.Errorf("goal = %q, want %q", parsed.Goal, "Test fences")
 	}
 }
+
+func TestParsePlanOutput_MarkdownProseFallback(t *testing.T) {
+	mdPlan := `Here's the plan summary:
+
+---
+
+## Goal
+Build a REST API for user management
+
+## Steps
+1. Create main.go with HTTP server setup
+2. Add user handler with CRUD operations
+3. Write integration tests
+
+## Acceptance Criteria
+- Server starts on port 8080
+- GET /users returns 200
+- POST /users creates a user
+`
+	cfg := &config.PlannerConfig{ModelRef: "test-model", SystemPrompt: "Plan."}
+	p := NewPlanner(&plannerMockCLIRunner{response: mdPlan}, cfg)
+	po, err := p.Plan(context.Background(), "build user API")
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if po.Spec.Goal != "Build a REST API for user management" {
+		t.Errorf("goal = %q, want %q", po.Spec.Goal, "Build a REST API for user management")
+	}
+	if len(po.Spec.Steps) != 3 {
+		t.Errorf("steps = %d, want 3", len(po.Spec.Steps))
+	}
+	if len(po.Spec.Acceptance) != 3 {
+		t.Errorf("acceptance = %d, want 3", len(po.Spec.Acceptance))
+	}
+}
+
+func TestParsePlanOutput_MarkdownWithInlineGoal(t *testing.T) {
+	mdPlan := `## Goal: Refactor the auth module
+
+## Steps
+- Extract interface from concrete type
+- Add unit tests for each method
+
+## Acceptance
+- All tests pass
+- No direct struct usage in handlers
+`
+	cfg := &config.PlannerConfig{ModelRef: "test-model", SystemPrompt: "Plan."}
+	p := NewPlanner(&plannerMockCLIRunner{}, cfg)
+	po, err := p.ParsePlanOutput(mdPlan)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if po.Spec.Goal != "Refactor the auth module" {
+		t.Errorf("goal = %q, want %q", po.Spec.Goal, "Refactor the auth module")
+	}
+	if len(po.Spec.Steps) != 2 {
+		t.Errorf("steps = %d, want 2", len(po.Spec.Steps))
+	}
+}

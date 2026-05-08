@@ -870,10 +870,17 @@ func (m Model) viewStreaming(width int) string {
 		b.WriteString(dividerStyle.Render(strings.Repeat("─", width-2)))
 		b.WriteString("\n")
 		// Render all lines — viewport handles clipping and scrolling
+		maxLineWidth := width - 2
+		if maxLineWidth < 1 {
+			maxLineWidth = 1
+		}
 		for _, line := range streamLines {
-			// Truncate long lines to content width
-			if len(line) > width-2 {
-				line = line[:width-2]
+			// Soft-wrap long lines instead of truncating
+			for len(line) > maxLineWidth {
+				b.WriteString(" ")
+				b.WriteString(streamStyle.Render(line[:maxLineWidth]))
+				b.WriteString("\n")
+				line = line[maxLineWidth:]
 			}
 			b.WriteString(" ")
 			b.WriteString(streamStyle.Render(line))

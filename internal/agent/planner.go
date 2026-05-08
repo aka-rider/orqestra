@@ -71,9 +71,15 @@ func (p *Planner) ParsePlanOutput(raw string) (PlanOutput, error) {
 		// If steps are objects, try flexible spec parsing
 		spec, specErr := parseFlexibleSpec(content)
 		if specErr != nil {
-			return PlanOutput{}, fmt.Errorf("parse plan output JSON: %w (raw: %s)", err, content)
+			// Last resort: try to extract a plan from markdown prose
+			mdSpec, mdErr := parseMarkdownPlan(raw)
+			if mdErr != nil {
+				return PlanOutput{}, fmt.Errorf("parse plan output JSON: %w (raw: %s)", err, truncateRaw(content, 200))
+			}
+			po.Spec = mdSpec
+		} else {
+			po.Spec = spec
 		}
-		po.Spec = spec
 	}
 
 	if po.Spec.Goal == "" || len(po.Spec.Steps) == 0 || len(po.Spec.Acceptance) == 0 {
@@ -81,6 +87,134 @@ func (p *Planner) ParsePlanOutput(raw string) (PlanOutput, error) {
 	}
 
 	return po, nil
+}
+
+// truncateRaw limits a raw string for error messages.
+func truncateRaw(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+// parseMarkdownPlan attempts to extract a Specification from markdown-formatted
+// plan output when the model ignores the JSON output instruction.
+func parseMarkdownPlan(raw string) (Specification, error) {
+	lines := strings.Split(raw, "\n")
+	var goal string
+	var steps []string
+	var acceptance []string
+
+	type section int
+	const (
+		sNone section = iota
+		sGoal
+		sSteps
+		sAcceptance
+	)
+	current := sNone
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+
+		// Detect section headings (## Goal, **Goal:**, Goal:, etc.)
+		switch {
+		case isHeading(lower, "goal"):
+			current = sGoal
+			// Check for inline content: "## Goal: build a thing"
+			if v := extractInlineValue(trimmed); v != "" {
+				goal = v
+			}
+			continue
+		case isHeading(lower, "steps"):
+			current = sSteps
+			continue
+		case isHeading(lower, "acceptance"), isHeading(lower, "acceptance criteria"),
+			isHeading(lower, "done when"), isHeading(lower, "success criteria"):
+			current = sAcceptance
+			continue
+		}
+
+		if trimmed == "" || trimmed == "---" {
+			continue
+		}
+
+		switch current {
+		case sGoal:
+			if goal == "" {
+				goal = stripListPrefix(trimmed)
+			}
+		case sSteps:
+			if item := stripListPrefix(trimmed); item != "" {
+				steps = append(steps, item)
+			}
+		case sAcceptance:
+			if item := stripListPrefix(trimmed); item != "" {
+				acceptance = append(acceptance, item)
+			}
+		}
+	}
+
+	if goal == "" || len(steps) == 0 || len(acceptance) == 0 {
+		return Specification{}, fmt.Errorf("could not extract plan from markdown (goal=%q, steps=%d, acceptance=%d)",
+			goal, len(steps), len(acceptance))
+	}
+
+	return Specification{Goal: goal, Steps: steps, Acceptance: acceptance}, nil
+}
+
+// isHeading returns true if the line is a markdown heading for the given section name.
+func isHeading(lower, name string) bool {
+	// "## goal", "# goal:", "**goal**", "goal:", "## goal: some inline value"
+	lower = strings.TrimLeft(lower, "#* ")
+	lower = strings.TrimSpace(lower)
+	// Exact match: "goal"
+	if lower == name {
+		return true
+	}
+	// Prefix match with separator: "goal:" or "goal: ..."
+	if strings.HasPrefix(lower, name+":") || strings.HasPrefix(lower, name+" ") {
+		return true
+	}
+	return false
+}
+
+// extractInlineValue extracts text after ":" or the heading marker on the same line.
+func extractInlineValue(line string) string {
+	// Strip markdown heading prefixes
+	line = strings.TrimLeft(line, "# ")
+	// Strip bold markers
+	line = strings.ReplaceAll(line, "**", "")
+	// Find colon separator
+	idx := strings.Index(line, ":")
+	if idx >= 0 && idx < len(line)-1 {
+		return strings.TrimSpace(line[idx+1:])
+	}
+	return ""
+}
+
+// stripListPrefix removes "- ", "* ", "1. ", etc. from a line.
+func stripListPrefix(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) == 0 {
+		return ""
+	}
+	// Numbered list: "1. ", "2. "
+	for i, c := range s {
+		if c >= '0' && c <= '9' {
+			continue
+		}
+		if c == '.' && i > 0 && i < len(s)-1 && s[i+1] == ' ' {
+			return strings.TrimSpace(s[i+2:])
+		}
+		break
+	}
+	// Bullet: "- " or "* "
+	if (s[0] == '-' || s[0] == '*') && len(s) > 2 && s[1] == ' ' {
+		return strings.TrimSpace(s[2:])
+	}
+	return s
 }
 
 // ParseSpec parses a raw claude response into a Specification.
