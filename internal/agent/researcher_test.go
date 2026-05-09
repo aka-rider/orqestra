@@ -33,13 +33,13 @@ func TestResearcher_Research_Success(t *testing.T) {
 	draft := "## Goal\nBuild something.\n\n## Context\nFound foo.go.\n\n## Draft Steps\n1. Edit foo.go\n\n## Draft Acceptance\n- Tests pass\n\n## Gotchas\nNone.\n\n## Risks\nNone."
 	mock := &researcherMockRunner{response: draft}
 
-	cfg := &config.ResearcherConfig{
+	cfg := config.ResearcherConfig{
 		Model:        "test-model",
 		SystemPrompt: "You are a researcher.",
 	}
 
 	r := NewResearcher(mock, cfg)
-	plan, err := r.Research(context.Background(), "build something")
+	plan, _, err := r.Research(context.Background(), "build something")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -53,9 +53,9 @@ func TestResearcher_Research_StripsCodeFences(t *testing.T) {
 	wrapped := "```markdown\n" + draft + "\n```"
 	mock := &researcherMockRunner{response: wrapped}
 
-	cfg := &config.ResearcherConfig{Model: "test"}
+	cfg := config.ResearcherConfig{Model: "test"}
 	r := NewResearcher(mock, cfg)
-	plan, err := r.Research(context.Background(), "prompt")
+	plan, _, err := r.Research(context.Background(), "prompt")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -67,9 +67,9 @@ func TestResearcher_Research_StripsCodeFences(t *testing.T) {
 func TestResearcher_Research_CLIError(t *testing.T) {
 	mock := &researcherMockRunner{err: fmt.Errorf("timeout")}
 
-	cfg := &config.ResearcherConfig{Model: "test"}
+	cfg := config.ResearcherConfig{Model: "test"}
 	r := NewResearcher(mock, cfg)
-	_, err := r.Research(context.Background(), "prompt")
+	_, _, err := r.Research(context.Background(), "prompt")
 	if err == nil {
 		t.Fatal("expected error propagation from CLI")
 	}

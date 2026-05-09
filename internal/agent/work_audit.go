@@ -29,20 +29,20 @@ type ChangedFile struct {
 // GitDiffSummary runs git diff against the working tree in the given repo directory
 // and returns a structured summary. This is the human audit trail showing what
 // the worker actually changed.
-func GitDiffSummary(ctx context.Context, repoPath string) (*WorkDiff, error) {
+func GitDiffSummary(ctx context.Context, repoPath string) (WorkDiff, error) {
 	stat, err := gitCmd(ctx, repoPath, "diff", "--stat")
 	if err != nil {
-		return nil, fmt.Errorf("git diff --stat: %w", err)
+		return WorkDiff{}, fmt.Errorf("git diff --stat: %w", err)
 	}
 
 	nameStatus, err := gitCmd(ctx, repoPath, "diff", "--name-status")
 	if err != nil {
-		return nil, fmt.Errorf("git diff --name-status: %w", err)
+		return WorkDiff{}, fmt.Errorf("git diff --name-status: %w", err)
 	}
 
 	files := parseNameStatus(nameStatus)
 
-	return &WorkDiff{
+	return WorkDiff{
 		StatSummary:  stat,
 		NameStatus:   nameStatus,
 		ChangedFiles: files,
@@ -51,25 +51,25 @@ func GitDiffSummary(ctx context.Context, repoPath string) (*WorkDiff, error) {
 
 // GitDiffSummaryStaged is like GitDiffSummary but includes staged (added) files.
 // Useful when the worker has run `git add` on new files.
-func GitDiffSummaryStaged(ctx context.Context, repoPath string) (*WorkDiff, error) {
+func GitDiffSummaryStaged(ctx context.Context, repoPath string) (WorkDiff, error) {
 	// Unstaged changes.
 	unstaged, err := GitDiffSummary(ctx, repoPath)
 	if err != nil {
-		return nil, err
+		return WorkDiff{}, err
 	}
 
 	// Staged changes.
 	stagedStat, err := gitCmd(ctx, repoPath, "diff", "--cached", "--stat")
 	if err != nil {
-		return nil, fmt.Errorf("git diff --cached --stat: %w", err)
+		return WorkDiff{}, fmt.Errorf("git diff --cached --stat: %w", err)
 	}
 	stagedNS, err := gitCmd(ctx, repoPath, "diff", "--cached", "--name-status")
 	if err != nil {
-		return nil, fmt.Errorf("git diff --cached --name-status: %w", err)
+		return WorkDiff{}, fmt.Errorf("git diff --cached --name-status: %w", err)
 	}
 
 	// Merge: combine unstaged and staged.
-	combined := &WorkDiff{
+	combined := WorkDiff{
 		StatSummary:  strings.TrimSpace(unstaged.StatSummary + "\n" + stagedStat),
 		NameStatus:   strings.TrimSpace(unstaged.NameStatus + "\n" + stagedNS),
 		ChangedFiles: append(unstaged.ChangedFiles, parseNameStatus(stagedNS)...),

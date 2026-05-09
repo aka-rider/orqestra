@@ -2,8 +2,6 @@ package agent
 
 import (
 	"fmt"
-
-	"github.com/xiii/orqestra/internal/harness"
 )
 
 // ValidationReport is the unified result shape for all validators.
@@ -13,9 +11,6 @@ type ValidationReport struct {
 	Summary       string   `json:"summary"`
 	Issues        []Issue  `json:"issues,omitempty"`
 	Suggestions   []string `json:"suggestions,omitempty"`
-
-	// Usage is populated after parsing from the harness RunResult, not from LLM output.
-	Usage *harness.TokenUsage `json:"-"`
 }
 
 // Verdict represents the overall outcome of validation.
@@ -49,7 +44,7 @@ func DeriveVerdict(issues []Issue) Verdict {
 }
 
 // FormatValidationFeedback renders a ValidationReport into text feedback for re-planning.
-func FormatValidationFeedback(report *ValidationReport) string {
+func FormatValidationFeedback(report ValidationReport) string {
 	result := fmt.Sprintf("Verdict: %s\nSummary: %s\n", report.Verdict, report.Summary)
 	if len(report.Issues) > 0 {
 		result += "Issues:\n"

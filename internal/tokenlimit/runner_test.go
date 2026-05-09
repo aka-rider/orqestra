@@ -89,7 +89,7 @@ func TestLimitedRunner_RunPrint_PostRecordBudgetError(t *testing.T) {
 		runPrintFn: func(_ context.Context, _, _ string) (harness.RunResult, error) {
 			return harness.RunResult{
 				Output: "done",
-				Usage:  &harness.TokenUsage{TotalTokens: 900},
+				Usage:  harness.TokenUsage{TotalTokens: 900},
 			}, nil
 		},
 	}
@@ -113,7 +113,7 @@ func TestLimitedRunner_RunPrint_ZeroTokensSkipsRecord(t *testing.T) {
 	inner := &mockCLIRunner{
 		runPrintFn: func(_ context.Context, _, _ string) (harness.RunResult, error) {
 			return harness.RunResult{
-				Usage: &harness.TokenUsage{TotalTokens: 0},
+				Usage: harness.TokenUsage{TotalTokens: 0},
 			}, nil
 		},
 	}
@@ -135,7 +135,7 @@ func TestLimitedRunner_RunPrint_RecordsOnInnerError(t *testing.T) {
 	inner := &mockCLIRunner{
 		runPrintFn: func(_ context.Context, _, _ string) (harness.RunResult, error) {
 			return harness.RunResult{
-				Usage: &harness.TokenUsage{TotalTokens: 300},
+				Usage: harness.TokenUsage{TotalTokens: 300},
 			}, innerErr
 		},
 	}
@@ -156,7 +156,7 @@ func TestLimitedRunner_RunPrint_RecordsOnInnerError(t *testing.T) {
 func TestLimitedRunner_RunPrint_NilUsageSkipsRecord(t *testing.T) {
 	inner := &mockCLIRunner{
 		runPrintFn: func(_ context.Context, _, _ string) (harness.RunResult, error) {
-			return harness.RunResult{Usage: nil}, nil
+			return harness.RunResult{}, nil
 		},
 	}
 	limiter := newTestLimiter(t, map[string]int64{"opus": 1000})
@@ -177,7 +177,7 @@ func TestLimitedRunner_RunPrint_NoLimit_AlwaysPasses(t *testing.T) {
 		runPrintFn: func(_ context.Context, _, _ string) (harness.RunResult, error) {
 			return harness.RunResult{
 				Output: "ok",
-				Usage:  &harness.TokenUsage{TotalTokens: 999999},
+				Usage:  harness.TokenUsage{TotalTokens: 999999},
 			}, nil
 		},
 	}
@@ -222,7 +222,7 @@ func TestLimitedRunner_RunStreaming_RecordsOnInnerError(t *testing.T) {
 	inner := &mockCLIRunner{
 		runStreamingFn: func(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
 			return harness.RunResult{
-				Usage: &harness.TokenUsage{TotalTokens: 150},
+				Usage: harness.TokenUsage{TotalTokens: 150},
 			}, innerErr
 		},
 	}
@@ -244,7 +244,7 @@ func TestLimitedRunner_RunStreaming_PostRecordBudgetError(t *testing.T) {
 		runStreamingFn: func(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
 			return harness.RunResult{
 				Output: "streamed",
-				Usage:  &harness.TokenUsage{TotalTokens: 600},
+				Usage:  harness.TokenUsage{TotalTokens: 600},
 			}, nil
 		},
 	}
@@ -397,7 +397,7 @@ func TestLimitedRunner_RunStreaming_PassthroughOnBudgetOK(t *testing.T) {
 func TestLimitedRunner_RunStreaming_NilUsageSkipsRecord(t *testing.T) {
 	inner := &mockCLIRunner{
 		runStreamingFn: func(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
-			return harness.RunResult{Usage: nil}, nil
+			return harness.RunResult{}, nil
 		},
 	}
 	limiter := newTestLimiter(t, map[string]int64{"opus": 1000})
@@ -419,7 +419,7 @@ func TestLimitedRunner_RunStreaming_ZeroTokensSkipsRecord(t *testing.T) {
 	inner := &mockCLIRunner{
 		runStreamingFn: func(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
 			return harness.RunResult{
-				Usage: &harness.TokenUsage{TotalTokens: 0},
+				Usage: harness.TokenUsage{TotalTokens: 0},
 			}, nil
 		},
 	}
@@ -443,7 +443,7 @@ func TestLimitedRunner_RunStreaming_NoLimit_AlwaysPasses(t *testing.T) {
 		runStreamingFn: func(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
 			return harness.RunResult{
 				Output: "ok",
-				Usage:  &harness.TokenUsage{TotalTokens: 999999},
+				Usage:  harness.TokenUsage{TotalTokens: 999999},
 			}, nil
 		},
 	}

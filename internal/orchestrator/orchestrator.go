@@ -315,11 +315,11 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		emit(Event{Type: EventAgentStarted, AgentID: "gateway"})
 		stream.SetAgent("gateway")
 
-		gw := agent.NewGateway(e.Runners.Gateway, &e.Config.Gateway)
+		gw := agent.NewGateway(e.Runners.Gateway, e.Config.Gateway)
 		prompt := input.Prompt
 
 		for round := 0; round < maxCoachingRounds; round++ {
-			gwResult, err := gw.Evaluate(ctx, prompt, &streamWriter{buf: stream})
+			gwResult, gwUsage, err := gw.Evaluate(ctx, prompt, &streamWriter{buf: stream})
 			if err != nil {
 				emit(Event{Type: EventAgentFailed, AgentID: "gateway", Err: err})
 				emit(Event{Type: EventError, Err: err})
@@ -328,14 +328,14 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 
 			if gwResult.Verdict == agent.GatewayVerdictAccept {
 				emit(Event{Type: EventAgentDone, AgentID: "gateway",
-					InputTokens: usageIn(gwResult.Usage), OutputTokens: usageOut(gwResult.Usage)})
+					InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens})
 				plannerInput = buildPlannerInput(input.Prompt, gwResult.Brief)
 				break
 			}
 
 			if input.AutoApprove {
 				emit(Event{Type: EventAgentDone, AgentID: "gateway",
-					InputTokens: usageIn(gwResult.Usage), OutputTokens: usageOut(gwResult.Usage)})
+					InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens})
 				plannerInput = buildPlannerInput(input.Prompt, gwResult.Brief)
 				break
 			}
@@ -366,7 +366,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 
 			if round == maxCoachingRounds-1 {
 				emit(Event{Type: EventAgentDone, AgentID: "gateway",
-					InputTokens: usageIn(gwResult.Usage), OutputTokens: usageOut(gwResult.Usage)})
+					InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens})
 				plannerInput = buildPlannerInput(input.Prompt, gwResult.Brief)
 			}
 		}
@@ -389,8 +389,8 @@ research:
 		emit(Event{Type: EventAgentStarted, AgentID: "researcher"})
 		stream.SetAgent("researcher")
 
-		researcher := agent.NewResearcher(e.Runners.Researcher, &e.Config.Researcher)
-		draft, err := researcher.ResearchStreaming(ctx, plannerInput, &streamWriter{buf: stream})
+		researcher := agent.NewResearcher(e.Runners.Researcher, e.Config.Researcher)
+		draft, draftUsage, err := researcher.ResearchStreaming(ctx, plannerInput, &streamWriter{buf: stream})
 		if err != nil {
 			emit(Event{Type: EventAgentFailed, AgentID: "researcher", Err: err})
 			emit(Event{Type: EventError, Err: fmt.Errorf("research: %w", err)})
@@ -399,7 +399,7 @@ research:
 
 		writeArtifact(session, "researcher_draft.md", draft.Markdown)
 		emit(Event{Type: EventAgentDone, AgentID: "researcher",
-			InputTokens: usageIn(draft.Usage), OutputTokens: usageOut(draft.Usage),
+			InputTokens: draftUsage.InputTokens, OutputTokens: draftUsage.OutputTokens,
 			ResearchDraft: draft.Markdown})
 
 		// --- Planning ---
@@ -407,8 +407,8 @@ research:
 		emit(Event{Type: EventAgentStarted, AgentID: "planner"})
 		stream.SetAgent("planner")
 
-		planner := agent.NewPlanner(e.Runners.Planner, &e.Config.Planner)
-		plan, planErr := planner.RefineStreaming(ctx, draft.Markdown, &streamWriter{buf: stream})
+		planner := agent.NewPlanner(e.Runners.Planner, e.Config.Planner)
+		plan, planUsage, planErr := planner.RefineStreaming(ctx, draft.Markdown, &streamWriter{buf: stream})
 		if planErr != nil {
 			emit(Event{Type: EventAgentFailed, AgentID: "planner", Err: planErr})
 			emit(Event{Type: EventError, Err: fmt.Errorf("planning: %w", planErr)})
@@ -416,7 +416,7 @@ research:
 		}
 
 		emit(Event{Type: EventAgentDone, AgentID: "planner",
-			InputTokens: usageIn(plan.Usage), OutputTokens: usageOut(plan.Usage)})
+			InputTokens: planUsage.InputTokens, OutputTokens: planUsage.OutputTokens})
 
 		finalPlanMarkdown = plan.Markdown
 	}
@@ -451,15 +451,15 @@ planGate:
 					// Re-plan with comments
 					emit(Event{Type: EventAgentStarted, AgentID: "planner"})
 					stream.SetAgent("planner")
-					planner := agent.NewPlanner(e.Runners.Planner, &e.Config.Planner)
-					revised, err := planner.RefineWithCommentsStreaming(ctx, finalPlanMarkdown, decision.Comment, &streamWriter{buf: stream})
+					planner := agent.NewPlanner(e.Runners.Planner, e.Config.Planner)
+					revised, revisedUsage, err := planner.RefineWithCommentsStreaming(ctx, finalPlanMarkdown, decision.Comment, &streamWriter{buf: stream})
 					if err != nil {
 						emit(Event{Type: EventAgentFailed, AgentID: "planner", Err: err})
 						emit(Event{Type: EventError, Err: fmt.Errorf("planner revision: %w", err)})
 						return
 					}
 					emit(Event{Type: EventAgentDone, AgentID: "planner",
-						InputTokens: usageIn(revised.Usage), OutputTokens: usageOut(revised.Usage)})
+						InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens})
 					finalPlanMarkdown = revised.Markdown
 					continue // re-show gate with revised plan
 				case DecisionApprove:
@@ -497,7 +497,7 @@ planGate:
 
 	writeArtifact(session, "worker_output.txt", workResult.Output)
 	emit(Event{Type: EventAgentDone, AgentID: "worker", WorkOutput: workResult.Output,
-		InputTokens: usageIn(workResult.Usage), OutputTokens: usageOut(workResult.Usage)})
+		InputTokens: workResult.Usage.InputTokens, OutputTokens: workResult.Usage.OutputTokens})
 
 	// --- Worker Self-Validation via Session Continuation ---
 	emit(Event{Type: EventPhaseChange, Phase: PhaseSelfValidating})
@@ -521,7 +521,7 @@ planGate:
 		} else {
 			validationOutput = valResult.Output
 			emit(Event{Type: EventAgentDone, AgentID: "validator",
-				InputTokens: usageIn(valResult.Usage), OutputTokens: usageOut(valResult.Usage)})
+				InputTokens: valResult.Usage.InputTokens, OutputTokens: valResult.Usage.OutputTokens})
 		}
 	} else {
 		slog.Warn("no session ID from worker — attempting disconnected validation")
@@ -533,7 +533,7 @@ planGate:
 		} else {
 			validationOutput = valResult.Output
 			emit(Event{Type: EventAgentDone, AgentID: "validator",
-				InputTokens: usageIn(valResult.Usage), OutputTokens: usageOut(valResult.Usage)})
+				InputTokens: valResult.Usage.InputTokens, OutputTokens: valResult.Usage.OutputTokens})
 		}
 	}
 
@@ -623,22 +623,6 @@ func DefaultRunDirFactory() RunDirFactory {
 		}
 		return agent.NewSessionDir(cwd, slug)
 	}
-}
-
-// usageIn extracts InputTokens from a possibly-nil TokenUsage.
-func usageIn(u *harness.TokenUsage) int64 {
-	if u == nil {
-		return 0
-	}
-	return u.InputTokens
-}
-
-// usageOut extracts OutputTokens from a possibly-nil TokenUsage.
-func usageOut(u *harness.TokenUsage) int64 {
-	if u == nil {
-		return 0
-	}
-	return u.OutputTokens
 }
 
 // streamWriter implements io.Writer and harness.ActivitySink by appending

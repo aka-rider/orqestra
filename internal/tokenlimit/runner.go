@@ -34,7 +34,7 @@ func (r *LimitedRunner) RunPrint(ctx context.Context, prompt, systemPrompt strin
 
 	result, innerErr := r.inner.RunPrint(ctx, prompt, systemPrompt)
 
-	if result.Usage != nil && result.Usage.TotalTokens > 0 {
+	if result.Usage.TotalTokens > 0 {
 		if budgetErr := r.limiter.Record(ctx, r.model, r.agentID, result.Usage.TotalTokens); budgetErr != nil {
 			// Record succeeded (tokens are persisted), but budget is now exceeded.
 			// If the inner call also errored, return the inner error — it is the primary failure.
@@ -55,7 +55,7 @@ func (r *LimitedRunner) RunStreaming(ctx context.Context, prompt, systemPrompt s
 
 	result, innerErr := r.inner.RunStreaming(ctx, prompt, systemPrompt, stdout)
 
-	if result.Usage != nil && result.Usage.TotalTokens > 0 {
+	if result.Usage.TotalTokens > 0 {
 		if budgetErr := r.limiter.Record(ctx, r.model, r.agentID, result.Usage.TotalTokens); budgetErr != nil {
 			if innerErr != nil {
 				return result, innerErr
@@ -81,7 +81,7 @@ func (r *LimitedRunner) RunContinue(ctx context.Context, sessionID, prompt strin
 
 	result, innerErr := cr.RunContinue(ctx, sessionID, prompt, stdout)
 
-	if result.Usage != nil && result.Usage.TotalTokens > 0 {
+	if result.Usage.TotalTokens > 0 {
 		if budgetErr := r.limiter.Record(ctx, r.model, r.agentID, result.Usage.TotalTokens); budgetErr != nil {
 			if innerErr != nil {
 				return result, innerErr

@@ -34,13 +34,13 @@ func TestPlanner_Refine_Success(t *testing.T) {
 	planMD := "# Plan\n\n## Goal\nBuild a thing.\n\n## Work Packages\n\n### 1. Do stuff\n\n**Steps:**\n1. Edit foo.go\n\n**Done when:**\n- Tests pass"
 	mock := &plannerMockCLIRunner{response: planMD}
 
-	cfg := &config.PlannerConfig{
+	cfg := config.PlannerConfig{
 		Model:        "test-model",
 		SystemPrompt: "You are the architect.",
 	}
 
 	p := NewPlanner(mock, cfg)
-	plan, err := p.Refine(context.Background(), "some researcher draft")
+	plan, _, err := p.Refine(context.Background(), "some researcher draft")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -52,9 +52,9 @@ func TestPlanner_Refine_Success(t *testing.T) {
 func TestPlanner_Refine_MissingPlanHeader(t *testing.T) {
 	mock := &plannerMockCLIRunner{response: "## Goal\nDo something\n\n## Work Packages\n..."}
 
-	cfg := &config.PlannerConfig{Model: "test"}
+	cfg := config.PlannerConfig{Model: "test"}
 	p := NewPlanner(mock, cfg)
-	_, err := p.Refine(context.Background(), "draft")
+	_, _, err := p.Refine(context.Background(), "draft")
 	if err == nil {
 		t.Fatal("expected error for missing '# Plan' header")
 	}
@@ -63,9 +63,9 @@ func TestPlanner_Refine_MissingPlanHeader(t *testing.T) {
 func TestPlanner_Refine_MissingWorkPackages(t *testing.T) {
 	mock := &plannerMockCLIRunner{response: "# Plan\n\n## Goal\nDo something"}
 
-	cfg := &config.PlannerConfig{Model: "test"}
+	cfg := config.PlannerConfig{Model: "test"}
 	p := NewPlanner(mock, cfg)
-	_, err := p.Refine(context.Background(), "draft")
+	_, _, err := p.Refine(context.Background(), "draft")
 	if err == nil {
 		t.Fatal("expected error for missing '## Work Packages' section")
 	}
@@ -76,9 +76,9 @@ func TestPlanner_Refine_CodeFenceStripping(t *testing.T) {
 	wrapped := "```markdown\n" + planMD + "\n```"
 	mock := &plannerMockCLIRunner{response: wrapped}
 
-	cfg := &config.PlannerConfig{Model: "test"}
+	cfg := config.PlannerConfig{Model: "test"}
 	p := NewPlanner(mock, cfg)
-	plan, err := p.Refine(context.Background(), "draft")
+	plan, _, err := p.Refine(context.Background(), "draft")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -90,9 +90,9 @@ func TestPlanner_Refine_CodeFenceStripping(t *testing.T) {
 func TestPlanner_Refine_CLIError(t *testing.T) {
 	mock := &plannerMockCLIRunner{err: fmt.Errorf("connection refused")}
 
-	cfg := &config.PlannerConfig{Model: "test"}
+	cfg := config.PlannerConfig{Model: "test"}
 	p := NewPlanner(mock, cfg)
-	_, err := p.Refine(context.Background(), "draft")
+	_, _, err := p.Refine(context.Background(), "draft")
 	if err == nil {
 		t.Fatal("expected error propagation from CLI")
 	}
@@ -102,9 +102,9 @@ func TestPlanner_RefineWithComments(t *testing.T) {
 	planMD := "# Plan\n\n## Goal\nRevised.\n\n## Work Packages\n\n### 1. Fixed"
 	mock := &plannerMockCLIRunner{response: planMD}
 
-	cfg := &config.PlannerConfig{Model: "test"}
+	cfg := config.PlannerConfig{Model: "test"}
 	p := NewPlanner(mock, cfg)
-	plan, err := p.RefineWithComments(context.Background(), "old plan", "please fix step 2")
+	plan, _, err := p.RefineWithComments(context.Background(), "old plan", "please fix step 2")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

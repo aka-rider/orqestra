@@ -14,34 +14,32 @@ import (
 // deeply, producing a markdown draft that the Planner refines.
 type Researcher struct {
 	runner harness.CLIRunner
-	cfg    *config.ResearcherConfig
+	cfg    config.ResearcherConfig
 }
 
 // NewResearcher creates a Researcher backed by the given CLIRunner.
-func NewResearcher(runner harness.CLIRunner, cfg *config.ResearcherConfig) *Researcher {
+func NewResearcher(runner harness.CLIRunner, cfg config.ResearcherConfig) *Researcher {
 	return &Researcher{runner: runner, cfg: cfg}
 }
 
 // Research sends the user prompt to the CLI and returns the raw markdown output.
-func (r *Researcher) Research(ctx context.Context, prompt string) (RawPlan, error) {
+func (r *Researcher) Research(ctx context.Context, prompt string) (RawPlan, harness.TokenUsage, error) {
 	result, err := r.runner.RunPrint(ctx, prompt, r.cfg.SystemPrompt)
 	if err != nil {
-		return RawPlan{}, err
+		return RawPlan{}, harness.TokenUsage{}, err
 	}
 	return RawPlan{
 		Markdown: strings.TrimSpace(stripCodeFences(result.Output)),
-		Usage:    result.Usage,
-	}, nil
+	}, result.Usage, nil
 }
 
 // ResearchStreaming uses RunStreaming and returns the raw markdown output.
-func (r *Researcher) ResearchStreaming(ctx context.Context, prompt string, stdout io.Writer) (RawPlan, error) {
+func (r *Researcher) ResearchStreaming(ctx context.Context, prompt string, stdout io.Writer) (RawPlan, harness.TokenUsage, error) {
 	result, err := r.runner.RunStreaming(ctx, prompt, r.cfg.SystemPrompt, stdout)
 	if err != nil {
-		return RawPlan{}, err
+		return RawPlan{}, harness.TokenUsage{}, err
 	}
 	return RawPlan{
 		Markdown: strings.TrimSpace(stripCodeFences(result.Output)),
-		Usage:    result.Usage,
-	}, nil
+	}, result.Usage, nil
 }

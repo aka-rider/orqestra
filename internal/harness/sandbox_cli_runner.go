@@ -124,23 +124,23 @@ func (r *SandboxCLIRunner) run(ctx context.Context, args []string, stdout io.Wri
 }
 
 // extractJSONUsage parses token usage from a claude --output-format json response.
-func extractJSONUsage(raw string) *TokenUsage {
+func extractJSONUsage(raw string) TokenUsage {
 	var envelope struct {
 		Usage *streamUsage `json:"usage"`
 	}
 	if err := json.Unmarshal([]byte(raw), &envelope); err == nil && envelope.Usage != nil {
-		return &TokenUsage{
+		return TokenUsage{
 			InputTokens:  envelope.Usage.InputTokens,
 			OutputTokens: envelope.Usage.OutputTokens,
 			TotalTokens:  envelope.Usage.InputTokens + envelope.Usage.OutputTokens,
 		}
 	}
-	return nil
+	return TokenUsage{}
 }
 
 // extractStreamUsage scans stream-json lines for the last result event with usage.
-func extractStreamUsage(raw string) *TokenUsage {
-	var last *TokenUsage
+func extractStreamUsage(raw string) TokenUsage {
+	var last TokenUsage
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -154,7 +154,7 @@ func extractStreamUsage(raw string) *TokenUsage {
 			continue
 		}
 		if event.Type == "result" && event.Usage != nil {
-			last = &TokenUsage{
+			last = TokenUsage{
 				InputTokens:  event.Usage.InputTokens,
 				OutputTokens: event.Usage.OutputTokens,
 				TotalTokens:  event.Usage.InputTokens + event.Usage.OutputTokens,

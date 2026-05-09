@@ -26,6 +26,8 @@ When working on the codebase, ALWAYS check if your task falls into these domains
 10. **Security boundary at LLM output** — LLM-generated content (specs, commands, file paths) is untrusted input. Validate, sanitize, or gate before execution. Never exec() LLM output without strict validation buffers.
 11. **Idiomatic Go** — `(T, error)` over Result types. Value receivers in Bubble Tea models. No generics where interfaces suffice. Blend into the ecosystem; no surprises.
 12. **No magic numbers in layout** — Dimensions must be derived from measurement (`lipgloss.Height`, `lipgloss.Width`, `GetFrameSize`) or from explicit design constraints (min terminal size, split ratio). Bare arithmetic offsets that account for unmeasured chrome are layout bugs.
+13. **Value semantics by default** — Prefer value types over pointers. A pointer is justified only when: the type contains a sync primitive, nil has distinct meaning from zero value, or the type is a process/resource handle. 24-byte structs with a working zero value are not justified. Gratuitous pointers create invisible aliasing, nil-guard ceremony, and GC pressure.
+14. **Execution metadata is not domain state** — Token usage, timing, session IDs, and other infrastructure metadata must not live as fields on domain types (`RawPlan`, `GatewayResult`, `ValidationReport`, etc.). Return metadata as a separate value: `(Result, harness.TokenUsage, error)`. Domain types belong to the domain; the caller decides metadata lifecycle.
     </core_principles>
 
 <banned_patterns>
@@ -42,6 +44,8 @@ These are concrete code patterns that violate the core principles. Reject them i
 6. **Default values that mask misconfiguration** — If a config field is required for operation, its zero value must cause a clear error at startup, not silently produce broken behavior at runtime.
 7. **Fallback model/provider resolution** — If `model_ref` doesn't resolve, fail. Don't silently try a different resolution path or return a degraded runner.
 8. **Manual chrome accounting** — `height - headerLines - footerLines` where line counts are hardcoded inline. Use named constants for chrome zones and derive content dimensions via subtraction. If chrome changes, only the constant needs updating.
+9. **Gratuitous pointer fields when zero value works** — `Usage *TokenUsage` on any struct where `TokenUsage{}` (zero value) represents "not reported" — banned. Use `Usage TokenUsage`. A real LLM call never reports zero total tokens, so zero is unambiguous absence.
+10. **Infrastructure metadata on domain types** — `Usage *harness.TokenUsage` buried on `GatewayResult`, `RawPlan`, `ValidationReport`, or any other agent domain struct — banned. Infrastructure packages must not be imported by domain types to carry side-channel metadata. Surface it at the call boundary.
    </banned_patterns>
 
 <go_engineering>

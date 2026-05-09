@@ -58,7 +58,7 @@ func TestValidationReport_JSONRoundtrip(t *testing.T) {
 }
 
 func TestFormatValidationFeedback(t *testing.T) {
-	report := &ValidationReport{
+	report := ValidationReport{
 		Verdict: VerdictFail,
 		Summary: "Plan is incomplete",
 		Issues: []Issue{

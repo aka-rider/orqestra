@@ -42,68 +42,64 @@ type GatewayResult struct {
 	Brief      PromptBrief    `json:"brief"`
 	Questions  []Question     `json:"questions"`
 	Confidence float64        `json:"confidence"`
-
-	// Usage is populated after parsing from the harness RunResult, not from LLM output.
-	Usage *harness.TokenUsage `json:"-"`
 }
 
 // Gateway uses a CLIRunner to rephrase and coach user prompts.
 type Gateway struct {
 	runner harness.CLIRunner
-	cfg    *config.GatewayConfig
+	cfg    config.GatewayConfig
 }
 
 // NewGateway creates a new Gateway.
-func NewGateway(runner harness.CLIRunner, cfg *config.GatewayConfig) *Gateway {
+func NewGateway(runner harness.CLIRunner, cfg config.GatewayConfig) *Gateway {
 	return &Gateway{runner: runner, cfg: cfg}
 }
 
 // Evaluate sends the raw prompt to the LLM and parses the structured response.
-func (g *Gateway) Evaluate(ctx context.Context, rawPrompt string, stdout io.Writer) (GatewayResult, error) {
+func (g *Gateway) Evaluate(ctx context.Context, rawPrompt string, stdout io.Writer) (GatewayResult, harness.TokenUsage, error) {
 	if stdout == nil {
 		stdout = io.Discard
 	}
 	result, err := g.runner.RunStreaming(ctx, rawPrompt, g.cfg.SystemPrompt, stdout)
 	if err != nil {
-		return GatewayResult{}, fmt.Errorf("gateway evaluation failed: %w", err)
+		return GatewayResult{}, harness.TokenUsage{}, fmt.Errorf("gateway evaluation failed: %w", err)
 	}
 
 	slog.Debug("gateway raw output", "len", len(result.Output), "first_200", truncate(result.Output, 200))
 
 	jsonStr := extractJSON(result.Output)
 	if jsonStr == "" {
-		return GatewayResult{}, fmt.Errorf("parsing gateway response: no JSON object found in output")
+		return GatewayResult{}, harness.TokenUsage{}, fmt.Errorf("parsing gateway response: no JSON object found in output")
 	}
 
 	var gwResult GatewayResult
 	if err := json.Unmarshal([]byte(jsonStr), &gwResult); err != nil {
-		return GatewayResult{}, fmt.Errorf("parsing gateway response: %w", err)
+		return GatewayResult{}, harness.TokenUsage{}, fmt.Errorf("parsing gateway response: %w", err)
 	}
 
 	switch gwResult.Verdict {
 	case GatewayVerdictAccept, GatewayVerdictCoach:
 		// valid
 	default:
-		return GatewayResult{}, fmt.Errorf("gateway evaluation returned invalid verdict %q", gwResult.Verdict)
+		return GatewayResult{}, harness.TokenUsage{}, fmt.Errorf("gateway evaluation returned invalid verdict %q", gwResult.Verdict)
 	}
 
 	if gwResult.Brief.Task == "" {
-		return GatewayResult{}, errors.New("gateway evaluation returned empty brief.task")
+		return GatewayResult{}, harness.TokenUsage{}, errors.New("gateway evaluation returned empty brief.task")
 	}
 	if gwResult.Verdict == GatewayVerdictAccept {
 		if gwResult.Brief.EndState == "" {
-			return GatewayResult{}, errors.New("gateway accepted but returned empty brief.end_state")
+			return GatewayResult{}, harness.TokenUsage{}, errors.New("gateway accepted but returned empty brief.end_state")
 		}
 	}
 	if gwResult.Verdict == GatewayVerdictCoach && len(gwResult.Questions) == 0 {
-		return GatewayResult{}, errors.New("gateway coach verdict requires at least one question")
+		return GatewayResult{}, harness.TokenUsage{}, errors.New("gateway coach verdict requires at least one question")
 	}
 	if len(gwResult.Questions) > 3 {
-		return GatewayResult{}, fmt.Errorf("gateway returned %d questions, max is 3", len(gwResult.Questions))
+		return GatewayResult{}, harness.TokenUsage{}, fmt.Errorf("gateway returned %d questions, max is 3", len(gwResult.Questions))
 	}
 
-	gwResult.Usage = result.Usage
-	return gwResult, nil
+	return gwResult, result.Usage, nil
 }
 
 // extractJSON finds the outermost JSON object in s.

@@ -25,8 +25,8 @@ type TokenUsage struct {
 // RunResult captures the output and token usage from a CLIRunner invocation.
 type RunResult struct {
 	Output    string
-	Usage     *TokenUsage // nil if the harness did not report usage
-	SessionID string      // populated from stream-json result event when available
+	Usage     TokenUsage // zero value if the harness did not report usage
+	SessionID string     // populated from stream-json result event when available
 }
 
 // CLIRunner is the interface for running claude CLI commands.
@@ -175,9 +175,9 @@ func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (
 	var envelope struct {
 		Usage *streamUsage `json:"usage"`
 	}
-	var usage *TokenUsage
+	var usage TokenUsage
 	if err := json.Unmarshal([]byte(raw), &envelope); err == nil && envelope.Usage != nil {
-		usage = &TokenUsage{
+		usage = TokenUsage{
 			InputTokens:  envelope.Usage.InputTokens,
 			OutputTokens: envelope.Usage.OutputTokens,
 			TotalTokens:  envelope.Usage.InputTokens + envelope.Usage.OutputTokens,
@@ -213,7 +213,7 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 
 	var result string
 	var resultIsError bool
-	var usage *TokenUsage
+	var usage TokenUsage
 	var sessionID string
 	scanner := bufio.NewScanner(cmdStdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large lines
@@ -260,7 +260,7 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 				sessionID = event.SessionID
 			}
 			if event.Usage != nil {
-				usage = &TokenUsage{
+				usage = TokenUsage{
 					InputTokens:  event.Usage.InputTokens,
 					OutputTokens: event.Usage.OutputTokens,
 					TotalTokens:  event.Usage.InputTokens + event.Usage.OutputTokens,
@@ -313,7 +313,7 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 
 	var result string
 	var resultIsError bool
-	var usage *TokenUsage
+	var usage TokenUsage
 	var newSessionID string
 	scanner := bufio.NewScanner(cmdStdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -355,7 +355,7 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 				newSessionID = event.SessionID
 			}
 			if event.Usage != nil {
-				usage = &TokenUsage{
+				usage = TokenUsage{
 					InputTokens:  event.Usage.InputTokens,
 					OutputTokens: event.Usage.OutputTokens,
 					TotalTokens:  event.Usage.InputTokens + event.Usage.OutputTokens,

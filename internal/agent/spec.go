@@ -4,14 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-
-	"github.com/xiii/orqestra/internal/harness"
 )
 
 // RawPlan is the new pipeline's plan type: raw markdown, no parsing.
 type RawPlan struct {
 	Markdown string
-	Usage    *harness.TokenUsage
 }
 
 // IsNewFormat returns true if the markdown starts with "# Plan" — the new format.
@@ -51,9 +48,6 @@ type PlanOutput struct {
 
 	// ExpectedArtifacts lists files that should exist after execution.
 	ExpectedArtifacts []string `json:"expected_artifacts,omitempty"`
-
-	// Usage is populated after parsing from the harness RunResult, not from LLM output.
-	Usage *harness.TokenUsage `json:"-"`
 }
 
 // UnmarshalJSON handles flexible LLM output for Specification fields.
