@@ -2,7 +2,8 @@
 
 ## Overview
 
-A `bubbles/list`-style sub-model within the Elm architecture that intercepts `@` from the prompt textarea, scans the repo asynchronously without blocking the event loop, provides real-time fuzzy filtering across ~83 files, and cleanly restores textarea cursor position and focus on selection or dismissal.
+A `bubbles/list`-style sub-model within the Elm architecture that intercepts `@` from the prompt textarea, scans the repo asynchronously without blocking the event loop, provides real-time fuzzy filtering across 10M files, and cleanly restores textarea cursor position and focus on selection or dismissal.
+'@' file picker should add directory or files names to the prompt. Opaque for the gateway (gateway cannot read the repo), but to focus the researcher
 
 ---
 

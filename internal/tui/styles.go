@@ -15,6 +15,9 @@ var (
 	elapsedStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("244"))
 
+	dimStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240"))
+
 	// Content styles
 	goalStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("15")).
@@ -46,20 +49,36 @@ var (
 	streamStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("7"))
 
-	// Activity bar styles
-	activityIconStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("3")).
+	// Activity log styles
+	activityToolStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("244")).
 				Faint(true)
 
-	activityToolStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("14")).
-				Faint(true).
-				Bold(true)
+	activityPathStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("12"))
 
 	activityDetailStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("244")).
 				Faint(true)
 
-	activitySepStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("240"))
+	// File picker styles
+	fpQueryStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("12")).
+			Bold(true)
+
+	fpSelectedStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("0")).
+			Background(lipgloss.Color("12")).
+			Bold(true)
+
+	fpDimStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("244"))
+
+	fpStatusStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Faint(true)
+
+	fpBorderStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("12"))
 )

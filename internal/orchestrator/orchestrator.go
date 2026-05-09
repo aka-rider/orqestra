@@ -116,6 +116,7 @@ const (
 	EventGateRequest
 	EventComplete
 	EventError
+	EventRunDirReady // emitted once after session dir is created
 )
 
 // Phase represents the current pipeline phase.
@@ -143,6 +144,7 @@ type GateRequest struct {
 	Type              GateType
 	GatewayResult     agent.GatewayResult
 	FinalPlanMarkdown string // for GatePlanApproval
+	PlanFilePath      string // absolute path to plan.md on disk (for external editor)
 }
 
 // DecisionType classifies user decisions at gates.
@@ -184,6 +186,8 @@ type Event struct {
 	ResearchDraft    string
 	FinalPlan        string
 	WorkerValidation string
+	Status           RunStatus // set on EventComplete
+	RunDir           string    // set on EventComplete
 
 	// Token usage from the agent's RunResult. Set on EventAgentDone.
 	InputTokens  int64
@@ -271,10 +275,15 @@ func (e *Engine) Run(ctx context.Context, input Input, emit func(Event)) (Result
 			lastErr = event.Err
 		}
 		if event.Type == EventComplete {
+			status := event.Status
+			if status == "" {
+				status = StatusSuccess
+			}
 			result = Result{
-				Status:           StatusSuccess,
+				Status:           status,
 				FinalPlan:        event.FinalPlan,
 				WorkerValidation: event.WorkerValidation,
+				RunDir:           event.RunDir,
 			}
 		}
 	}
@@ -303,6 +312,10 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			emit(Event{Type: EventError, Err: fmt.Errorf("create run directory: %w", err)})
 			return
 		}
+	}
+
+	if session.Path != "" {
+		emit(Event{Type: EventRunDirReady, RunDir: session.Path})
 	}
 
 	// --- Gateway Evaluation ---
@@ -390,7 +403,25 @@ research:
 		stream.SetAgent("researcher")
 
 		researcher := agent.NewResearcher(e.Runners.Researcher, e.Config.Researcher)
-		draft, draftUsage, err := researcher.ResearchStreaming(ctx, plannerInput, &streamWriter{buf: stream})
+
+		researchAttempts := e.Config.Retry.ResearcherAttempts
+		if researchAttempts < 1 {
+			researchAttempts = 1
+		}
+
+		var draft agent.RawPlan
+		var draftUsage harness.TokenUsage
+		var err error
+		for attempt := 1; attempt <= researchAttempts; attempt++ {
+			draft, draftUsage, err = researcher.ResearchStreaming(ctx, plannerInput, &streamWriter{buf: stream})
+			if err == nil {
+				break
+			}
+			if attempt < researchAttempts {
+				slog.Warn("researcher attempt failed, retrying", "attempt", attempt, "err", err)
+				stream.SetAgent("researcher") // reset stream for retry
+			}
+		}
 		if err != nil {
 			emit(Event{Type: EventAgentFailed, AgentID: "researcher", Err: err})
 			emit(Event{Type: EventError, Err: fmt.Errorf("research: %w", err)})
@@ -408,7 +439,25 @@ research:
 		stream.SetAgent("planner")
 
 		planner := agent.NewPlanner(e.Runners.Planner, e.Config.Planner)
-		plan, planUsage, planErr := planner.RefineStreaming(ctx, draft.Markdown, &streamWriter{buf: stream})
+
+		plannerAttempts := e.Config.Retry.PlannerAttempts
+		if plannerAttempts < 1 {
+			plannerAttempts = 1
+		}
+
+		var plan agent.RawPlan
+		var planUsage harness.TokenUsage
+		var planErr error
+		for attempt := 1; attempt <= plannerAttempts; attempt++ {
+			plan, planUsage, planErr = planner.RefineStreaming(ctx, draft.Markdown, &streamWriter{buf: stream})
+			if planErr == nil {
+				break
+			}
+			if attempt < plannerAttempts {
+				slog.Warn("planner attempt failed, retrying", "attempt", attempt, "err", planErr)
+				stream.SetAgent("planner") // reset stream for retry
+			}
+		}
 		if planErr != nil {
 			emit(Event{Type: EventAgentFailed, AgentID: "planner", Err: planErr})
 			emit(Event{Type: EventError, Err: fmt.Errorf("planning: %w", planErr)})
@@ -427,9 +476,11 @@ planGate:
 
 	if !input.AutoApprove {
 		for {
+			writeArtifact(session, "final_plan.md", finalPlanMarkdown)
 			emit(Event{Type: EventGateRequest, Gate: GateRequest{
 				Type:              GatePlanApproval,
 				FinalPlanMarkdown: finalPlanMarkdown,
+				PlanFilePath:      session.ArtifactPath("final_plan.md"),
 			}})
 
 			select {
@@ -478,7 +529,11 @@ planGate:
 	// --- NoExecute: stop after plan gate ---
 	if input.NoExecute {
 		emit(Event{Type: EventPhaseChange, Phase: PhaseDone})
-		emit(Event{Type: EventComplete, Phase: PhaseDone, FinalPlan: finalPlanMarkdown})
+		emit(Event{Type: EventComplete, Phase: PhaseDone,
+			FinalPlan: finalPlanMarkdown,
+			Status:    StatusSuccess,
+			RunDir:    session.Path,
+		})
 		return
 	}
 
@@ -550,8 +605,9 @@ planGate:
 	emit(Event{Type: EventComplete, Phase: PhaseDone,
 		FinalPlan:        finalPlanMarkdown,
 		WorkerValidation: validationOutput,
+		Status:           status,
+		RunDir:           session.Path,
 	})
-	_ = status // status is captured by Result in Run()
 }
 
 // buildPlannerInput constructs the planner prompt from the raw user prompt and

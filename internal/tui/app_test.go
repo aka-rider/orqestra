@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -42,7 +43,7 @@ func testModel() Model {
 			Worker:     &noopRunner{},
 		},
 	}
-	m := NewModel(engine)
+	m := NewModel(engine, "test.yaml")
 	m.width = 120
 	m.height = 40
 	return m
@@ -83,15 +84,32 @@ func TestTUI_PromptSubmit(t *testing.T) {
 	if model.goal != "add a feature" {
 		t.Errorf("expected goal 'add a feature', got %q", model.goal)
 	}
-	// Cmd should be non-nil (waitForEvent)
-	_ = cmd
+	// Pipeline channels must be set on the returned model (regression: evaluation-order bug).
+	if model.events == nil {
+		t.Error("model.events is nil after prompt submit — pipeline events will never be received")
+	}
+	if model.streamBuf == nil {
+		t.Error("model.streamBuf is nil after prompt submit — streaming output will not display")
+	}
+	if model.decisions == nil {
+		t.Error("model.decisions is nil after prompt submit — gate responses will never be sent")
+	}
+	if model.cancel == nil {
+		t.Error("model.cancel is nil after prompt submit — pipeline cannot be stopped")
+	}
+	// Cmd should be non-nil (waitForEvent + tick)
+	if cmd == nil {
+		t.Error("expected non-nil cmd from startPipeline")
+	}
+	// Clean up: cancel the pipeline
+	model.cancel()
 }
 
 func TestTUI_PromptSkipGateway(t *testing.T) {
 	m := testModel()
 	m.prompt.SetValue("add a feature")
 
-	result, _ := sendKey(m, tea.KeyCtrlS)
+	result, cmd := sendKey(m, tea.KeyCtrlS)
 	model := result.(Model)
 
 	if model.state != StatePipeline {
@@ -100,6 +118,20 @@ func TestTUI_PromptSkipGateway(t *testing.T) {
 	if model.goal != "add a feature" {
 		t.Errorf("expected goal 'add a feature', got %q", model.goal)
 	}
+	// Same evaluation-order regression guard as TestTUI_PromptSubmit.
+	if model.events == nil {
+		t.Error("model.events is nil after skip-gateway submit")
+	}
+	if model.streamBuf == nil {
+		t.Error("model.streamBuf is nil after skip-gateway submit")
+	}
+	if model.cancel == nil {
+		t.Error("model.cancel is nil after skip-gateway submit")
+	}
+	if cmd == nil {
+		t.Error("expected non-nil cmd from startPipeline")
+	}
+	model.cancel()
 }
 
 func TestTUI_PromptEmptyIgnored(t *testing.T) {
@@ -134,8 +166,7 @@ func TestTUI_CoachingRender(t *testing.T) {
 		},
 	}
 
-	result, _ := m.handleOrchestratorEvent(event)
-	model := result.(Model)
+	model := m.applyEvent(event)
 
 	if model.content != ContentCoaching {
 		t.Errorf("expected ContentCoaching, got %d", model.content)
@@ -232,8 +263,7 @@ func TestTUI_PlanApproval(t *testing.T) {
 		},
 	}
 
-	result, _ := m.handleOrchestratorEvent(event)
-	model := result.(Model)
+	model := m.applyEvent(event)
 
 	if model.content != ContentPlanReview {
 		t.Errorf("expected ContentPlanReview, got %d", model.content)
@@ -456,22 +486,20 @@ func TestTUI_SidebarUpdates(t *testing.T) {
 	m.events = make(chan orchestrator.Event, 1)
 
 	// AgentStarted
-	result, _ := m.handleOrchestratorEvent(orchestrator.Event{
+	model := m.applyEvent(orchestrator.Event{
 		Type:    orchestrator.EventAgentStarted,
 		AgentID: "gateway",
 	})
-	model := result.(Model)
 
 	if len(model.agents) != 1 || model.agents[0].State != "running" {
 		t.Errorf("expected 1 agent running, got %+v", model.agents)
 	}
 
 	// AgentDone
-	result2, _ := model.handleOrchestratorEvent(orchestrator.Event{
+	model2 := model.applyEvent(orchestrator.Event{
 		Type:    orchestrator.EventAgentDone,
 		AgentID: "gateway",
 	})
-	model2 := result2.(Model)
 
 	if model2.agents[0].State != "done" {
 		t.Errorf("expected agent state 'done', got %q", model2.agents[0].State)
@@ -541,8 +569,7 @@ func TestTUI_CompletionValidation(t *testing.T) {
 		WorkerValidation: "✅ tests pass\n✅ build succeeds",
 	}
 
-	result, _ := m.handleOrchestratorEvent(event)
-	model := result.(Model)
+	model := m.applyEvent(event)
 
 	if model.content != ContentCompletion {
 		t.Errorf("expected ContentCompletion, got %d", model.content)
@@ -788,5 +815,268 @@ func TestStreamBuffer_TokenAccumulation(t *testing.T) {
 	}
 	if lines[1] != "Next line here" {
 		t.Errorf("unexpected second line: %q", lines[1])
+	}
+}
+
+func TestTUI_NewRunClearsStaleState(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.content = ContentCompletion
+	m.goal = "previous task"
+
+	// Simulate stale state from a previous run
+	m.agents = []AgentRow{
+		{ID: "gateway", State: "done"},
+		{ID: "planner", State: "failed"},
+	}
+	m.lastErr = fmt.Errorf("planner failed")
+	m.finalPlan = "# Old Plan"
+	m.hasPlan = true
+	m.workerValidation = "old validation"
+	m.hasValidation = true
+
+	// Press N to start new run
+	result, _ := sendRune(m, "n")
+	model := result.(Model)
+
+	if model.state != StatePrompt {
+		t.Fatalf("expected StatePrompt, got %d", model.state)
+	}
+
+	// All stale state must be cleared
+	if len(model.agents) != 0 {
+		t.Errorf("expected agents cleared, got %d agents", len(model.agents))
+	}
+	if model.lastErr != nil {
+		t.Errorf("expected lastErr cleared, got %v", model.lastErr)
+	}
+	if model.hasPlan {
+		t.Error("expected hasPlan cleared")
+	}
+	if model.hasValidation {
+		t.Error("expected hasValidation cleared")
+	}
+	if model.showDashboard {
+		t.Error("expected showDashboard cleared")
+	}
+	if model.finalPlan != "" {
+		t.Error("expected finalPlan cleared")
+	}
+
+	// Goal should be preserved in prompt
+	if !strings.Contains(model.prompt.Value(), "previous task") {
+		t.Errorf("expected prompt pre-filled, got %q", model.prompt.Value())
+	}
+}
+
+func TestTUI_RestartClearsErrorAndAgents(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.content = ContentCompletion
+	m.goal = "task"
+	m.agents = []AgentRow{{ID: "gateway", State: "done"}}
+	m.lastErr = fmt.Errorf("old error")
+
+	// Press N, then submit new prompt via Enter
+	result, _ := sendRune(m, "n")
+	model := result.(Model)
+	model.prompt.SetValue("new task")
+
+	result2, _ := sendKey(model, tea.KeyEnter)
+	model2 := result2.(Model)
+
+	if model2.state != StatePipeline {
+		t.Fatalf("expected StatePipeline, got %d", model2.state)
+	}
+	if len(model2.agents) != 0 {
+		t.Errorf("expected agents cleared on new pipeline start, got %d", len(model2.agents))
+	}
+	if model2.lastErr != nil {
+		t.Errorf("expected lastErr cleared on new pipeline start, got %v", model2.lastErr)
+	}
+	model2.cancel()
+}
+
+func TestTUI_ConfigNameInHeader(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.content = ContentStreaming
+	m.goal = "test"
+	m.width = 120
+	m.height = 40
+
+	view := m.View()
+	if !strings.Contains(view, "test.yaml") {
+		t.Error("expected config name 'test.yaml' in pipeline header")
+	}
+}
+
+func TestTUI_PlanGateBlocksOverwrite(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.content = ContentStreaming
+	m.events = make(chan orchestrator.Event, 1)
+
+	// Simulate gate event
+	model := m.applyEvent(orchestrator.Event{
+		Type: orchestrator.EventGateRequest,
+		Gate: orchestrator.GateRequest{
+			Type:              orchestrator.GatePlanApproval,
+			FinalPlanMarkdown: "# Plan\n\n## Goal\nTest",
+		},
+	})
+
+	if model.content != ContentPlanReview {
+		t.Fatalf("expected ContentPlanReview, got %d", model.content)
+	}
+	if !model.awaitingPlanDecision {
+		t.Fatal("expected awaitingPlanDecision=true")
+	}
+
+	// Simulate a stale EventPhaseChange arriving after the gate
+	model2 := model.applyEvent(orchestrator.Event{
+		Type:  orchestrator.EventPhaseChange,
+		Phase: orchestrator.PhaseExecuting,
+	})
+
+	// Gate must NOT be overwritten
+	if model2.content != ContentPlanReview {
+		t.Errorf("gate was overwritten by stale EventPhaseChange: content=%d", model2.content)
+	}
+	// Phase should not be updated while gate is active
+	if model2.phase == orchestrator.PhaseExecuting {
+		t.Error("phase was updated despite awaitingPlanDecision being true")
+	}
+}
+
+func TestTUI_PlanReviewComment(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.content = ContentPlanReview
+	m.hasPlan = true
+	m.finalPlan = "# Plan\n\n## Goal\nTest"
+	decisions := make(chan orchestrator.Decision, 1)
+	m.decisions = decisions
+	m.events = make(chan orchestrator.Event, 1)
+
+	// Initialize comment textarea
+	m.planComment = textarea.New()
+	m.planComment.SetWidth(80)
+	m.planComment.SetHeight(2)
+	m.planComment.CharLimit = 1024
+	m.planComment.Focus()
+	m.hasPlanComment = true
+	m.planComment.SetValue("please add error handling")
+
+	// Press Enter to submit comment
+	result, cmd := sendKey(m, tea.KeyEnter)
+	model := result.(Model)
+
+	if model.content != ContentStreaming {
+		t.Errorf("expected ContentStreaming after comment submit, got %d", model.content)
+	}
+	if cmd == nil {
+		t.Error("expected non-nil cmd (waitForEvent)")
+	}
+
+	select {
+	case d := <-decisions:
+		if d.Type != orchestrator.DecisionComment {
+			t.Errorf("expected DecisionComment, got %d", d.Type)
+		}
+		if d.Comment != "please add error handling" {
+			t.Errorf("expected comment text, got %q", d.Comment)
+		}
+	default:
+		t.Error("expected comment decision to be sent")
+	}
+}
+
+func TestTUI_PlanReviewExternalEditor(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.content = ContentPlanReview
+	m.hasPlan = true
+	m.finalPlan = "# Plan\n\n## Goal\nTest"
+	m.planFilePath = "/tmp/test-plan.md"
+	m.hasPlanComment = true
+	m.planComment = textarea.New()
+
+	// Press Ctrl+E to open external editor
+	result, cmd := sendKey(m, tea.KeyCtrlE)
+	model := result.(Model)
+
+	if !model.editorRunning {
+		t.Error("expected editorRunning=true after Ctrl+E")
+	}
+	if cmd == nil {
+		t.Error("expected non-nil cmd (ExecProcess)")
+	}
+}
+
+func TestTUI_PlanReviewGlamour(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.content = ContentPlanReview
+	m.hasPlan = true
+	m.finalPlan = "# Plan\n\n## Goal\nAdd feature X.\n\n## Work Packages\n\n### 1. Step 1\n\n- item a\n- item b\n"
+	m.width = 120
+	m.height = 40
+
+	view := m.viewPlanReview(80)
+	if view == m.finalPlan {
+		t.Error("expected glamour to transform the markdown, got raw input back")
+	}
+	if !strings.Contains(view, "Plan") {
+		t.Error("expected rendered output to contain 'Plan'")
+	}
+}
+
+func TestTUI_EditorReturn(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.content = ContentPlanReview
+	m.hasPlan = true
+	m.finalPlan = "# Plan\n\nOriginal content"
+	decisions := make(chan orchestrator.Decision, 1)
+	m.decisions = decisions
+	m.events = make(chan orchestrator.Event, 1)
+
+	// Write a modified plan to a temp file
+	tmpFile, err := os.CreateTemp("", "test-plan-*.md")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	modifiedPlan := "# Plan\n\nModified content with changes"
+	if _, err := tmpFile.WriteString(modifiedPlan); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+	tmpFile.Close()
+
+	m.planFilePath = tmpFile.Name()
+
+	// Simulate editor return
+	result, _ := m.Update(editorReturnMsg{err: nil})
+	model := result.(Model)
+
+	if model.finalPlan != modifiedPlan {
+		t.Errorf("expected updated finalPlan, got %q", model.finalPlan)
+	}
+	if model.content != ContentStreaming {
+		t.Errorf("expected ContentStreaming after editor return with changes, got %d", model.content)
+	}
+
+	select {
+	case d := <-decisions:
+		if d.Type != orchestrator.DecisionEdit {
+			t.Errorf("expected DecisionEdit, got %d", d.Type)
+		}
+		if d.EditedContent != modifiedPlan {
+			t.Errorf("expected edited content to match modified plan")
+		}
+	default:
+		t.Error("expected edit decision to be sent")
 	}
 }

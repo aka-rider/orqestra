@@ -3,9 +3,12 @@ package orchestrator
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
 )
@@ -362,5 +365,50 @@ func TestStreamWriter_ImplementsActivitySink(t *testing.T) {
 	}
 	if acts[0].Tool != "Read" {
 		t.Errorf("tool = %q, want Read", acts[0].Tool)
+	}
+}
+
+func TestEngine_PlanFileBeforeGate(t *testing.T) {
+	engine := testEngine(acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
+
+	// Set up a RunDirFactory that creates a temp directory
+	tmpDir := t.TempDir()
+	engine.RunDirFactory = func(slug string) (agent.SessionDir, error) {
+		dir := filepath.Join(tmpDir, slug)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return agent.SessionDir{}, err
+		}
+		return agent.SessionDir{Path: dir}, nil
+	}
+
+	ctx := context.Background()
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
+
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case event, ok := <-channels.Events:
+			if !ok {
+				return
+			}
+			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+				// Verify plan file exists on disk before the gate was emitted
+				planPath := event.Gate.PlanFilePath
+				if planPath == "" {
+					t.Fatal("PlanFilePath is empty on gate request")
+				}
+				data, err := os.ReadFile(planPath)
+				if err != nil {
+					t.Fatalf("plan file should exist before gate: %v", err)
+				}
+				content := string(data)
+				if content != validPlanMarkdown() {
+					t.Errorf("plan file content mismatch:\ngot:  %q\nwant: %q", content, validPlanMarkdown())
+				}
+				channels.Decisions <- Decision{Type: DecisionApprove}
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for plan gate")
+		}
 	}
 }

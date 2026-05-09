@@ -46,7 +46,7 @@ These are concrete code patterns that violate the core principles. Reject them i
 8. **Manual chrome accounting** — `height - headerLines - footerLines` where line counts are hardcoded inline. Use named constants for chrome zones and derive content dimensions via subtraction. If chrome changes, only the constant needs updating.
 9. **Gratuitous pointer fields when zero value works** — `Usage *TokenUsage` on any struct where `TokenUsage{}` (zero value) represents "not reported" — banned. Use `Usage TokenUsage`. A real LLM call never reports zero total tokens, so zero is unambiguous absence.
 10. **Infrastructure metadata on domain types** — `Usage *harness.TokenUsage` buried on `GatewayResult`, `RawPlan`, `ValidationReport`, or any other agent domain struct — banned. Infrastructure packages must not be imported by domain types to carry side-channel metadata. Surface it at the call boundary.
-   </banned_patterns>
+    </banned_patterns>
 
 <go_engineering>
 
@@ -86,6 +86,49 @@ These are concrete code patterns that violate the core principles. Reject them i
 - **Context cancellation**: subprocesses, validators, sandboxes, and harness sessions must accept and respect `context.Context`.
 - **Catch-all packages**: never create `types`, `utils`, `helpers`, or `misc` packages. Types belong in the package that owns the domain concept. If a type is shared, it belongs in the package that defines the behavior.
   </common_gotchas>
+
+<e2e_debugging>
+
+## Debugging E2E / Headless Runs via Claude CLI Logs
+
+When an orchestrator run hangs, produces no output, or errors silently, the **ground truth** is in the Claude CLI session logs on disk — not in Orqestra's own stderr (which is silenced in TUI mode).
+
+### Log Locations
+
+| Path                                                   | Contents                                                                                                                                          |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `~/.claude/sessions/`                                  | Active process metadata (PID, session ID, cwd, CLI version). One JSON file per running `claude` process.                                          |
+| `~/.claude/projects/-Users-<user>-Developer-orqestra/` | Per-session JSONL conversation logs. Each line is a typed event: `queue-operation`, `user`, `assistant`, `last-prompt`. File name = session UUID. |
+| `~/.claude/debug/latest`                               | Symlink to the most recent debug trace (if debug mode was enabled).                                                                               |
+
+### How to Read Them
+
+1. **Find the most recent session logs** — sort by mtime:
+
+   ```sh
+   ls -lt ~/.claude/projects/-Users-*-Developer-orqestra/*.jsonl | head -5
+   ```
+
+2. **Read the session JSONL** — each line is a JSON object. Key fields:
+   - `"type":"user"` — the prompt sent by Orqestra's harness.
+   - `"type":"assistant"` — the model's response. Check `message.content[].text` for the actual output.
+   - `"isApiErrorMessage": true` — **the model never ran**. Read `message.content[].text` for the error (e.g. `"API Error: Unable to connect to API (ConnectionRefused)"`).
+   - `"error":"unknown"` — transport-level failure, not a model refusal.
+
+3. **Check for connection errors** — if the assistant response contains `ConnectionRefused`, `timeout`, or `rate_limit`, the issue is infrastructure (proxy down, API key invalid, quota exhausted), not Orqestra code.
+
+4. **Cross-reference with the session metadata** — match the `sessionId` from the JSONL filename to `~/.claude/sessions/<pid>.json` to confirm which process owns it:
+   ```sh
+   cat ~/.claude/sessions/*.json | python3 -m json.tool
+   ```
+
+### When to Use This
+
+- Pipeline hangs with no visible output in TUI or headless mode.
+- `EventAgentFailed` fires but the error message is opaque.
+- Token counters stay at zero after an agent "completes".
+- Debugging harness integration tests that shell out to `claude`.
+  </e2e_debugging>
 
 <mcp_servers>
 

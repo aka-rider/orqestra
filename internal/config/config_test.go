@@ -10,14 +10,14 @@ import (
 
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.Researcher.Model != "sonnet" {
-		t.Errorf("researcher model = %q, want %q", cfg.Researcher.Model, "sonnet")
+	if cfg.Researcher.Model != "medium" {
+		t.Errorf("researcher model = %q, want %q", cfg.Researcher.Model, "medium")
 	}
-	if cfg.Planner.Model != "sonnet" {
-		t.Errorf("planner model = %q, want %q", cfg.Planner.Model, "sonnet")
+	if cfg.Planner.Model != "large" {
+		t.Errorf("planner model = %q, want %q", cfg.Planner.Model, "large")
 	}
-	if cfg.Worker.Model != "sonnet" {
-		t.Errorf("worker model = %q, want %q", cfg.Worker.Model, "sonnet")
+	if cfg.Worker.Model != "medium" {
+		t.Errorf("worker model = %q, want %q", cfg.Worker.Model, "medium")
 	}
 	if cfg.Utility != "small" {
 		t.Errorf("utility = %q, want %q", cfg.Utility, "small")
@@ -47,18 +47,18 @@ providers:
     base_url: http://test:1234
     type: openai
 models:
-  sonnet:
+  medium:
     provider: local
     model: test-planner
   small:
     provider: local
     model: test-val
 researcher:
-  model: sonnet
+  model: medium
 planner:
-  model: sonnet
+  model: medium
 worker:
-  model: sonnet
+  model: medium
 utility: small
 `
 	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
@@ -72,10 +72,10 @@ utility: small
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Researcher.Model != "sonnet" {
+	if cfg.Researcher.Model != "medium" {
 		t.Errorf("expected researcher model sonnet, got %q", cfg.Researcher.Model)
 	}
-	if cfg.Planner.Model != "sonnet" {
+	if cfg.Planner.Model != "large" {
 		t.Errorf("expected planner model sonnet, got %q", cfg.Planner.Model)
 	}
 }
@@ -92,7 +92,7 @@ func TestResolveModel_Success(t *testing.T) {
 		Models: map[string]ModelConfig{
 			"my-model": {
 				Provider: "my-provider",
-				Model:    "claude-sonnet-4.6",
+				Model:    "claude-medium",
 			},
 		},
 	}
@@ -107,8 +107,8 @@ func TestResolveModel_Success(t *testing.T) {
 	if resolved.APIKey != "secret" {
 		t.Errorf("APIKey = %q, want %q", resolved.APIKey, "secret")
 	}
-	if resolved.Model != "claude-sonnet-4.6" {
-		t.Errorf("Model = %q, want %q", resolved.Model, "claude-sonnet-4.6")
+	if resolved.Model != "claude-medium" {
+		t.Errorf("Model = %q, want %q", resolved.Model, "claude-medium")
 	}
 	if resolved.Type != "anthropic" {
 		t.Errorf("Type = %q, want %q", resolved.Type, "anthropic")
@@ -121,14 +121,14 @@ func TestResolveModel_CaseInsensitive(t *testing.T) {
 			"prov": {BaseURL: "http://localhost", Type: "openai"},
 		},
 		Models: map[string]ModelConfig{
-			"Sonnet": {Provider: "prov", Model: "claude-sonnet"},
+			"Sonnet": {Provider: "prov", Model: "claude-medium"},
 		},
 	}
-	resolved, err := cfg.ResolveModel("sonnet")
+	resolved, err := cfg.ResolveModel("medium")
 	if err != nil {
 		t.Fatalf("expected case-insensitive lookup to succeed, got: %v", err)
 	}
-	if resolved.Model != "claude-sonnet" {
+	if resolved.Model != "claude-medium" {
 		t.Errorf("Model = %q, want claude-sonnet", resolved.Model)
 	}
 }
@@ -191,7 +191,7 @@ providers:
     base_url: http://localhost
     type: anthropic
 models:
-  sonnet:
+  medium:
     provider: good
     model: big
   small:
@@ -201,11 +201,11 @@ models:
     provider: nonexistent
     model: x
 researcher:
-  model: sonnet
+  model: medium
 planner:
-  model: sonnet
+  model: medium
 worker:
-  model: sonnet
+  model: medium
 utility: small
 `
 	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
@@ -228,18 +228,18 @@ providers:
     base_url: http://localhost
     type: openai
 models:
-  sonnet:
+  medium:
     provider: local
     model: big
   small:
     provider: local
     model: small
 researcher:
-  model: sonnet
+  model: medium
 planner:
-  model: sonnet
+  model: medium
 worker:
-  model: sonnet
+  model: medium
 utility: small
 `
 	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
@@ -321,18 +321,18 @@ providers:
     base_url: http://localhost
     type: openai
 models:
-  sonnet:
+  medium:
     provider: local
     model: big
   small:
     provider: local
     model: small
 researcher:
-  model: sonnet
+  model: medium
 planner:
-  model: sonnet
+  model: medium
 worker:
-  model: sonnet
+  model: medium
 utility: small
 execution_graph:
   agents:
@@ -451,7 +451,7 @@ providers:
     base_url: http://localhost
     type: openai
 models:
-  sonnet:
+  medium:
     provider: local
     model: big
   small:
@@ -462,11 +462,11 @@ models:
     model: qwen36
     token_limit: "garbage"
 researcher:
-  model: sonnet
+  model: medium
 planner:
-  model: sonnet
+  model: medium
 worker:
-  model: sonnet
+  model: medium
 utility: small
 `
 	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
@@ -500,18 +500,18 @@ providers:
     base_url: http://localhost
     type: openai
 models:
-  sonnet:
+  medium:
     provider: local
     model: big
   small:
     provider: local
     model: small
 researcher:
-  model: sonnet
+  model: medium
 planner:
-  model: sonnet
+  model: medium
 worker:
-  model: sonnet
+  model: medium
 utility: small
 ` + tt.key + "\n"
 			f, err := os.CreateTemp(t.TempDir(), "*.yaml")
@@ -539,15 +539,15 @@ providers:
     base_url: http://localhost
     type: openai
 models:
-  sonnet:
+  medium:
     provider: local
     model: big
 researcher:
-  model: sonnet
+  model: medium
 planner:
-  model: sonnet
+  model: medium
 worker:
-  model: sonnet
+  model: medium
 `
 	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
 	if err != nil {
@@ -573,20 +573,20 @@ providers:
     api_key: dummy
     type: openai
 models:
-  sonnet:
+  medium:
     provider: test
-    model: test-sonnet
+    model: test-medium
     token_limit: 100K
   small:
     provider: test
     model: test-small
     token_limit: 50K
 researcher:
-  model: sonnet
+  model: medium
 planner:
-  model: sonnet
+  model: medium
 worker:
-  model: sonnet
+  model: medium
 utility: small
 sandbox:
   max_lifetime: 2h
@@ -640,20 +640,20 @@ providers:
     api_key: dummy
     type: openai
 models:
-  sonnet:
+  medium:
     provider: test
-    model: test-sonnet
+    model: test-medium
     token_limit: 100K
   small:
     provider: test
     model: test-small
     token_limit: 50K
 researcher:
-  model: sonnet
+  model: medium
 planner:
-  model: sonnet
+  model: medium
 worker:
-  model: sonnet
+  model: medium
 utility: small
 `
 	f := filepath.Join(t.TempDir(), "cfg.yaml")
@@ -686,20 +686,20 @@ providers:
     api_key: dummy
     type: openai
 models:
-  sonnet:
+  medium:
     provider: test
-    model: test-sonnet
+    model: test-medium
     token_limit: 100K
   small:
     provider: test
     model: test-small
     token_limit: 50K
 researcher:
-  model: sonnet
+  model: medium
 planner:
-  model: sonnet
+  model: medium
 worker:
-  model: sonnet
+  model: medium
 utility: small
 sandbox:
   max_lifetime: 1h
@@ -709,7 +709,7 @@ execution_graph:
   agents:
     - id: worker-1
       role: worker
-      model_ref: sonnet
+      model_ref: medium
       sandbox:
         max_lifetime: 30m
         allow_write:

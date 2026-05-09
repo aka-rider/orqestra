@@ -20,6 +20,9 @@ const (
 	// and input is the body zone's line terminator, not chrome).
 	constPipelineInputHeight = 2
 
+	// Plan review mode: divider + 2-line comment textarea + padding
+	constPlanReviewInputHeight = 4
+
 	// Prompt mode: divider + instruction label + 3-line textarea
 	constPromptInputHeight = 5
 )
@@ -43,7 +46,11 @@ func (m *Model) recalculateLayout() {
 	case StatePrompt:
 		inputHeight = constPromptInputHeight
 	case StatePipeline:
-		inputHeight = constPipelineInputHeight
+		if m.content == ContentPlanReview {
+			inputHeight = constPlanReviewInputHeight
+		} else {
+			inputHeight = constPipelineInputHeight
+		}
 	}
 
 	usedHeight := constHeaderHeight + inputHeight + constFooterHeight

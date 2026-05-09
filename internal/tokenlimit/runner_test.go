@@ -52,11 +52,11 @@ func TestLimitedRunner_RunPrint_BudgetExhaustedBlocks(t *testing.T) {
 			return harness.RunResult{}, nil
 		},
 	}
-	limiter := newTestLimiter(t, map[string]int64{"opus": 100})
+	limiter := newTestLimiter(t, map[string]int64{"large": 100})
 	// Pre-exhaust the budget.
-	limiter.store.Record(context.Background(), "opus", "other", 200)
+	limiter.store.Record(context.Background(), "large", "other", 200)
 
-	runner := NewLimitedRunner(inner, limiter, "opus", "planner")
+	runner := NewLimitedRunner(inner, limiter, "large", "planner")
 	_, err := runner.RunPrint(context.Background(), "prompt", "sys")
 	if !IsBudgetExhausted(err) {
 		t.Fatalf("expected ErrBudgetExhausted, got %v", err)
@@ -72,8 +72,8 @@ func TestLimitedRunner_RunPrint_PassthroughOnBudgetOK(t *testing.T) {
 			return harness.RunResult{Output: "the answer"}, nil
 		},
 	}
-	limiter := newTestLimiter(t, map[string]int64{"opus": 10000})
-	runner := NewLimitedRunner(inner, limiter, "opus", "planner")
+	limiter := newTestLimiter(t, map[string]int64{"large": 10000})
+	runner := NewLimitedRunner(inner, limiter, "large", "planner")
 
 	result, err := runner.RunPrint(context.Background(), "prompt", "sys")
 	if err != nil {
@@ -94,10 +94,10 @@ func TestLimitedRunner_RunPrint_PostRecordBudgetError(t *testing.T) {
 		},
 	}
 	// Limit 1000, already used 500 — adding 900 will exceed.
-	limiter := newTestLimiter(t, map[string]int64{"opus": 1000})
-	limiter.store.Record(context.Background(), "opus", "prior", 500)
+	limiter := newTestLimiter(t, map[string]int64{"large": 1000})
+	limiter.store.Record(context.Background(), "large", "prior", 500)
 
-	runner := NewLimitedRunner(inner, limiter, "opus", "planner")
+	runner := NewLimitedRunner(inner, limiter, "large", "planner")
 	result, err := runner.RunPrint(context.Background(), "prompt", "sys")
 
 	// Result output must still be returned even alongside the budget error.
@@ -117,14 +117,14 @@ func TestLimitedRunner_RunPrint_ZeroTokensSkipsRecord(t *testing.T) {
 			}, nil
 		},
 	}
-	limiter := newTestLimiter(t, map[string]int64{"opus": 1000})
-	runner := NewLimitedRunner(inner, limiter, "opus", "planner")
+	limiter := newTestLimiter(t, map[string]int64{"large": 1000})
+	runner := NewLimitedRunner(inner, limiter, "large", "planner")
 
 	_, err := runner.RunPrint(context.Background(), "prompt", "sys")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	used, _ := limiter.store.UsageByModel(context.Background(), "opus")
+	used, _ := limiter.store.UsageByModel(context.Background(), "large")
 	if used != 0 {
 		t.Errorf("expected 0 tokens recorded, got %d", used)
 	}
@@ -139,15 +139,15 @@ func TestLimitedRunner_RunPrint_RecordsOnInnerError(t *testing.T) {
 			}, innerErr
 		},
 	}
-	limiter := newTestLimiter(t, map[string]int64{"opus": 10000})
-	runner := NewLimitedRunner(inner, limiter, "opus", "planner")
+	limiter := newTestLimiter(t, map[string]int64{"large": 10000})
+	runner := NewLimitedRunner(inner, limiter, "large", "planner")
 
 	_, err := runner.RunPrint(context.Background(), "prompt", "sys")
 	if !errors.Is(err, innerErr) {
 		t.Fatalf("expected innerErr, got %v", err)
 	}
 	// Tokens must be recorded even though inner errored.
-	used, _ := limiter.store.UsageByModel(context.Background(), "opus")
+	used, _ := limiter.store.UsageByModel(context.Background(), "large")
 	if used != 300 {
 		t.Errorf("expected 300 tokens recorded, got %d", used)
 	}
@@ -159,14 +159,14 @@ func TestLimitedRunner_RunPrint_NilUsageSkipsRecord(t *testing.T) {
 			return harness.RunResult{}, nil
 		},
 	}
-	limiter := newTestLimiter(t, map[string]int64{"opus": 1000})
-	runner := NewLimitedRunner(inner, limiter, "opus", "planner")
+	limiter := newTestLimiter(t, map[string]int64{"large": 1000})
+	runner := NewLimitedRunner(inner, limiter, "large", "planner")
 
 	_, err := runner.RunPrint(context.Background(), "prompt", "sys")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	used, _ := limiter.store.UsageByModel(context.Background(), "opus")
+	used, _ := limiter.store.UsageByModel(context.Background(), "large")
 	if used != 0 {
 		t.Errorf("expected 0 tokens, got %d", used)
 	}
@@ -181,9 +181,9 @@ func TestLimitedRunner_RunPrint_NoLimit_AlwaysPasses(t *testing.T) {
 			}, nil
 		},
 	}
-	// No limit configured for "opus".
+	// No limit configured for "large".
 	limiter := newTestLimiter(t, map[string]int64{})
-	runner := NewLimitedRunner(inner, limiter, "opus", "planner")
+	runner := NewLimitedRunner(inner, limiter, "large", "planner")
 
 	result, err := runner.RunPrint(context.Background(), "prompt", "sys")
 	if err != nil {
@@ -204,10 +204,10 @@ func TestLimitedRunner_RunStreaming_BudgetExhaustedBlocks(t *testing.T) {
 			return harness.RunResult{}, nil
 		},
 	}
-	limiter := newTestLimiter(t, map[string]int64{"opus": 100})
-	limiter.store.Record(context.Background(), "opus", "other", 200)
+	limiter := newTestLimiter(t, map[string]int64{"large": 100})
+	limiter.store.Record(context.Background(), "large", "other", 200)
 
-	runner := NewLimitedRunner(inner, limiter, "opus", "worker")
+	runner := NewLimitedRunner(inner, limiter, "large", "worker")
 	_, err := runner.RunStreaming(context.Background(), "prompt", "sys", io.Discard)
 	if !IsBudgetExhausted(err) {
 		t.Fatalf("expected ErrBudgetExhausted, got %v", err)
@@ -226,14 +226,14 @@ func TestLimitedRunner_RunStreaming_RecordsOnInnerError(t *testing.T) {
 			}, innerErr
 		},
 	}
-	limiter := newTestLimiter(t, map[string]int64{"opus": 10000})
-	runner := NewLimitedRunner(inner, limiter, "opus", "worker")
+	limiter := newTestLimiter(t, map[string]int64{"large": 10000})
+	runner := NewLimitedRunner(inner, limiter, "large", "worker")
 
 	_, err := runner.RunStreaming(context.Background(), "prompt", "sys", io.Discard)
 	if !errors.Is(err, innerErr) {
 		t.Fatalf("expected innerErr, got %v", err)
 	}
-	used, _ := limiter.store.UsageByModel(context.Background(), "opus")
+	used, _ := limiter.store.UsageByModel(context.Background(), "large")
 	if used != 150 {
 		t.Errorf("expected 150 tokens recorded, got %d", used)
 	}
@@ -248,10 +248,10 @@ func TestLimitedRunner_RunStreaming_PostRecordBudgetError(t *testing.T) {
 			}, nil
 		},
 	}
-	limiter := newTestLimiter(t, map[string]int64{"opus": 1000})
-	limiter.store.Record(context.Background(), "opus", "prior", 500)
+	limiter := newTestLimiter(t, map[string]int64{"large": 1000})
+	limiter.store.Record(context.Background(), "large", "prior", 500)
 
-	runner := NewLimitedRunner(inner, limiter, "opus", "worker")
+	runner := NewLimitedRunner(inner, limiter, "large", "worker")
 	result, err := runner.RunStreaming(context.Background(), "prompt", "sys", io.Discard)
 
 	if result.Output != "streamed" {
@@ -283,11 +283,11 @@ func TestErrBudgetExhausted_ErrorFormat(t *testing.T) {
 
 func TestLimiter_StatusAll(t *testing.T) {
 	limiter := newTestLimiter(t, map[string]int64{
-		"opus":   10000,
+		"large":   10000,
 		"sonnet": 5000,
 	})
 	ctx := context.Background()
-	limiter.store.Record(ctx, "opus", "planner", 2000)
+	limiter.store.Record(ctx, "large", "planner", 2000)
 	limiter.store.Record(ctx, "sonnet", "validator", 1000)
 
 	statuses, err := limiter.StatusAll(ctx)
@@ -303,7 +303,7 @@ func TestLimiter_StatusAll(t *testing.T) {
 		byModel[s.Model] = s
 	}
 
-	opus := byModel["opus"]
+	opus := byModel["large"]
 	if opus.Used != 2000 {
 		t.Errorf("opus used = %d, want 2000", opus.Used)
 	}
@@ -334,17 +334,17 @@ func TestLimiter_StatusAll_Empty(t *testing.T) {
 // --- Limiter.Record edge: tokens <= 0 ---
 
 func TestLimiter_RecordZeroTokens_NoWrite(t *testing.T) {
-	limiter := newTestLimiter(t, map[string]int64{"opus": 1000})
+	limiter := newTestLimiter(t, map[string]int64{"large": 1000})
 	ctx := context.Background()
 
-	if err := limiter.Record(ctx, "opus", "agent", 0); err != nil {
+	if err := limiter.Record(ctx, "large", "agent", 0); err != nil {
 		t.Fatalf("Record(0) error: %v", err)
 	}
-	if err := limiter.Record(ctx, "opus", "agent", -5); err != nil {
+	if err := limiter.Record(ctx, "large", "agent", -5); err != nil {
 		t.Fatalf("Record(-5) error: %v", err)
 	}
 
-	used, _ := limiter.store.UsageByModel(ctx, "opus")
+	used, _ := limiter.store.UsageByModel(ctx, "large")
 	if used != 0 {
 		t.Errorf("expected 0 tokens stored for zero/negative input, got %d", used)
 	}
@@ -376,8 +376,8 @@ func TestLimitedRunner_RunStreaming_PassthroughOnBudgetOK(t *testing.T) {
 			return harness.RunResult{Output: "streamed text"}, nil
 		},
 	}
-	limiter := newTestLimiter(t, map[string]int64{"opus": 10000})
-	runner := NewLimitedRunner(inner, limiter, "opus", "worker")
+	limiter := newTestLimiter(t, map[string]int64{"large": 10000})
+	runner := NewLimitedRunner(inner, limiter, "large", "worker")
 
 	var buf strings.Builder
 	result, err := runner.RunStreaming(context.Background(), "prompt", "sys", &buf)
@@ -400,14 +400,14 @@ func TestLimitedRunner_RunStreaming_NilUsageSkipsRecord(t *testing.T) {
 			return harness.RunResult{}, nil
 		},
 	}
-	limiter := newTestLimiter(t, map[string]int64{"opus": 1000})
-	runner := NewLimitedRunner(inner, limiter, "opus", "worker")
+	limiter := newTestLimiter(t, map[string]int64{"large": 1000})
+	runner := NewLimitedRunner(inner, limiter, "large", "worker")
 
 	_, err := runner.RunStreaming(context.Background(), "prompt", "sys", io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	used, _ := limiter.store.UsageByModel(context.Background(), "opus")
+	used, _ := limiter.store.UsageByModel(context.Background(), "large")
 	if used != 0 {
 		t.Errorf("expected 0 tokens, got %d", used)
 	}
@@ -423,14 +423,14 @@ func TestLimitedRunner_RunStreaming_ZeroTokensSkipsRecord(t *testing.T) {
 			}, nil
 		},
 	}
-	limiter := newTestLimiter(t, map[string]int64{"opus": 1000})
-	runner := NewLimitedRunner(inner, limiter, "opus", "worker")
+	limiter := newTestLimiter(t, map[string]int64{"large": 1000})
+	runner := NewLimitedRunner(inner, limiter, "large", "worker")
 
 	_, err := runner.RunStreaming(context.Background(), "prompt", "sys", io.Discard)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	used, _ := limiter.store.UsageByModel(context.Background(), "opus")
+	used, _ := limiter.store.UsageByModel(context.Background(), "large")
 	if used != 0 {
 		t.Errorf("expected 0 tokens recorded, got %d", used)
 	}
@@ -448,7 +448,7 @@ func TestLimitedRunner_RunStreaming_NoLimit_AlwaysPasses(t *testing.T) {
 		},
 	}
 	limiter := newTestLimiter(t, map[string]int64{})
-	runner := NewLimitedRunner(inner, limiter, "opus", "worker")
+	runner := NewLimitedRunner(inner, limiter, "large", "worker")
 
 	result, err := runner.RunStreaming(context.Background(), "prompt", "sys", io.Discard)
 	if err != nil {
@@ -462,12 +462,12 @@ func TestLimitedRunner_RunStreaming_NoLimit_AlwaysPasses(t *testing.T) {
 // --- Limiter.Status error from UsageByModelAgent ---
 
 func TestLimiter_Status_ByAgentBreakdown(t *testing.T) {
-	limiter := newTestLimiter(t, map[string]int64{"opus": 5000})
+	limiter := newTestLimiter(t, map[string]int64{"large": 5000})
 	ctx := context.Background()
-	limiter.store.Record(ctx, "opus", "planner", 1000)
-	limiter.store.Record(ctx, "opus", "worker", 500)
+	limiter.store.Record(ctx, "large", "planner", 1000)
+	limiter.store.Record(ctx, "large", "worker", 500)
 
-	status, err := limiter.Status(ctx, "opus")
+	status, err := limiter.Status(ctx, "large")
 	if err != nil {
 		t.Fatalf("Status() error: %v", err)
 	}
@@ -483,11 +483,11 @@ func TestLimiter_Status_ByAgentBreakdown(t *testing.T) {
 }
 
 func TestLimiter_Status_Unlimited(t *testing.T) {
-	limiter := newTestLimiter(t, map[string]int64{}) // no limit for "opus"
+	limiter := newTestLimiter(t, map[string]int64{}) // no limit for "large"
 	ctx := context.Background()
-	limiter.store.Record(ctx, "opus", "planner", 1000)
+	limiter.store.Record(ctx, "large", "planner", 1000)
 
-	status, err := limiter.Status(ctx, "opus")
+	status, err := limiter.Status(ctx, "large")
 	if err != nil {
 		t.Fatalf("Status() error: %v", err)
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -11,7 +13,6 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
@@ -48,13 +49,14 @@ type AgentRow struct {
 
 // Model is the top-level Bubble Tea model for the Orqestra TUI.
 type Model struct {
-	state     AppState
-	content   ContentMode
-	width     int
-	height    int
-	startTime time.Time
-	goal      string
-	phase     orchestrator.Phase
+	state      AppState
+	content    ContentMode
+	width      int
+	height     int
+	startTime  time.Time
+	goal       string
+	phase      orchestrator.Phase
+	configName string // display name of the active config (e.g. "orqestra.yaml")
 
 	// Pipeline communication
 	events    <-chan orchestrator.Event
@@ -84,8 +86,19 @@ type Model struct {
 	planEditor    textarea.Model
 	hasPlanEditor bool
 
+	// Plan review state
+	planComment    textarea.Model // comment input for refining the plan
+	hasPlanComment bool
+	editorRunning  bool // true while external editor subprocess is active
+
 	// Agent history navigation
 	focusedAgent int // 0 = live (no agent focused), 1-9 = agent index
+
+	// Run directory and plan file
+	runDir       string // set on EventRunDirReady
+	planFilePath string // set on GatePlanApproval gate
+
+	awaitingPlanDecision bool // true while plan gate is active, blocks event overwrites
 
 	// UI state
 	engine        *orchestrator.Engine
@@ -93,6 +106,12 @@ type Model struct {
 	showDashboard bool
 	showHelp      bool
 	confirmNew    bool // awaiting confirmation to start new run while pipeline active
+
+	// File picker state
+	fp        filePicker
+	fpActive  bool
+	fpAtStart int    // byte index of '@' in prompt.Value() when picker was activated
+	fpQuery   string // characters typed after '@'
 
 	// Viewports — scrollable zones managed by recalculateLayout()
 	contentVP   viewport.Model
@@ -102,7 +121,7 @@ type Model struct {
 }
 
 // NewModel creates the initial TUI model.
-func NewModel(engine *orchestrator.Engine) Model {
+func NewModel(engine *orchestrator.Engine, configName string) Model {
 	ta := textarea.New()
 	ta.Placeholder = "Enter a task description. Be specific about the end state."
 	ta.Focus()
@@ -123,6 +142,7 @@ func NewModel(engine *orchestrator.Engine) Model {
 		startTime:   time.Now(),
 		prompt:      ta,
 		engine:      engine,
+		configName:  configName,
 		contentVP:   cvp,
 		sidebarVP:   svp,
 		dashboardVP: dvp,
@@ -162,6 +182,49 @@ type pipelineClosedMsg struct{}
 // Update handles messages and returns the updated model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case filePickerBatchMsg:
+		if m.fpActive {
+			m.fp.entries = append(m.fp.entries, msg.entries...)
+			m.fp.refilter(m.fpQuery)
+		}
+		// Always drain so the goroutine can exit cleanly.
+		if m.fp.scanCh != nil {
+			return m, readNextBatch(m.fp.scanCh)
+		}
+		return m, nil
+
+	case filePickerDoneMsg:
+		m.fp.scanning = false
+		return m, nil
+
+	case editorReturnMsg:
+		m.editorRunning = false
+		if msg.err != nil {
+			m.lastErr = msg.err
+			return m, nil
+		}
+		if m.planFilePath != "" {
+			data, err := os.ReadFile(m.planFilePath)
+			if err != nil {
+				m.lastErr = fmt.Errorf("read plan after editor: %w", err)
+				return m, nil
+			}
+			edited := string(data)
+			if edited != m.finalPlan {
+				m.finalPlan = edited
+				if m.decisions != nil {
+					m.decisions <- orchestrator.Decision{
+						Type:          orchestrator.DecisionEdit,
+						EditedContent: edited,
+					}
+				}
+				m.awaitingPlanDecision = false
+				m.content = ContentStreaming
+				return m, waitForEvent(m.events)
+			}
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -182,7 +245,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case OrchestratorEventMsg:
-		return m.handleOrchestratorEvent(msg.Event)
+		m = m.applyEvent(msg.Event)
+		// Drain all buffered events so the orchestrator never blocks.
+		// The channel is buffered; non-blocking reads pick up bursts.
+		for {
+			select {
+			case ev, ok := <-m.events:
+				if !ok {
+					if m.content != ContentCompletion {
+						m.content = ContentCompletion
+					}
+					return m, nil
+				}
+				m = m.applyEvent(ev)
+			default:
+				return m, waitForEvent(m.events)
+			}
+		}
 
 	case pipelineClosedMsg:
 		// Pipeline finished — stay in current content mode
@@ -260,31 +339,41 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.fpActive {
+		return m.handleFilePickerKey(msg)
+	}
 	switch msg.Type {
 	case tea.KeyEnter:
 		prompt := strings.TrimSpace(m.prompt.Value())
 		if prompt == "" {
 			return m, nil
 		}
+		m.resetPipelineState()
 		m.goal = prompt
 		m.state = StatePipeline
 		m.content = ContentStreaming
 		m.startTime = time.Now()
-		return m, m.startPipeline(prompt, false)
+		cmd := m.startPipeline(prompt, false)
+		return m, cmd
 	case tea.KeyCtrlS:
 		// Skip gateway
 		prompt := strings.TrimSpace(m.prompt.Value())
 		if prompt == "" {
 			return m, nil
 		}
+		m.resetPipelineState()
 		m.goal = prompt
 		m.state = StatePipeline
 		m.content = ContentStreaming
 		m.startTime = time.Now()
-		return m, m.startPipeline(prompt, true)
+		cmd := m.startPipeline(prompt, true)
+		return m, cmd
 	default:
 		var cmd tea.Cmd
 		m.prompt, cmd = m.prompt.Update(msg)
+		if !m.fpActive && msg.String() == "@" {
+			return m.activateFilePicker(cmd)
+		}
 		return m, cmd
 	}
 }
@@ -407,14 +496,47 @@ func (m Model) handleCoachingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handlePlanReviewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Special keys first
+	switch msg.Type {
+	case tea.KeyCtrlE:
+		if m.planFilePath != "" {
+			m.editorRunning = true
+			return m, openExternalEditor(m.planFilePath)
+		}
+		return m, nil
+	case tea.KeyEnter:
+		// Submit comment for replanning
+		if m.hasPlanComment {
+			comment := strings.TrimSpace(m.planComment.Value())
+			if comment != "" {
+				if m.decisions != nil {
+					m.decisions <- orchestrator.Decision{
+						Type:    orchestrator.DecisionComment,
+						Comment: comment,
+					}
+				}
+				m.planComment.Reset()
+				m.hasPlanComment = false
+				m.awaitingPlanDecision = false
+				m.content = ContentStreaming
+				return m, waitForEvent(m.events)
+			}
+		}
+		return m, nil
+	}
+
+	// Single-char commands
 	switch msg.String() {
 	case "a", "A":
 		if m.decisions != nil {
 			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionApprove}
 		}
+		m.awaitingPlanDecision = false
+		m.hasPlanComment = false
 		m.content = ContentStreaming
 		return m, nil
 	case "e", "E":
+		m.awaitingPlanDecision = false
 		// Switch to plan edit mode
 		contentWidth := max(1, int(float64(m.width)*splitRatio))
 		contentHeight := max(4, m.height-constHeaderHeight-constPipelineInputHeight-constFooterHeight)
@@ -428,13 +550,22 @@ func (m Model) handlePlanReviewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		ta.Focus()
 		m.planEditor = ta
 		m.hasPlanEditor = true
+		m.hasPlanComment = false
 		m.content = ContentPlanEdit
 		return m, nil
 	case "s", "S":
 		if m.decisions != nil {
 			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionCancel}
 		}
+		m.awaitingPlanDecision = false
 		return m, nil
+	}
+
+	// Pass remaining keys to comment textarea
+	if m.hasPlanComment {
+		var cmd tea.Cmd
+		m.planComment, cmd = m.planComment.Update(msg)
+		return m, cmd
 	}
 	return m, nil
 }
@@ -485,11 +616,13 @@ func (m Model) handleStreamingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.cancel != nil {
 				m.cancel()
 			}
+			goal := m.goal
 			m.confirmNew = false
+			m.resetPipelineState()
 			m.state = StatePrompt
 			m.prompt.Reset()
-			if m.goal != "" {
-				m.prompt.SetValue(m.goal)
+			if goal != "" {
+				m.prompt.SetValue(goal)
 			}
 			return m, nil
 		default:
@@ -512,10 +645,12 @@ func (m Model) handleStreamingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.confirmNew = true
 			return m, nil
 		}
+		goal := m.goal
+		m.resetPipelineState()
 		m.state = StatePrompt
 		m.prompt.Reset()
-		if m.goal != "" {
-			m.prompt.SetValue(m.goal)
+		if goal != "" {
+			m.prompt.SetValue(goal)
 		}
 		return m, nil
 	}
@@ -525,10 +660,12 @@ func (m Model) handleStreamingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleCompletionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "n", "N":
+		goal := m.goal
+		m.resetPipelineState()
 		m.state = StatePrompt
 		m.prompt.Reset()
-		if m.goal != "" {
-			m.prompt.SetValue(m.goal)
+		if goal != "" {
+			m.prompt.SetValue(goal)
 		}
 		return m, nil
 	case "q", "Q":
@@ -537,16 +674,23 @@ func (m Model) handleCompletionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleOrchestratorEvent updates the model based on orchestrator events.
-func (m Model) handleOrchestratorEvent(event orchestrator.Event) (tea.Model, tea.Cmd) {
-	// Always re-subscribe to the next event
-	nextCmd := waitForEvent(m.events)
+// applyEvent updates the model based on a single orchestrator event.
+// Called in a drain loop — must not return tea.Cmd (caller handles re-subscription).
+func (m Model) applyEvent(event orchestrator.Event) Model {
+	slog.Debug("tui event", "type", event.Type, "phase", event.Phase, "agentID", event.AgentID)
 
 	switch event.Type {
 	case orchestrator.EventPhaseChange:
-		m.phase = event.Phase
+		if !m.awaitingPlanDecision {
+			m.phase = event.Phase
+		}
 
 	case orchestrator.EventAgentStarted:
+		if m.awaitingPlanDecision {
+			// Buffer agent start events but don't switch content mode
+			m.agents = append(m.agents, AgentRow{ID: event.AgentID, State: "running", StartedAt: time.Now()})
+			return m
+		}
 		m.agents = append(m.agents, AgentRow{ID: event.AgentID, State: "running", StartedAt: time.Now()})
 
 	case orchestrator.EventAgentDone:
@@ -599,14 +743,31 @@ func (m Model) handleOrchestratorEvent(event orchestrator.Event) (tea.Model, tea
 			m.answerCursor = 0
 
 		case orchestrator.GatePlanApproval:
+			m.awaitingPlanDecision = true
 			m.content = ContentPlanReview
 			m.finalPlan = event.Gate.FinalPlanMarkdown
 			m.hasPlan = true
+			m.planFilePath = event.Gate.PlanFilePath
+			// Initialize comment textarea for refining the plan
+			contentWidth := max(1, int(float64(m.width)*splitRatio))
+			m.planComment = textarea.New()
+			m.planComment.Placeholder = "Comment to refine the plan..."
+			m.planComment.SetWidth(max(1, contentWidth-4))
+			m.planComment.SetHeight(2)
+			m.planComment.CharLimit = 1024
+			m.planComment.Focus()
+			m.hasPlanComment = true
 		}
 
 	case orchestrator.EventPlanReady:
 		m.finalPlan = event.FinalPlan
 		m.hasPlan = true
+
+	case orchestrator.EventRunDirReady:
+		m.runDir = event.RunDir
+
+	case orchestrator.EventError:
+		m.lastErr = event.Err
 
 	case orchestrator.EventComplete:
 		m.content = ContentCompletion
@@ -617,7 +778,38 @@ func (m Model) handleOrchestratorEvent(event orchestrator.Event) (tea.Model, tea
 		}
 	}
 
-	return m, nextCmd
+	return m
+}
+
+// resetPipelineState clears all run-specific state so a fresh pipeline starts clean.
+func (m *Model) resetPipelineState() {
+	m.agents = nil
+	m.lastErr = nil
+	m.gatewayResult = agent.GatewayResult{}
+	m.finalPlan = ""
+	m.hasPlan = false
+	m.workerValidation = ""
+	m.hasValidation = false
+	m.streamBuf = nil
+	m.answerFields = nil
+	m.answerCursor = 0
+	m.hasPlanEditor = false
+	m.hasPlanComment = false
+	m.editorRunning = false
+	m.awaitingPlanDecision = false
+	m.focusedAgent = 0
+	m.runDir = ""
+	m.planFilePath = ""
+	m.showDashboard = false
+	m.showHelp = false
+	m.confirmNew = false
+	m.phase = ""
+	m.contentVP.SetContent("")
+	m.sidebarVP.SetContent("")
+	m.dashboardVP.SetContent("")
+	m.contentVP.GotoTop()
+	m.sidebarVP.GotoTop()
+	m.dashboardVP.GotoTop()
 }
 
 // startPipeline launches the orchestrator and returns a command to start listening.
@@ -731,7 +923,11 @@ func (m Model) viewPipelineScreen() string {
 	title := headerStyle.Render(" Orqestra")
 	phase := phaseStyle.Render(fmt.Sprintf("▶ %s", m.phase))
 	timeStr := elapsedStyle.Render(elapsed.String())
-	header := fmt.Sprintf("%s  %s  %s\n", title, phase, timeStr) +
+	var runInfo string
+	if m.configName != "" {
+		runInfo = dimStyle.Render(fmt.Sprintf(" [%s]", m.configName))
+	}
+	header := fmt.Sprintf("%s%s  %s  %s\n", title, runInfo, phase, timeStr) +
 		dividerStyle.Render(strings.Repeat("─", w)) + "\n"
 
 	// Footer (2 lines)
@@ -806,7 +1002,10 @@ func (m Model) viewInputZone() string {
 	case ContentCoaching:
 		return keyStyle.Render(" Answer the questions above, then [Enter] to confirm")
 	case ContentPlanReview:
-		return keyStyle.Render(" [A] accept | [E] edit | [S] cancel")
+		if m.hasPlanComment {
+			return m.planComment.View()
+		}
+		return keyStyle.Render(" [A] accept | [E] edit | [Ctrl+E] editor | [Enter] comment | [S] cancel")
 	case ContentPlanEdit:
 		return keyStyle.Render(" [Ctrl+S] save edits | [Esc] discard")
 	case ContentAgentHistory:
@@ -863,8 +1062,7 @@ func (m Model) viewStreaming(width int) string {
 
 	// Activity bar: show recent tool invocations
 	if len(activities) > 0 {
-		b.WriteString(renderActivityBar(activities, width))
-		b.WriteString("\n")
+		b.WriteString(renderActivityLog(activities, width))
 	}
 
 	if len(streamLines) > 0 {
@@ -891,11 +1089,9 @@ func (m Model) viewStreaming(width int) string {
 	return b.String()
 }
 
-// renderActivityBar renders the last few tool activities as a compact single-line bar.
-// File paths are rendered as OSC 8 terminal hyperlinks (clickable in iTerm2, Kitty, etc).
-func renderActivityBar(activities []orchestrator.Activity, width int) string {
-	const maxShow = 5
-
+// renderActivityLog renders recent tool activities as a multi-line vertical log.
+func renderActivityLog(activities []orchestrator.Activity, width int) string {
+	const maxShow = 8
 	start := 0
 	if len(activities) > maxShow {
 		start = len(activities) - maxShow
@@ -903,27 +1099,18 @@ func renderActivityBar(activities []orchestrator.Activity, width int) string {
 	recent := activities[start:]
 
 	var b strings.Builder
-	b.WriteString(" ")
-	for i, act := range recent {
-		if i > 0 {
-			b.WriteString(activitySepStyle.Render("  "))
+	for _, act := range recent {
+		toolLabel := activityToolStyle.Render(fmt.Sprintf(" %-10s", act.Tool))
+		detail := act.Detail
+		if isFilePathTool(act.Tool) && detail != "" {
+			detail = fileHyperlink(detail)
+			b.WriteString(toolLabel + " " + activityPathStyle.Render(detail))
+		} else {
+			b.WriteString(toolLabel + " " + activityDetailStyle.Render(detail))
 		}
-		b.WriteString(activityIconStyle.Render("⚡"))
-		b.WriteString(" ")
-		b.WriteString(activityToolStyle.Render(act.Tool))
-		if act.Detail != "" {
-			b.WriteString(" ")
-			label := act.Detail
-			// For file-path tools, make the path a clickable OSC 8 hyperlink
-			if isFilePathTool(act.Tool) && act.Detail != "" {
-				label = fileHyperlink(act.Detail)
-			}
-			b.WriteString(activityDetailStyle.Render(label))
-		}
+		b.WriteString("\n")
 	}
-
-	// Use ANSI-aware MaxWidth to avoid cutting mid-escape-sequence or mid-rune
-	return lipgloss.NewStyle().MaxWidth(width).Render(b.String())
+	return b.String()
 }
 
 // isFilePathTool returns true if the tool's detail field is a file path.
@@ -972,17 +1159,7 @@ func (m Model) viewPlanReview(width int) string {
 	if !m.hasPlan {
 		return " Waiting for plan...\n"
 	}
-	var b strings.Builder
-	// Render raw markdown plan — the plan IS the content
-	for _, line := range strings.Split(m.finalPlan, "\n") {
-		if len(line) > width-2 {
-			line = line[:width-2]
-		}
-		b.WriteString(" ")
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
-	return b.String()
+	return renderMarkdown(m.finalPlan, width)
 }
 
 func (m Model) viewCompletion(_ int) string {
@@ -1232,7 +1409,7 @@ func (m Model) viewFooter() string {
 	case ContentCoaching:
 		return keyStyle.Render(" [Enter] confirm | [Ctrl+S] skip | [Tab] next field       [?] help  [D] expand  [S] stop  [^C^C] quit")
 	case ContentPlanReview:
-		return keyStyle.Render(" [A] accept | [E] edit | [S] cancel                        [?] help  [D] expand  [1-9] agent  [^C^C] quit")
+		return keyStyle.Render(" [A] accept | [E] edit | [Ctrl+E] editor | [Enter] comment | [S] cancel   [?] help  [^C^C] quit")
 	case ContentPlanEdit:
 		return keyStyle.Render(" [Ctrl+S] save edits | [Esc] discard                       [?] help  [^C^C] quit")
 	case ContentAgentHistory:

@@ -190,7 +190,7 @@ func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (
 // RunStreaming runs `claude -p <prompt> --system-prompt <systemPrompt> --output-format stream-json --verbose`
 // and streams displayable content to stdout. Returns the final result text.
 func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (RunResult, error) {
-	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
+	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"}
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
 	}
@@ -239,9 +239,13 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 
 		switch event.Type {
 		case "assistant":
-			// Extract text from message content blocks
 			if text := event.extractAssistantText(); text != "" {
 				stdout.Write([]byte(text))
+			}
+			if sink, ok := stdout.(ActivitySink); ok {
+				for _, tu := range event.extractAssistantToolUses() {
+					sink.OnToolUse(tu.Name, ToolDetail(tu.Name, tu.Input))
+				}
 			}
 		case "content_block_delta":
 			if event.Delta.Text != "" {
@@ -251,6 +255,26 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 			if sink, ok := stdout.(ActivitySink); ok {
 				if name, args := event.extractToolUse(); name != "" {
 					sink.OnToolUse(name, ToolDetail(name, args))
+				}
+			}
+		case "stream_event":
+			if event.Event == nil {
+				continue
+			}
+			var inner streamEvent
+			if err := json.Unmarshal(event.Event, &inner); err != nil {
+				continue
+			}
+			switch inner.Type {
+			case "content_block_start":
+				if sink, ok := stdout.(ActivitySink); ok {
+					if name, args := inner.extractToolUse(); name != "" {
+						sink.OnToolUse(name, ToolDetail(name, args))
+					}
+				}
+			case "content_block_delta":
+				if inner.Delta.Text != "" {
+					stdout.Write([]byte(inner.Delta.Text))
 				}
 			}
 		case "result":
@@ -293,7 +317,7 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 // Used for worker self-validation: the worker validates its own work in the
 // same session that performed the implementation.
 func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, stdout io.Writer) (RunResult, error) {
-	args := []string{"--resume", sessionID, "-p", prompt, "--output-format", "stream-json", "--verbose"}
+	args := []string{"--resume", sessionID, "-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"}
 	args = append(args, c.extraArgs...)
 
 	cmd := exec.CommandContext(ctx, c.binary, args...)
@@ -338,6 +362,11 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 			if text := event.extractAssistantText(); text != "" && stdout != nil {
 				stdout.Write([]byte(text))
 			}
+			if sink, ok := stdout.(ActivitySink); ok {
+				for _, tu := range event.extractAssistantToolUses() {
+					sink.OnToolUse(tu.Name, ToolDetail(tu.Name, tu.Input))
+				}
+			}
 		case "content_block_delta":
 			if event.Delta.Text != "" && stdout != nil {
 				stdout.Write([]byte(event.Delta.Text))
@@ -346,6 +375,26 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 			if sink, ok := stdout.(ActivitySink); ok {
 				if name, args := event.extractToolUse(); name != "" {
 					sink.OnToolUse(name, ToolDetail(name, args))
+				}
+			}
+		case "stream_event":
+			if event.Event == nil {
+				continue
+			}
+			var inner streamEvent
+			if err := json.Unmarshal(event.Event, &inner); err != nil {
+				continue
+			}
+			switch inner.Type {
+			case "content_block_start":
+				if sink, ok := stdout.(ActivitySink); ok {
+					if name, args := inner.extractToolUse(); name != "" {
+						sink.OnToolUse(name, ToolDetail(name, args))
+					}
+				}
+			case "content_block_delta":
+				if inner.Delta.Text != "" {
+					stdout.Write([]byte(inner.Delta.Text))
 				}
 			}
 		case "result":
@@ -390,6 +439,7 @@ type streamEvent struct {
 	ContentBlock json.RawMessage `json:"content_block,omitempty"`
 	Usage        *streamUsage    `json:"usage,omitempty"`
 	SessionID    string          `json:"session_id,omitempty"`
+	Event        json.RawMessage `json:"event,omitempty"` // inner event for stream_event wrapper
 }
 
 // streamUsage captures token usage from the Claude CLI result event.
@@ -424,6 +474,34 @@ func (e *streamEvent) extractAssistantText() string {
 		}
 	}
 	return b.String()
+}
+
+type toolUseBlock struct {
+	Name  string
+	Input json.RawMessage
+}
+
+func (e *streamEvent) extractAssistantToolUses() []toolUseBlock {
+	if e.Message == nil {
+		return nil
+	}
+	var msg struct {
+		Content []struct {
+			Type  string          `json:"type"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(e.Message, &msg); err != nil {
+		return nil
+	}
+	var tools []toolUseBlock
+	for _, block := range msg.Content {
+		if block.Type == "tool_use" {
+			tools = append(tools, toolUseBlock{Name: block.Name, Input: block.Input})
+		}
+	}
+	return tools
 }
 
 // extractToolUse extracts the tool name and input args from a content_block_start event.

@@ -140,3 +140,55 @@ func TestExtractToolUse(t *testing.T) {
 		})
 	}
 }
+
+func TestStreamEventToolUse(t *testing.T) {
+	inner := `{"type":"content_block_start","content_block":{"type":"tool_use","name":"Read","input":{"file_path":"go.mod"}}}`
+	wrapper := streamEvent{
+		Type:  "stream_event",
+		Event: json.RawMessage(inner),
+	}
+	if wrapper.Event == nil {
+		t.Fatal("expected non-nil Event field")
+	}
+	var innerEvt streamEvent
+	if err := json.Unmarshal(wrapper.Event, &innerEvt); err != nil {
+		t.Fatalf("unmarshal inner event: %v", err)
+	}
+	name, args := innerEvt.extractToolUse()
+	if name != "Read" {
+		t.Errorf("tool name = %q, want Read", name)
+	}
+	if args == nil {
+		t.Error("expected non-nil args")
+	}
+}
+
+func TestStreamEventTextDelta(t *testing.T) {
+	inner := `{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello world"}}`
+	wrapper := streamEvent{
+		Type:  "stream_event",
+		Event: json.RawMessage(inner),
+	}
+	var innerEvt streamEvent
+	if err := json.Unmarshal(wrapper.Event, &innerEvt); err != nil {
+		t.Fatalf("unmarshal inner: %v", err)
+	}
+	if innerEvt.Delta.Text != "hello world" {
+		t.Errorf("delta text = %q, want 'hello world'", innerEvt.Delta.Text)
+	}
+}
+
+func TestAssistantToolUseFallback(t *testing.T) {
+	msg := `{"content":[{"type":"text","text":"analyzing..."},{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}`
+	e := &streamEvent{
+		Type:    "assistant",
+		Message: json.RawMessage(msg),
+	}
+	tools := e.extractAssistantToolUses()
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool use, got %d", len(tools))
+	}
+	if tools[0].Name != "Bash" {
+		t.Errorf("tool name = %q, want Bash", tools[0].Name)
+	}
+}
