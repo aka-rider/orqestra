@@ -24,14 +24,24 @@ type TokenUsage struct {
 
 // RunResult captures the output and token usage from a CLIRunner invocation.
 type RunResult struct {
-	Output string
-	Usage  *TokenUsage // nil if the harness did not report usage
+	Output    string
+	Usage     *TokenUsage // nil if the harness did not report usage
+	SessionID string      // populated from stream-json result event when available
 }
 
 // CLIRunner is the interface for running claude CLI commands.
 type CLIRunner interface {
 	RunPrint(ctx context.Context, prompt, systemPrompt string) (RunResult, error)
 	RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (RunResult, error)
+}
+
+// ContinuableRunner extends CLIRunner with session continuation support.
+// Workers use this to self-validate in the same session.
+type ContinuableRunner interface {
+	CLIRunner
+	// RunContinue resumes a previous session with a new prompt.
+	// The session retains its tool state, conversation history, and sandbox.
+	RunContinue(ctx context.Context, sessionID, prompt string, stdout io.Writer) (RunResult, error)
 }
 
 // ClaudeCLI executes the `claude` binary as a subprocess.
@@ -81,8 +91,8 @@ func modelOptions(cfg *config.Config, modelRef string) ([]ClaudeCLIOption, error
 	if runtime.Binary != "" {
 		opts = append(opts, WithBinary(runtime.Binary))
 	}
-	if small := cfg.ResolveSmallModel(); small != nil {
-		opts = append(opts, WithSmallModel(*small))
+	if utility := cfg.ResolveUtilityModel(); utility != nil {
+		opts = append(opts, WithSmallModel(*utility))
 	}
 	return opts, nil
 }
@@ -204,6 +214,7 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 	var result string
 	var resultIsError bool
 	var usage *TokenUsage
+	var sessionID string
 	scanner := bufio.NewScanner(cmdStdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large lines
 	for scanner.Scan() {
@@ -221,6 +232,11 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 			continue
 		}
 
+		// Capture session ID from any event that includes it
+		if event.SessionID != "" {
+			sessionID = event.SessionID
+		}
+
 		switch event.Type {
 		case "assistant":
 			// Extract text from message content blocks
@@ -234,6 +250,9 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 		case "result":
 			result = event.Result
 			resultIsError = event.IsError
+			if event.SessionID != "" {
+				sessionID = event.SessionID
+			}
 			if event.Usage != nil {
 				usage = &TokenUsage{
 					InputTokens:  event.Usage.InputTokens,
@@ -262,18 +281,103 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 		return RunResult{}, fmt.Errorf("claude CLI produced no result message in stream")
 	}
 
-	return RunResult{Output: result, Usage: usage}, nil
+	return RunResult{Output: result, Usage: usage, SessionID: sessionID}, nil
+}
+
+// RunContinue resumes a previous Claude CLI session with a follow-up prompt.
+// Used for worker self-validation: the worker validates its own work in the
+// same session that performed the implementation.
+func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, stdout io.Writer) (RunResult, error) {
+	args := []string{"--resume", sessionID, "-p", prompt, "--output-format", "stream-json", "--verbose"}
+	args = append(args, c.extraArgs...)
+
+	cmd := exec.CommandContext(ctx, c.binary, args...)
+	cmd.Env = c.buildEnv()
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	cmdStdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return RunResult{}, fmt.Errorf("claude CLI stdout pipe error: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return RunResult{}, fmt.Errorf("claude CLI start error: %w", err)
+	}
+
+	var result string
+	var resultIsError bool
+	var usage *TokenUsage
+	var newSessionID string
+	scanner := bufio.NewScanner(cmdStdout)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var event streamEvent
+		if err := json.Unmarshal(line, &event); err != nil {
+			if stdout != nil {
+				stdout.Write(line)
+				stdout.Write([]byte("\n"))
+			}
+			continue
+		}
+		if event.SessionID != "" {
+			newSessionID = event.SessionID
+		}
+		switch event.Type {
+		case "assistant":
+			if text := event.extractAssistantText(); text != "" && stdout != nil {
+				stdout.Write([]byte(text))
+			}
+		case "content_block_delta":
+			if event.Delta.Text != "" && stdout != nil {
+				stdout.Write([]byte(event.Delta.Text))
+			}
+		case "result":
+			result = event.Result
+			resultIsError = event.IsError
+			if event.SessionID != "" {
+				newSessionID = event.SessionID
+			}
+			if event.Usage != nil {
+				usage = &TokenUsage{
+					InputTokens:  event.Usage.InputTokens,
+					OutputTokens: event.Usage.OutputTokens,
+					TotalTokens:  event.Usage.InputTokens + event.Usage.OutputTokens,
+				}
+			}
+		}
+	}
+
+	cmdErr := cmd.Wait()
+	if cmdErr != nil {
+		if resultIsError && result != "" {
+			return RunResult{}, fmt.Errorf("claude CLI continue error: %s", result)
+		}
+		return RunResult{}, fmt.Errorf("claude CLI continue error: %w (stderr: %s)", cmdErr, stderr.String())
+	}
+
+	if resultIsError {
+		return RunResult{}, fmt.Errorf("claude CLI continue error: %s", result)
+	}
+
+	return RunResult{Output: result, Usage: usage, SessionID: newSessionID}, nil
 }
 
 // streamEvent represents a parsed event from Claude CLI's stream-json output.
 type streamEvent struct {
-	Type    string          `json:"type"`
-	Subtype string          `json:"subtype,omitempty"`
-	Result  string          `json:"result,omitempty"`
-	IsError bool            `json:"is_error,omitempty"`
-	Delta   streamDeltaText `json:"delta,omitempty"`
-	Message json.RawMessage `json:"message,omitempty"`
-	Usage   *streamUsage    `json:"usage,omitempty"`
+	Type      string          `json:"type"`
+	Subtype   string          `json:"subtype,omitempty"`
+	Result    string          `json:"result,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
+	Delta     streamDeltaText `json:"delta,omitempty"`
+	Message   json.RawMessage `json:"message,omitempty"`
+	Usage     *streamUsage    `json:"usage,omitempty"`
+	SessionID string          `json:"session_id,omitempty"`
 }
 
 // streamUsage captures token usage from the Claude CLI result event.
@@ -312,7 +416,7 @@ func (e *streamEvent) extractAssistantText() string {
 
 // BuildModelEnv returns the environment variables needed to route the claude binary
 // to the given model. Used by sandbox runners that exec claude inside a container.
-func BuildModelEnv(resolved config.ResolvedModel, small *config.ResolvedModel) []string {
+func BuildModelEnv(resolved config.ResolvedModel, utility *config.ResolvedModel) []string {
 	var env []string
 	switch resolved.Type {
 	case "native":
@@ -323,30 +427,23 @@ func BuildModelEnv(resolved config.ResolvedModel, small *config.ResolvedModel) [
 			"ANTHROPIC_MODEL="+resolved.Model,
 			"ANTHROPIC_DEFAULT_SONNET_MODEL="+resolved.Model,
 		)
-		if small != nil {
+		if utility != nil {
 			env = append(env,
-				"ANTHROPIC_SMALL_FAST_MODEL="+small.Model,
-				"ANTHROPIC_DEFAULT_HAIKU_MODEL="+small.Model,
+				"ANTHROPIC_SMALL_FAST_MODEL="+utility.Model,
+				"ANTHROPIC_DEFAULT_HAIKU_MODEL="+utility.Model,
 			)
 		}
 	case "openai":
-		// Claude Code CLI uses the Anthropic API path natively. When targeting
-		// an OpenAI-compatible server (Ollama, vLLM, etc.) that also speaks the
-		// Anthropic messages format, route via ANTHROPIC_BASE_URL so the CLI
-		// handles auth and streaming correctly.
-		// ANTHROPIC_DEFAULT_SONNET_MODEL pins the model used for background/
-		// non-essential calls; without it, the CLI falls back to a hardcoded
-		// default (e.g. claude-sonnet-4-5) which the proxy doesn't recognise.
 		baseURL := strings.TrimRight(resolved.BaseURL, "/")
 		env = append(env,
 			"ANTHROPIC_BASE_URL="+baseURL,
 			"ANTHROPIC_MODEL="+resolved.Model,
 			"ANTHROPIC_DEFAULT_SONNET_MODEL="+resolved.Model,
 		)
-		if small != nil {
+		if utility != nil {
 			env = append(env,
-				"ANTHROPIC_SMALL_FAST_MODEL="+small.Model,
-				"ANTHROPIC_DEFAULT_HAIKU_MODEL="+small.Model,
+				"ANTHROPIC_SMALL_FAST_MODEL="+utility.Model,
+				"ANTHROPIC_DEFAULT_HAIKU_MODEL="+utility.Model,
 			)
 		}
 	}

@@ -12,17 +12,28 @@ providers:
     type: native
 
 models:
-  x-large:
+  opus:
     provider: anthropic-native
     model: claude-opus-4-7
 
-  large:
+  sonnet:
     provider: anthropic-native
     model: claude-sonnet-4-6
 
-  small:
+  haiku:
     provider: anthropic-native
     model: claude-haiku-4-5
+
+researcher:
+  model: sonnet
+
+planner:
+  model: opus
+
+worker:
+  model: sonnet
+
+utility: haiku
 
 sandbox:
   max_lifetime: 45m

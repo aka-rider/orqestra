@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"testing"
@@ -31,183 +30,85 @@ func (m *plannerMockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io
 	return harness.RunResult{Output: m.response}, nil
 }
 
-func TestPlan_Success(t *testing.T) {
-	specData := map[string]any{
-		"goal":       "Build a REST API",
-		"steps":      []string{"Create main.go", "Add handler", "Write tests"},
-		"acceptance": []string{"Server starts", "GET /health returns 200"},
-	}
-	specJSON, _ := json.Marshal(specData)
-	mock := &plannerMockCLIRunner{response: string(specJSON)}
+func TestPlanner_Refine_Success(t *testing.T) {
+	planMD := "# Plan\n\n## Goal\nBuild a thing.\n\n## Work Packages\n\n### 1. Do stuff\n\n**Steps:**\n1. Edit foo.go\n\n**Done when:**\n- Tests pass"
+	mock := &plannerMockCLIRunner{response: planMD}
 
 	cfg := &config.PlannerConfig{
-		ModelRef:     "test-model",
-		SystemPrompt: "Plan mode.",
+		Model:        "test-model",
+		SystemPrompt: "You are the architect.",
 	}
 
 	p := NewPlanner(mock, cfg)
-	po, err := p.Plan(context.Background(), "build a REST API")
-
+	plan, err := p.Refine(context.Background(), "some researcher draft")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if po.Spec.Goal != "Build a REST API" {
-		t.Errorf("goal = %q, want %q", po.Spec.Goal, "Build a REST API")
-	}
-	if len(po.Spec.Steps) != 3 {
-		t.Errorf("steps = %d, want 3", len(po.Spec.Steps))
+	if plan.Markdown != planMD {
+		t.Errorf("plan markdown mismatch:\ngot:  %s\nwant: %s", plan.Markdown, planMD)
 	}
 }
 
-func TestPlan_JsonEnvelope(t *testing.T) {
-	specData := map[string]any{
-		"goal":       "Refactor auth",
-		"steps":      []string{"Extract interface", "Add tests"},
-		"acceptance": []string{"Tests pass"},
-	}
-	specJSON, _ := json.Marshal(specData)
-	envelope := fmt.Sprintf(`{"type":"result","result":%q}`, string(specJSON))
-	mock := &plannerMockCLIRunner{response: envelope}
+func TestPlanner_Refine_MissingPlanHeader(t *testing.T) {
+	mock := &plannerMockCLIRunner{response: "## Goal\nDo something\n\n## Work Packages\n..."}
 
-	cfg := &config.PlannerConfig{ModelRef: "test-model", SystemPrompt: "Plan."}
+	cfg := &config.PlannerConfig{Model: "test"}
 	p := NewPlanner(mock, cfg)
-	po, err := p.Plan(context.Background(), "refactor auth")
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if po.Spec.Goal != "Refactor auth" {
-		t.Errorf("goal = %q, want %q", po.Spec.Goal, "Refactor auth")
-	}
-}
-
-func TestPlan_InvalidJSON(t *testing.T) {
-	mock := &plannerMockCLIRunner{response: "not json at all"}
-
-	cfg := &config.PlannerConfig{ModelRef: "test-model", SystemPrompt: "Plan."}
-	p := NewPlanner(mock, cfg)
-	_, err := p.Plan(context.Background(), "do something")
-
+	_, err := p.Refine(context.Background(), "draft")
 	if err == nil {
-		t.Fatal("expected error for invalid JSON")
+		t.Fatal("expected error for missing '# Plan' header")
 	}
 }
 
-func TestPlan_IncompleteSpec(t *testing.T) {
-	specData := map[string]any{"goal": "Missing steps and acceptance"}
-	specJSON, _ := json.Marshal(specData)
-	mock := &plannerMockCLIRunner{response: string(specJSON)}
+func TestPlanner_Refine_MissingWorkPackages(t *testing.T) {
+	mock := &plannerMockCLIRunner{response: "# Plan\n\n## Goal\nDo something"}
 
-	cfg := &config.PlannerConfig{ModelRef: "test-model", SystemPrompt: "Plan."}
+	cfg := &config.PlannerConfig{Model: "test"}
 	p := NewPlanner(mock, cfg)
-	_, err := p.Plan(context.Background(), "incomplete")
-
+	_, err := p.Refine(context.Background(), "draft")
 	if err == nil {
-		t.Fatal("expected error for incomplete spec")
+		t.Fatal("expected error for missing '## Work Packages' section")
 	}
 }
 
-func TestPlan_MarkdownFencedJSON(t *testing.T) {
-	specData := map[string]any{
-		"goal":       "Deploy app",
-		"steps":      []string{"Build image", "Push to registry"},
-		"acceptance": []string{"Container runs"},
-	}
-	specJSON, _ := json.Marshal(specData)
-	fenced := "```json\n" + string(specJSON) + "\n```"
-	mock := &plannerMockCLIRunner{response: fenced}
+func TestPlanner_Refine_CodeFenceStripping(t *testing.T) {
+	planMD := "# Plan\n\n## Goal\nBuild.\n\n## Work Packages\n\n### 1. Do"
+	wrapped := "```markdown\n" + planMD + "\n```"
+	mock := &plannerMockCLIRunner{response: wrapped}
 
-	cfg := &config.PlannerConfig{ModelRef: "test-model", SystemPrompt: "Plan."}
+	cfg := &config.PlannerConfig{Model: "test"}
 	p := NewPlanner(mock, cfg)
-	po, err := p.Plan(context.Background(), "deploy")
-
+	plan, err := p.Refine(context.Background(), "draft")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if po.Spec.Goal != "Deploy app" {
-		t.Errorf("goal = %q, want %q", po.Spec.Goal, "Deploy app")
+	if plan.Markdown != planMD {
+		t.Errorf("expected code fences stripped:\ngot:  %q\nwant: %q", plan.Markdown, planMD)
 	}
 }
 
-func TestParseSpec_MarkdownFencedJSON(t *testing.T) {
-	spec := map[string]any{
-		"goal":       "Test fences",
-		"steps":      []string{"Step one"},
-		"acceptance": []string{"Done"},
-	}
-	specJSON, _ := json.Marshal(spec)
-	fenced := "```json\n" + string(specJSON) + "\n```"
+func TestPlanner_Refine_CLIError(t *testing.T) {
+	mock := &plannerMockCLIRunner{err: fmt.Errorf("connection refused")}
 
-	cfg := &config.PlannerConfig{ModelRef: "test-model", SystemPrompt: "Plan."}
-	p := NewPlanner(&plannerMockCLIRunner{}, cfg)
-	parsed, err := p.ParseSpec(fenced)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if parsed.Goal != "Test fences" {
-		t.Errorf("goal = %q, want %q", parsed.Goal, "Test fences")
+	cfg := &config.PlannerConfig{Model: "test"}
+	p := NewPlanner(mock, cfg)
+	_, err := p.Refine(context.Background(), "draft")
+	if err == nil {
+		t.Fatal("expected error propagation from CLI")
 	}
 }
 
-func TestParsePlanOutput_MarkdownProseFallback(t *testing.T) {
-	mdPlan := `Here's the plan summary:
+func TestPlanner_RefineWithComments(t *testing.T) {
+	planMD := "# Plan\n\n## Goal\nRevised.\n\n## Work Packages\n\n### 1. Fixed"
+	mock := &plannerMockCLIRunner{response: planMD}
 
----
-
-## Goal
-Build a REST API for user management
-
-## Steps
-1. Create main.go with HTTP server setup
-2. Add user handler with CRUD operations
-3. Write integration tests
-
-## Acceptance Criteria
-- Server starts on port 8080
-- GET /users returns 200
-- POST /users creates a user
-`
-	cfg := &config.PlannerConfig{ModelRef: "test-model", SystemPrompt: "Plan."}
-	p := NewPlanner(&plannerMockCLIRunner{response: mdPlan}, cfg)
-	po, err := p.Plan(context.Background(), "build user API")
-
+	cfg := &config.PlannerConfig{Model: "test"}
+	p := NewPlanner(mock, cfg)
+	plan, err := p.RefineWithComments(context.Background(), "old plan", "please fix step 2")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if po.Spec.Goal != "Build a REST API for user management" {
-		t.Errorf("goal = %q, want %q", po.Spec.Goal, "Build a REST API for user management")
-	}
-	if len(po.Spec.Steps) != 3 {
-		t.Errorf("steps = %d, want 3", len(po.Spec.Steps))
-	}
-	if len(po.Spec.Acceptance) != 3 {
-		t.Errorf("acceptance = %d, want 3", len(po.Spec.Acceptance))
-	}
-}
-
-func TestParsePlanOutput_MarkdownWithInlineGoal(t *testing.T) {
-	mdPlan := `## Goal: Refactor the auth module
-
-## Steps
-- Extract interface from concrete type
-- Add unit tests for each method
-
-## Acceptance
-- All tests pass
-- No direct struct usage in handlers
-`
-	cfg := &config.PlannerConfig{ModelRef: "test-model", SystemPrompt: "Plan."}
-	p := NewPlanner(&plannerMockCLIRunner{}, cfg)
-	po, err := p.ParsePlanOutput(mdPlan)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if po.Spec.Goal != "Refactor the auth module" {
-		t.Errorf("goal = %q, want %q", po.Spec.Goal, "Refactor the auth module")
-	}
-	if len(po.Spec.Steps) != 2 {
-		t.Errorf("steps = %d, want 2", len(po.Spec.Steps))
+	if plan.Markdown != planMD {
+		t.Errorf("plan markdown mismatch")
 	}
 }

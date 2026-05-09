@@ -92,6 +92,7 @@ func TestNewClaudeCLIFromConfig_AppliesModelRuntimeOptions(t *testing.T) {
 				Binary:   "claude-test",
 			},
 		},
+		Utility: "small",
 	}
 
 	runner, err := NewClaudeCLIFromConfig(cfg, "worker", WithExtraArgs("--verbose-mode"))

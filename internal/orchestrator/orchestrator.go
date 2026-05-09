@@ -41,8 +41,7 @@ func (sb *StreamBuffer) SetAgent(id string) {
 }
 
 // Append adds text to the buffer, accumulating into the current line
-// until a newline is encountered. This handles streaming where each
-// Write call contains a small text fragment (single token).
+// until a newline is encountered.
 func (sb *StreamBuffer) Append(text string) {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
@@ -50,7 +49,6 @@ func (sb *StreamBuffer) Append(text string) {
 	for len(text) > 0 {
 		nlIdx := strings.IndexByte(text, '\n')
 		if nlIdx == -1 {
-			// No newline — append to current (last) line
 			if len(sb.lines) == 0 {
 				sb.lines = append(sb.lines, text)
 			} else {
@@ -58,15 +56,12 @@ func (sb *StreamBuffer) Append(text string) {
 			}
 			break
 		}
-
-		// Complete the current line up to the newline
 		fragment := text[:nlIdx]
 		if len(sb.lines) == 0 {
 			sb.lines = append(sb.lines, fragment)
 		} else {
 			sb.lines[len(sb.lines)-1] += fragment
 		}
-		// Start a new line for content after the newline
 		sb.lines = append(sb.lines, "")
 		text = text[nlIdx+1:]
 	}
@@ -96,8 +91,6 @@ const (
 	EventAgentCancelled
 	EventAgentOutput
 	EventPlanReady
-	EventValidationDone
-	EventQADone
 	EventGateRequest
 	EventComplete
 	EventError
@@ -107,13 +100,12 @@ const (
 type Phase string
 
 const (
-	PhaseGateway    Phase = "gateway"
-	PhasePlanning   Phase = "planning"
-	PhaseValidating Phase = "validating"
-	PhaseDecompose  Phase = "decompose"
-	PhaseExecuting  Phase = "executing"
-	PhaseQA         Phase = "qa"
-	PhaseDone       Phase = "done"
+	PhaseGateway        Phase = "gateway"
+	PhaseResearching    Phase = "researching"
+	PhasePlanning       Phase = "planning"
+	PhaseExecuting      Phase = "executing"
+	PhaseSelfValidating Phase = "self-validating"
+	PhaseDone           Phase = "done"
 )
 
 // GateType identifies which interactive gate the pipeline is waiting at.
@@ -124,11 +116,11 @@ const (
 	GatePlanApproval
 )
 
-// GateRequest is emitted when the pipeline needs user input. Passed by value.
+// GateRequest is emitted when the pipeline needs user input.
 type GateRequest struct {
-	Type          GateType
-	GatewayResult agent.GatewayResult
-	PlanOutput    agent.PlanOutput
+	Type              GateType
+	GatewayResult     agent.GatewayResult
+	FinalPlanMarkdown string // for GatePlanApproval
 }
 
 // DecisionType classifies user decisions at gates.
@@ -139,6 +131,7 @@ const (
 	DecisionEdit
 	DecisionSkip
 	DecisionCancel
+	DecisionComment // comment-only refinement at plan gate
 )
 
 // GatewayAnswer holds a user's response to a coaching question.
@@ -152,23 +145,23 @@ type Decision struct {
 	Type           DecisionType
 	GatewayAnswers []GatewayAnswer
 	EditedContent  string
+	Comment        string // for DecisionComment
 }
 
 // Event is emitted by the orchestrator to notify the TUI of progress.
-// All payload fields are values (not pointers) to prevent data races across channels.
 type Event struct {
-	Type             EventType
-	Phase            Phase
-	AgentID          string
-	PlanOutput       agent.PlanOutput
-	ValidationReport agent.ValidationReport
-	HasValidation    bool
-	QAReport         agent.ValidationReport
-	HasQA            bool
-	Gate             GateRequest
-	WorkOutput       string
-	OutputChunk      string // text fragment for EventAgentOutput
-	Err              error
+	Type        EventType
+	Phase       Phase
+	AgentID     string
+	Gate        GateRequest
+	WorkOutput  string
+	OutputChunk string
+	Err         error
+
+	// New pipeline fields
+	ResearchDraft    string
+	FinalPlan        string
+	WorkerValidation string
 
 	// Token usage from the agent's RunResult. Set on EventAgentDone.
 	InputTokens  int64
@@ -180,28 +173,24 @@ type Input struct {
 	Prompt      string
 	AutoApprove bool
 	SkipGateway bool
+	PlanFile    string // pre-loaded plan markdown (--plan flag)
+	NoExecute   bool   // stop after plan gate
 }
 
 // RunStatus classifies the final outcome.
 type RunStatus string
 
 const (
-	StatusSuccess          RunStatus = "success"
-	StatusFailed           RunStatus = "failed"
-	StatusCancelled        RunStatus = "cancelled"
-	StatusAborted          RunStatus = "aborted"
-	StatusAcceptedWithWarn RunStatus = "accepted_with_warnings"
+	StatusSuccess RunStatus = "success"
+	StatusFailed  RunStatus = "failed"
 )
 
 // Result is the final output of an orchestrator run.
 type Result struct {
-	Status      RunStatus
-	Spec        agent.Specification
-	PlanOutput  agent.PlanOutput
-	ProjectPlan *agent.ProjectPlan
-	QAReport    *agent.ValidationReport
-	WorkOutput  string
-	RunDir      string
+	Status           RunStatus
+	FinalPlan        string
+	WorkerValidation string
+	RunDir           string
 }
 
 // RunDirFactory creates a session directory for artifact persistence.
@@ -209,12 +198,10 @@ type RunDirFactory func(slug string) (agent.SessionDir, error)
 
 // Runners holds all CLIRunners for each agent role.
 type Runners struct {
-	Gateway        harness.CLIRunner
-	Planner        harness.CLIRunner
-	Validator      harness.CLIRunner
-	ProjectManager harness.CLIRunner
-	Worker         harness.CLIRunner
-	QA             harness.CLIRunner
+	Gateway    harness.CLIRunner
+	Researcher harness.CLIRunner
+	Planner    harness.CLIRunner
+	Worker     harness.ContinuableRunner
 }
 
 // Engine is the hardcoded Go orchestrator that runs the full pipeline.
@@ -228,12 +215,10 @@ type Engine struct {
 type RunChannels struct {
 	Events    <-chan Event
 	Decisions chan<- Decision
-	Stream    *StreamBuffer // shared output buffer, polled by TUI on tick
+	Stream    *StreamBuffer
 }
 
 // Start launches the pipeline in a goroutine. Returns channels immediately.
-// Pipeline sends events, blocks at gates waiting for decisions.
-// The Events channel is closed when the pipeline exits.
 func (e *Engine) Start(ctx context.Context, input Input) RunChannels {
 	events := make(chan Event, 16)
 	decisions := make(chan Decision, 1)
@@ -251,7 +236,7 @@ func (e *Engine) Start(ctx context.Context, input Input) RunChannels {
 func (e *Engine) Run(ctx context.Context, input Input, emit func(Event)) (Result, error) {
 	channels := e.Start(ctx, Input{
 		Prompt:      input.Prompt,
-		AutoApprove: true, // Legacy API auto-approves all gates
+		AutoApprove: true,
 	})
 
 	var result Result
@@ -264,15 +249,10 @@ func (e *Engine) Run(ctx context.Context, input Input, emit func(Event)) (Result
 			lastErr = event.Err
 		}
 		if event.Type == EventComplete {
-			var qaPtr *agent.ValidationReport
-			if event.HasQA {
-				rpt := event.QAReport
-				qaPtr = &rpt
-			}
 			result = Result{
-				Status:     StatusSuccess,
-				PlanOutput: event.PlanOutput,
-				QAReport:   qaPtr,
+				Status:           StatusSuccess,
+				FinalPlan:        event.FinalPlan,
+				WorkerValidation: event.WorkerValidation,
 			}
 		}
 	}
@@ -308,7 +288,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 
 	if input.SkipGateway {
 		plannerInput = input.Prompt
-	} else {
+	} else if e.Runners.Gateway != nil {
 		emit(Event{Type: EventPhaseChange, Phase: PhaseGateway})
 		emit(Event{Type: EventAgentStarted, AgentID: "gateway"})
 		stream.SetAgent("gateway")
@@ -331,9 +311,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 				break
 			}
 
-			// Coach verdict — gate for user input
 			if input.AutoApprove {
-				// Auto-approve: use current brief as planner input
 				emit(Event{Type: EventAgentDone, AgentID: "gateway",
 					InputTokens: usageIn(gwResult.Usage), OutputTokens: usageOut(gwResult.Usage)})
 				plannerInput = buildPlannerInput(input.Prompt, gwResult.Brief)
@@ -345,7 +323,6 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 				GatewayResult: gwResult,
 			}})
 
-			// Block waiting for decision
 			select {
 			case decision := <-decisions:
 				switch decision.Type {
@@ -356,9 +333,8 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 				case DecisionSkip:
 					emit(Event{Type: EventAgentDone, AgentID: "gateway"})
 					plannerInput = input.Prompt
-					goto plan
+					goto research
 				case DecisionApprove:
-					// Incorporate answers and re-evaluate
 					prompt = incorporateAnswers(prompt, gwResult, decision.GatewayAnswers)
 				}
 			case <-ctx.Done():
@@ -366,143 +342,198 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 				return
 			}
 
-			// If this is the last round, auto-accept
 			if round == maxCoachingRounds-1 {
 				emit(Event{Type: EventAgentDone, AgentID: "gateway",
 					InputTokens: usageIn(gwResult.Usage), OutputTokens: usageOut(gwResult.Usage)})
 				plannerInput = buildPlannerInput(input.Prompt, gwResult.Brief)
 			}
 		}
+	} else {
+		plannerInput = input.Prompt
 	}
 
-plan:
-	// --- Planning ---
-	emit(Event{Type: EventPhaseChange, Phase: PhasePlanning})
-	emit(Event{Type: EventAgentStarted, AgentID: "planner"})
-	stream.SetAgent("planner")
+research:
+	var finalPlanMarkdown string
 
-	planner := agent.NewPlanner(e.Runners.Planner, &e.Config.Planner)
-	planOutput, err := planner.PlanStreaming(ctx, plannerInput, &streamWriter{buf: stream})
-	if err != nil {
-		emit(Event{Type: EventAgentFailed, AgentID: "planner", Err: err})
-		emit(Event{Type: EventError, Err: fmt.Errorf("planning: %w", err)})
-		return
+	// If a pre-loaded plan was provided, skip research and planning
+	if input.PlanFile != "" {
+		finalPlanMarkdown = input.PlanFile
+		goto planGate
 	}
 
-	writeArtifact(session, "plan_output.json", planOutput)
-	emit(Event{Type: EventAgentDone, AgentID: "planner",
-		InputTokens: usageIn(planOutput.Usage), OutputTokens: usageOut(planOutput.Usage)})
+	// --- Research ---
+	{
+		emit(Event{Type: EventPhaseChange, Phase: PhaseResearching})
+		emit(Event{Type: EventAgentStarted, AgentID: "researcher"})
+		stream.SetAgent("researcher")
 
-	// --- Plan Approval Gate ---
-	if !input.AutoApprove {
-		emit(Event{Type: EventGateRequest, Gate: GateRequest{
-			Type:       GatePlanApproval,
-			PlanOutput: planOutput,
-		}})
-
-		select {
-		case decision := <-decisions:
-			switch decision.Type {
-			case DecisionCancel:
-				emit(Event{Type: EventComplete, Phase: PhaseDone})
-				return
-			case DecisionEdit:
-				// Re-parse the edited content as a plan
-				edited, parseErr := planner.ParsePlanOutput(decision.EditedContent)
-				if parseErr == nil {
-					planOutput = edited
-				}
-			case DecisionApprove:
-				// proceed
-			}
-		case <-ctx.Done():
+		researcher := agent.NewResearcher(e.Runners.Researcher, &e.Config.Researcher)
+		draft, err := researcher.ResearchStreaming(ctx, plannerInput, &streamWriter{buf: stream})
+		if err != nil {
+			emit(Event{Type: EventAgentFailed, AgentID: "researcher", Err: err})
+			emit(Event{Type: EventError, Err: fmt.Errorf("research: %w", err)})
 			return
 		}
-	}
 
-	spec := planOutput.Spec
-	writeArtifact(session, "specification.json", spec)
-	emit(Event{Type: EventPlanReady, PlanOutput: planOutput})
+		writeArtifact(session, "researcher_draft.md", draft.Markdown)
+		emit(Event{Type: EventAgentDone, AgentID: "researcher",
+			InputTokens: usageIn(draft.Usage), OutputTokens: usageOut(draft.Usage),
+			ResearchDraft: draft.Markdown})
 
-	// --- Plan Validation ---
-	emit(Event{Type: EventPhaseChange, Phase: PhaseValidating})
-	emit(Event{Type: EventAgentStarted, AgentID: "validator"})
+		// --- Planning ---
+		emit(Event{Type: EventPhaseChange, Phase: PhasePlanning})
+		emit(Event{Type: EventAgentStarted, AgentID: "planner"})
+		stream.SetAgent("planner")
 
-	validator := agent.NewPlanValidator(e.Runners.Validator, &e.Config.Validator)
-	planReport, err := validator.ValidatePlan(ctx, spec)
-	if err != nil {
-		emit(Event{Type: EventAgentFailed, AgentID: "validator", Err: err})
-		emit(Event{Type: EventError, Err: fmt.Errorf("plan validation: %w", err)})
-		return
-	}
-
-	writeArtifact(session, "validation_report.json", planReport)
-	emit(Event{Type: EventValidationDone, ValidationReport: *planReport, HasValidation: true})
-	emit(Event{Type: EventAgentDone, AgentID: "validator",
-		InputTokens: usageIn(planReport.Usage), OutputTokens: usageOut(planReport.Usage)})
-
-	if planReport.Verdict == agent.VerdictFail {
-		emit(Event{Type: EventError, Err: fmt.Errorf("plan validation failed: %s", planReport.Summary)})
-		return
-	}
-
-	// --- Project Management Decomposition ---
-	emit(Event{Type: EventPhaseChange, Phase: PhaseDecompose})
-
-	var projectPlan *agent.ProjectPlan
-	if e.Runners.ProjectManager != nil {
-		pm := agent.NewProjectManager(e.Runners.ProjectManager, &e.Config.ProjectManager)
-		plan, pmErr := pm.Decompose(ctx, spec)
-		if pmErr != nil {
-			slog.Warn("project decomposition failed, executing as single package", "err", pmErr)
-		} else {
-			projectPlan = &plan
-			writeArtifact(session, "project_plan.json", plan)
+		planner := agent.NewPlanner(e.Runners.Planner, &e.Config.Planner)
+		plan, planErr := planner.RefineStreaming(ctx, draft.Markdown, &streamWriter{buf: stream})
+		if planErr != nil {
+			emit(Event{Type: EventAgentFailed, AgentID: "planner", Err: planErr})
+			emit(Event{Type: EventError, Err: fmt.Errorf("planning: %w", planErr)})
+			return
 		}
+
+		emit(Event{Type: EventAgentDone, AgentID: "planner",
+			InputTokens: usageIn(plan.Usage), OutputTokens: usageOut(plan.Usage)})
+
+		finalPlanMarkdown = plan.Markdown
+	}
+
+planGate:
+	// --- Plan Approval Gate ---
+	emit(Event{Type: EventPlanReady, FinalPlan: finalPlanMarkdown})
+
+	if !input.AutoApprove {
+		for {
+			emit(Event{Type: EventGateRequest, Gate: GateRequest{
+				Type:              GatePlanApproval,
+				FinalPlanMarkdown: finalPlanMarkdown,
+			}})
+
+			select {
+			case decision := <-decisions:
+				switch decision.Type {
+				case DecisionCancel:
+					emit(Event{Type: EventComplete, Phase: PhaseDone})
+					return
+				case DecisionEdit:
+					// Basic sanity check on edited content
+					edited := strings.TrimSpace(decision.EditedContent)
+					if !strings.HasPrefix(edited, "# Plan") {
+						emit(Event{Type: EventError, Err: fmt.Errorf("edited plan must start with '# Plan'")})
+						return
+					}
+					finalPlanMarkdown = edited
+					continue // re-show gate with edited plan
+				case DecisionComment:
+					// Re-plan with comments
+					emit(Event{Type: EventAgentStarted, AgentID: "planner"})
+					stream.SetAgent("planner")
+					planner := agent.NewPlanner(e.Runners.Planner, &e.Config.Planner)
+					revised, err := planner.RefineWithCommentsStreaming(ctx, finalPlanMarkdown, decision.Comment, &streamWriter{buf: stream})
+					if err != nil {
+						emit(Event{Type: EventAgentFailed, AgentID: "planner", Err: err})
+						emit(Event{Type: EventError, Err: fmt.Errorf("planner revision: %w", err)})
+						return
+					}
+					emit(Event{Type: EventAgentDone, AgentID: "planner",
+						InputTokens: usageIn(revised.Usage), OutputTokens: usageOut(revised.Usage)})
+					finalPlanMarkdown = revised.Markdown
+					continue // re-show gate with revised plan
+				case DecisionApprove:
+					// proceed
+				}
+			case <-ctx.Done():
+				return
+			}
+			break
+		}
+	}
+
+	// Save approved plan
+	writeArtifact(session, "final_plan.md", finalPlanMarkdown)
+
+	// --- NoExecute: stop after plan gate ---
+	if input.NoExecute {
+		emit(Event{Type: EventPhaseChange, Phase: PhaseDone})
+		emit(Event{Type: EventComplete, Phase: PhaseDone, FinalPlan: finalPlanMarkdown})
+		return
 	}
 
 	// --- Worker Execution ---
 	emit(Event{Type: EventPhaseChange, Phase: PhaseExecuting})
+	emit(Event{Type: EventAgentStarted, AgentID: "worker"})
+	stream.SetAgent("worker")
 
-	workOutput, execErr := e.executeWorkerWaves(ctx, spec, projectPlan, emit, stream)
+	execPrompt := agent.BuildExecutionPromptFromPlan(finalPlanMarkdown)
+	workResult, execErr := e.Runners.Worker.RunStreaming(ctx, execPrompt, "", &streamWriter{buf: stream})
 	if execErr != nil {
 		emit(Event{Type: EventAgentFailed, AgentID: "worker", Err: execErr})
 		emit(Event{Type: EventError, Err: execErr})
 		return
 	}
 
-	// --- QA Gate ---
-	emit(Event{Type: EventPhaseChange, Phase: PhaseQA})
-	emit(Event{Type: EventAgentStarted, AgentID: "qa"})
+	writeArtifact(session, "worker_output.txt", workResult.Output)
+	emit(Event{Type: EventAgentDone, AgentID: "worker", WorkOutput: workResult.Output,
+		InputTokens: usageIn(workResult.Usage), OutputTokens: usageOut(workResult.Usage)})
 
-	gate := agent.NewGate(e.Runners.QA, &e.Config.QA)
-	qaReport, qaErr := gate.ValidateWork(ctx, &agent.QAInput{
-		Spec:               spec,
-		WorkOutput:         workOutput,
-		ValidationCommands: planOutput.ValidationCommands,
-		ExpectedArtifacts:  planOutput.ExpectedArtifacts,
-	})
-	if qaErr != nil {
-		emit(Event{Type: EventAgentFailed, AgentID: "qa", Err: qaErr})
-		emit(Event{Type: EventError, Err: qaErr})
-		return
+	// --- Worker Self-Validation via Session Continuation ---
+	emit(Event{Type: EventPhaseChange, Phase: PhaseSelfValidating})
+	emit(Event{Type: EventAgentStarted, AgentID: "validator"})
+	stream.SetAgent("validator")
+
+	var validationOutput string
+	retryBudget := e.Config.Retry.WorkerValidationRetries
+	if retryBudget < 1 {
+		retryBudget = 1
 	}
 
-	writeArtifact(session, "qa_report.json", qaReport)
-	emit(Event{Type: EventQADone, QAReport: *qaReport, HasQA: true})
-	emit(Event{Type: EventAgentDone, AgentID: "qa",
-		InputTokens: usageIn(qaReport.Usage), OutputTokens: usageOut(qaReport.Usage)})
+	validationPrompt := agent.WorkerValidationPrompt(retryBudget)
+
+	if workResult.SessionID != "" {
+		valResult, valErr := e.Runners.Worker.RunContinue(ctx, workResult.SessionID, validationPrompt, &streamWriter{buf: stream})
+		if valErr != nil {
+			slog.Warn("worker self-validation failed", "err", valErr)
+			emit(Event{Type: EventAgentFailed, AgentID: "validator", Err: valErr})
+			// Non-fatal: proceed with whatever output we have
+		} else {
+			validationOutput = valResult.Output
+			emit(Event{Type: EventAgentDone, AgentID: "validator",
+				InputTokens: usageIn(valResult.Usage), OutputTokens: usageOut(valResult.Usage)})
+		}
+	} else {
+		slog.Warn("no session ID from worker — attempting disconnected validation")
+		// Fallback: run validation as a new session (less effective but still useful)
+		valResult, valErr := e.Runners.Worker.RunStreaming(ctx, validationPrompt, "", &streamWriter{buf: stream})
+		if valErr != nil {
+			slog.Warn("disconnected validation failed", "err", valErr)
+			emit(Event{Type: EventAgentFailed, AgentID: "validator", Err: valErr})
+		} else {
+			validationOutput = valResult.Output
+			emit(Event{Type: EventAgentDone, AgentID: "validator",
+				InputTokens: usageIn(valResult.Usage), OutputTokens: usageOut(valResult.Usage)})
+		}
+	}
+
+	writeArtifact(session, "worker_validation.txt", validationOutput)
+
+	// Check for failures in validation output
+	status := StatusSuccess
+	if strings.Contains(validationOutput, "❌") {
+		status = StatusFailed
+	}
 
 	// --- Completion ---
 	emit(Event{Type: EventPhaseChange, Phase: PhaseDone})
-	emit(Event{Type: EventComplete, Phase: PhaseDone, PlanOutput: planOutput, QAReport: *qaReport, HasQA: true})
+	emit(Event{Type: EventComplete, Phase: PhaseDone,
+		FinalPlan:        finalPlanMarkdown,
+		WorkerValidation: validationOutput,
+	})
+	_ = status // status is captured by Result in Run()
 }
 
-// buildPlannerInputFromBrief constructs a planner question from a partial brief.
 // buildPlannerInput constructs the planner prompt from the raw user prompt and
-// gateway brief. The raw prompt is the primary input — the user's original words.
-// The brief supplies lightweight structured context (outcome, scope boundaries)
-// without replacing or rewriting the user's intent.
+// gateway brief.
 func buildPlannerInput(rawPrompt string, brief agent.PromptBrief) string {
 	var b strings.Builder
 	b.WriteString(rawPrompt)
@@ -535,93 +566,18 @@ func incorporateAnswers(prompt string, gwResult agent.GatewayResult, answers []G
 	return b.String()
 }
 
-// executeWorkerWaves runs work packages in dependency waves with config-controlled concurrency.
-func (e *Engine) executeWorkerWaves(ctx context.Context, spec agent.Specification, projectPlan *agent.ProjectPlan, emit func(Event), stream *StreamBuffer) (string, error) {
-	if projectPlan == nil || len(projectPlan.Packages) == 0 {
-		// Single execution
-		emit(Event{Type: EventAgentStarted, AgentID: "worker"})
-		stream.SetAgent("worker")
-		result, err := e.Runners.Worker.RunStreaming(ctx, agent.BuildExecutionPrompt(spec), "", &streamWriter{buf: stream})
-		if err != nil {
-			return "", err
-		}
-		emit(Event{Type: EventAgentDone, AgentID: "worker", WorkOutput: result.Output,
-			InputTokens: usageIn(result.Usage), OutputTokens: usageOut(result.Usage)})
-		return result.Output, nil
+// writeArtifact writes a string artifact to the session directory.
+func writeArtifact(session agent.SessionDir, name string, content string) {
+	if session.Path == "" {
+		return
 	}
-
-	parallelism := e.Config.Worker.Parallelism
-	if parallelism <= 0 {
-		parallelism = 1
+	if err := session.WriteArtifact(name, []byte(content)); err != nil {
+		slog.Error("write artifact", "path", session.ArtifactPath(name), "err", err)
 	}
-
-	waves := agent.TopoWaves(projectPlan.Packages)
-	var allOutput strings.Builder
-
-	for _, wave := range waves {
-		if parallelism == 1 {
-			// Sequential — no goroutines
-			for _, pkg := range wave {
-				wSpec := pkg.ToSpecification(spec)
-				emit(Event{Type: EventAgentStarted, AgentID: pkg.ID})
-				stream.SetAgent(pkg.ID)
-				res, err := e.Runners.Worker.RunStreaming(ctx, agent.BuildExecutionPrompt(wSpec), "", &streamWriter{buf: stream})
-				if err != nil {
-					return allOutput.String(), fmt.Errorf("worker %q: %w", pkg.ID, err)
-				}
-				emit(Event{Type: EventAgentDone, AgentID: pkg.ID, WorkOutput: res.Output,
-					InputTokens: usageIn(res.Usage), OutputTokens: usageOut(res.Usage)})
-				fmt.Fprintf(&allOutput, "=== Package: %s ===\n%s\n", pkg.ID, res.Output)
-			}
-		} else {
-			// Parallel with semaphore
-			type pkgResult struct {
-				id     string
-				output string
-				err    error
-				usage  *harness.TokenUsage
-			}
-			sem := make(chan struct{}, parallelism)
-			results := make(chan pkgResult, len(wave))
-			var wg sync.WaitGroup
-
-			for _, pkg := range wave {
-				wg.Add(1)
-				go func(wp agent.WorkPackage) {
-					defer wg.Done()
-					sem <- struct{}{}
-					defer func() { <-sem }()
-					wSpec := wp.ToSpecification(spec)
-					emit(Event{Type: EventAgentStarted, AgentID: wp.ID})
-					stream.SetAgent(wp.ID)
-					res, err := e.Runners.Worker.RunStreaming(ctx, agent.BuildExecutionPrompt(wSpec), "", &streamWriter{buf: stream})
-					if err != nil {
-						results <- pkgResult{id: wp.ID, err: fmt.Errorf("worker %q: %w", wp.ID, err)}
-						return
-					}
-					emit(Event{Type: EventAgentDone, AgentID: wp.ID, WorkOutput: res.Output,
-						InputTokens: usageIn(res.Usage), OutputTokens: usageOut(res.Usage)})
-					results <- pkgResult{id: wp.ID, output: res.Output, usage: res.Usage}
-				}(pkg)
-			}
-
-			wg.Wait()
-			close(results)
-
-			for r := range results {
-				if r.err != nil {
-					return allOutput.String(), r.err
-				}
-				fmt.Fprintf(&allOutput, "=== Package: %s ===\n%s\n", r.id, r.output)
-			}
-		}
-	}
-
-	return allOutput.String(), nil
 }
 
-// writeArtifact marshals a value to JSON and writes it to the session directory.
-func writeArtifact(session agent.SessionDir, name string, v any) {
+// writeArtifactJSON marshals a value to JSON and writes it to the session directory.
+func writeArtifactJSON(session agent.SessionDir, name string, v any) {
 	if session.Path == "" {
 		return
 	}
@@ -664,7 +620,6 @@ func usageOut(u *harness.TokenUsage) int64 {
 }
 
 // streamWriter implements io.Writer by appending to a StreamBuffer.
-// Unlike channel-based approaches, this never blocks the subprocess.
 type streamWriter struct {
 	buf *StreamBuffer
 }

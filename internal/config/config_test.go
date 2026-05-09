@@ -3,26 +3,30 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.Planner.ModelRef != "x-large" {
-		t.Errorf("planner model_ref = %q, want %q", cfg.Planner.ModelRef, "x-large")
+	if cfg.Researcher.Model != "sonnet" {
+		t.Errorf("researcher model = %q, want %q", cfg.Researcher.Model, "sonnet")
 	}
-	if cfg.Validator.ModelRef != "small" {
-		t.Errorf("validator model_ref = %q, want %q", cfg.Validator.ModelRef, "small")
+	if cfg.Planner.Model != "sonnet" {
+		t.Errorf("planner model = %q, want %q", cfg.Planner.Model, "sonnet")
 	}
-	if cfg.Worker.ModelRef != "large" {
-		t.Errorf("worker model_ref = %q, want %q", cfg.Worker.ModelRef, "large")
+	if cfg.Worker.Model != "sonnet" {
+		t.Errorf("worker model = %q, want %q", cfg.Worker.Model, "sonnet")
 	}
-	if cfg.QA.ModelRef != "small" {
-		t.Errorf("qa model_ref = %q, want %q", cfg.QA.ModelRef, "small")
+	if cfg.Utility != "small" {
+		t.Errorf("utility = %q, want %q", cfg.Utility, "small")
 	}
-	if cfg.Gateway.ModelRef != "x-small" {
-		t.Errorf("gateway model_ref = %q, want %q", cfg.Gateway.ModelRef, "x-small")
+	if cfg.Gateway.Model != "small" {
+		t.Errorf("gateway model = %q, want %q", cfg.Gateway.Model, "small")
+	}
+	if cfg.Retry.ResearcherAttempts < 1 {
+		t.Error("researcher attempts should be at least 1")
 	}
 	if cfg.Retry.PlannerAttempts < 1 {
 		t.Error("planner attempts should be at least 1")
@@ -36,44 +40,6 @@ func TestLoad_MissingFile(t *testing.T) {
 	}
 }
 
-func TestLoad_EnvOverride(t *testing.T) {
-	t.Setenv("ORQESTRA_VALIDATOR_MODEL_REF", "custom-ref")
-
-	content := `
-providers:
-  local:
-    base_url: http://localhost
-    type: openai
-models:
-  x-large:
-    provider: local
-    model: big-model
-  large:
-    provider: local
-    model: custom-model
-  small:
-    provider: local
-    model: small-model
-  custom-ref:
-    provider: local
-    model: custom-model
-`
-	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.WriteString(content)
-	f.Close()
-
-	cfg, err := Load(f.Name())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.Validator.ModelRef != "custom-ref" {
-		t.Errorf("expected env override, got %q", cfg.Validator.ModelRef)
-	}
-}
-
 func TestLoad_ValidYAML(t *testing.T) {
 	content := `
 providers:
@@ -81,15 +47,19 @@ providers:
     base_url: http://test:1234
     type: openai
 models:
-  x-large:
+  sonnet:
     provider: local
     model: test-planner
-  large:
-    provider: local
-    model: test-worker
   small:
     provider: local
     model: test-val
+researcher:
+  model: sonnet
+planner:
+  model: sonnet
+worker:
+  model: sonnet
+utility: small
 `
 	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
 	if err != nil {
@@ -102,15 +72,11 @@ models:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Planner.ModelRef != "x-large" {
-		t.Errorf("expected planner model_ref x-large, got %q", cfg.Planner.ModelRef)
+	if cfg.Researcher.Model != "sonnet" {
+		t.Errorf("expected researcher model sonnet, got %q", cfg.Researcher.Model)
 	}
-	if cfg.Validator.ModelRef != "small" {
-		t.Errorf("expected validator model_ref small, got %q", cfg.Validator.ModelRef)
-	}
-	// x-small should default to small
-	if _, ok := cfg.Models["x-small"]; !ok {
-		t.Error("expected x-small model to be defaulted from small")
+	if cfg.Planner.Model != "sonnet" {
+		t.Errorf("expected planner model sonnet, got %q", cfg.Planner.Model)
 	}
 }
 
@@ -146,6 +112,24 @@ func TestResolveModel_Success(t *testing.T) {
 	}
 	if resolved.Type != "anthropic" {
 		t.Errorf("Type = %q, want %q", resolved.Type, "anthropic")
+	}
+}
+
+func TestResolveModel_CaseInsensitive(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]ProviderConfig{
+			"prov": {BaseURL: "http://localhost", Type: "openai"},
+		},
+		Models: map[string]ModelConfig{
+			"Sonnet": {Provider: "prov", Model: "claude-sonnet"},
+		},
+	}
+	resolved, err := cfg.ResolveModel("sonnet")
+	if err != nil {
+		t.Fatalf("expected case-insensitive lookup to succeed, got: %v", err)
+	}
+	if resolved.Model != "claude-sonnet" {
+		t.Errorf("Model = %q, want claude-sonnet", resolved.Model)
 	}
 }
 
@@ -207,18 +191,22 @@ providers:
     base_url: http://localhost
     type: anthropic
 models:
-  x-large:
+  sonnet:
     provider: good
     model: big
-  large:
-    provider: good
-    model: worker
   small:
     provider: good
     model: small
   bad-model:
     provider: nonexistent
     model: x
+researcher:
+  model: sonnet
+planner:
+  model: sonnet
+worker:
+  model: sonnet
+utility: small
 `
 	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
 	if err != nil {
@@ -240,15 +228,19 @@ providers:
     base_url: http://localhost
     type: openai
 models:
-  x-large:
+  sonnet:
     provider: local
     model: big
-  large:
-    provider: local
-    model: qwen36
   small:
     provider: local
     model: small
+researcher:
+  model: sonnet
+planner:
+  model: sonnet
+worker:
+  model: sonnet
+utility: small
 `
 	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
 	if err != nil {
@@ -257,13 +249,9 @@ models:
 	f.WriteString(content)
 	f.Close()
 
-	cfg, err := Load(f.Name())
+	_, err = Load(f.Name())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	// x-large, large, small defined + x-small defaulted from small = 4 models
-	if len(cfg.Models) != 4 {
-		t.Errorf("expected 4 models (with x-small default), got %d", len(cfg.Models))
 	}
 }
 
@@ -290,7 +278,7 @@ func TestRuntimeOptions(t *testing.T) {
 	}
 }
 
-func TestResolveSmallModel(t *testing.T) {
+func TestResolveUtilityModel(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]ProviderConfig{
 			"local": {BaseURL: "http://localhost:1234", APIKey: "k", Type: "openai"},
@@ -298,18 +286,19 @@ func TestResolveSmallModel(t *testing.T) {
 		Models: map[string]ModelConfig{
 			"small": {Provider: "local", Model: "haiku"},
 		},
+		Utility: "small",
 	}
 
-	small := cfg.ResolveSmallModel()
-	if small == nil {
-		t.Fatal("expected small model to resolve")
+	utility := cfg.ResolveUtilityModel()
+	if utility == nil {
+		t.Fatal("expected utility model to resolve")
 	}
-	if small.Model != "haiku" {
-		t.Errorf("small.Model = %q, want haiku", small.Model)
+	if utility.Model != "haiku" {
+		t.Errorf("utility.Model = %q, want haiku", utility.Model)
 	}
 }
 
-func TestResolveSmallModel_NotDefined(t *testing.T) {
+func TestResolveUtilityModel_NotDefined(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]ProviderConfig{
 			"local": {BaseURL: "http://localhost", Type: "openai"},
@@ -319,9 +308,9 @@ func TestResolveSmallModel_NotDefined(t *testing.T) {
 		},
 	}
 
-	small := cfg.ResolveSmallModel()
-	if small != nil {
-		t.Errorf("expected nil when small tier not defined, got %+v", small)
+	utility := cfg.ResolveUtilityModel()
+	if utility != nil {
+		t.Errorf("expected nil when utility not defined, got %+v", utility)
 	}
 }
 
@@ -332,15 +321,19 @@ providers:
     base_url: http://localhost
     type: openai
 models:
-  x-large:
+  sonnet:
     provider: local
     model: big
-  large:
-    provider: local
-    model: qwen36
   small:
     provider: local
     model: small
+researcher:
+  model: sonnet
+planner:
+  model: sonnet
+worker:
+  model: sonnet
+utility: small
 execution_graph:
   agents:
     - id: implement
@@ -458,12 +451,9 @@ providers:
     base_url: http://localhost
     type: openai
 models:
-  x-large:
+  sonnet:
     provider: local
     model: big
-  large:
-    provider: local
-    model: qwen36
   small:
     provider: local
     model: small
@@ -471,6 +461,13 @@ models:
     provider: local
     model: qwen36
     token_limit: "garbage"
+researcher:
+  model: sonnet
+planner:
+  model: sonnet
+worker:
+  model: sonnet
+utility: small
 `
 	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
 	if err != nil {
@@ -485,67 +482,72 @@ models:
 	}
 }
 
-func TestModelTierDefaults(t *testing.T) {
-	content := `
+func TestLoad_ForbiddenKeys(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{"validator", "validator:\n  model: small"},
+		{"qa", "qa:\n  model: small"},
+		{"project_manager", "project_manager:\n  model: small"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content := `
 providers:
   local:
     base_url: http://localhost
     type: openai
 models:
-  large:
+  sonnet:
     provider: local
-    model: worker-model
+    model: big
   small:
     provider: local
-    model: small-model
-`
-	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.WriteString(content)
-	f.Close()
+    model: small
+researcher:
+  model: sonnet
+planner:
+  model: sonnet
+worker:
+  model: sonnet
+utility: small
+` + tt.key + "\n"
+			f, err := os.CreateTemp(t.TempDir(), "*.yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.WriteString(content)
+			f.Close()
 
-	cfg, err := Load(f.Name())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// x-large should default to large
-	xl, ok := cfg.Models["x-large"]
-	if !ok {
-		t.Fatal("x-large model should be defaulted from large")
-	}
-	if xl.Model != "worker-model" {
-		t.Errorf("x-large.Model = %q, want %q", xl.Model, "worker-model")
-	}
-
-	// x-small should default to small
-	xs, ok := cfg.Models["x-small"]
-	if !ok {
-		t.Fatal("x-small model should be defaulted from small")
-	}
-	if xs.Model != "small-model" {
-		t.Errorf("x-small.Model = %q, want %q", xs.Model, "small-model")
+			_, err = Load(f.Name())
+			if err == nil {
+				t.Fatalf("expected error for forbidden key %q", tt.name)
+			}
+			if !strings.Contains(err.Error(), "forbidden config key") {
+				t.Errorf("expected forbidden key error, got: %v", err)
+			}
+		})
 	}
 }
 
-func TestModelTierDefaults_ExplicitXL(t *testing.T) {
+func TestLoad_MissingUtility(t *testing.T) {
 	content := `
 providers:
   local:
     base_url: http://localhost
     type: openai
 models:
-  x-large:
+  sonnet:
     provider: local
-    model: explicit-xl
-  large:
-    provider: local
-    model: worker-model
-  small:
-    provider: local
-    model: small-model
+    model: big
+researcher:
+  model: sonnet
+planner:
+  model: sonnet
+worker:
+  model: sonnet
 `
 	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
 	if err != nil {
@@ -554,14 +556,12 @@ models:
 	f.WriteString(content)
 	f.Close()
 
-	cfg, err := Load(f.Name())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err = Load(f.Name())
+	if err == nil {
+		t.Fatal("expected error for missing utility")
 	}
-
-	// Explicit x-large should NOT be overwritten
-	if cfg.Models["x-large"].Model != "explicit-xl" {
-		t.Errorf("x-large.Model = %q, want %q", cfg.Models["x-large"].Model, "explicit-xl")
+	if !strings.Contains(err.Error(), "utility") {
+		t.Errorf("expected utility error, got: %v", err)
 	}
 }
 
@@ -573,24 +573,21 @@ providers:
     api_key: dummy
     type: openai
 models:
-  x-large:
+  sonnet:
     provider: test
-    model: test-xl
-    token_limit: 100K
-  large:
-    provider: test
-    model: test-large
+    model: test-sonnet
     token_limit: 100K
   small:
     provider: test
     model: test-small
     token_limit: 50K
-  x-small:
-    provider: test
-    model: test-xs
-    token_limit: 50K
+researcher:
+  model: sonnet
+planner:
+  model: sonnet
 worker:
-  model_ref: large
+  model: sonnet
+utility: small
 sandbox:
   max_lifetime: 2h
   proxy_env:
@@ -643,24 +640,21 @@ providers:
     api_key: dummy
     type: openai
 models:
-  x-large:
+  sonnet:
     provider: test
-    model: test-xl
-    token_limit: 100K
-  large:
-    provider: test
-    model: test-large
+    model: test-sonnet
     token_limit: 100K
   small:
     provider: test
     model: test-small
     token_limit: 50K
-  x-small:
-    provider: test
-    model: test-xs
-    token_limit: 50K
+researcher:
+  model: sonnet
+planner:
+  model: sonnet
 worker:
-  model_ref: large
+  model: sonnet
+utility: small
 `
 	f := filepath.Join(t.TempDir(), "cfg.yaml")
 	os.WriteFile(f, []byte(yaml), 0644)
@@ -692,24 +686,21 @@ providers:
     api_key: dummy
     type: openai
 models:
-  x-large:
+  sonnet:
     provider: test
-    model: test-xl
-    token_limit: 100K
-  large:
-    provider: test
-    model: test-large
+    model: test-sonnet
     token_limit: 100K
   small:
     provider: test
     model: test-small
     token_limit: 50K
-  x-small:
-    provider: test
-    model: test-xs
-    token_limit: 50K
+researcher:
+  model: sonnet
+planner:
+  model: sonnet
 worker:
-  model_ref: large
+  model: sonnet
+utility: small
 sandbox:
   max_lifetime: 1h
   allow_exec:
@@ -718,7 +709,7 @@ execution_graph:
   agents:
     - id: worker-1
       role: worker
-      model_ref: x-large
+      model_ref: sonnet
       sandbox:
         max_lifetime: 30m
         allow_write:

@@ -10,13 +10,20 @@ providers:
     type: openai
 
 models:
-  large:
+  qwen:
     provider: llama-cpp
     model: qwen3.6
 
-  small:
-    provider: llama-cpp
-    model: qwen3.6
+researcher:
+  model: qwen
+
+planner:
+  model: qwen
+
+worker:
+  model: qwen
+
+utility: qwen
 
 sandbox:
   max_lifetime: 35m
@@ -32,6 +39,6 @@ worker:
 gateway:
   mcp_servers: []
 
-planner:
+researcher:
   mcp_servers:
     - MCP_DOCKER

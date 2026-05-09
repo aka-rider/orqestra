@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"image"
 	"strings"
@@ -64,12 +63,12 @@ type Model struct {
 	agents []AgentRow
 
 	// Content state (held by value to prevent races)
-	gatewayResult agent.GatewayResult
-	planOutput    agent.PlanOutput
-	hasPlan       bool
-	qaReport      agent.ValidationReport
-	hasQA         bool
-	lastErr       error
+	gatewayResult    agent.GatewayResult
+	finalPlan        string
+	hasPlan          bool
+	workerValidation string
+	hasValidation    bool
+	lastErr          error
 
 	// Streaming output — shared buffer polled on tick, not via channel events
 	streamBuf *orchestrator.StreamBuffer
@@ -422,8 +421,7 @@ func (m Model) handlePlanReviewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		ta.SetHeight(max(1, contentHeight-2))
 		ta.CharLimit = 65536
 		if m.hasPlan {
-			content, _ := json.MarshalIndent(m.planOutput, "", "  ")
-			ta.SetValue(string(content))
+			ta.SetValue(m.finalPlan)
 		}
 		ta.Focus()
 		m.planEditor = ta
@@ -600,26 +598,20 @@ func (m Model) handleOrchestratorEvent(event orchestrator.Event) (tea.Model, tea
 
 		case orchestrator.GatePlanApproval:
 			m.content = ContentPlanReview
-			m.planOutput = event.Gate.PlanOutput
+			m.finalPlan = event.Gate.FinalPlanMarkdown
 			m.hasPlan = true
 		}
 
 	case orchestrator.EventPlanReady:
-		m.planOutput = event.PlanOutput
+		m.finalPlan = event.FinalPlan
 		m.hasPlan = true
-
-	case orchestrator.EventQADone:
-		if event.HasQA {
-			m.qaReport = event.QAReport
-			m.hasQA = true
-		}
 
 	case orchestrator.EventComplete:
 		m.content = ContentCompletion
 		m.contentVP.GotoTop()
-		if event.HasQA {
-			m.qaReport = event.QAReport
-			m.hasQA = true
+		if event.WorkerValidation != "" {
+			m.workerValidation = event.WorkerValidation
+			m.hasValidation = true
 		}
 	}
 
@@ -911,20 +903,19 @@ func (m Model) viewCoaching(_ int) string {
 	return b.String()
 }
 
-func (m Model) viewPlanReview(_ int) string {
+func (m Model) viewPlanReview(width int) string {
 	if !m.hasPlan {
 		return " Waiting for plan...\n"
 	}
-	spec := m.planOutput.Spec
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf(" Goal: %s\n\n", goalStyle.Render(spec.Goal)))
-	b.WriteString(" Steps:\n")
-	for i, s := range spec.Steps {
-		b.WriteString(fmt.Sprintf("   %d. %s\n", i+1, stepStyle.Render(s)))
-	}
-	b.WriteString("\n Acceptance:\n")
-	for _, a := range spec.Acceptance {
-		b.WriteString(fmt.Sprintf("   • %s\n", a))
+	// Render raw markdown plan — the plan IS the content
+	for _, line := range strings.Split(m.finalPlan, "\n") {
+		if len(line) > width-2 {
+			line = line[:width-2]
+		}
+		b.WriteString(" ")
+		b.WriteString(line)
+		b.WriteString("\n")
 	}
 	return b.String()
 }
@@ -938,15 +929,11 @@ func (m Model) viewCompletion(_ int) string {
 		b.WriteString(errorStyle.Render(fmt.Sprintf(" Error: %v", m.lastErr)))
 		b.WriteString("\n")
 	}
-	if m.hasQA {
-		verdictStyle := passStyle
-		if m.qaReport.Verdict == agent.VerdictFail {
-			verdictStyle = failStyle
-		} else if m.qaReport.Verdict == agent.VerdictWarn {
-			verdictStyle = warnStyle
+	if m.hasValidation {
+		b.WriteString(" Validation:\n")
+		for _, line := range strings.Split(m.workerValidation, "\n") {
+			b.WriteString(fmt.Sprintf("   %s\n", line))
 		}
-		b.WriteString(fmt.Sprintf(" QA: %s\n", verdictStyle.Render(string(m.qaReport.Verdict))))
-		b.WriteString(fmt.Sprintf(" %s\n", m.qaReport.Summary))
 	}
 	elapsed := time.Since(m.startTime).Truncate(time.Second)
 	b.WriteString(fmt.Sprintf("\n Elapsed: %s\n", elapsed))

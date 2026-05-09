@@ -27,16 +27,19 @@ func (n *noopRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (
 	return harness.RunResult{Output: `{"verdict":"accept","brief":{"task":"t","end_state":"e","scope":[],"non_scope":[]},"questions":[],"confidence":0.9}`}, nil
 }
 
+func (n *noopRunner) RunContinue(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
+	return harness.RunResult{Output: "✅ all pass"}, nil
+}
+
 // testModel creates a Model suitable for testing with a minimal mock engine.
 func testModel() Model {
 	engine := &orchestrator.Engine{
 		Config: testConfig(),
 		Runners: orchestrator.Runners{
-			Gateway:   &noopRunner{},
-			Planner:   &noopRunner{},
-			Validator: &noopRunner{},
-			Worker:    &noopRunner{},
-			QA:        &noopRunner{},
+			Gateway:    &noopRunner{},
+			Researcher: &noopRunner{},
+			Planner:    &noopRunner{},
+			Worker:     &noopRunner{},
 		},
 	}
 	m := NewModel(engine)
@@ -47,11 +50,10 @@ func testModel() Model {
 
 func testConfig() *config.Config {
 	return &config.Config{
-		Gateway:   config.GatewayConfig{SystemPrompt: "test"},
-		Planner:   config.PlannerConfig{},
-		Validator: config.ValidatorConfig{},
-		Worker:    config.WorkerConfig{},
-		QA:        config.ValidatorConfig{},
+		Gateway:    config.GatewayConfig{SystemPrompt: "test"},
+		Researcher: config.ResearcherConfig{},
+		Planner:    config.PlannerConfig{},
+		Worker:     config.WorkerConfig{},
 	}
 }
 
@@ -225,10 +227,8 @@ func TestTUI_PlanApproval(t *testing.T) {
 	event := orchestrator.Event{
 		Type: orchestrator.EventGateRequest,
 		Gate: orchestrator.GateRequest{
-			Type: orchestrator.GatePlanApproval,
-			PlanOutput: agent.PlanOutput{
-				Spec: agent.Specification{Goal: "Add feature X", Steps: []string{"Step 1"}},
-			},
+			Type:              orchestrator.GatePlanApproval,
+			FinalPlanMarkdown: "# Plan\n\n## Goal\nAdd feature X\n\n## Work Packages\n\n### 1. Step 1",
 		},
 	}
 
@@ -248,7 +248,7 @@ func TestTUI_PlanApprove(t *testing.T) {
 	m.state = StatePipeline
 	m.content = ContentPlanReview
 	m.hasPlan = true
-	m.planOutput = agent.PlanOutput{Spec: agent.Specification{Goal: "Test"}}
+	m.finalPlan = "# Plan\n\n## Goal\nTest"
 	decisions := make(chan orchestrator.Decision, 1)
 	m.decisions = decisions
 
@@ -274,7 +274,7 @@ func TestTUI_PlanEditSave(t *testing.T) {
 	m.state = StatePipeline
 	m.content = ContentPlanReview
 	m.hasPlan = true
-	m.planOutput = agent.PlanOutput{Spec: agent.Specification{Goal: "Original"}}
+	m.finalPlan = "# Plan\n\n## Goal\nOriginal"
 	decisions := make(chan orchestrator.Decision, 1)
 	m.decisions = decisions
 
@@ -318,7 +318,7 @@ func TestTUI_PlanEditDiscard(t *testing.T) {
 	m.state = StatePipeline
 	m.content = ContentPlanReview
 	m.hasPlan = true
-	m.planOutput = agent.PlanOutput{Spec: agent.Specification{Goal: "Original"}}
+	m.finalPlan = "# Plan\n\n## Goal\nOriginal"
 
 	// Press E to enter edit mode
 	result, _ := sendRune(m, "e")
@@ -530,19 +530,15 @@ func TestTUI_DoubleCtrlC(t *testing.T) {
 	}
 }
 
-func TestTUI_CompletionQA(t *testing.T) {
+func TestTUI_CompletionValidation(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.content = ContentStreaming
 	m.events = make(chan orchestrator.Event, 1)
 
 	event := orchestrator.Event{
-		Type:  orchestrator.EventComplete,
-		HasQA: true,
-		QAReport: agent.ValidationReport{
-			Verdict: agent.VerdictPass,
-			Summary: "All criteria met",
-		},
+		Type:             orchestrator.EventComplete,
+		WorkerValidation: "✅ tests pass\n✅ build succeeds",
 	}
 
 	result, _ := m.handleOrchestratorEvent(event)
@@ -551,11 +547,8 @@ func TestTUI_CompletionQA(t *testing.T) {
 	if model.content != ContentCompletion {
 		t.Errorf("expected ContentCompletion, got %d", model.content)
 	}
-	if !model.hasQA {
-		t.Error("expected hasQA=true")
-	}
-	if model.qaReport.Verdict != agent.VerdictPass {
-		t.Errorf("expected pass verdict, got %q", model.qaReport.Verdict)
+	if !model.hasValidation {
+		t.Error("expected hasValidation=true")
 	}
 }
 

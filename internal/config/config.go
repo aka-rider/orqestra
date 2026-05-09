@@ -49,28 +49,27 @@ type Config struct {
 	Providers      map[string]ProviderConfig `yaml:"providers"`
 	Models         map[string]ModelConfig    `yaml:"models"`
 	Pipeline       PipelineConfig            `yaml:"pipeline"`
+	Researcher     ResearcherConfig          `yaml:"researcher"`
 	Planner        PlannerConfig             `yaml:"planner"`
-	Validator      ValidatorConfig           `yaml:"validator"`
 	Worker         WorkerConfig              `yaml:"worker"`
-	QA             ValidatorConfig           `yaml:"qa"`
-	ProjectManager ProjectManagerConfig      `yaml:"project_manager"`
+	Utility        string                    `yaml:"utility"`
 	Retry          RetryConfig               `yaml:"retry"`
 	ExecutionGraph ExecutionGraphConfig      `yaml:"execution_graph"`
 	Gateway        GatewayConfig             `yaml:"gateway"`
 	Sandbox        SandboxConfig             `yaml:"sandbox"`
 }
 
-type PlannerConfig struct {
-	ModelRef        string   `yaml:"model_ref"`
-	SystemPrompt    string   `yaml:"system_prompt"`
-	AllowedTools    []string `yaml:"allowed_tools"`
-	DisallowedTools []string `yaml:"disallowed_tools"`
+type ResearcherConfig struct {
+	Model           string    `yaml:"model"`
+	SystemPrompt    string    `yaml:"system_prompt"`
+	AllowedTools    []string  `yaml:"allowed_tools"`
+	DisallowedTools []string  `yaml:"disallowed_tools"`
 	MCPServers      *[]string `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
 }
 
-// ValidatorConfig is used for both plan and work validation.
-type ValidatorConfig struct {
-	ModelRef        string    `yaml:"model_ref"`
+// PlannerConfig is used for the senior architect planner.
+type PlannerConfig struct {
+	Model           string    `yaml:"model"`
 	SystemPrompt    string    `yaml:"system_prompt"`
 	AllowedTools    []string  `yaml:"allowed_tools"`
 	DisallowedTools []string  `yaml:"disallowed_tools"`
@@ -78,7 +77,7 @@ type ValidatorConfig struct {
 }
 
 type WorkerConfig struct {
-	ModelRef        string   `yaml:"model_ref"`
+	Model           string   `yaml:"model"`
 	AllowedTools    []string `yaml:"allowed_tools"`
 	DisallowedTools []string `yaml:"disallowed_tools"`
 	PermissionMode  string   `yaml:"permission_mode"`
@@ -88,9 +87,9 @@ type WorkerConfig struct {
 }
 
 type RetryConfig struct {
-	PlannerAttempts      int `yaml:"planner_attempts"`
-	PlanValidationRepair int `yaml:"plan_validation_repair"`
-	QARepair             int `yaml:"qa_repair"`
+	ResearcherAttempts      int `yaml:"researcher_attempts"`
+	PlannerAttempts         int `yaml:"planner_attempts"`
+	WorkerValidationRetries int `yaml:"worker_validation_retries"`
 }
 
 // Duration wraps time.Duration for YAML unmarshaling.
@@ -135,13 +134,6 @@ type ValidatorNodeConfig struct {
 	SystemPromptFile string `yaml:"system_prompt_file"`
 }
 
-// ProjectManagerConfig configures the project manager that decomposes specs
-// into independent work packages for parallel worker execution.
-type ProjectManagerConfig struct {
-	ModelRef     string `yaml:"model_ref"`
-	SystemPrompt string `yaml:"system_prompt"`
-}
-
 // PipelineConfig controls global pipeline behavior.
 type PipelineConfig struct {
 	TokenBudget       int64  `yaml:"token_budget"`       // total token budget for a run
@@ -151,7 +143,7 @@ type PipelineConfig struct {
 
 // GatewayConfig configures the gateway evaluation layer.
 type GatewayConfig struct {
-	ModelRef        string    `yaml:"model_ref"`
+	Model           string    `yaml:"model"`
 	SystemPrompt    string    `yaml:"system_prompt"`
 	AllowedTools    []string  `yaml:"allowed_tools"`
 	DisallowedTools []string  `yaml:"disallowed_tools"`
@@ -209,15 +201,9 @@ func Load(path string) (*Config, error) {
 		return nil, formatYAMLError(path, err)
 	}
 
-	// Apply model tier defaults: xl → l, xs → s.
-	applyModelTierDefaults(cfg)
-
-	// Override from environment (always applied)
-	if v := os.Getenv("ORQESTRA_VALIDATOR_MODEL_REF"); v != "" {
-		cfg.Validator.ModelRef = v
-	}
-	if v := os.Getenv("ORQESTRA_WORK_VALIDATOR_MODEL_REF"); v != "" {
-		cfg.QA.ModelRef = v
+	// Check for forbidden legacy keys.
+	if err := checkForbiddenKeys(data); err != nil {
+		return nil, fmt.Errorf("config %q: %w", path, err)
 	}
 
 	// Validate: every model's provider key must exist
@@ -228,58 +214,64 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// applyModelTierDefaults copies model definitions for unset tiers:
-// x-large defaults to large, x-small defaults to small.
-func applyModelTierDefaults(cfg *Config) {
-	if cfg.Models == nil {
-		return
+// checkForbiddenKeys rejects legacy config keys that have been removed.
+func checkForbiddenKeys(data []byte) error {
+	var raw map[string]yaml.Node
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil // validation will catch parse errors
 	}
-	if _, hasXL := cfg.Models["x-large"]; !hasXL {
-		if l, hasL := cfg.Models["large"]; hasL {
-			cfg.Models["x-large"] = l
+	forbidden := map[string]string{
+		"validator":       "The 'validator' role has been replaced by 'planner'. Rename 'validator:' to 'planner:' and update model/prompt.",
+		"qa":              "The 'qa' role has been removed. Worker self-validates via session continuation. Remove the 'qa:' section.",
+		"project_manager": "The 'project_manager' role has been removed. The planner structures work packages for the worker. Remove the 'project_manager:' section.",
+	}
+	for key, msg := range forbidden {
+		if _, ok := raw[key]; ok {
+			return fmt.Errorf("forbidden config key %q: %s", key, msg)
 		}
 	}
-	if _, hasXS := cfg.Models["x-small"]; !hasXS {
-		if s, hasS := cfg.Models["small"]; hasS {
-			cfg.Models["x-small"] = s
-		}
-	}
+	return nil
 }
 
 // validate checks that all model references point to existing providers.
 func (c *Config) validate() error {
-	if c.Planner.ModelRef == "" {
-		return fmt.Errorf("missing mandatory planner.model_ref parameter")
+	if c.Researcher.Model == "" {
+		return fmt.Errorf("missing mandatory researcher.model parameter")
 	}
-	if c.Worker.ModelRef == "" {
-		return fmt.Errorf("missing mandatory worker.model_ref parameter")
+	if c.Planner.Model == "" {
+		return fmt.Errorf("missing mandatory planner.model parameter")
 	}
-	if c.Validator.ModelRef == "" {
-		return fmt.Errorf("missing mandatory validator.model_ref parameter")
+	if c.Worker.Model == "" {
+		return fmt.Errorf("missing mandatory worker.model parameter")
 	}
-	if c.QA.ModelRef == "" {
-		return fmt.Errorf("missing mandatory work_validator.model_ref parameter")
+	if c.Utility == "" {
+		return fmt.Errorf("missing mandatory utility parameter")
 	}
 
-	// Verify pipeline model_refs resolve to defined model entries.
+	// Verify pipeline model refs resolve to defined model entries.
 	for _, ref := range []struct{ role, ref string }{
-		{"planner", c.Planner.ModelRef},
-		{"worker", c.Worker.ModelRef},
-		{"validator", c.Validator.ModelRef},
-		{"qa", c.QA.ModelRef},
+		{"researcher", c.Researcher.Model},
+		{"planner", c.Planner.Model},
+		{"worker", c.Worker.Model},
+		{"utility", c.Utility},
 	} {
 		if _, ok := c.Models[ref.ref]; !ok {
-			return fmt.Errorf("%s.model_ref %q not found in models (define model tier %q in your provider config)", ref.role, ref.ref, ref.ref)
+			// Case-insensitive lookup
+			found := false
+			for k := range c.Models {
+				if strings.EqualFold(k, ref.ref) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("%s.model %q not found in models (define model %q in your provider config)", ref.role, ref.ref, ref.ref)
+			}
 		}
 	}
-	if c.Gateway.ModelRef != "" {
-		if _, ok := c.Models[c.Gateway.ModelRef]; !ok {
-			return fmt.Errorf("gateway.model_ref %q not found in models (define model tier %q in your provider config)", c.Gateway.ModelRef, c.Gateway.ModelRef)
-		}
-	}
-	if c.ProjectManager.ModelRef != "" {
-		if _, ok := c.Models[c.ProjectManager.ModelRef]; !ok {
-			return fmt.Errorf("project_manager.model_ref %q not found in models (define model tier %q in your provider config)", c.ProjectManager.ModelRef, c.ProjectManager.ModelRef)
+	if c.Gateway.Model != "" {
+		if _, ok := c.Models[c.Gateway.Model]; !ok {
+			return fmt.Errorf("gateway.model %q not found in models (define model %q in your provider config)", c.Gateway.Model, c.Gateway.Model)
 		}
 	}
 
@@ -353,8 +345,19 @@ func interpolateEnv(s string) string {
 }
 
 // ResolveModel resolves a model name from the models map into a ResolvedModel.
+// Lookup is case-insensitive.
 func (c *Config) ResolveModel(name string) (ResolvedModel, error) {
 	mc, ok := c.Models[name]
+	if !ok {
+		// Case-insensitive fallback
+		for k, v := range c.Models {
+			if strings.EqualFold(k, name) {
+				mc = v
+				ok = true
+				break
+			}
+		}
+	}
 	if !ok {
 		return ResolvedModel{}, fmt.Errorf("model %q not found in config", name)
 	}
@@ -384,9 +387,12 @@ func (c *Config) RuntimeOptions(name string) (ModelRuntimeOptions, error) {
 	}, nil
 }
 
-// ResolveSmallModel resolves the "small" tier model. Returns nil if not defined.
-func (c *Config) ResolveSmallModel() *ResolvedModel {
-	resolved, err := c.ResolveModel("small")
+// ResolveUtilityModel resolves the utility model. Returns nil if not defined.
+func (c *Config) ResolveUtilityModel() *ResolvedModel {
+	if c.Utility == "" {
+		return nil
+	}
+	resolved, err := c.ResolveModel(c.Utility)
 	if err != nil {
 		return nil
 	}

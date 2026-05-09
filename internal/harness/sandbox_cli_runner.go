@@ -52,7 +52,7 @@ func (r *SandboxCLIRunner) RunPrint(ctx context.Context, prompt, systemPrompt st
 	if err != nil {
 		return RunResult{Output: output}, err
 	}
-	return RunResult{Output: output, Usage: extractJSONUsage(output)}, nil
+	return RunResult{Output: output, Usage: extractJSONUsage(output), SessionID: extractStreamSessionID(output)}, nil
 }
 
 // RunStreaming runs the claude CLI with streaming output under seatbelt.
@@ -62,7 +62,17 @@ func (r *SandboxCLIRunner) RunStreaming(ctx context.Context, prompt, systemPromp
 	if err != nil {
 		return RunResult{Output: output}, err
 	}
-	return RunResult{Output: output, Usage: extractStreamUsage(output)}, nil
+	return RunResult{Output: output, Usage: extractStreamUsage(output), SessionID: extractStreamSessionID(output)}, nil
+}
+
+// RunContinue resumes a previous session under seatbelt.
+func (r *SandboxCLIRunner) RunContinue(ctx context.Context, sessionID, prompt string, stdout io.Writer) (RunResult, error) {
+	args := []string{"claude", "--resume", sessionID, "--dangerously-skip-permissions", "-p", prompt, "--output-format", "stream-json", "--verbose"}
+	output, err := r.run(ctx, args, stdout)
+	if err != nil {
+		return RunResult{Output: output}, err
+	}
+	return RunResult{Output: output, Usage: extractStreamUsage(output), SessionID: extractStreamSessionID(output)}, nil
 }
 
 func (r *SandboxCLIRunner) buildCommand(prompt, systemPrompt string, streaming bool) []string {
@@ -152,4 +162,25 @@ func extractStreamUsage(raw string) *TokenUsage {
 		}
 	}
 	return last
+}
+
+// extractStreamSessionID scans stream-json lines for a session_id in the result event.
+func extractStreamSessionID(raw string) string {
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var event struct {
+			Type      string `json:"type"`
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+		if event.SessionID != "" {
+			return event.SessionID
+		}
+	}
+	return ""
 }

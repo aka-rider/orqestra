@@ -2,7 +2,7 @@
 # Usage: orqestra --config flash
 #
 # Ultra-fast iteration for quick checks, small tasks, and experiments.
-# Uses Gemini 3.1 Flash (preview) for every tier — cheap and snappy.
+# Uses Gemini 3.1 Flash (preview) for every role — cheap and snappy.
 
 providers:
   copilot-proxy:
@@ -11,21 +11,28 @@ providers:
     type: openai
 
 models:
-  large:
+  flash:
     provider: copilot-proxy
     model: gemini-3.1-flash
 
-  small:
-    provider: copilot-proxy
-    model: gemini-3.1-flash
+researcher:
+  model: flash
+
+planner:
+  model: flash
+
+worker:
+  model: flash
+
+utility: flash
 
 sandbox:
   max_lifetime: 20m
 
 retry:
+  researcher_attempts: 1
   planner_attempts: 1
-  plan_validation_repair: 1
-  work_validation_repair: 1
+  worker_validation_retries: 1
 
 worker:
   timeout: 15m
