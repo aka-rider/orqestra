@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
@@ -848,8 +850,9 @@ func (m Model) viewStreaming(width int) string {
 
 	var streamAgent string
 	var streamLines []string
+	var activities []orchestrator.Activity
 	if m.streamBuf != nil {
-		streamAgent, streamLines = m.streamBuf.Snapshot()
+		streamAgent, streamLines, activities = m.streamBuf.Snapshot()
 	}
 
 	b.WriteString(fmt.Sprintf(" Phase: %s", m.phase))
@@ -857,6 +860,12 @@ func (m Model) viewStreaming(width int) string {
 		b.WriteString(fmt.Sprintf("  (%s)", streamAgent))
 	}
 	b.WriteString("\n")
+
+	// Activity bar: show recent tool invocations
+	if len(activities) > 0 {
+		b.WriteString(renderActivityBar(activities, width))
+		b.WriteString("\n")
+	}
 
 	if len(streamLines) > 0 {
 		b.WriteString(dividerStyle.Render(strings.Repeat("─", width-2)))
@@ -880,6 +889,62 @@ func (m Model) viewStreaming(width int) string {
 		}
 	}
 	return b.String()
+}
+
+// renderActivityBar renders the last few tool activities as a compact single-line bar.
+// File paths are rendered as OSC 8 terminal hyperlinks (clickable in iTerm2, Kitty, etc).
+func renderActivityBar(activities []orchestrator.Activity, width int) string {
+	const maxShow = 5
+
+	start := 0
+	if len(activities) > maxShow {
+		start = len(activities) - maxShow
+	}
+	recent := activities[start:]
+
+	var b strings.Builder
+	b.WriteString(" ")
+	for i, act := range recent {
+		if i > 0 {
+			b.WriteString(activitySepStyle.Render("  "))
+		}
+		b.WriteString(activityIconStyle.Render("⚡"))
+		b.WriteString(" ")
+		b.WriteString(activityToolStyle.Render(act.Tool))
+		if act.Detail != "" {
+			b.WriteString(" ")
+			label := act.Detail
+			// For file-path tools, make the path a clickable OSC 8 hyperlink
+			if isFilePathTool(act.Tool) && act.Detail != "" {
+				label = fileHyperlink(act.Detail)
+			}
+			b.WriteString(activityDetailStyle.Render(label))
+		}
+	}
+
+	// Use ANSI-aware MaxWidth to avoid cutting mid-escape-sequence or mid-rune
+	return lipgloss.NewStyle().MaxWidth(width).Render(b.String())
+}
+
+// isFilePathTool returns true if the tool's detail field is a file path.
+func isFilePathTool(tool string) bool {
+	switch tool {
+	case "Read", "Write", "MultiEdit", "TodoRead", "TodoWrite":
+		return true
+	}
+	return false
+}
+
+// fileHyperlink wraps a file path in an OSC 8 terminal hyperlink sequence.
+// Terminals that support OSC 8 (iTerm2, Kitty, WezTerm, Windows Terminal)
+// render clickable links; others show the text with no visible difference.
+func fileHyperlink(path string) string {
+	// Convert to absolute path for file:// URI
+	if !strings.HasPrefix(path, "/") {
+		// Best-effort: use path as-is for relative paths
+		return path
+	}
+	return fmt.Sprintf("\033]8;;file://%s\033\\%s\033]8;;\033\\", path, filepath.Base(path))
 }
 
 func (m Model) viewCoaching(_ int) string {

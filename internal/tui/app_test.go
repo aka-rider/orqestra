@@ -737,7 +737,7 @@ func TestTUI_StreamingOutputReset(t *testing.T) {
 	stream.SetAgent("gateway")
 	stream.Append("gateway output line")
 
-	agentID, lines := stream.Snapshot()
+	agentID, lines, _ := stream.Snapshot()
 	if agentID != "gateway" {
 		t.Errorf("expected agent 'gateway', got %q", agentID)
 	}
@@ -748,7 +748,7 @@ func TestTUI_StreamingOutputReset(t *testing.T) {
 	// Simulate second agent — buffer should reset
 	stream.SetAgent("planner")
 
-	agentID2, lines2 := stream.Snapshot()
+	agentID2, lines2, _ := stream.Snapshot()
 	if agentID2 != "planner" {
 		t.Errorf("expected agent 'planner', got %q", agentID2)
 	}
@@ -768,7 +768,7 @@ func TestStreamBuffer_TokenAccumulation(t *testing.T) {
 	stream.Append(" the")
 	stream.Append(" request")
 
-	_, lines := stream.Snapshot()
+	_, lines, _ := stream.Snapshot()
 	if len(lines) != 1 {
 		t.Errorf("expected 1 line from token-level writes, got %d: %v", len(lines), lines)
 	}
@@ -779,7 +779,7 @@ func TestStreamBuffer_TokenAccumulation(t *testing.T) {
 	// Now write a newline to start a new line
 	stream.Append(".\nNext line here")
 
-	_, lines = stream.Snapshot()
+	_, lines, _ = stream.Snapshot()
 	if len(lines) != 2 {
 		t.Errorf("expected 2 lines after newline, got %d: %v", len(lines), lines)
 	}

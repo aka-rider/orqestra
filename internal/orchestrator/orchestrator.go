@@ -14,14 +14,23 @@ import (
 	"github.com/xiii/orqestra/internal/harness"
 )
 
+// Activity records a single tool invocation observed in the agent stream.
+type Activity struct {
+	Tool   string // e.g. "Read", "Bash", "Write"
+	Detail string // human-readable context, e.g. file path or truncated command
+}
+
+const maxActivities = 20
+
 // StreamBuffer is a concurrent-safe line buffer shared between the orchestrator
 // (writer) and the TUI (reader). The TUI polls it on tick to avoid channel
 // backpressure that would block the subprocess.
 type StreamBuffer struct {
-	mu       sync.Mutex
-	lines    []string
-	agentID  string
-	maxLines int
+	mu         sync.Mutex
+	lines      []string
+	agentID    string
+	maxLines   int
+	activities []Activity
 }
 
 // NewStreamBuffer creates a StreamBuffer with the given line capacity.
@@ -38,6 +47,7 @@ func (sb *StreamBuffer) SetAgent(id string) {
 	defer sb.mu.Unlock()
 	sb.agentID = id
 	sb.lines = nil
+	sb.activities = nil
 }
 
 // Append adds text to the buffer, accumulating into the current line
@@ -71,13 +81,25 @@ func (sb *StreamBuffer) Append(text string) {
 	}
 }
 
-// Snapshot returns the current agent ID and a copy of buffered lines.
-func (sb *StreamBuffer) Snapshot() (agentID string, lines []string) {
+// AppendActivity records a tool invocation in the activity ring.
+func (sb *StreamBuffer) AppendActivity(tool, detail string) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	sb.activities = append(sb.activities, Activity{Tool: tool, Detail: detail})
+	if len(sb.activities) > maxActivities {
+		sb.activities = sb.activities[len(sb.activities)-maxActivities:]
+	}
+}
+
+// Snapshot returns the current agent ID, a copy of buffered lines, and recent activities.
+func (sb *StreamBuffer) Snapshot() (agentID string, lines []string, activities []Activity) {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
 	cp := make([]string, len(sb.lines))
 	copy(cp, sb.lines)
-	return sb.agentID, cp
+	act := make([]Activity, len(sb.activities))
+	copy(act, sb.activities)
+	return sb.agentID, cp, act
 }
 
 // EventType classifies orchestrator events emitted to the TUI.
@@ -619,7 +641,8 @@ func usageOut(u *harness.TokenUsage) int64 {
 	return u.OutputTokens
 }
 
-// streamWriter implements io.Writer by appending to a StreamBuffer.
+// streamWriter implements io.Writer and harness.ActivitySink by appending
+// to a StreamBuffer.
 type streamWriter struct {
 	buf *StreamBuffer
 }
@@ -629,4 +652,9 @@ func (w *streamWriter) Write(p []byte) (int, error) {
 		w.buf.Append(string(p))
 	}
 	return len(p), nil
+}
+
+// OnToolUse implements harness.ActivitySink.
+func (w *streamWriter) OnToolUse(name, detail string) {
+	w.buf.AppendActivity(name, detail)
 }

@@ -6,6 +6,67 @@ import (
 	"strings"
 )
 
+// ActivitySink receives tool-use notifications from the harness during streaming.
+// Implementations can use this to display tool activity in the TUI.
+// The harness checks for this interface via type assertion on the io.Writer
+// passed to RunStreaming/RunContinue, so callers that don't implement it are
+// unaffected.
+type ActivitySink interface {
+	OnToolUse(name, detail string)
+}
+
+// ToolDetail extracts a human-readable summary from a tool invocation's
+// name and raw JSON arguments. Used to populate the TUI activity bar.
+func ToolDetail(name string, args json.RawMessage) string {
+	// MCP tools: mcp__server__tool → "server/tool"
+	if strings.HasPrefix(name, "mcp__") {
+		parts := strings.SplitN(name, "__", 3)
+		if len(parts) == 3 {
+			return parts[1] + "/" + parts[2]
+		}
+		return name
+	}
+
+	if len(args) == 0 {
+		return ""
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(args, &fields); err != nil {
+		return ""
+	}
+
+	switch name {
+	case "Read", "Write", "MultiEdit":
+		return extractString(fields, "file_path")
+	case "Bash":
+		cmd := extractString(fields, "command")
+		if len(cmd) > 60 {
+			return cmd[:60] + "…"
+		}
+		return cmd
+	case "Grep", "Glob":
+		return extractString(fields, "pattern")
+	case "TodoRead", "TodoWrite":
+		return extractString(fields, "file_path")
+	default:
+		return ""
+	}
+}
+
+// extractString pulls a string value from a map of raw JSON fields.
+func extractString(fields map[string]json.RawMessage, key string) string {
+	raw, ok := fields[key]
+	if !ok {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return s
+}
+
 // ParseLLMOutput extracts structured JSON from Claude CLI output into target.
 // Handles: raw JSON, markdown code-fenced JSON, and Claude result envelopes.
 func ParseLLMOutput(raw string, target any) error {

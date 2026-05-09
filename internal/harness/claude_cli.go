@@ -247,6 +247,12 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 			if event.Delta.Text != "" {
 				stdout.Write([]byte(event.Delta.Text))
 			}
+		case "content_block_start":
+			if sink, ok := stdout.(ActivitySink); ok {
+				if name, args := event.extractToolUse(); name != "" {
+					sink.OnToolUse(name, ToolDetail(name, args))
+				}
+			}
 		case "result":
 			result = event.Result
 			resultIsError = event.IsError
@@ -260,7 +266,6 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 					TotalTokens:  event.Usage.InputTokens + event.Usage.OutputTokens,
 				}
 			}
-			// system, tool_use, tool_result, etc. — skip for display
 		}
 	}
 
@@ -337,6 +342,12 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 			if event.Delta.Text != "" && stdout != nil {
 				stdout.Write([]byte(event.Delta.Text))
 			}
+		case "content_block_start":
+			if sink, ok := stdout.(ActivitySink); ok {
+				if name, args := event.extractToolUse(); name != "" {
+					sink.OnToolUse(name, ToolDetail(name, args))
+				}
+			}
 		case "result":
 			result = event.Result
 			resultIsError = event.IsError
@@ -370,14 +381,15 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 
 // streamEvent represents a parsed event from Claude CLI's stream-json output.
 type streamEvent struct {
-	Type      string          `json:"type"`
-	Subtype   string          `json:"subtype,omitempty"`
-	Result    string          `json:"result,omitempty"`
-	IsError   bool            `json:"is_error,omitempty"`
-	Delta     streamDeltaText `json:"delta,omitempty"`
-	Message   json.RawMessage `json:"message,omitempty"`
-	Usage     *streamUsage    `json:"usage,omitempty"`
-	SessionID string          `json:"session_id,omitempty"`
+	Type         string          `json:"type"`
+	Subtype      string          `json:"subtype,omitempty"`
+	Result       string          `json:"result,omitempty"`
+	IsError      bool            `json:"is_error,omitempty"`
+	Delta        streamDeltaText `json:"delta,omitempty"`
+	Message      json.RawMessage `json:"message,omitempty"`
+	ContentBlock json.RawMessage `json:"content_block,omitempty"`
+	Usage        *streamUsage    `json:"usage,omitempty"`
+	SessionID    string          `json:"session_id,omitempty"`
 }
 
 // streamUsage captures token usage from the Claude CLI result event.
@@ -412,6 +424,23 @@ func (e *streamEvent) extractAssistantText() string {
 		}
 	}
 	return b.String()
+}
+
+// extractToolUse extracts the tool name and input args from a content_block_start event.
+// Claude CLI emits: {"type":"content_block_start","content_block":{"type":"tool_use","name":"Read","input":{...}}}
+func (e *streamEvent) extractToolUse() (name string, args json.RawMessage) {
+	if e.ContentBlock == nil {
+		return "", nil
+	}
+	var block struct {
+		Type  string          `json:"type"`
+		Name  string          `json:"name"`
+		Input json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(e.ContentBlock, &block); err == nil && block.Type == "tool_use" {
+		return block.Name, block.Input
+	}
+	return "", nil
 }
 
 // BuildModelEnv returns the environment variables needed to route the claude binary

@@ -300,3 +300,67 @@ func (s *switchingMockRunner) RunContinue(_ context.Context, _, _ string, _ io.W
 	*s.counter++
 	return harness.RunResult{Output: s.outputs[idx]}, nil
 }
+
+func TestStreamBuffer_AppendActivity(t *testing.T) {
+	sb := NewStreamBuffer(200)
+	sb.SetAgent("worker")
+
+	sb.AppendActivity("Read", "go.mod")
+	sb.AppendActivity("Bash", "ls -la")
+
+	agentID, _, acts := sb.Snapshot()
+	if agentID != "worker" {
+		t.Errorf("agentID = %q, want worker", agentID)
+	}
+	if len(acts) != 2 {
+		t.Fatalf("len(activities) = %d, want 2", len(acts))
+	}
+	if acts[0].Tool != "Read" || acts[0].Detail != "go.mod" {
+		t.Errorf("activity[0] = %+v, want {Read go.mod}", acts[0])
+	}
+	if acts[1].Tool != "Bash" || acts[1].Detail != "ls -la" {
+		t.Errorf("activity[1] = %+v, want {Bash ls -la}", acts[1])
+	}
+}
+
+func TestStreamBuffer_SetAgentClearsActivities(t *testing.T) {
+	sb := NewStreamBuffer(200)
+	sb.SetAgent("worker")
+	sb.AppendActivity("Read", "go.mod")
+	sb.SetAgent("planner")
+
+	_, _, acts := sb.Snapshot()
+	if len(acts) != 0 {
+		t.Errorf("activities not cleared on SetAgent, got %d", len(acts))
+	}
+}
+
+func TestStreamBuffer_ActivityRingOverflow(t *testing.T) {
+	sb := NewStreamBuffer(200)
+	sb.SetAgent("worker")
+	for i := 0; i < 30; i++ {
+		sb.AppendActivity("Read", "file")
+	}
+
+	_, _, acts := sb.Snapshot()
+	if len(acts) != maxActivities {
+		t.Errorf("len(activities) = %d, want %d (maxActivities)", len(acts), maxActivities)
+	}
+}
+
+func TestStreamWriter_ImplementsActivitySink(t *testing.T) {
+	sb := NewStreamBuffer(200)
+	sb.SetAgent("test")
+	w := &streamWriter{buf: sb}
+
+	// Verify it satisfies the interface by calling OnToolUse
+	w.OnToolUse("Read", "go.mod")
+
+	_, _, acts := sb.Snapshot()
+	if len(acts) != 1 {
+		t.Fatalf("expected 1 activity, got %d", len(acts))
+	}
+	if acts[0].Tool != "Read" {
+		t.Errorf("tool = %q, want Read", acts[0].Tool)
+	}
+}

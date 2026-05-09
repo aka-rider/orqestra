@@ -45,4 +45,21 @@ var (
 
 	streamStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("7"))
+
+	// Activity bar styles
+	activityIconStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("3")).
+				Faint(true)
+
+	activityToolStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("14")).
+				Faint(true).
+				Bold(true)
+
+	activityDetailStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("244")).
+				Faint(true)
+
+	activitySepStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240"))
 )
