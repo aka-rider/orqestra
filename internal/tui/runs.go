@@ -39,7 +39,12 @@ func (m Model) viewRunsListScreen() string {
 			dur := formatDuration(run.Duration)
 			ts := run.Timestamp.Format("2006-01-02 15:04:05")
 
-			line1 := fmt.Sprintf("  %s  %s  %s  %s", icon, ts, dur, run.Slug)
+			var tokens string
+			if run.TotalTokens > 0 {
+				tokens = fmt.Sprintf("  %dk tok", run.TotalTokens/1000)
+			}
+
+			line1 := fmt.Sprintf("  %s  %s  %s%s  %s", icon, ts, dur, tokens, run.Slug)
 			if i == m.runsCursor {
 				line1 = selectedStyle.Render(line1)
 			}
@@ -173,6 +178,12 @@ func (m Model) handleRunsListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.runsCursor < len(m.runs)-1 {
 			m.runsCursor++
 		}
+		return m, nil
+	case tea.KeyPgUp:
+		m.runsVP.HalfViewUp()
+		return m, nil
+	case tea.KeyPgDown:
+		m.runsVP.HalfViewDown()
 		return m, nil
 	}
 

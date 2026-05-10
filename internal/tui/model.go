@@ -1457,7 +1457,7 @@ func (m Model) viewFooter() string {
 	case ContentAgentHistory:
 		return keyStyle.Render(" [Esc] back to live                                        [?] help  [D] expand  [S] stop  [N] new  [^C^C] quit")
 	case ContentCompletion:
-		return keyStyle.Render(" [N] new run | [Q] quit                                    [?] help")
+		return keyStyle.Render(" [N] new run | [Ctrl+R] runs | [Q] quit                    [?] help")
 	default:
 		return keyStyle.Render(" [S] stop | [N] new run                                    [?] help  [D] expand  [1-9] agent  [^C^C] quit")
 	}

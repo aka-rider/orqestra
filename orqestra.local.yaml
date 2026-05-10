@@ -40,9 +40,9 @@ utility: small
 sandbox:
   max_lifetime: 35m
   extra_env:
-    DISABLE_NON_ESSENTIAL_MODEL_CALLS: "0"
+    DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1"
     CLAUDE_CODE_ATTRIBUTION_HEADER: "0"
-    ANTHROPIC_SMALL_FAST_MODEL: "qwen3.6"
+    ANTHROPIC_SMALL_FAST_MODEL: "small"
 
 gateway:
   mcp_servers: []

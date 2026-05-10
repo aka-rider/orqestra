@@ -69,12 +69,13 @@ type StepMeta struct {
 
 // RunSummary is a lightweight overview of a past pipeline run.
 type RunSummary struct {
-	Timestamp time.Time
-	Slug      string
-	Path      string
-	Prompt    string
-	Status    string        // from last *_meta.json, or empty
-	Duration  time.Duration // derived from first start → last end in step metas
+	Timestamp   time.Time
+	Slug        string
+	Path        string
+	Prompt      string
+	Status      string        // from last *_meta.json, or empty
+	Duration    time.Duration // derived from first start → last end in step metas
+	TotalTokens int64         // sum of input+output tokens across all steps
 }
 
 // RunDetail is the full data for a single historical run.
@@ -113,15 +114,16 @@ func ListRuns(repoPath string) ([]RunSummary, error) {
 		}
 
 		prompt := readStringArtifact(dirPath, "prompt.md")
-		status, duration := lastStepStatus(dirPath)
+		status, duration, totalTokens := lastStepStatus(dirPath)
 
 		runs = append(runs, RunSummary{
-			Timestamp: ts,
-			Slug:      slug,
-			Path:      dirPath,
-			Prompt:    prompt,
-			Status:    status,
-			Duration:  duration,
+			Timestamp:   ts,
+			Slug:        slug,
+			Path:        dirPath,
+			Prompt:      prompt,
+			Status:      status,
+			Duration:    duration,
+			TotalTokens: totalTokens,
 		})
 	}
 
@@ -137,16 +139,17 @@ func LoadRunDetail(runPath string) (RunDetail, error) {
 	ts, slug := parseSessionDirName(name)
 
 	prompt := readStringArtifact(runPath, "prompt.md")
-	status, duration := lastStepStatus(runPath)
+	status, duration, totalTokens := lastStepStatus(runPath)
 
 	detail := RunDetail{
 		RunSummary: RunSummary{
-			Timestamp: ts,
-			Slug:      slug,
-			Path:      runPath,
-			Prompt:    prompt,
-			Status:    status,
-			Duration:  duration,
+			Timestamp:   ts,
+			Slug:        slug,
+			Path:        runPath,
+			Prompt:      prompt,
+			Status:      status,
+			Duration:    duration,
+			TotalTokens: totalTokens,
 		},
 		PlanMarkdown: readStringArtifact(runPath, "final_plan.md"),
 		WorkerOutput: readStringArtifact(runPath, "worker_output.txt"),
@@ -198,11 +201,11 @@ func readStringArtifact(dir, name string) string {
 }
 
 // lastStepStatus reads all *_meta.json in a directory and returns the status
-// of the last step by end time, and the total duration from first start to last end.
-func lastStepStatus(dir string) (status string, duration time.Duration) {
+// of the last step by end time, the total duration, and the total token count.
+func lastStepStatus(dir string) (status string, duration time.Duration, totalTokens int64) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return "", 0
+		return "", 0, 0
 	}
 
 	var earliest, latest time.Time
@@ -218,6 +221,7 @@ func lastStepStatus(dir string) (status string, duration time.Duration) {
 		if err := json.Unmarshal(data, &meta); err != nil {
 			continue
 		}
+		totalTokens += meta.InputTokens + meta.OutputTokens
 		if earliest.IsZero() || meta.StartTime.Before(earliest) {
 			earliest = meta.StartTime
 		}
@@ -229,5 +233,5 @@ func lastStepStatus(dir string) (status string, duration time.Duration) {
 	if !earliest.IsZero() && !latest.IsZero() {
 		duration = latest.Sub(earliest)
 	}
-	return status, duration
+	return status, duration, totalTokens
 }
