@@ -64,6 +64,7 @@ type ResearcherConfig struct {
 	AllowedTools    []string  `yaml:"allowed_tools"`
 	DisallowedTools []string  `yaml:"disallowed_tools"`
 	MCPServers      *[]string `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
+	PermissionMode  string    `yaml:"permission_mode"`
 }
 
 // PlannerConfig is used for the senior architect planner.
@@ -73,6 +74,7 @@ type PlannerConfig struct {
 	AllowedTools    []string  `yaml:"allowed_tools"`
 	DisallowedTools []string  `yaml:"disallowed_tools"`
 	MCPServers      *[]string `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
+	PermissionMode  string    `yaml:"permission_mode"`
 }
 
 type WorkerConfig struct {
@@ -147,6 +149,7 @@ type GatewayConfig struct {
 	AllowedTools    []string  `yaml:"allowed_tools"`
 	DisallowedTools []string  `yaml:"disallowed_tools"`
 	MCPServers      *[]string `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
+	PermissionMode  string    `yaml:"permission_mode"`
 }
 
 // SandboxConfig configures macOS-native sandbox (sandbox-exec) agent sandboxing.

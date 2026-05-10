@@ -142,6 +142,14 @@ func WithDisallowedTools(tools []string) ClaudeCLIOption {
 	return WithExtraArgs("--disallowed-tools", strings.Join(tools, ","))
 }
 
+// WithPermissionMode sets the --permission-mode flag (e.g. "plan", "default").
+func WithPermissionMode(mode string) ClaudeCLIOption {
+	if mode == "" {
+		return func(*ClaudeCLI) {}
+	}
+	return WithExtraArgs("--permission-mode", mode)
+}
+
 // WithBinary overrides the claude binary path.
 func WithBinary(path string) ClaudeCLIOption {
 	return func(c *ClaudeCLI) {
