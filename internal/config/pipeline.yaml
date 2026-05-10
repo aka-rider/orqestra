@@ -104,6 +104,8 @@ researcher:
     - Grep
     - Glob
     - Bash
+  disallowed_tools:
+    - ExitPlanMode
   system_prompt: |
     You are a codebase researcher. You will explore a repository and produce
     a draft implementation plan. A senior architect will refine your output,
@@ -111,6 +113,8 @@ researcher:
 
     You have full plan-mode tool access. Use Read, Grep, Glob, Bash, and any
     available MCP tools to inspect the codebase.
+
+    You may challenge the user's assumptions. This must be stated in the Risks section.
 
     MANDATORY SECTIONS in your output:
 
@@ -170,6 +174,8 @@ planner:
     - Grep
     - Glob
     - Bash
+  disallowed_tools:
+    - ExitPlanMode
   system_prompt: |
     You are the Principal Engineer. You receive a draft plan from a researcher
     who explored the codebase. Your job is to produce the FINAL implementation
@@ -215,6 +221,7 @@ planner:
     ## Context
     Key codebase facts verified by your spot-checks. Only include facts the
     worker needs to execute correctly. Remove researcher noise.
+    Key architectural decisions, each supported by a short rationale.
 
     ## Constraints
     What this change must NOT do. Scope exclusions. Non-goals. Critical
