@@ -6,19 +6,20 @@ Good user prompts can already drive good results with or without the gateway sys
 
 Signal: correct task shaping by prompt class.
 
-| Prompt class | Bad gateway | Good gateway policy |
-| ------------ | ----------- | ------------------- |
-| Small bounded task | Widens a valid narrow ask into architecture work | Preserve and compress. Accept without widening. |
-| Ambiguous task | Passes vague work downstream | Coach to resolve the end state. |
-| Suspicious local fix | Always accepts the local patch or always asks "why" | Escalate only when prompt cues suggest a workaround, recurring symptom, or cross-cutting problem. |
-| Already strategic task | Rewrites the user's framing | Preserve the framing faithfully. |
-| Fantasy / infeasible task | Accepts or asks vague follow-ups | Narrow or deflect into executable scope. |
+| Prompt class              | Bad gateway                                         | Good gateway policy                                                                               |
+| ------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Small bounded task        | Widens a valid narrow ask into architecture work    | Preserve and compress. Accept without widening.                                                   |
+| Ambiguous task            | Passes vague work downstream                        | Coach to resolve the end state.                                                                   |
+| Suspicious local fix      | Always accepts the local patch or always asks "why" | Escalate only when prompt cues suggest a workaround, recurring symptom, or cross-cutting problem. |
+| Already strategic task    | Rewrites the user's framing                         | Preserve the framing faithfully.                                                                  |
+| Fantasy / infeasible task | Accepts or asks vague follow-ups                    | Narrow or deflect into executable scope.                                                          |
 
 The current ACCEPT BIAS rule, _"User names a file -> accept"_, is too blunt. It protects small tasks, but it also suppresses justified escalation. The target is not "always ask WHY". The target is "ask WHY only when prompt evidence says widening is useful."
 
 Decision: treat the system prompt as a policy layer, not a quality booster.
 
 Problems solved:
+
 - avoids giving the prompt credit for cases where the user prompt already saturates the outcome
 - protects Orqestra's small-task UX from unnecessary coaching
 - creates a causal link between prompt text and gateway behavior
@@ -26,6 +27,7 @@ Problems solved:
 Decision: root cause extraction is conditional escalation, not the universal job.
 
 Problems solved:
+
 - prevents blanket widening of valid small asks
 - defines when escalation is helpful instead of treating it as always good
 - makes the thesis falsifiable
@@ -49,17 +51,18 @@ Human-authored. Human-reviewed. 50 cases. Ground truth must be defensible on bot
 
 Each case: `{id, class, input, expected_verdict, expected_policy_action, expected_behavior}`.
 
-| Class | Count | What it tests |
-| ----- | ----- | ------------- |
-| Small bounded | 15 | Valid narrow asks that should be preserved and compressed |
-| Ambiguous | 10 | Asks with multiple plausible end states that should be clarified |
-| Suspicious local fix | 10 | Local patches that may hide a larger problem and should escalate only when prompt cues justify it |
-| Already strategic | 5 | High-signal prompts that already frame the work correctly |
-| Fantasy / infeasible | 10 | Unbounded asks that should be narrowed or deflected |
+| Class                | Count | What it tests                                                                                     |
+| -------------------- | ----- | ------------------------------------------------------------------------------------------------- |
+| Small bounded        | 15    | Valid narrow asks that should be preserved and compressed                                         |
+| Ambiguous            | 10    | Asks with multiple plausible end states that should be clarified                                  |
+| Suspicious local fix | 10    | Local patches that may hide a larger problem and should escalate only when prompt cues justify it |
+| Already strategic    | 5     | High-signal prompts that already frame the work correctly                                         |
+| Fantasy / infeasible | 10    | Unbounded asks that should be narrowed or deflected                                               |
 
 Decision: classify cases by task shape, not by generic "depth."
 
 Problems solved:
+
 - defines the signal instead of using "noise reduction" as a loose proxy
 - makes small-task preservation visible as a first-class constraint
 - gives justified escalation and false escalation separate measurements
@@ -116,6 +119,7 @@ Standalone binary. Not a test file.
 Decision: compare baseline and candidate on the same user prompt.
 
 Problems solved:
+
 - isolates the system prompt contribution from the user prompt
 - shows where the system prompt matters and where it should be silent
 - makes regressions on small tasks visible instead of hiding them inside pooled averages
@@ -154,6 +158,7 @@ These diverge: verdict accuracy 100% + false escalation 20% = gateway gets `acce
 Decision: score the prompt on policy fit, not on generic quality or verbosity.
 
 Problems solved:
+
 - defines the signal instead of relying on vague "noise reduction"
 - gives zero-delta good-user-prompt cases the correct interpretation
 - prevents aggressive coaching from masquerading as improvement
@@ -205,7 +210,7 @@ One line per run, appended:
   "prompt_hash": "a1b2c3",
   "small_task_preservation": 0.94,
   "ambiguity_clarification": 0.82,
-  "fantasy_deflection": 0.90,
+  "fantasy_deflection": 0.9,
   "justified_escalation": 0.63,
   "false_escalation": 0.06
 }
@@ -228,17 +233,17 @@ Run 42 (prompt a1b2c3, model qwen3.6)
 
 ### Plateau detection
 
-If no target class metric improves > 2% over the last 5 runs and small-task preservation stays flat, print: *"Quality plateau. Last 5 prompt changes had no measurable policy effect."*
+If no target class metric improves > 2% over the last 5 runs and small-task preservation stays flat, print: _"Quality plateau. Last 5 prompt changes had no measurable policy effect."_
 
 ### Dual-model divergence
 
 When > 1 config provided, print divergence by prompt class:
 
-| Model A | Model B | Diagnosis |
-| ------- | ------- | --------- |
-| ✓       | ✓       | Prompt policy is clear |
-| ✓       | ✗       | Model capability gap |
-| ✗       | ✗       | Prompt policy is the bug |
+| Model A | Model B | Diagnosis                                     |
+| ------- | ------- | --------------------------------------------- |
+| ✓       | ✓       | Prompt policy is clear                        |
+| ✓       | ✗       | Model capability gap                          |
+| ✗       | ✗       | Prompt policy is the bug                      |
 | diverge |         | Prompt policy is ambiguous for smaller models |
 
 Target: divergence rate < 15%.
@@ -300,13 +305,13 @@ Schema changes come AFTER eval exists so we measure before/after.
 
 ## Token Budget
 
-| Operation | Cost |
-| --------- | ---- |
-| Baseline + candidate model calls (50 cases, 1 small model) | ~$0.02 |
-| Sonnet judge (50 paired cases) | ~$0.50 |
-| Opus escalation (~8 cases) | ~$0.30 |
-| **Full paired eval run, 1 model** | **~$1** |
-| **Targeted class re-run** | **~$0.20** |
+| Operation                                                  | Cost       |
+| ---------------------------------------------------------- | ---------- |
+| Baseline + candidate model calls (50 cases, 1 small model) | ~$0.02     |
+| Sonnet judge (50 paired cases)                             | ~$0.50     |
+| Opus escalation (~8 cases)                                 | ~$0.30     |
+| **Full paired eval run, 1 model**                          | **~$1**    |
+| **Targeted class re-run**                                  | **~$0.20** |
 
 ---
 

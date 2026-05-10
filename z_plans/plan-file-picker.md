@@ -8,7 +8,7 @@ A `bubbles/list`-style sub-model within the Elm architecture that intercepts `@`
 
 researcher's claudecode **MUST** receive this context as if they were natively provided by '@' syntax in the prompt of the claudecode itself.
 
-THis makes this feature a proxy.
+This makes orqestra to behave like a proxy.
 
 ---
 
