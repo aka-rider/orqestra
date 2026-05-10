@@ -11,13 +11,14 @@ import (
 
 // PromptScreen manages the task prompt input and file picker.
 type PromptScreen struct {
-	textarea  textarea.Model
-	fp        filePicker
-	fpActive  bool
-	fpAtStart int
-	fpQuery   string
-	width     int // set by parent for layout calculations
-	height    int // set by parent for layout calculations
+	textarea      textarea.Model
+	fp            filePicker
+	fpActive      bool
+	fpAtStart     int
+	fpQuery       string
+	width         int     // set by parent for layout calculations
+	height        int     // set by parent for layout calculations
+	PendingIntent tea.Msg // set by Update, consumed by parent
 }
 
 // NewPromptScreen creates a new prompt screen with initialized textarea.
@@ -66,15 +67,18 @@ func (s PromptScreen) Update(msg tea.Msg) (PromptScreen, tea.Cmd) {
 		if prompt == "" {
 			return s, nil
 		}
-		return s, intentCmd(StartPipelineIntent{Prompt: prompt, SkipGateway: false})
+		s.PendingIntent = StartPipelineIntent{Prompt: prompt, SkipGateway: false}
+		return s, nil
 	case tea.KeyCtrlS:
 		prompt := strings.TrimSpace(s.textarea.Value())
 		if prompt == "" {
 			return s, nil
 		}
-		return s, intentCmd(StartPipelineIntent{Prompt: prompt, SkipGateway: true})
+		s.PendingIntent = StartPipelineIntent{Prompt: prompt, SkipGateway: true}
+		return s, nil
 	case tea.KeyCtrlR:
-		return s, intentCmd(NavigateToRunsListIntent{})
+		s.PendingIntent = NavigateToRunsListIntent{}
+		return s, nil
 	default:
 		var cmd tea.Cmd
 		s.textarea, cmd = s.textarea.Update(msg)

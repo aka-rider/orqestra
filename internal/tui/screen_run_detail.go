@@ -14,12 +14,13 @@ import (
 
 // RunDetailScreen manages the run detail inspection view.
 type RunDetailScreen struct {
-	detail     agent.RunDetail
-	stepCursor int
-	logLines   []string
-	detailVP   viewport.Model
-	stepsVP    viewport.Model
-	logVP      viewport.Model
+	detail        agent.RunDetail
+	stepCursor    int
+	logLines      []string
+	detailVP      viewport.Model
+	stepsVP       viewport.Model
+	logVP         viewport.Model
+	PendingIntent tea.Msg // set by Update, consumed by parent
 }
 
 // NewRunDetailScreen creates a new run detail screen.
@@ -186,7 +187,8 @@ func (s RunDetailScreen) Update(msg tea.Msg) (RunDetailScreen, tea.Cmd) {
 
 	switch keyMsg.Type {
 	case tea.KeyEsc:
-		return s, intentCmd(NavigateBackIntent{})
+		s.PendingIntent = NavigateBackIntent{}
+		return s, nil
 	case tea.KeyUp:
 		s.logVP.LineUp(1)
 		return s, nil

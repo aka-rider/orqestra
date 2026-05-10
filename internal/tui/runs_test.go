@@ -214,7 +214,7 @@ func TestTUI_RunDetail_KeyNavigation(t *testing.T) {
 	}
 
 	// Esc returns to runs list
-	result, _ = sendKey(m, tea.KeyEsc)
+	result, _ := sendKey(m, tea.KeyEsc)
 	model = result.(Model)
 	if model.state != StateRunsList {
 		t.Errorf("expected StateRunsList after Esc, got %d", model.state)

@@ -11,9 +11,10 @@ import (
 
 // RunsListScreen manages the historical runs list view.
 type RunsListScreen struct {
-	runs     []agent.RunSummary
-	cursor   int
-	viewport viewport.Model
+	runs          []agent.RunSummary
+	cursor        int
+	viewport      viewport.Model
+	PendingIntent tea.Msg // set by Update, consumed by parent
 }
 
 // NewRunsListScreen creates a new runs list screen.
@@ -79,12 +80,14 @@ func (s RunsListScreen) Update(msg tea.Msg) (RunsListScreen, tea.Cmd) {
 
 	switch keyMsg.Type {
 	case tea.KeyEsc:
-		return s, intentCmd(NavigateBackIntent{})
+		s.PendingIntent = NavigateBackIntent{}
+		return s, nil
 	case tea.KeyEnter:
 		if len(s.runs) == 0 {
 			return s, nil
 		}
-		return s, intentCmd(NavigateToRunDetailIntent{RunIndex: s.cursor})
+		s.PendingIntent = NavigateToRunDetailIntent{RunIndex: s.cursor}
+		return s, nil
 	case tea.KeyUp:
 		if s.cursor > 0 {
 			s.cursor--
@@ -117,7 +120,8 @@ func (s RunsListScreen) Update(msg tea.Msg) (RunsListScreen, tea.Cmd) {
 			s.SyncViewport(s.viewport.Width)
 		}
 	case "q":
-		return s, intentCmd(NavigateBackIntent{})
+		s.PendingIntent = NavigateBackIntent{}
+		return s, nil
 	}
 	return s, nil
 }

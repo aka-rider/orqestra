@@ -70,6 +70,8 @@ type PipelineScreen struct {
 	sidebarVP   viewport.Model
 	dashboardVP viewport.Model
 	bounds      layoutBounds
+
+	PendingIntent tea.Msg // set by Update, consumed by parent
 }
 
 // NewPipelineScreen creates a new pipeline screen.
@@ -398,11 +400,11 @@ func (s PipelineScreen) handleCoachingKey(msg tea.KeyMsg) (PipelineScreen, tea.C
 		}
 		s.content = ContentStreaming
 		s.SyncViewports()
-		return s, intentCmd(SubmitGatewayIntent{Answers: answers})
+		s.PendingIntent = SubmitGatewayIntent{Answers: answers}; return s, nil
 	case tea.KeyCtrlS:
 		s.content = ContentStreaming
 		s.SyncViewports()
-		return s, intentCmd(SkipGatewayIntent{})
+		s.PendingIntent = SkipGatewayIntent{}; return s, nil
 	case tea.KeyTab:
 		if s.answerCursor < len(s.answerFields)-1 {
 			s.answerFields[s.answerCursor].Blur()
@@ -432,7 +434,7 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyMsg) (PipelineScreen, tea
 	case tea.KeyCtrlE:
 		if s.planFilePath != "" {
 			s.editorRunning = true
-			return s, intentCmd(OpenExternalEditorIntent{FilePath: s.planFilePath})
+			s.PendingIntent = OpenExternalEditorIntent{FilePath: s.planFilePath}; return s, nil
 		}
 		return s, nil
 	case tea.KeyEnter:
@@ -444,7 +446,7 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyMsg) (PipelineScreen, tea
 				s.awaitingPlanDecision = false
 				s.content = ContentStreaming
 				s.SyncViewports()
-				return s, intentCmd(CommentPlanIntent{Comment: comment})
+				s.PendingIntent = CommentPlanIntent{Comment: comment}; return s, nil
 			}
 		}
 		return s, nil
@@ -456,7 +458,7 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyMsg) (PipelineScreen, tea
 		s.hasPlanComment = false
 		s.content = ContentStreaming
 		s.SyncViewports()
-		return s, intentCmd(ApprovePlanIntent{})
+		s.PendingIntent = ApprovePlanIntent{}; return s, nil
 	case "e", "E":
 		s.awaitingPlanDecision = false
 		contentWidth := max(1, int(float64(s.contentVP.Width+s.sidebarVP.Width+1)*splitRatio))
@@ -477,7 +479,7 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyMsg) (PipelineScreen, tea
 		return s, nil
 	case "s", "S":
 		s.awaitingPlanDecision = false
-		return s, intentCmd(CancelPlanIntent{})
+		s.PendingIntent = CancelPlanIntent{}; return s, nil
 	}
 
 	// Pass remaining keys to comment textarea
@@ -495,7 +497,7 @@ func (s PipelineScreen) handlePlanEditKey(msg tea.KeyMsg) (PipelineScreen, tea.C
 		edited := s.planEditor.Value()
 		s.content = ContentStreaming
 		s.SyncViewports()
-		return s, intentCmd(EditPlanIntent{ModifiedMarkdown: edited})
+		s.PendingIntent = EditPlanIntent{ModifiedMarkdown: edited}; return s, nil
 	case tea.KeyEsc:
 		s.content = ContentPlanReview
 		s.SyncViewports()
@@ -526,7 +528,7 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyMsg) (PipelineScreen, tea.
 		switch msg.String() {
 		case "y", "Y":
 			s.confirmNew = false
-			return s, intentCmd(ConfirmNewRunIntent{})
+			s.PendingIntent = ConfirmNewRunIntent{}; return s, nil
 		default:
 			s.confirmNew = false
 			return s, nil
@@ -535,13 +537,13 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyMsg) (PipelineScreen, tea.
 
 	switch msg.String() {
 	case "s", "S":
-		return s, intentCmd(CancelPipelineIntent{})
+		s.PendingIntent = CancelPipelineIntent{}; return s, nil
 	case "n", "N":
 		if s.active && s.content == ContentStreaming {
 			s.confirmNew = true
 			return s, nil
 		}
-		return s, intentCmd(NavigateToPromptIntent{PreFillGoal: s.goal})
+		s.PendingIntent = NavigateToPromptIntent{PreFillGoal: s.goal}; return s, nil
 	}
 	return s, nil
 }
@@ -549,11 +551,11 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyMsg) (PipelineScreen, tea.
 func (s PipelineScreen) handleCompletionKey(msg tea.KeyMsg) (PipelineScreen, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlR:
-		return s, intentCmd(NavigateToRunsListIntent{})
+		s.PendingIntent = NavigateToRunsListIntent{}; return s, nil
 	}
 	switch msg.String() {
 	case "n", "N":
-		return s, intentCmd(NavigateToPromptIntent{PreFillGoal: s.goal})
+		s.PendingIntent = NavigateToPromptIntent{PreFillGoal: s.goal}; return s, nil
 	case "q", "Q":
 		return s, tea.Quit
 	}

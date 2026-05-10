@@ -271,19 +271,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleRunsListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.runsListScreen, cmd = m.runsListScreen.Update(msg)
-	if cmd != nil {
-		intentMsg := cmd()
-		switch intentMsg.(type) {
+	if intent := m.runsListScreen.PendingIntent; intent != nil {
+		m.runsListScreen.PendingIntent = nil
+		switch i := intent.(type) {
 		case NavigateBackIntent:
 			m.state = StatePrompt
 			m.recalculateLayout()
 			return m, nil
 		case NavigateToRunDetailIntent:
-			intent := intentMsg.(NavigateToRunDetailIntent)
-			if intent.RunIndex < 0 || intent.RunIndex >= len(m.runsListScreen.runs) {
+			if i.RunIndex < 0 || i.RunIndex >= len(m.runsListScreen.runs) {
 				return m, nil
 			}
-			detail, err := agent.LoadRunDetail(m.runsListScreen.runs[intent.RunIndex].Path)
+			detail, err := agent.LoadRunDetail(m.runsListScreen.runs[i.RunIndex].Path)
 			if err != nil {
 				m.lastErr = err
 				return m, nil
@@ -294,67 +293,61 @@ func (m Model) handleRunsListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.recalculateLayout()
 			m.runDetailScreen.SyncViewports()
 			return m, nil
-		default:
-			return m, cmd
 		}
 	}
-	return m, nil
+	return m, cmd
 }
 
 // handleRunDetailKey delegates to RunDetailScreen and handles intents.
 func (m Model) handleRunDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.runDetailScreen, cmd = m.runDetailScreen.Update(msg)
-	if cmd != nil {
-		intentMsg := cmd()
-		switch intentMsg.(type) {
+	if intent := m.runDetailScreen.PendingIntent; intent != nil {
+		m.runDetailScreen.PendingIntent = nil
+		switch intent.(type) {
 		case NavigateBackIntent:
 			m.state = StateRunsList
 			m.recalculateLayout()
 			m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width)
 			return m, nil
-		default:
-			return m, cmd
 		}
 	}
-	return m, nil
+	return m, cmd
 }
 
 // handlePromptKey delegates to PromptScreen and handles intents.
 func (m Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.promptScreen, cmd = m.promptScreen.Update(msg)
-	if cmd != nil {
-		intentMsg := cmd()
-		switch intent := intentMsg.(type) {
+	if intent := m.promptScreen.PendingIntent; intent != nil {
+		m.promptScreen.PendingIntent = nil
+		switch i := intent.(type) {
 		case StartPipelineIntent:
-			m.pipelineScreen.Start(intent.Prompt)
+			m.pipelineScreen.Start(i.Prompt)
 			m.state = StatePipeline
 			m.recalculateLayout()
-			pipelineCmd := m.startPipeline(intent.Prompt, intent.SkipGateway)
+			pipelineCmd := m.startPipeline(i.Prompt, i.SkipGateway)
 			return m, pipelineCmd
 		case NavigateToRunsListIntent:
 			m.navigateToRunsList()
 			return m, nil
-		default:
-			return m, cmd
 		}
 	}
-	return m, nil
+	return m, cmd
 }
 
 // handlePipelineKey delegates to PipelineScreen and handles intents.
 func (m Model) handlePipelineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.pipelineScreen, cmd = m.pipelineScreen.Update(msg)
-	if cmd != nil {
-		intentMsg := cmd()
-		switch intent := intentMsg.(type) {
+	if intent := m.pipelineScreen.PendingIntent; intent != nil {
+		m.pipelineScreen.PendingIntent = nil
+		switch i := intent.(type) {
 		case SubmitGatewayIntent:
 			if m.decisions != nil {
 				m.decisions <- orchestrator.Decision{
 					Type:           orchestrator.DecisionApprove,
-					GatewayAnswers: intent.Answers,
+					GatewayAnswers: i.Answers,
 				}
 			}
 			return m, nil
@@ -372,7 +365,7 @@ func (m Model) handlePipelineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.decisions != nil {
 				m.decisions <- orchestrator.Decision{
 					Type:          orchestrator.DecisionEdit,
-					EditedContent: intent.ModifiedMarkdown,
+					EditedContent: i.ModifiedMarkdown,
 				}
 			}
 			return m, nil
@@ -380,7 +373,7 @@ func (m Model) handlePipelineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.decisions != nil {
 				m.decisions <- orchestrator.Decision{
 					Type:    orchestrator.DecisionComment,
-					Comment: intent.Comment,
+					Comment: i.Comment,
 				}
 			}
 			return m, waitForEvent(m.events)
@@ -398,8 +391,8 @@ func (m Model) handlePipelineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.pipelineScreen.Reset()
 			m.state = StatePrompt
 			m.promptScreen.Reset()
-			if intent.PreFillGoal != "" {
-				m.promptScreen.SetValue(intent.PreFillGoal)
+			if i.PreFillGoal != "" {
+				m.promptScreen.SetValue(i.PreFillGoal)
 			}
 			return m, nil
 		case NavigateToRunsListIntent:
@@ -418,12 +411,10 @@ func (m Model) handlePipelineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case OpenExternalEditorIntent:
-			return m, openExternalEditor(intent.FilePath)
-		default:
-			return m, cmd
+			return m, openExternalEditor(i.FilePath)
 		}
 	}
-	return m, nil
+	return m, cmd
 }
 
 // startPipeline launches the orchestrator and returns a command to start listening.

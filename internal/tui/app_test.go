@@ -72,7 +72,7 @@ func TestTUI_PromptSubmit(t *testing.T) {
 	// Set prompt value directly (textarea handles rune input internally)
 	m.promptScreen.SetValue("add a feature")
 
-	// Press Enter to submit
+	// Press Enter to submit — intent arrives on next Update cycle
 	result, cmd := sendKey(m, tea.KeyEnter)
 	model := result.(Model)
 
