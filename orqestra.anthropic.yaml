@@ -33,8 +33,6 @@ planner:
 worker:
   model: medium
 
-utility: small
-
 sandbox:
   max_lifetime: 45m
   allow_read:

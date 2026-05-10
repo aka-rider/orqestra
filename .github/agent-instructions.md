@@ -1,5 +1,7 @@
 # Orqestra — Agent, Sandbox & Pipeline Instructions
 
+[text](../Makefile)
+
 <agent_architecture>
 
 ## LLM Integration & Orchestration Pipeline (`internal/agent`)

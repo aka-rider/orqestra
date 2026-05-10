@@ -35,14 +35,11 @@ worker:
   timeout: 30m
   parallelism: 0
 
-utility: small
-
 sandbox:
   max_lifetime: 35m
   extra_env:
     DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1"
     CLAUDE_CODE_ATTRIBUTION_HEADER: "0"
-    ANTHROPIC_SMALL_FAST_MODEL: "small"
 
 gateway:
   mcp_servers: []

@@ -1,16 +1,18 @@
 .PHONY: build run test test-integration lint clean e2e sandbox-image sandbox-test
 
-BINARY := orqestra
+THIS_MAKEFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
+BIN_DIR := "$(dir $(THIS_MAKEFILE_PATH))bin"
+BINARY := "$(BIN_DIR)/orqestra"
 
 build:
+	mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 go build -ldflags "-s -w" -o $(BINARY) ./cmd/orqestra
 
 run: build
 	./$(BINARY) $(ARGS)
 
 test:
-	go test -coverprofile=coverage.out -covermode=atomic ./...
-	#go tool cover -func=coverage.out
+	go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
 test-integration:
 	go test -tags integration -v ./...

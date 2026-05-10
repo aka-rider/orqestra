@@ -33,8 +33,6 @@ worker:
   model: medium
   timeout: 15m
 
-utility: small
-
 sandbox:
   max_lifetime: 20m
 

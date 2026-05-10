@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
@@ -919,36 +920,42 @@ func (m Model) viewPromptScreen() string {
 		return header + input + footer
 	}
 
-	// Content: mascot art centered vertically
-	mascot := renderMascot(contentWidth-2, contentHeight)
-	mascotLines := strings.Split(mascot, "\n")
-	padTop := 0
-	if len(mascotLines) < contentHeight {
-		padTop = (contentHeight - len(mascotLines)) / 2
-	}
-	var contentBuf strings.Builder
-	for i := 0; i < contentHeight; i++ {
-		mi := i - padTop
-		if mi >= 0 && mi < len(mascotLines) {
-			contentBuf.WriteString(" " + mascotLines[mi])
+	var body string
+	if m.fpActive {
+		pickerStr := m.fp.view(m.fpQuery)
+		body = lipgloss.Place(m.effectiveWidth(), contentHeight, lipgloss.Left, lipgloss.Bottom, pickerStr)
+	} else {
+		// Content: mascot art centered vertically
+		mascot := renderMascot(contentWidth-2, contentHeight)
+		mascotLines := strings.Split(mascot, "\n")
+		padTop := 0
+		if len(mascotLines) < contentHeight {
+			padTop = (contentHeight - len(mascotLines)) / 2
 		}
-		if i < contentHeight-1 {
-			contentBuf.WriteString("\n")
+		var contentBuf strings.Builder
+		for i := 0; i < contentHeight; i++ {
+			mi := i - padTop
+			if mi >= 0 && mi < len(mascotLines) {
+				contentBuf.WriteString(" " + mascotLines[mi])
+			}
+			if i < contentHeight-1 {
+				contentBuf.WriteString("\n")
+			}
 		}
+
+		// Sidebar: static agent list
+		var sidebarBuf strings.Builder
+		sidebarBuf.WriteString(" Agents\n")
+		sidebarBuf.WriteString(strings.Repeat("─", max(1, sidebarWidth-1)) + "\n")
+		sidebarBuf.WriteString(" ● gateway     gate\n")
+		sidebarBuf.WriteString("   awaiting input\n")
+		sidebarBuf.WriteString("\n")
+		sidebarBuf.WriteString(" ○ planner        -\n")
+		sidebarBuf.WriteString(" ○ workers        -\n")
+		sidebarBuf.WriteString(" ○ qa             -")
+
+		body = joinSplitView(contentBuf.String(), sidebarBuf.String(), contentWidth, sidebarWidth, contentHeight)
 	}
-
-	// Sidebar: static agent list
-	var sidebarBuf strings.Builder
-	sidebarBuf.WriteString(" Agents\n")
-	sidebarBuf.WriteString(strings.Repeat("─", max(1, sidebarWidth-1)) + "\n")
-	sidebarBuf.WriteString(" ● gateway     gate\n")
-	sidebarBuf.WriteString("   awaiting input\n")
-	sidebarBuf.WriteString("\n")
-	sidebarBuf.WriteString(" ○ planner        -\n")
-	sidebarBuf.WriteString(" ○ workers        -\n")
-	sidebarBuf.WriteString(" ○ qa             -")
-
-	body := joinSplitView(contentBuf.String(), sidebarBuf.String(), contentWidth, sidebarWidth, contentHeight)
 
 	return header + body + "\n" + input + footer
 }

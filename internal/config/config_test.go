@@ -59,7 +59,6 @@ planner:
   model: large
 worker:
   model: medium
-utility: small
 `
 	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
 	if err != nil {
@@ -206,7 +205,6 @@ planner:
   model: medium
 worker:
   model: medium
-utility: small
 `
 	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
 	if err != nil {
@@ -240,7 +238,6 @@ planner:
   model: medium
 worker:
   model: medium
-utility: small
 `
 	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
 	if err != nil {
@@ -316,7 +313,6 @@ planner:
   model: medium
 worker:
   model: medium
-utility: small
 execution_graph:
   agents:
     - id: implement
@@ -450,7 +446,6 @@ planner:
   model: medium
 worker:
   model: medium
-utility: small
 `
 	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
 	if err != nil {
@@ -495,7 +490,6 @@ planner:
   model: medium
 worker:
   model: medium
-utility: small
 ` + tt.key + "\n"
 			f, err := os.CreateTemp(t.TempDir(), "*.yaml")
 			if err != nil {
@@ -537,7 +531,6 @@ planner:
   model: medium
 worker:
   model: medium
-utility: small
 sandbox:
   max_lifetime: 2h
   proxy_env:
@@ -604,7 +597,6 @@ planner:
   model: medium
 worker:
   model: medium
-utility: small
 `
 	f := filepath.Join(t.TempDir(), "cfg.yaml")
 	os.WriteFile(f, []byte(yaml), 0644)
@@ -650,7 +642,6 @@ planner:
   model: medium
 worker:
   model: medium
-utility: small
 sandbox:
   max_lifetime: 1h
   allow_exec:
