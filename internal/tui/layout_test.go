@@ -102,17 +102,17 @@ func TestLayout_RecalculateConstants(t *testing.T) {
 	sidebarWidth := 120 - contentWidth - 1
 	contentHeight := 40 - constHeaderHeight - constPipelineInputHeight - constFooterHeight
 
-	if m.contentVP.Width != contentWidth {
-		t.Errorf("contentVP.Width = %d, want %d", m.contentVP.Width, contentWidth)
+	if m.pipelineScreen.contentVP.Width != contentWidth {
+		t.Errorf("contentVP.Width = %d, want %d", m.pipelineScreen.contentVP.Width, contentWidth)
 	}
-	if m.contentVP.Height != contentHeight {
-		t.Errorf("contentVP.Height = %d, want %d", m.contentVP.Height, contentHeight)
+	if m.pipelineScreen.contentVP.Height != contentHeight {
+		t.Errorf("contentVP.Height = %d, want %d", m.pipelineScreen.contentVP.Height, contentHeight)
 	}
-	if m.sidebarVP.Width != sidebarWidth {
-		t.Errorf("sidebarVP.Width = %d, want %d", m.sidebarVP.Width, sidebarWidth)
+	if m.pipelineScreen.sidebarVP.Width != sidebarWidth {
+		t.Errorf("sidebarVP.Width = %d, want %d", m.pipelineScreen.sidebarVP.Width, sidebarWidth)
 	}
-	if m.dashboardVP.Width != 120 {
-		t.Errorf("dashboardVP.Width = %d, want 120", m.dashboardVP.Width)
+	if m.pipelineScreen.dashboardVP.Width != 120 {
+		t.Errorf("dashboardVP.Width = %d, want 120", m.pipelineScreen.dashboardVP.Width)
 	}
 }
 
@@ -121,8 +121,8 @@ func TestLayout_RecalculatePromptMode(t *testing.T) {
 
 	contentHeight := 40 - constHeaderHeight - constPromptInputHeight - constFooterHeight
 
-	if m.contentVP.Height != contentHeight {
-		t.Errorf("contentVP.Height = %d, want %d (prompt mode)", m.contentVP.Height, contentHeight)
+	if m.pipelineScreen.contentVP.Height != contentHeight {
+		t.Errorf("contentVP.Height = %d, want %d (prompt mode)", m.pipelineScreen.contentVP.Height, contentHeight)
 	}
 }
 
@@ -133,7 +133,7 @@ func TestLayout_BelowMinimumNoOp(t *testing.T) {
 	m.recalculateLayout()
 
 	// Viewports should remain at zero (not set to negative)
-	if m.contentVP.Width < 0 || m.contentVP.Height < 0 {
+	if m.pipelineScreen.contentVP.Width < 0 || m.pipelineScreen.contentVP.Height < 0 {
 		t.Error("viewport dimensions should not be negative below minimum size")
 	}
 }
@@ -166,11 +166,11 @@ func TestLayout_BoundsNonOverlapping(t *testing.T) {
 	m := layoutTestModel(120, 40, StatePipeline)
 
 	// Content and sidebar should not overlap
-	if m.bounds.content.Overlaps(m.bounds.sidebar) {
+	if m.pipelineScreen.bounds.content.Overlaps(m.pipelineScreen.bounds.sidebar) {
 		t.Error("content and sidebar bounds overlap")
 	}
 	// Textarea should be below content
-	if m.bounds.textarea.Min.Y <= m.bounds.content.Min.Y {
+	if m.pipelineScreen.bounds.textarea.Min.Y <= m.pipelineScreen.bounds.content.Min.Y {
 		t.Error("textarea should be below content zone")
 	}
 }

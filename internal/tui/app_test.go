@@ -46,6 +46,7 @@ func testModel() Model {
 	m := NewModel(engine, "test.yaml")
 	m.width = 120
 	m.height = 40
+	m.recalculateLayout()
 	return m
 }
 
@@ -69,7 +70,7 @@ func sendRune(m tea.Model, r string) (tea.Model, tea.Cmd) {
 func TestTUI_PromptSubmit(t *testing.T) {
 	m := testModel()
 	// Set prompt value directly (textarea handles rune input internally)
-	m.prompt.SetValue("add a feature")
+	m.promptScreen.SetValue("add a feature")
 
 	// Press Enter to submit
 	result, cmd := sendKey(m, tea.KeyEnter)
@@ -78,18 +79,18 @@ func TestTUI_PromptSubmit(t *testing.T) {
 	if model.state != StatePipeline {
 		t.Errorf("expected StatePipeline, got %d", model.state)
 	}
-	if model.content != ContentStreaming {
-		t.Errorf("expected ContentStreaming, got %d", model.content)
+	if model.pipelineScreen.content != ContentStreaming {
+		t.Errorf("expected ContentStreaming, got %d", model.pipelineScreen.content)
 	}
-	if model.goal != "add a feature" {
-		t.Errorf("expected goal 'add a feature', got %q", model.goal)
+	if model.pipelineScreen.goal != "add a feature" {
+		t.Errorf("expected goal 'add a feature', got %q", model.pipelineScreen.goal)
 	}
 	// Pipeline channels must be set on the returned model (regression: evaluation-order bug).
 	if model.events == nil {
 		t.Error("model.events is nil after prompt submit — pipeline events will never be received")
 	}
-	if model.streamBuf == nil {
-		t.Error("model.streamBuf is nil after prompt submit — streaming output will not display")
+	if model.pipelineScreen.streamBuf == nil {
+		t.Error("model.pipelineScreen.streamBuf is nil after prompt submit — streaming output will not display")
 	}
 	if model.decisions == nil {
 		t.Error("model.decisions is nil after prompt submit — gate responses will never be sent")
@@ -107,7 +108,7 @@ func TestTUI_PromptSubmit(t *testing.T) {
 
 func TestTUI_PromptSkipGateway(t *testing.T) {
 	m := testModel()
-	m.prompt.SetValue("add a feature")
+	m.promptScreen.SetValue("add a feature")
 
 	result, cmd := sendKey(m, tea.KeyCtrlS)
 	model := result.(Model)
@@ -115,15 +116,15 @@ func TestTUI_PromptSkipGateway(t *testing.T) {
 	if model.state != StatePipeline {
 		t.Errorf("expected StatePipeline, got %d", model.state)
 	}
-	if model.goal != "add a feature" {
-		t.Errorf("expected goal 'add a feature', got %q", model.goal)
+	if model.pipelineScreen.goal != "add a feature" {
+		t.Errorf("expected goal 'add a feature', got %q", model.pipelineScreen.goal)
 	}
 	// Same evaluation-order regression guard as TestTUI_PromptSubmit.
 	if model.events == nil {
 		t.Error("model.events is nil after skip-gateway submit")
 	}
-	if model.streamBuf == nil {
-		t.Error("model.streamBuf is nil after skip-gateway submit")
+	if model.pipelineScreen.streamBuf == nil {
+		t.Error("model.pipelineScreen.streamBuf is nil after skip-gateway submit")
 	}
 	if model.cancel == nil {
 		t.Error("model.cancel is nil after skip-gateway submit")
@@ -148,7 +149,7 @@ func TestTUI_PromptEmptyIgnored(t *testing.T) {
 func TestTUI_CoachingRender(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentStreaming
+	m.pipelineScreen.content = ContentStreaming
 	m.events = make(chan orchestrator.Event, 1) // need a channel for waitForEvent
 
 	// Simulate receiving a coaching gate event
@@ -166,42 +167,42 @@ func TestTUI_CoachingRender(t *testing.T) {
 		},
 	}
 
-	model := m.applyEvent(event)
+	m.pipelineScreen.ApplyEvent(event, m.width)
 
-	if model.content != ContentCoaching {
-		t.Errorf("expected ContentCoaching, got %d", model.content)
+	if m.pipelineScreen.content != ContentCoaching {
+		t.Errorf("expected ContentCoaching, got %d", m.pipelineScreen.content)
 	}
-	if len(model.answerFields) != 1 {
-		t.Fatalf("expected 1 answer field, got %d", len(model.answerFields))
+	if len(m.pipelineScreen.answerFields) != 1 {
+		t.Fatalf("expected 1 answer field, got %d", len(m.pipelineScreen.answerFields))
 	}
-	if model.answerFields[0].Value() != "login" {
-		t.Errorf("expected default 'login', got %q", model.answerFields[0].Value())
+	if m.pipelineScreen.answerFields[0].Value() != "login" {
+		t.Errorf("expected default 'login', got %q", m.pipelineScreen.answerFields[0].Value())
 	}
 }
 
 func TestTUI_CoachingSubmit(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentCoaching
+	m.pipelineScreen.content = ContentCoaching
 	decisions := make(chan orchestrator.Decision, 1)
 	m.decisions = decisions
-	m.gatewayResult = agent.GatewayResult{
+	m.pipelineScreen.gatewayResult = agent.GatewayResult{
 		Questions: []agent.Question{
 			{Text: "Which part?", Options: []string{"a", "b"}, Default: "a"},
 		},
 	}
 
 	// Create answer field with value
-	m.answerFields = makeAnswerFields(m.gatewayResult.Questions, m.effectiveWidth())
-	m.answerFields[0].SetValue("module b")
-	m.answerCursor = 0
+	m.pipelineScreen.answerFields = makeAnswerFields(m.pipelineScreen.gatewayResult.Questions, m.effectiveWidth())
+	m.pipelineScreen.answerFields[0].SetValue("module b")
+	m.pipelineScreen.answerCursor = 0
 
 	// Press Enter to submit
 	result, _ := sendKey(m, tea.KeyEnter)
 	model := result.(Model)
 
-	if model.content != ContentStreaming {
-		t.Errorf("expected ContentStreaming after submit, got %d", model.content)
+	if model.pipelineScreen.content != ContentStreaming {
+		t.Errorf("expected ContentStreaming after submit, got %d", model.pipelineScreen.content)
 	}
 
 	// Check decision was sent
@@ -221,22 +222,22 @@ func TestTUI_CoachingSubmit(t *testing.T) {
 func TestTUI_CoachingSkip(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentCoaching
+	m.pipelineScreen.content = ContentCoaching
 	decisions := make(chan orchestrator.Decision, 1)
 	m.decisions = decisions
-	m.gatewayResult = agent.GatewayResult{
+	m.pipelineScreen.gatewayResult = agent.GatewayResult{
 		Questions: []agent.Question{
 			{Text: "Q1?", Options: []string{"a"}, Default: "a"},
 		},
 	}
-	m.answerFields = makeAnswerFields(m.gatewayResult.Questions, m.effectiveWidth())
-	m.answerCursor = 0
+	m.pipelineScreen.answerFields = makeAnswerFields(m.pipelineScreen.gatewayResult.Questions, m.effectiveWidth())
+	m.pipelineScreen.answerCursor = 0
 
 	result, _ := sendKey(m, tea.KeyCtrlS)
 	model := result.(Model)
 
-	if model.content != ContentStreaming {
-		t.Errorf("expected ContentStreaming after skip, got %d", model.content)
+	if model.pipelineScreen.content != ContentStreaming {
+		t.Errorf("expected ContentStreaming after skip, got %d", model.pipelineScreen.content)
 	}
 
 	select {
@@ -252,7 +253,7 @@ func TestTUI_CoachingSkip(t *testing.T) {
 func TestTUI_PlanApproval(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentStreaming
+	m.pipelineScreen.content = ContentStreaming
 	m.events = make(chan orchestrator.Event, 1)
 
 	event := orchestrator.Event{
@@ -263,12 +264,12 @@ func TestTUI_PlanApproval(t *testing.T) {
 		},
 	}
 
-	model := m.applyEvent(event)
+	m.pipelineScreen.ApplyEvent(event, m.width)
 
-	if model.content != ContentPlanReview {
-		t.Errorf("expected ContentPlanReview, got %d", model.content)
+	if m.pipelineScreen.content != ContentPlanReview {
+		t.Errorf("expected ContentPlanReview, got %d", m.pipelineScreen.content)
 	}
-	if !model.hasPlan {
+	if !m.pipelineScreen.hasPlan {
 		t.Error("expected hasPlan=true")
 	}
 }
@@ -276,17 +277,17 @@ func TestTUI_PlanApproval(t *testing.T) {
 func TestTUI_PlanApprove(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentPlanReview
-	m.hasPlan = true
-	m.finalPlan = "# Plan\n\n## Goal\nTest"
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest"
 	decisions := make(chan orchestrator.Decision, 1)
 	m.decisions = decisions
 
 	result, _ := sendRune(m, "a")
 	model := result.(Model)
 
-	if model.content != ContentStreaming {
-		t.Errorf("expected ContentStreaming after approve, got %d", model.content)
+	if model.pipelineScreen.content != ContentStreaming {
+		t.Errorf("expected ContentStreaming after approve, got %d", model.pipelineScreen.content)
 	}
 
 	select {
@@ -302,9 +303,9 @@ func TestTUI_PlanApprove(t *testing.T) {
 func TestTUI_PlanEditSave(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentPlanReview
-	m.hasPlan = true
-	m.finalPlan = "# Plan\n\n## Goal\nOriginal"
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nOriginal"
 	decisions := make(chan orchestrator.Decision, 1)
 	m.decisions = decisions
 
@@ -312,22 +313,22 @@ func TestTUI_PlanEditSave(t *testing.T) {
 	result, _ := sendRune(m, "e")
 	model := result.(Model)
 
-	if model.content != ContentPlanEdit {
-		t.Fatalf("expected ContentPlanEdit, got %d", model.content)
+	if model.pipelineScreen.content != ContentPlanEdit {
+		t.Fatalf("expected ContentPlanEdit, got %d", model.pipelineScreen.content)
 	}
-	if !model.hasPlanEditor {
+	if !model.pipelineScreen.hasPlanEditor {
 		t.Fatal("expected hasPlanEditor=true")
 	}
 
 	// Simulate editing the content
-	model.planEditor.SetValue(`{"goal":"Modified","steps":["s1"],"acceptance":["a1"]}`)
+	model.pipelineScreen.planEditor.SetValue(`{"goal":"Modified","steps":["s1"],"acceptance":["a1"]}`)
 
 	// Press Ctrl+S to save
 	result2, _ := sendKey(model, tea.KeyCtrlS)
 	model2 := result2.(Model)
 
-	if model2.content != ContentStreaming {
-		t.Errorf("expected ContentStreaming after save, got %d", model2.content)
+	if model2.pipelineScreen.content != ContentStreaming {
+		t.Errorf("expected ContentStreaming after save, got %d", model2.pipelineScreen.content)
 	}
 
 	select {
@@ -346,15 +347,15 @@ func TestTUI_PlanEditSave(t *testing.T) {
 func TestTUI_PlanEditDiscard(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentPlanReview
-	m.hasPlan = true
-	m.finalPlan = "# Plan\n\n## Goal\nOriginal"
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nOriginal"
 
 	// Press E to enter edit mode
 	result, _ := sendRune(m, "e")
 	model := result.(Model)
 
-	if model.content != ContentPlanEdit {
+	if model.pipelineScreen.content != ContentPlanEdit {
 		t.Fatal("expected ContentPlanEdit")
 	}
 
@@ -362,15 +363,15 @@ func TestTUI_PlanEditDiscard(t *testing.T) {
 	result2, _ := sendKey(model, tea.KeyEsc)
 	model2 := result2.(Model)
 
-	if model2.content != ContentPlanReview {
-		t.Errorf("expected ContentPlanReview after discard, got %d", model2.content)
+	if model2.pipelineScreen.content != ContentPlanReview {
+		t.Errorf("expected ContentPlanReview after discard, got %d", model2.pipelineScreen.content)
 	}
 }
 
 func TestTUI_CancelAgent(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentStreaming
+	m.pipelineScreen.content = ContentStreaming
 	cancelled := false
 	m.cancel = func() { cancelled = true }
 
@@ -385,8 +386,8 @@ func TestTUI_CancelAgent(t *testing.T) {
 func TestTUI_AgentNavigation(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentStreaming
-	m.agents = []AgentRow{
+	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.agents = []AgentRow{
 		{ID: "gateway", State: "done"},
 		{ID: "planner", State: "running"},
 	}
@@ -395,38 +396,38 @@ func TestTUI_AgentNavigation(t *testing.T) {
 	result, _ := sendRune(m, "1")
 	model := result.(Model)
 
-	if model.content != ContentAgentHistory {
-		t.Errorf("expected ContentAgentHistory, got %d", model.content)
+	if model.pipelineScreen.content != ContentAgentHistory {
+		t.Errorf("expected ContentAgentHistory, got %d", model.pipelineScreen.content)
 	}
-	if model.focusedAgent != 1 {
-		t.Errorf("expected focusedAgent=1, got %d", model.focusedAgent)
+	if model.pipelineScreen.focusedAgent != 1 {
+		t.Errorf("expected focusedAgent=1, got %d", model.pipelineScreen.focusedAgent)
 	}
 }
 
 func TestTUI_AgentNavBack(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentAgentHistory
-	m.focusedAgent = 1
-	m.agents = []AgentRow{{ID: "gateway", State: "done"}}
+	m.pipelineScreen.content = ContentAgentHistory
+	m.pipelineScreen.focusedAgent = 1
+	m.pipelineScreen.agents = []AgentRow{{ID: "gateway", State: "done"}}
 
 	// Press Esc to go back
 	result, _ := sendKey(m, tea.KeyEsc)
 	model := result.(Model)
 
-	if model.content != ContentStreaming {
-		t.Errorf("expected ContentStreaming after Esc, got %d", model.content)
+	if model.pipelineScreen.content != ContentStreaming {
+		t.Errorf("expected ContentStreaming after Esc, got %d", model.pipelineScreen.content)
 	}
-	if model.focusedAgent != 0 {
-		t.Errorf("expected focusedAgent=0, got %d", model.focusedAgent)
+	if model.pipelineScreen.focusedAgent != 0 {
+		t.Errorf("expected focusedAgent=0, got %d", model.pipelineScreen.focusedAgent)
 	}
 }
 
 func TestTUI_NewRun(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentCompletion
-	m.goal = "original goal"
+	m.pipelineScreen.content = ContentCompletion
+	m.pipelineScreen.goal = "original goal"
 
 	result, _ := sendRune(m, "n")
 	model := result.(Model)
@@ -434,16 +435,17 @@ func TestTUI_NewRun(t *testing.T) {
 	if model.state != StatePrompt {
 		t.Errorf("expected StatePrompt, got %d", model.state)
 	}
-	if !strings.Contains(model.prompt.Value(), "original goal") {
-		t.Errorf("expected prompt pre-filled with goal, got %q", model.prompt.Value())
+	if !strings.Contains(model.promptScreen.Value(), "original goal") {
+		t.Errorf("expected prompt pre-filled with goal, got %q", model.promptScreen.Value())
 	}
 }
 
 func TestTUI_NewRunConfirm(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentStreaming
-	m.goal = "active task"
+	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.goal = "active task"
+	m.pipelineScreen.active = true
 	cancelled := false
 	m.cancel = func() { cancelled = true }
 
@@ -454,7 +456,7 @@ func TestTUI_NewRunConfirm(t *testing.T) {
 	if model.state != StatePipeline {
 		t.Error("expected to stay in StatePipeline until confirmed")
 	}
-	if !model.confirmNew {
+	if !model.pipelineScreen.confirmNew {
 		t.Error("expected confirmNew=true")
 	}
 
@@ -474,43 +476,43 @@ func TestTUI_NewRunConfirm(t *testing.T) {
 	if !cancelled {
 		t.Error("expected cancel to be called")
 	}
-	if !strings.Contains(model2.prompt.Value(), "active task") {
-		t.Errorf("expected prompt pre-filled with goal, got %q", model2.prompt.Value())
+	if !strings.Contains(model2.promptScreen.Value(), "active task") {
+		t.Errorf("expected prompt pre-filled with goal, got %q", model2.promptScreen.Value())
 	}
 }
 
 func TestTUI_SidebarUpdates(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentStreaming
+	m.pipelineScreen.content = ContentStreaming
 	m.events = make(chan orchestrator.Event, 1)
 
 	// AgentStarted
-	model := m.applyEvent(orchestrator.Event{
+	m.pipelineScreen.ApplyEvent(orchestrator.Event{
 		Type:    orchestrator.EventAgentStarted,
 		AgentID: "gateway",
-	})
+	}, m.width)
 
-	if len(model.agents) != 1 || model.agents[0].State != "running" {
-		t.Errorf("expected 1 agent running, got %+v", model.agents)
+	if len(m.pipelineScreen.agents) != 1 || m.pipelineScreen.agents[0].State != "running" {
+		t.Errorf("expected 1 agent running, got %+v", m.pipelineScreen.agents)
 	}
 
 	// AgentDone
-	model2 := model.applyEvent(orchestrator.Event{
+	m.pipelineScreen.ApplyEvent(orchestrator.Event{
 		Type:    orchestrator.EventAgentDone,
 		AgentID: "gateway",
-	})
+	}, m.width)
 
-	if model2.agents[0].State != "done" {
-		t.Errorf("expected agent state 'done', got %q", model2.agents[0].State)
+	if m.pipelineScreen.agents[0].State != "done" {
+		t.Errorf("expected agent state 'done', got %q", m.pipelineScreen.agents[0].State)
 	}
 }
 
 func TestTUI_FullDashboard(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentStreaming
-	m.agents = []AgentRow{
+	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.agents = []AgentRow{
 		{ID: "gateway", State: "done"},
 		{ID: "planner", State: "running"},
 	}
@@ -519,7 +521,7 @@ func TestTUI_FullDashboard(t *testing.T) {
 	result, _ := sendRune(m, "d")
 	model := result.(Model)
 
-	if !model.showDashboard {
+	if !model.pipelineScreen.showDashboard {
 		t.Error("expected showDashboard=true")
 	}
 
@@ -533,7 +535,7 @@ func TestTUI_FullDashboard(t *testing.T) {
 	result2, _ := sendKey(model, tea.KeyEsc)
 	model2 := result2.(Model)
 
-	if model2.showDashboard {
+	if model2.pipelineScreen.showDashboard {
 		t.Error("expected showDashboard=false after Esc")
 	}
 }
@@ -561,7 +563,7 @@ func TestTUI_DoubleCtrlC(t *testing.T) {
 func TestTUI_CompletionValidation(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentStreaming
+	m.pipelineScreen.content = ContentStreaming
 	m.events = make(chan orchestrator.Event, 1)
 
 	event := orchestrator.Event{
@@ -569,12 +571,12 @@ func TestTUI_CompletionValidation(t *testing.T) {
 		WorkerValidation: "✅ tests pass\n✅ build succeeds",
 	}
 
-	model := m.applyEvent(event)
+	m.pipelineScreen.ApplyEvent(event, m.width)
 
-	if model.content != ContentCompletion {
-		t.Errorf("expected ContentCompletion, got %d", model.content)
+	if m.pipelineScreen.content != ContentCompletion {
+		t.Errorf("expected ContentCompletion, got %d", m.pipelineScreen.content)
 	}
-	if !model.hasValidation {
+	if !m.pipelineScreen.hasValidation {
 		t.Error("expected hasValidation=true")
 	}
 }
@@ -601,8 +603,8 @@ func makeAnswerFields(questions []agent.Question, width int) []textarea.Model {
 func TestTUI_PgUpPgDown(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentStreaming
-	m.goal = "test scroll"
+	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.goal = "test scroll"
 	// Initialize layout so viewports have dimensions
 	m.width = 120
 	m.height = 40
@@ -613,40 +615,42 @@ func TestTUI_PgUpPgDown(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		longContent.WriteString(fmt.Sprintf("line %d\n", i))
 	}
-	m.contentVP.SetContent(longContent.String())
+	m.pipelineScreen.contentVP.SetContent(longContent.String())
 
 	// PgDown should change viewport offset
 	result, _ := sendKey(m, tea.KeyPgDown)
 	model := result.(Model)
-	if model.contentVP.YOffset == 0 {
+	if model.pipelineScreen.contentVP.YOffset == 0 {
 		t.Error("expected viewport YOffset > 0 after PgDown")
 	}
 
 	// PgUp should return to top
 	result2, _ := sendKey(model, tea.KeyPgUp)
 	model2 := result2.(Model)
-	if model2.contentVP.YOffset != 0 {
-		t.Errorf("expected YOffset=0 after PgUp from first page, got %d", model2.contentVP.YOffset)
+	if model2.pipelineScreen.contentVP.YOffset != 0 {
+		t.Errorf("expected YOffset=0 after PgUp from first page, got %d", model2.pipelineScreen.contentVP.YOffset)
 	}
 
 	// PgUp at 0 should stay at 0
 	result3, _ := sendKey(model2, tea.KeyPgUp)
 	model3 := result3.(Model)
-	if model3.contentVP.YOffset != 0 {
-		t.Errorf("expected YOffset=0, got %d", model3.contentVP.YOffset)
+	if model3.pipelineScreen.contentVP.YOffset != 0 {
+		t.Errorf("expected YOffset=0, got %d", model3.pipelineScreen.contentVP.YOffset)
 	}
 }
 
 func TestTUI_SidebarTokens(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentStreaming
+	m.pipelineScreen.content = ContentStreaming
 	m.width = 120
 	m.height = 40
-	m.agents = []AgentRow{
+	m.pipelineScreen.agents = []AgentRow{
 		{ID: "gateway", State: "done", Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402},
 		{ID: "planner", State: "running", StartedAt: time.Now().Add(-24 * time.Second), InputTokens: 0, OutputTokens: 0},
 	}
+	m.recalculateLayout()
+	m.pipelineScreen.SyncViewports()
 
 	view := m.View()
 
@@ -661,13 +665,15 @@ func TestTUI_SidebarTokens(t *testing.T) {
 func TestTUI_DashboardTokens(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentStreaming
-	m.showDashboard = true
+	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.showDashboard = true
 	m.width = 120
 	m.height = 40
-	m.agents = []AgentRow{
+	m.pipelineScreen.agents = []AgentRow{
 		{ID: "gateway", State: "done", Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402},
 	}
+	m.recalculateLayout()
+	m.pipelineScreen.SyncViewports()
 
 	view := m.View()
 	if !strings.Contains(view, "In Tok") {
@@ -701,8 +707,8 @@ func TestFormatTokens(t *testing.T) {
 func TestTUI_TickRefreshesView(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentStreaming
-	m.goal = "test tick"
+	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.goal = "test tick"
 
 	// tickMsg should return another tick command during pipeline
 	result, cmd := m.Update(tickMsg(time.Now()))
@@ -730,19 +736,22 @@ func TestTUI_TickStopsAfterPrompt(t *testing.T) {
 func TestTUI_StreamingOutput(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentStreaming
-	m.goal = "stream test"
+	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.goal = "stream test"
 	m.width = 120
 	m.height = 40
 	m.events = make(chan orchestrator.Event, 5)
 
 	// Create a shared stream buffer (like the orchestrator would)
 	stream := orchestrator.NewStreamBuffer(200)
-	m.streamBuf = stream
+	m.pipelineScreen.streamBuf = stream
 
 	// Simulate agent start + streaming output via the shared buffer
 	stream.SetAgent("gateway")
 	stream.Append("Analyzing prompt...\nProcessing request...")
+
+	m.recalculateLayout()
+	m.pipelineScreen.SyncViewports()
 
 	// Verify the view renders the streamed content
 	view := m.View()
@@ -821,19 +830,19 @@ func TestStreamBuffer_TokenAccumulation(t *testing.T) {
 func TestTUI_NewRunClearsStaleState(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentCompletion
-	m.goal = "previous task"
+	m.pipelineScreen.content = ContentCompletion
+	m.pipelineScreen.goal = "previous task"
 
 	// Simulate stale state from a previous run
-	m.agents = []AgentRow{
+	m.pipelineScreen.agents = []AgentRow{
 		{ID: "gateway", State: "done"},
 		{ID: "planner", State: "failed"},
 	}
-	m.lastErr = fmt.Errorf("planner failed")
-	m.finalPlan = "# Old Plan"
-	m.hasPlan = true
-	m.workerValidation = "old validation"
-	m.hasValidation = true
+	m.pipelineScreen.lastErr = fmt.Errorf("planner failed")
+	m.pipelineScreen.finalPlan = "# Old Plan"
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.workerValidation = "old validation"
+	m.pipelineScreen.hasValidation = true
 
 	// Press N to start new run
 	result, _ := sendRune(m, "n")
@@ -844,43 +853,43 @@ func TestTUI_NewRunClearsStaleState(t *testing.T) {
 	}
 
 	// All stale state must be cleared
-	if len(model.agents) != 0 {
-		t.Errorf("expected agents cleared, got %d agents", len(model.agents))
+	if len(model.pipelineScreen.agents) != 0 {
+		t.Errorf("expected agents cleared, got %d agents", len(model.pipelineScreen.agents))
 	}
-	if model.lastErr != nil {
-		t.Errorf("expected lastErr cleared, got %v", model.lastErr)
+	if model.pipelineScreen.lastErr != nil {
+		t.Errorf("expected lastErr cleared, got %v", model.pipelineScreen.lastErr)
 	}
-	if model.hasPlan {
+	if model.pipelineScreen.hasPlan {
 		t.Error("expected hasPlan cleared")
 	}
-	if model.hasValidation {
+	if model.pipelineScreen.hasValidation {
 		t.Error("expected hasValidation cleared")
 	}
-	if model.showDashboard {
+	if model.pipelineScreen.showDashboard {
 		t.Error("expected showDashboard cleared")
 	}
-	if model.finalPlan != "" {
+	if model.pipelineScreen.finalPlan != "" {
 		t.Error("expected finalPlan cleared")
 	}
 
 	// Goal should be preserved in prompt
-	if !strings.Contains(model.prompt.Value(), "previous task") {
-		t.Errorf("expected prompt pre-filled, got %q", model.prompt.Value())
+	if !strings.Contains(model.promptScreen.Value(), "previous task") {
+		t.Errorf("expected prompt pre-filled, got %q", model.promptScreen.Value())
 	}
 }
 
 func TestTUI_RestartClearsErrorAndAgents(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentCompletion
-	m.goal = "task"
-	m.agents = []AgentRow{{ID: "gateway", State: "done"}}
-	m.lastErr = fmt.Errorf("old error")
+	m.pipelineScreen.content = ContentCompletion
+	m.pipelineScreen.goal = "task"
+	m.pipelineScreen.agents = []AgentRow{{ID: "gateway", State: "done"}}
+	m.pipelineScreen.lastErr = fmt.Errorf("old error")
 
 	// Press N, then submit new prompt via Enter
 	result, _ := sendRune(m, "n")
 	model := result.(Model)
-	model.prompt.SetValue("new task")
+	model.promptScreen.SetValue("new task")
 
 	result2, _ := sendKey(model, tea.KeyEnter)
 	model2 := result2.(Model)
@@ -888,11 +897,11 @@ func TestTUI_RestartClearsErrorAndAgents(t *testing.T) {
 	if model2.state != StatePipeline {
 		t.Fatalf("expected StatePipeline, got %d", model2.state)
 	}
-	if len(model2.agents) != 0 {
-		t.Errorf("expected agents cleared on new pipeline start, got %d", len(model2.agents))
+	if len(model2.pipelineScreen.agents) != 0 {
+		t.Errorf("expected agents cleared on new pipeline start, got %d", len(model2.pipelineScreen.agents))
 	}
-	if model2.lastErr != nil {
-		t.Errorf("expected lastErr cleared on new pipeline start, got %v", model2.lastErr)
+	if model2.pipelineScreen.lastErr != nil {
+		t.Errorf("expected lastErr cleared on new pipeline start, got %v", model2.pipelineScreen.lastErr)
 	}
 	model2.cancel()
 }
@@ -900,8 +909,8 @@ func TestTUI_RestartClearsErrorAndAgents(t *testing.T) {
 func TestTUI_ConfigNameInHeader(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentStreaming
-	m.goal = "test"
+	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.goal = "test"
 	m.width = 120
 	m.height = 40
 
@@ -914,37 +923,37 @@ func TestTUI_ConfigNameInHeader(t *testing.T) {
 func TestTUI_PlanGateBlocksOverwrite(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentStreaming
+	m.pipelineScreen.content = ContentStreaming
 	m.events = make(chan orchestrator.Event, 1)
 
 	// Simulate gate event
-	model := m.applyEvent(orchestrator.Event{
+	m.pipelineScreen.ApplyEvent(orchestrator.Event{
 		Type: orchestrator.EventGateRequest,
 		Gate: orchestrator.GateRequest{
 			Type:              orchestrator.GatePlanApproval,
 			FinalPlanMarkdown: "# Plan\n\n## Goal\nTest",
 		},
-	})
+	}, m.width)
 
-	if model.content != ContentPlanReview {
-		t.Fatalf("expected ContentPlanReview, got %d", model.content)
+	if m.pipelineScreen.content != ContentPlanReview {
+		t.Fatalf("expected ContentPlanReview, got %d", m.pipelineScreen.content)
 	}
-	if !model.awaitingPlanDecision {
+	if !m.pipelineScreen.awaitingPlanDecision {
 		t.Fatal("expected awaitingPlanDecision=true")
 	}
 
 	// Simulate a stale EventPhaseChange arriving after the gate
-	model2 := model.applyEvent(orchestrator.Event{
+	m.pipelineScreen.ApplyEvent(orchestrator.Event{
 		Type:  orchestrator.EventPhaseChange,
 		Phase: orchestrator.PhaseExecuting,
-	})
+	}, m.width)
 
 	// Gate must NOT be overwritten
-	if model2.content != ContentPlanReview {
-		t.Errorf("gate was overwritten by stale EventPhaseChange: content=%d", model2.content)
+	if m.pipelineScreen.content != ContentPlanReview {
+		t.Errorf("gate was overwritten by stale EventPhaseChange: content=%d", m.pipelineScreen.content)
 	}
 	// Phase should not be updated while gate is active
-	if model2.phase == orchestrator.PhaseExecuting {
+	if m.pipelineScreen.phase == orchestrator.PhaseExecuting {
 		t.Error("phase was updated despite awaitingPlanDecision being true")
 	}
 }
@@ -952,28 +961,28 @@ func TestTUI_PlanGateBlocksOverwrite(t *testing.T) {
 func TestTUI_PlanReviewComment(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentPlanReview
-	m.hasPlan = true
-	m.finalPlan = "# Plan\n\n## Goal\nTest"
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest"
 	decisions := make(chan orchestrator.Decision, 1)
 	m.decisions = decisions
 	m.events = make(chan orchestrator.Event, 1)
 
 	// Initialize comment textarea
-	m.planComment = textarea.New()
-	m.planComment.SetWidth(80)
-	m.planComment.SetHeight(2)
-	m.planComment.CharLimit = 1024
-	m.planComment.Focus()
-	m.hasPlanComment = true
-	m.planComment.SetValue("please add error handling")
+	m.pipelineScreen.planComment = textarea.New()
+	m.pipelineScreen.planComment.SetWidth(80)
+	m.pipelineScreen.planComment.SetHeight(2)
+	m.pipelineScreen.planComment.CharLimit = 1024
+	m.pipelineScreen.planComment.Focus()
+	m.pipelineScreen.hasPlanComment = true
+	m.pipelineScreen.planComment.SetValue("please add error handling")
 
 	// Press Enter to submit comment
 	result, cmd := sendKey(m, tea.KeyEnter)
 	model := result.(Model)
 
-	if model.content != ContentStreaming {
-		t.Errorf("expected ContentStreaming after comment submit, got %d", model.content)
+	if model.pipelineScreen.content != ContentStreaming {
+		t.Errorf("expected ContentStreaming after comment submit, got %d", model.pipelineScreen.content)
 	}
 	if cmd == nil {
 		t.Error("expected non-nil cmd (waitForEvent)")
@@ -995,18 +1004,18 @@ func TestTUI_PlanReviewComment(t *testing.T) {
 func TestTUI_PlanReviewExternalEditor(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentPlanReview
-	m.hasPlan = true
-	m.finalPlan = "# Plan\n\n## Goal\nTest"
-	m.planFilePath = "/tmp/test-plan.md"
-	m.hasPlanComment = true
-	m.planComment = textarea.New()
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest"
+	m.pipelineScreen.planFilePath = "/tmp/test-plan.md"
+	m.pipelineScreen.hasPlanComment = true
+	m.pipelineScreen.planComment = textarea.New()
 
 	// Press Ctrl+E to open external editor
 	result, cmd := sendKey(m, tea.KeyCtrlE)
 	model := result.(Model)
 
-	if !model.editorRunning {
+	if !model.pipelineScreen.editorRunning {
 		t.Error("expected editorRunning=true after Ctrl+E")
 	}
 	if cmd == nil {
@@ -1017,14 +1026,14 @@ func TestTUI_PlanReviewExternalEditor(t *testing.T) {
 func TestTUI_PlanReviewGlamour(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentPlanReview
-	m.hasPlan = true
-	m.finalPlan = "# Plan\n\n## Goal\nAdd feature X.\n\n## Work Packages\n\n### 1. Step 1\n\n- item a\n- item b\n"
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nAdd feature X.\n\n## Work Packages\n\n### 1. Step 1\n\n- item a\n- item b\n"
 	m.width = 120
 	m.height = 40
 
-	view := m.viewPlanReview(80)
-	if view == m.finalPlan {
+	view := m.pipelineScreen.viewPlanReview(80)
+	if view == m.pipelineScreen.finalPlan {
 		t.Error("expected glamour to transform the markdown, got raw input back")
 	}
 	if !strings.Contains(view, "Plan") {
@@ -1035,9 +1044,9 @@ func TestTUI_PlanReviewGlamour(t *testing.T) {
 func TestTUI_EditorReturn(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentPlanReview
-	m.hasPlan = true
-	m.finalPlan = "# Plan\n\nOriginal content"
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.finalPlan = "# Plan\n\nOriginal content"
 	decisions := make(chan orchestrator.Decision, 1)
 	m.decisions = decisions
 	m.events = make(chan orchestrator.Event, 1)
@@ -1055,17 +1064,17 @@ func TestTUI_EditorReturn(t *testing.T) {
 	}
 	tmpFile.Close()
 
-	m.planFilePath = tmpFile.Name()
+	m.pipelineScreen.planFilePath = tmpFile.Name()
 
 	// Simulate editor return
 	result, _ := m.Update(editorReturnMsg{err: nil})
 	model := result.(Model)
 
-	if model.finalPlan != modifiedPlan {
-		t.Errorf("expected updated finalPlan, got %q", model.finalPlan)
+	if model.pipelineScreen.finalPlan != modifiedPlan {
+		t.Errorf("expected updated finalPlan, got %q", model.pipelineScreen.finalPlan)
 	}
-	if model.content != ContentStreaming {
-		t.Errorf("expected ContentStreaming after editor return with changes, got %d", model.content)
+	if model.pipelineScreen.content != ContentStreaming {
+		t.Errorf("expected ContentStreaming after editor return with changes, got %d", model.pipelineScreen.content)
 	}
 
 	select {
@@ -1078,5 +1087,174 @@ func TestTUI_EditorReturn(t *testing.T) {
 		}
 	default:
 		t.Error("expected edit decision to be sent")
+	}
+}
+
+// TestTUI_DrainLoopPlanGate exercises the full Update drain loop:
+// events for planner-done → plan-ready → gate-request arrive in a burst
+// and must all be consumed, leaving the model in ContentPlanReview.
+func TestTUI_DrainLoopPlanGate(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.agents = []AgentRow{{ID: "planner", State: "running", StartedAt: time.Now()}}
+
+	events := make(chan orchestrator.Event, 16)
+	m.events = events
+
+	planMD := "# Plan\n\n## Goal\nAdd X.\n\n## Work Packages\n\n### 1. Step 1"
+
+	// Buffer all three events before the TUI reads any of them.
+	events <- orchestrator.Event{Type: orchestrator.EventAgentDone, AgentID: "planner", InputTokens: 100, OutputTokens: 50}
+	events <- orchestrator.Event{Type: orchestrator.EventPlanReady, FinalPlan: planMD}
+	events <- orchestrator.Event{Type: orchestrator.EventGateRequest, Gate: orchestrator.GateRequest{
+		Type:              orchestrator.GatePlanApproval,
+		FinalPlanMarkdown: planMD,
+		PlanFilePath:      "/tmp/plan.md",
+	}}
+
+	// Simulate what waitForEvent would do: read the first event and wrap it.
+	firstEvent := <-events
+	result, cmd := m.Update(OrchestratorEventMsg{Event: firstEvent})
+	model := result.(Model)
+
+	if model.pipelineScreen.content != ContentPlanReview {
+		t.Errorf("expected ContentPlanReview after drain, got %d", model.pipelineScreen.content)
+	}
+	if !model.pipelineScreen.awaitingPlanDecision {
+		t.Error("expected awaitingPlanDecision=true")
+	}
+	if !model.pipelineScreen.hasPlan {
+		t.Error("expected hasPlan=true")
+	}
+	if model.pipelineScreen.finalPlan != planMD {
+		t.Errorf("expected finalPlan to be set, got %q", model.pipelineScreen.finalPlan)
+	}
+	if !model.pipelineScreen.hasPlanComment {
+		t.Error("expected hasPlanComment=true (comment textarea initialised)")
+	}
+	if cmd == nil {
+		t.Error("expected non-nil cmd (waitForEvent)")
+	}
+}
+
+// TestTUI_ChannelCloseDoesNotOverwriteGate verifies that when the events channel
+// closes while awaitingPlanDecision, the content stays on ContentPlanReview.
+func TestTUI_ChannelCloseDoesNotOverwriteGate(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.awaitingPlanDecision = true
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest"
+
+	// pipelineClosedMsg must NOT overwrite the gate.
+	result, _ := m.Update(pipelineClosedMsg{})
+	model := result.(Model)
+
+	if model.pipelineScreen.content != ContentPlanReview {
+		t.Errorf("pipelineClosedMsg overwrite gate: expected ContentPlanReview, got %d", model.pipelineScreen.content)
+	}
+}
+
+// TestTUI_DrainLoopChannelCloseAfterGate verifies that if the channel closes
+// right after the gate event is drained, the gate is preserved.
+func TestTUI_DrainLoopChannelCloseAfterGate(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.agents = []AgentRow{{ID: "planner", State: "running", StartedAt: time.Now()}}
+
+	events := make(chan orchestrator.Event, 16)
+	m.events = events
+
+	planMD := "# Plan\n\n## Goal\nX.\n\n## Work Packages\n\n### 1. Step"
+
+	// Buffer gate event and close channel (simulating ctx cancel race).
+	events <- orchestrator.Event{Type: orchestrator.EventGateRequest, Gate: orchestrator.GateRequest{
+		Type:              orchestrator.GatePlanApproval,
+		FinalPlanMarkdown: planMD,
+	}}
+	close(events)
+
+	// Deliver the gate event via OrchestratorEventMsg. The drain loop will
+	// read the closed channel on the next iteration.
+	result, _ := m.Update(OrchestratorEventMsg{Event: <-events})
+
+	// Channel was already closed, so the read above consumed the gate.
+	// But we need to rebuild: put the gate event, close, then let drain run.
+	// Redo with a fresh channel:
+	events2 := make(chan orchestrator.Event, 16)
+	m.events = events2
+	events2 <- orchestrator.Event{Type: orchestrator.EventGateRequest, Gate: orchestrator.GateRequest{
+		Type:              orchestrator.GatePlanApproval,
+		FinalPlanMarkdown: planMD,
+	}}
+	close(events2)
+
+	firstEvent := <-events2 // gate event
+	result, _ = m.Update(OrchestratorEventMsg{Event: firstEvent})
+	model := result.(Model)
+
+	// After draining, the next read sees channel-closed.
+	// awaitingPlanDecision should protect the gate.
+	if model.pipelineScreen.content != ContentPlanReview {
+		t.Errorf("expected ContentPlanReview (gate protected), got %d", model.pipelineScreen.content)
+	}
+}
+
+// TestTUI_GlobalKeysBlockedInPlanReview ensures "d" and number keys
+// are routed to the comment textarea, not to global handlers.
+func TestTUI_GlobalKeysBlockedInPlanReview(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.hasPlanComment = true
+	m.pipelineScreen.planComment = textarea.New()
+	m.pipelineScreen.planComment.SetWidth(80)
+	m.pipelineScreen.planComment.SetHeight(2)
+	m.pipelineScreen.planComment.Focus()
+	m.pipelineScreen.agents = []AgentRow{{ID: "planner", State: "done"}}
+
+	// Press "d" — must NOT toggle dashboard
+	result, _ := sendRune(m, "d")
+	model := result.(Model)
+
+	if model.pipelineScreen.showDashboard {
+		t.Error("pressing 'd' in ContentPlanReview toggled dashboard instead of typing in comment textarea")
+	}
+
+	// Press "1" — must NOT switch to agent history
+	result2, _ := sendRune(model, "1")
+	model2 := result2.(Model)
+
+	if model2.pipelineScreen.content != ContentPlanReview {
+		t.Errorf("pressing '1' in ContentPlanReview switched content to %d", model2.pipelineScreen.content)
+	}
+}
+
+// TestTUI_PlanReviewInputHeight verifies that the content height accounts
+// for the taller input zone in ContentPlanReview mode.
+func TestTUI_PlanReviewInputHeight(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest\n\n## Work Packages\n\n### 1. Do thing"
+	m.width = 120
+	m.height = 40
+	m.pipelineScreen.hasPlanComment = true
+	m.pipelineScreen.planComment = textarea.New()
+	m.pipelineScreen.planComment.SetWidth(80)
+	m.pipelineScreen.planComment.SetHeight(2)
+
+	view := m.View()
+	lines := strings.Split(view, "\n")
+
+	// The view must not exceed the terminal height.
+	// Allow a 1-line tolerance for trailing newline.
+	if len(lines) > m.height+1 {
+		t.Errorf("plan review view exceeds terminal height: %d lines for %d-row terminal", len(lines), m.height)
 	}
 }

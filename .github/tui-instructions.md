@@ -22,7 +22,9 @@ The TUI uses the **Elm architecture** (Model-View-Update) via `charmbracelet/bub
 
 ## Core Rules & Anti-Patterns (BANNED)
 
-- **CRITICAL: `View()` Must Be 100% Pure**: NEVER call `.SetWidth()`, `.SetHeight()`, `.SetContent()`, or alter any state (like viewports/textareas) inside `View()`. Performing layout math or state mutation inside `View()` causes race conditions and cursor bugs.
+- **CRITICAL: `View()` Must Be 100% Pure**: NEVER call `.SetWidth()`, `.SetHeight()`, `.SetContent()`, `.GotoBottom()`, or alter any state (like viewports/textareas) inside `View()`. Performing layout math, viewport bounds-checking, or state mutation inside `View()` causes severe synchronization bugs, layout desyncs, frame flickering, and cursor bugs. All viewport mutations and state assertions **must** be executed sequentially in `Update()` via native Elm message passing.
+- **Bypassing explicit `tea.Msg` routing**: Directly reading global variables, channels, or explicitly passing structural `Props` side-channel data into sub-screens drastically bypasses Bubble Tea architecture. Screen component coupling must exclusively manifest as `Model, cmd := Screen.Update(msg)` where data payloads flowing **DOWN** must only be derived from structural typed `msg` interfaces (e.g. `EngineUpdateMsg`), and intents flowing **UP** must manifest as `tea.Cmd`.
+- **Local keys overriding state machines**: Hardcoding `ctrl+c` or global navigation actions (`esc`) in nested sub-component updates. The root router `AppModel` must intercept and filter structural exits and global navigation; giving global shortcuts to nested screen widgets causes unrecoverable desyncs and orphaned states.
 - **CRITICAL: Never Block in `Update()`**: Do not perform IO, sleeps, or network calls inside `Update()`. Always delegate to `tea.Cmd`.
 - **No Pointers in IO Messages**: NEVER pass structs containing mutable pointers in `tea.Msg` (via `p.Send()`) when streaming from goroutines. BubbleTea requires deep immutability. Pass copies or values to prevent concurrent map panics.
 - **No Direct IO in `Init()`**: `Init()` should only return a `tea.Cmd`.

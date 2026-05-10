@@ -56,10 +56,10 @@ func testRunDetail() agent.RunDetail {
 
 func TestTUI_RunsListNavigation(t *testing.T) {
 	m := testModel()
-	m.runs = testRunSummaries()
+	m.runsListScreen.SetRuns(testRunSummaries())
 	m.state = StateRunsList
-	m.runsCursor = 0
 	m.recalculateLayout()
+	m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width)
 
 	// Verify view contains prompt text
 	view := m.View()
@@ -76,28 +76,28 @@ func TestTUI_RunsListNavigation(t *testing.T) {
 	// Press down to move cursor
 	result, _ := sendKey(m, tea.KeyDown)
 	model := result.(Model)
-	if model.runsCursor != 1 {
-		t.Errorf("expected cursor at 1 after down, got %d", model.runsCursor)
+	if model.runsListScreen.cursor != 1 {
+		t.Errorf("expected cursor at 1 after down, got %d", model.runsListScreen.cursor)
 	}
 
 	// Press up to move back
 	result, _ = sendKey(model, tea.KeyUp)
 	model = result.(Model)
-	if model.runsCursor != 0 {
-		t.Errorf("expected cursor at 0 after up, got %d", model.runsCursor)
+	if model.runsListScreen.cursor != 0 {
+		t.Errorf("expected cursor at 0 after up, got %d", model.runsListScreen.cursor)
 	}
 
 	// j/k also work
 	result, _ = sendRune(m, "j")
 	model = result.(Model)
-	if model.runsCursor != 1 {
-		t.Errorf("expected cursor at 1 after j, got %d", model.runsCursor)
+	if model.runsListScreen.cursor != 1 {
+		t.Errorf("expected cursor at 1 after j, got %d", model.runsListScreen.cursor)
 	}
 
 	result, _ = sendRune(model, "k")
 	model = result.(Model)
-	if model.runsCursor != 0 {
-		t.Errorf("expected cursor at 0 after k, got %d", model.runsCursor)
+	if model.runsListScreen.cursor != 0 {
+		t.Errorf("expected cursor at 0 after k, got %d", model.runsListScreen.cursor)
 	}
 
 	// Esc returns to prompt
@@ -126,15 +126,14 @@ func TestTUI_RunsListEnterLoadsDetail(t *testing.T) {
 	os.WriteFile(filepath.Join(sessDir, "gateway_meta.json"), data, 0o644)
 
 	m := testModel()
-	m.runs = []agent.RunSummary{{
+	m.runsListScreen.SetRuns([]agent.RunSummary{{
 		Timestamp: time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
 		Slug:      "test-run",
 		Path:      sessDir,
 		Prompt:    "Test prompt",
 		Status:    "done",
-	}}
+	}})
 	m.state = StateRunsList
-	m.runsCursor = 0
 	m.recalculateLayout()
 
 	// Press Enter
@@ -144,25 +143,25 @@ func TestTUI_RunsListEnterLoadsDetail(t *testing.T) {
 	if model.state != StateRunDetail {
 		t.Errorf("expected StateRunDetail, got %d", model.state)
 	}
-	if model.runDetail.Prompt != "Test prompt" {
-		t.Errorf("expected prompt 'Test prompt', got %q", model.runDetail.Prompt)
+	if model.runDetailScreen.detail.Prompt != "Test prompt" {
+		t.Errorf("expected prompt 'Test prompt', got %q", model.runDetailScreen.detail.Prompt)
 	}
-	if len(model.runDetail.Steps) != 1 {
-		t.Errorf("expected 1 step, got %d", len(model.runDetail.Steps))
+	if len(model.runDetailScreen.detail.Steps) != 1 {
+		t.Errorf("expected 1 step, got %d", len(model.runDetailScreen.detail.Steps))
 	}
 }
 
 func TestTUI_RunDetailLayout_ThreeZones(t *testing.T) {
 	m := testModel()
 	m.state = StateRunDetail
-	m.runDetail = testRunDetail()
-	m.runStepCursor = 0
-	m.runLogLines = []string{
+	m.runDetailScreen.SetDetail(testRunDetail())
+	m.runDetailScreen.logLines = []string{
 		"  Read go.mod",
 		"  Bash go test ./...",
 		"  ╶ I found the issue.",
 	}
 	m.recalculateLayout()
+	m.runDetailScreen.SyncViewports()
 
 	view := m.View()
 
@@ -196,23 +195,22 @@ func TestTUI_RunDetailLayout_ThreeZones(t *testing.T) {
 func TestTUI_RunDetail_KeyNavigation(t *testing.T) {
 	m := testModel()
 	m.state = StateRunDetail
-	m.runDetail = testRunDetail()
-	m.runStepCursor = 0
-	m.runLogLines = []string{"line1", "line2"}
+	m.runDetailScreen.SetDetail(testRunDetail())
+	m.runDetailScreen.logLines = []string{"line1", "line2"}
 	m.recalculateLayout()
 
 	// j moves step cursor down
 	result, _ := sendRune(m, "j")
 	model := result.(Model)
-	if model.runStepCursor != 1 {
-		t.Errorf("expected step cursor 1 after j, got %d", model.runStepCursor)
+	if model.runDetailScreen.stepCursor != 1 {
+		t.Errorf("expected step cursor 1 after j, got %d", model.runDetailScreen.stepCursor)
 	}
 
 	// k moves step cursor up
 	result, _ = sendRune(model, "k")
 	model = result.(Model)
-	if model.runStepCursor != 0 {
-		t.Errorf("expected step cursor 0 after k, got %d", model.runStepCursor)
+	if model.runDetailScreen.stepCursor != 0 {
+		t.Errorf("expected step cursor 0 after k, got %d", model.runDetailScreen.stepCursor)
 	}
 
 	// Esc returns to runs list
@@ -240,7 +238,7 @@ func TestTUI_CtrlR_FromPrompt(t *testing.T) {
 func TestTUI_CtrlR_NotDuringPipeline(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.content = ContentStreaming // mid-pipeline
+	m.pipelineScreen.content = ContentStreaming // mid-pipeline
 
 	// Ctrl+R should be a no-op during active pipeline (no handler for it)
 	result, _ := sendKey(m, tea.KeyCtrlR)
@@ -253,9 +251,9 @@ func TestTUI_CtrlR_NotDuringPipeline(t *testing.T) {
 
 func TestTUI_RunsListEmpty(t *testing.T) {
 	m := testModel()
-	m.runs = nil
 	m.state = StateRunsList
 	m.recalculateLayout()
+	m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width)
 
 	view := m.View()
 	if !strings.Contains(view, "No runs found") {
@@ -273,21 +271,20 @@ func TestTUI_RunsListEmpty(t *testing.T) {
 func TestTUI_RunStepNoSessionID(t *testing.T) {
 	m := testModel()
 	m.state = StateRunDetail
-	m.runDetail = agent.RunDetail{
+	m.runDetailScreen.SetDetail(agent.RunDetail{
 		RunSummary: agent.RunSummary{Status: "done"},
 		Steps: []agent.StepMeta{
 			{AgentID: "gateway", Status: "done"}, // no ClaudeSessionID
 		},
-	}
-	m.runStepCursor = 0
+	})
 	m.recalculateLayout()
-	m.loadStepLog()
+	m.runDetailScreen.LoadStepLog()
 
-	if len(m.runLogLines) == 0 {
+	if len(m.runDetailScreen.logLines) == 0 {
 		t.Fatal("expected at least one log line")
 	}
-	if !strings.Contains(m.runLogLines[0], "no agent log") {
-		t.Errorf("expected 'no agent log' placeholder, got %q", m.runLogLines[0])
+	if !strings.Contains(m.runDetailScreen.logLines[0], "no agent log") {
+		t.Errorf("expected 'no agent log' placeholder, got %q", m.runDetailScreen.logLines[0])
 	}
 }
 
