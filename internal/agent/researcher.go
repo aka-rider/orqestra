@@ -23,23 +23,23 @@ func NewResearcher(runner harness.CLIRunner, cfg config.ResearcherConfig) *Resea
 }
 
 // Research sends the user prompt to the CLI and returns the raw markdown output.
-func (r *Researcher) Research(ctx context.Context, prompt string) (RawPlan, harness.TokenUsage, error) {
+func (r *Researcher) Research(ctx context.Context, prompt string) (RawPlan, harness.TokenUsage, string, error) {
 	result, err := r.runner.RunPrint(ctx, prompt, r.cfg.SystemPrompt)
 	if err != nil {
-		return RawPlan{}, harness.TokenUsage{}, err
+		return RawPlan{}, harness.TokenUsage{}, "", err
 	}
 	return RawPlan{
 		Markdown: strings.TrimSpace(stripCodeFences(result.Output)),
-	}, result.Usage, nil
+	}, result.Usage, result.SessionID, nil
 }
 
 // ResearchStreaming uses RunStreaming and returns the raw markdown output.
-func (r *Researcher) ResearchStreaming(ctx context.Context, prompt string, stdout io.Writer) (RawPlan, harness.TokenUsage, error) {
+func (r *Researcher) ResearchStreaming(ctx context.Context, prompt string, stdout io.Writer) (RawPlan, harness.TokenUsage, string, error) {
 	result, err := r.runner.RunStreaming(ctx, prompt, r.cfg.SystemPrompt, stdout)
 	if err != nil {
-		return RawPlan{}, harness.TokenUsage{}, err
+		return RawPlan{}, harness.TokenUsage{}, "", err
 	}
 	return RawPlan{
 		Markdown: strings.TrimSpace(stripCodeFences(result.Output)),
-	}, result.Usage, nil
+	}, result.Usage, result.SessionID, nil
 }

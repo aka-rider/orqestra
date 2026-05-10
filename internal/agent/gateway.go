@@ -56,50 +56,50 @@ func NewGateway(runner harness.CLIRunner, cfg config.GatewayConfig) *Gateway {
 }
 
 // Evaluate sends the raw prompt to the LLM and parses the structured response.
-func (g *Gateway) Evaluate(ctx context.Context, rawPrompt string, stdout io.Writer) (GatewayResult, harness.TokenUsage, error) {
+func (g *Gateway) Evaluate(ctx context.Context, rawPrompt string, stdout io.Writer) (GatewayResult, harness.TokenUsage, string, error) {
 	if stdout == nil {
 		stdout = io.Discard
 	}
 	result, err := g.runner.RunStreaming(ctx, rawPrompt, g.cfg.SystemPrompt, stdout)
 	if err != nil {
-		return GatewayResult{}, harness.TokenUsage{}, fmt.Errorf("gateway evaluation failed: %w", err)
+		return GatewayResult{}, harness.TokenUsage{}, "", fmt.Errorf("gateway evaluation failed: %w", err)
 	}
 
 	slog.Debug("gateway raw output", "len", len(result.Output), "first_200", truncate(result.Output, 200))
 
 	jsonStr := extractJSON(result.Output)
 	if jsonStr == "" {
-		return GatewayResult{}, harness.TokenUsage{}, fmt.Errorf("parsing gateway response: no JSON object found in output")
+		return GatewayResult{}, harness.TokenUsage{}, "", fmt.Errorf("parsing gateway response: no JSON object found in output")
 	}
 
 	var gwResult GatewayResult
 	if err := json.Unmarshal([]byte(jsonStr), &gwResult); err != nil {
-		return GatewayResult{}, harness.TokenUsage{}, fmt.Errorf("parsing gateway response: %w", err)
+		return GatewayResult{}, harness.TokenUsage{}, "", fmt.Errorf("parsing gateway response: %w", err)
 	}
 
 	switch gwResult.Verdict {
 	case GatewayVerdictAccept, GatewayVerdictCoach:
 		// valid
 	default:
-		return GatewayResult{}, harness.TokenUsage{}, fmt.Errorf("gateway evaluation returned invalid verdict %q", gwResult.Verdict)
+		return GatewayResult{}, harness.TokenUsage{}, "", fmt.Errorf("gateway evaluation returned invalid verdict %q", gwResult.Verdict)
 	}
 
 	if gwResult.Brief.Task == "" {
-		return GatewayResult{}, harness.TokenUsage{}, errors.New("gateway evaluation returned empty brief.task")
+		return GatewayResult{}, harness.TokenUsage{}, "", errors.New("gateway evaluation returned empty brief.task")
 	}
 	if gwResult.Verdict == GatewayVerdictAccept {
 		if gwResult.Brief.EndState == "" {
-			return GatewayResult{}, harness.TokenUsage{}, errors.New("gateway accepted but returned empty brief.end_state")
+			return GatewayResult{}, harness.TokenUsage{}, "", errors.New("gateway accepted but returned empty brief.end_state")
 		}
 	}
 	if gwResult.Verdict == GatewayVerdictCoach && len(gwResult.Questions) == 0 {
-		return GatewayResult{}, harness.TokenUsage{}, errors.New("gateway coach verdict requires at least one question")
+		return GatewayResult{}, harness.TokenUsage{}, "", errors.New("gateway coach verdict requires at least one question")
 	}
 	if len(gwResult.Questions) > 3 {
-		return GatewayResult{}, harness.TokenUsage{}, fmt.Errorf("gateway returned %d questions, max is 3", len(gwResult.Questions))
+		return GatewayResult{}, harness.TokenUsage{}, "", fmt.Errorf("gateway returned %d questions, max is 3", len(gwResult.Questions))
 	}
 
-	return gwResult, result.Usage, nil
+	return gwResult, result.Usage, result.SessionID, nil
 }
 
 // extractJSON finds the outermost JSON object in s.

@@ -40,7 +40,7 @@ func TestPlanner_Refine_Success(t *testing.T) {
 	}
 
 	p := NewPlanner(mock, cfg)
-	plan, _, err := p.Refine(context.Background(), "some researcher draft")
+	plan, _, _, err := p.Refine(context.Background(), "some researcher draft")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestPlanner_Refine_MissingPlanHeader(t *testing.T) {
 
 	cfg := config.PlannerConfig{Model: "test"}
 	p := NewPlanner(mock, cfg)
-	_, _, err := p.Refine(context.Background(), "draft")
+	_, _, _, err := p.Refine(context.Background(), "draft")
 	if err == nil {
 		t.Fatal("expected error for missing '# Plan' header")
 	}
@@ -65,7 +65,7 @@ func TestPlanner_Refine_MissingWorkPackages(t *testing.T) {
 
 	cfg := config.PlannerConfig{Model: "test"}
 	p := NewPlanner(mock, cfg)
-	_, _, err := p.Refine(context.Background(), "draft")
+	_, _, _, err := p.Refine(context.Background(), "draft")
 	if err == nil {
 		t.Fatal("expected error for missing '## Work Packages' section")
 	}
@@ -78,7 +78,7 @@ func TestPlanner_Refine_CodeFenceStripping(t *testing.T) {
 
 	cfg := config.PlannerConfig{Model: "test"}
 	p := NewPlanner(mock, cfg)
-	plan, _, err := p.Refine(context.Background(), "draft")
+	plan, _, _, err := p.Refine(context.Background(), "draft")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestPlanner_Refine_CLIError(t *testing.T) {
 
 	cfg := config.PlannerConfig{Model: "test"}
 	p := NewPlanner(mock, cfg)
-	_, _, err := p.Refine(context.Background(), "draft")
+	_, _, _, err := p.Refine(context.Background(), "draft")
 	if err == nil {
 		t.Fatal("expected error propagation from CLI")
 	}
@@ -104,7 +104,7 @@ func TestPlanner_RefineWithComments(t *testing.T) {
 
 	cfg := config.PlannerConfig{Model: "test"}
 	p := NewPlanner(mock, cfg)
-	plan, _, err := p.RefineWithComments(context.Background(), "old plan", "please fix step 2")
+	plan, _, _, err := p.RefineWithComments(context.Background(), "old plan", "please fix step 2")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

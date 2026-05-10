@@ -273,7 +273,7 @@ worker:
   permission_mode: full
   timeout: 45m
 
-utility: small
+
 
 retry:
   researcher_attempts: 1

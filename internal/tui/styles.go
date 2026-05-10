@@ -49,6 +49,12 @@ var (
 	streamStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("7"))
 
+	// Runs history styles
+	selectedStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("0")).
+			Background(lipgloss.Color("14")).
+			Bold(true)
+
 	// Activity log styles
 	activityToolStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("244")).

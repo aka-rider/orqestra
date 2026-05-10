@@ -21,8 +21,10 @@ import (
 type AppState int
 
 const (
-	StatePrompt   AppState = iota // full-screen prompt entry
-	StatePipeline                 // 3-zone split layout (pipeline running/done)
+	StatePrompt    AppState = iota // full-screen prompt entry
+	StatePipeline                  // 3-zone split layout (pipeline running/done)
+	StateRunsList                  // historical runs list
+	StateRunDetail                 // detail view for a single historical run
 )
 
 // ContentMode represents what the content zone shows during pipeline execution.
@@ -118,6 +120,17 @@ type Model struct {
 	sidebarVP   viewport.Model
 	dashboardVP viewport.Model
 	bounds      layoutBounds
+
+	// Runs history state
+	runs          []agent.RunSummary
+	runDetail     agent.RunDetail
+	runsCursor    int      // selected row in runs list
+	runStepCursor int      // selected step in detail right column
+	runLogLines   []string // parsed JSONL lines for lower raw-log pane
+	runsVP        viewport.Model
+	runDetailVP   viewport.Model
+	runStepsVP    viewport.Model
+	runLogVP      viewport.Model
 }
 
 // NewModel creates the initial TUI model.
@@ -137,6 +150,15 @@ func NewModel(engine *orchestrator.Engine, configName string) Model {
 	dvp := viewport.New(0, 0)
 	dvp.MouseWheelEnabled = true
 
+	rvp := viewport.New(0, 0)
+	rvp.MouseWheelEnabled = true
+	rdvp := viewport.New(0, 0)
+	rdvp.MouseWheelEnabled = true
+	rsvp := viewport.New(0, 0)
+	rsvp.MouseWheelEnabled = true
+	rlvp := viewport.New(0, 0)
+	rlvp.MouseWheelEnabled = true
+
 	return Model{
 		state:       StatePrompt,
 		startTime:   time.Now(),
@@ -146,6 +168,10 @@ func NewModel(engine *orchestrator.Engine, configName string) Model {
 		contentVP:   cvp,
 		sidebarVP:   svp,
 		dashboardVP: dvp,
+		runsVP:      rvp,
+		runDetailVP: rdvp,
+		runStepsVP:  rsvp,
+		runLogVP:    rlvp,
 	}
 }
 
@@ -334,6 +360,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handlePromptKey(msg)
 	case StatePipeline:
 		return m.handlePipelineKey(msg)
+	case StateRunsList:
+		return m.handleRunsListKey(msg)
+	case StateRunDetail:
+		return m.handleRunDetailKey(msg)
 	}
 	return m, nil
 }
@@ -368,6 +398,9 @@ func (m Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.startTime = time.Now()
 		cmd := m.startPipeline(prompt, true)
 		return m, cmd
+	case tea.KeyCtrlR:
+		m.navigateToRunsList()
+		return m, nil
 	default:
 		var cmd tea.Cmd
 		m.prompt, cmd = m.prompt.Update(msg)
@@ -658,6 +691,11 @@ func (m Model) handleStreamingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleCompletionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlR:
+		m.navigateToRunsList()
+		return m, nil
+	}
 	switch msg.String() {
 	case "n", "N":
 		goal := m.goal
@@ -836,6 +874,10 @@ func (m Model) View() string {
 		return m.viewPromptScreen()
 	case StatePipeline:
 		return m.viewPipelineScreen()
+	case StateRunsList:
+		return m.viewRunsListScreen()
+	case StateRunDetail:
+		return m.viewRunDetailScreen()
 	}
 	return ""
 }
@@ -860,7 +902,7 @@ func (m Model) viewPromptScreen() string {
 
 	// Footer (2 lines)
 	footer := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
-		keyStyle.Render(" [Enter] submit | [Ctrl+S] skip gateway | [^C^C] quit")
+		keyStyle.Render(" [Enter] submit | [Ctrl+S] skip gateway | [Ctrl+R] runs  [^C^C] quit")
 
 	// Input zone (divider + instruction + textarea + newline)
 	input := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +

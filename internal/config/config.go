@@ -52,7 +52,6 @@ type Config struct {
 	Researcher     ResearcherConfig          `yaml:"researcher"`
 	Planner        PlannerConfig             `yaml:"planner"`
 	Worker         WorkerConfig              `yaml:"worker"`
-	Utility        string                    `yaml:"utility"`
 	Retry          RetryConfig               `yaml:"retry"`
 	ExecutionGraph ExecutionGraphConfig      `yaml:"execution_graph"`
 	Gateway        GatewayConfig             `yaml:"gateway"`
@@ -244,16 +243,13 @@ func (c *Config) validate() error {
 	if c.Worker.Model == "" {
 		return fmt.Errorf("missing mandatory worker.model parameter")
 	}
-	if c.Utility == "" {
-		return fmt.Errorf("missing mandatory utility parameter")
-	}
 
 	// Verify pipeline model refs resolve to defined model entries.
 	for _, ref := range []struct{ role, ref string }{
 		{"researcher", c.Researcher.Model},
 		{"planner", c.Planner.Model},
 		{"worker", c.Worker.Model},
-		{"utility", c.Utility},
+		{"small", "small"},
 	} {
 		if _, ok := c.Models[ref.ref]; !ok {
 			// Case-insensitive lookup
@@ -389,10 +385,7 @@ func (c *Config) RuntimeOptions(name string) (ModelRuntimeOptions, error) {
 
 // ResolveUtilityModel resolves the utility model. Returns nil if not defined.
 func (c *Config) ResolveUtilityModel() *ResolvedModel {
-	if c.Utility == "" {
-		return nil
-	}
-	resolved, err := c.ResolveModel(c.Utility)
+	resolved, err := c.ResolveModel("small")
 	if err != nil {
 		return nil
 	}

@@ -39,7 +39,7 @@ func TestResearcher_Research_Success(t *testing.T) {
 	}
 
 	r := NewResearcher(mock, cfg)
-	plan, _, err := r.Research(context.Background(), "build something")
+	plan, _, _, err := r.Research(context.Background(), "build something")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestResearcher_Research_StripsCodeFences(t *testing.T) {
 
 	cfg := config.ResearcherConfig{Model: "test"}
 	r := NewResearcher(mock, cfg)
-	plan, _, err := r.Research(context.Background(), "prompt")
+	plan, _, _, err := r.Research(context.Background(), "prompt")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestResearcher_Research_CLIError(t *testing.T) {
 
 	cfg := config.ResearcherConfig{Model: "test"}
 	r := NewResearcher(mock, cfg)
-	_, _, err := r.Research(context.Background(), "prompt")
+	_, _, _, err := r.Research(context.Background(), "prompt")
 	if err == nil {
 		t.Fatal("expected error propagation from CLI")
 	}

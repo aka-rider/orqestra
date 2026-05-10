@@ -11,20 +11,29 @@ providers:
     type: openai
 
 models:
-  flash:
+  large:
+    provider: copilot-proxy
+    model: gemini-3.1-flash
+
+  medium:
+    provider: copilot-proxy
+    model: gemini-3.1-flash
+
+  small:
     provider: copilot-proxy
     model: gemini-3.1-flash
 
 researcher:
-  model: flash
+  model: medium
 
 planner:
-  model: flash
+  model: large
 
 worker:
-  model: flash
+  model: medium
+  timeout: 15m
 
-utility: flash
+utility: small
 
 sandbox:
   max_lifetime: 20m
@@ -33,6 +42,3 @@ retry:
   researcher_attempts: 1
   planner_attempts: 1
   worker_validation_retries: 1
-
-worker:
-  timeout: 15m

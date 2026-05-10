@@ -10,20 +10,32 @@ providers:
     type: openai
 
 models:
-  qwen:
+  large:
+    provider: llama-cpp
+    model: qwen3.6
+
+  medium:
+    provider: llama-cpp
+    model: qwen3.6
+
+  small:
     provider: llama-cpp
     model: qwen3.6
 
 researcher:
-  model: qwen
+  model: medium
+  mcp_servers:
+    - MCP_DOCKER
 
 planner:
-  model: qwen
+  model: large
 
 worker:
-  model: qwen
+  model: medium
+  timeout: 30m
+  parallelism: 0
 
-utility: qwen
+utility: small
 
 sandbox:
   max_lifetime: 35m
@@ -32,13 +44,5 @@ sandbox:
     CLAUDE_CODE_ATTRIBUTION_HEADER: "0"
     ANTHROPIC_SMALL_FAST_MODEL: "qwen3.6"
 
-worker:
-  timeout: 30m
-  parallelism: 0
-
 gateway:
   mcp_servers: []
-
-researcher:
-  mcp_servers:
-    - MCP_DOCKER

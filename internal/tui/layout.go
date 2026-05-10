@@ -25,6 +25,9 @@ const (
 
 	// Prompt mode: divider + instruction label + 3-line textarea
 	constPromptInputHeight = 5
+
+	// Run detail lower pane height (raw agent JSONL log)
+	constRunLogHeight = 8
 )
 
 // layoutBounds holds the computed bounding rectangles for each zone.
@@ -51,6 +54,8 @@ func (m *Model) recalculateLayout() {
 		} else {
 			inputHeight = constPipelineInputHeight
 		}
+	case StateRunsList, StateRunDetail:
+		inputHeight = 0 // no input zone in runs views
 	}
 
 	usedHeight := constHeaderHeight + inputHeight + constFooterHeight
@@ -65,6 +70,21 @@ func (m *Model) recalculateLayout() {
 	m.sidebarVP.Height = contentHeight
 	m.dashboardVP.Width = m.width
 	m.dashboardVP.Height = contentHeight
+
+	// Runs list: full-width viewport
+	m.runsVP.Width = m.width
+	m.runsVP.Height = contentHeight
+
+	// Run detail: 3-zone layout
+	if m.state == StateRunDetail {
+		upperHeight := max(0, contentHeight-constRunLogHeight-1) // -1 for divider
+		m.runDetailVP.Width = contentWidth
+		m.runDetailVP.Height = upperHeight
+		m.runStepsVP.Width = sidebarWidth
+		m.runStepsVP.Height = upperHeight
+		m.runLogVP.Width = m.width
+		m.runLogVP.Height = constRunLogHeight
+	}
 
 	// Update textarea width for prompt mode
 	if m.state == StatePrompt {

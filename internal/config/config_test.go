@@ -19,9 +19,6 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Worker.Model != "medium" {
 		t.Errorf("worker model = %q, want %q", cfg.Worker.Model, "medium")
 	}
-	if cfg.Utility != "small" {
-		t.Errorf("utility = %q, want %q", cfg.Utility, "small")
-	}
 	if cfg.Gateway.Model != "small" {
 		t.Errorf("gateway model = %q, want %q", cfg.Gateway.Model, "small")
 	}
@@ -53,10 +50,13 @@ models:
   small:
     provider: local
     model: test-val
+  large:
+    provider: local
+    model: test-large
 researcher:
   model: medium
 planner:
-  model: medium
+  model: large
 worker:
   model: medium
 utility: small
@@ -73,10 +73,10 @@ utility: small
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if cfg.Researcher.Model != "medium" {
-		t.Errorf("expected researcher model sonnet, got %q", cfg.Researcher.Model)
+		t.Errorf("expected researcher model medium, got %q", cfg.Researcher.Model)
 	}
 	if cfg.Planner.Model != "large" {
-		t.Errorf("expected planner model sonnet, got %q", cfg.Planner.Model)
+		t.Errorf("expected planner model large, got %q", cfg.Planner.Model)
 	}
 }
 
@@ -121,7 +121,7 @@ func TestResolveModel_CaseInsensitive(t *testing.T) {
 			"prov": {BaseURL: "http://localhost", Type: "openai"},
 		},
 		Models: map[string]ModelConfig{
-			"Sonnet": {Provider: "prov", Model: "claude-medium"},
+			"Medium": {Provider: "prov", Model: "claude-medium"},
 		},
 	}
 	resolved, err := cfg.ResolveModel("medium")
@@ -129,7 +129,7 @@ func TestResolveModel_CaseInsensitive(t *testing.T) {
 		t.Fatalf("expected case-insensitive lookup to succeed, got: %v", err)
 	}
 	if resolved.Model != "claude-medium" {
-		t.Errorf("Model = %q, want claude-sonnet", resolved.Model)
+		t.Errorf("Model = %q, want claude-medium", resolved.Model)
 	}
 }
 
@@ -286,7 +286,6 @@ func TestResolveUtilityModel(t *testing.T) {
 		Models: map[string]ModelConfig{
 			"small": {Provider: "local", Model: "haiku"},
 		},
-		Utility: "small",
 	}
 
 	utility := cfg.ResolveUtilityModel()
@@ -295,22 +294,6 @@ func TestResolveUtilityModel(t *testing.T) {
 	}
 	if utility.Model != "haiku" {
 		t.Errorf("utility.Model = %q, want haiku", utility.Model)
-	}
-}
-
-func TestResolveUtilityModel_NotDefined(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]ProviderConfig{
-			"local": {BaseURL: "http://localhost", Type: "openai"},
-		},
-		Models: map[string]ModelConfig{
-			"large": {Provider: "local", Model: "big"},
-		},
-	}
-
-	utility := cfg.ResolveUtilityModel()
-	if utility != nil {
-		t.Errorf("expected nil when utility not defined, got %+v", utility)
 	}
 }
 
@@ -529,39 +512,6 @@ utility: small
 				t.Errorf("expected forbidden key error, got: %v", err)
 			}
 		})
-	}
-}
-
-func TestLoad_MissingUtility(t *testing.T) {
-	content := `
-providers:
-  local:
-    base_url: http://localhost
-    type: openai
-models:
-  medium:
-    provider: local
-    model: big
-researcher:
-  model: medium
-planner:
-  model: medium
-worker:
-  model: medium
-`
-	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.WriteString(content)
-	f.Close()
-
-	_, err = Load(f.Name())
-	if err == nil {
-		t.Fatal("expected error for missing utility")
-	}
-	if !strings.Contains(err.Error(), "utility") {
-		t.Errorf("expected utility error, got: %v", err)
 	}
 }
 

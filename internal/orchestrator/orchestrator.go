@@ -8,11 +8,25 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
 )
+
+// stepMeta is the per-agent metadata persisted as JSON in the session directory.
+type stepMeta struct {
+	AgentID         string    `json:"agent_id"`
+	ModelRef        string    `json:"model_ref,omitempty"`
+	StartTime       time.Time `json:"start_time"`
+	EndTime         time.Time `json:"end_time"`
+	ClaudeSessionID string    `json:"claude_session_id,omitempty"`
+	Status          string    `json:"status"` // "done" or "failed"
+	Error           string    `json:"error,omitempty"`
+	InputTokens     int64     `json:"input_tokens"`
+	OutputTokens    int64     `json:"output_tokens"`
+}
 
 // Activity records a single tool invocation observed in the agent stream.
 type Activity struct {
@@ -316,6 +330,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 
 	if session.Path != "" {
 		emit(Event{Type: EventRunDirReady, RunDir: session.Path})
+		writeArtifact(session, "prompt.md", input.Prompt)
 	}
 
 	// --- Gateway Evaluation ---
@@ -330,16 +345,30 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 
 		gw := agent.NewGateway(e.Runners.Gateway, e.Config.Gateway)
 		prompt := input.Prompt
+		gwStart := time.Now()
+		var gwSessionID string
 
 		for round := 0; round < maxCoachingRounds; round++ {
-			gwResult, gwUsage, err := gw.Evaluate(ctx, prompt, &streamWriter{buf: stream})
+			gwResult, gwUsage, sessID, err := gw.Evaluate(ctx, prompt, &streamWriter{buf: stream})
+			if sessID != "" {
+				gwSessionID = sessID
+			}
 			if err != nil {
+				writeArtifactJSON(session, "gateway_meta.json", stepMeta{
+					AgentID: "gateway", StartTime: gwStart, EndTime: time.Now(),
+					ClaudeSessionID: gwSessionID, Status: "failed", Error: err.Error(),
+				})
 				emit(Event{Type: EventAgentFailed, AgentID: "gateway", Err: err})
 				emit(Event{Type: EventError, Err: err})
 				return
 			}
 
 			if gwResult.Verdict == agent.GatewayVerdictAccept {
+				writeArtifactJSON(session, "gateway_meta.json", stepMeta{
+					AgentID: "gateway", StartTime: gwStart, EndTime: time.Now(),
+					ClaudeSessionID: gwSessionID, Status: "done",
+					InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens,
+				})
 				emit(Event{Type: EventAgentDone, AgentID: "gateway",
 					InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens})
 				plannerInput = buildPlannerInput(input.Prompt, gwResult.Brief)
@@ -347,6 +376,11 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			}
 
 			if input.AutoApprove {
+				writeArtifactJSON(session, "gateway_meta.json", stepMeta{
+					AgentID: "gateway", StartTime: gwStart, EndTime: time.Now(),
+					ClaudeSessionID: gwSessionID, Status: "done",
+					InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens,
+				})
 				emit(Event{Type: EventAgentDone, AgentID: "gateway",
 					InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens})
 				plannerInput = buildPlannerInput(input.Prompt, gwResult.Brief)
@@ -366,6 +400,10 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 					emit(Event{Type: EventComplete, Phase: PhaseDone})
 					return
 				case DecisionSkip:
+					writeArtifactJSON(session, "gateway_meta.json", stepMeta{
+						AgentID: "gateway", StartTime: gwStart, EndTime: time.Now(),
+						ClaudeSessionID: gwSessionID, Status: "done",
+					})
 					emit(Event{Type: EventAgentDone, AgentID: "gateway"})
 					plannerInput = input.Prompt
 					goto research
@@ -378,6 +416,11 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			}
 
 			if round == maxCoachingRounds-1 {
+				writeArtifactJSON(session, "gateway_meta.json", stepMeta{
+					AgentID: "gateway", StartTime: gwStart, EndTime: time.Now(),
+					ClaudeSessionID: gwSessionID, Status: "done",
+					InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens,
+				})
 				emit(Event{Type: EventAgentDone, AgentID: "gateway",
 					InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens})
 				plannerInput = buildPlannerInput(input.Prompt, gwResult.Brief)
@@ -403,6 +446,7 @@ research:
 		stream.SetAgent("researcher")
 
 		researcher := agent.NewResearcher(e.Runners.Researcher, e.Config.Researcher)
+		researchStart := time.Now()
 
 		researchAttempts := e.Config.Retry.ResearcherAttempts
 		if researchAttempts < 1 {
@@ -411,9 +455,10 @@ research:
 
 		var draft agent.RawPlan
 		var draftUsage harness.TokenUsage
+		var researchSessionID string
 		var err error
 		for attempt := 1; attempt <= researchAttempts; attempt++ {
-			draft, draftUsage, err = researcher.ResearchStreaming(ctx, plannerInput, &streamWriter{buf: stream})
+			draft, draftUsage, researchSessionID, err = researcher.ResearchStreaming(ctx, plannerInput, &streamWriter{buf: stream})
 			if err == nil {
 				break
 			}
@@ -423,12 +468,21 @@ research:
 			}
 		}
 		if err != nil {
+			writeArtifactJSON(session, "researcher_meta.json", stepMeta{
+				AgentID: "researcher", StartTime: researchStart, EndTime: time.Now(),
+				ClaudeSessionID: researchSessionID, Status: "failed", Error: err.Error(),
+			})
 			emit(Event{Type: EventAgentFailed, AgentID: "researcher", Err: err})
 			emit(Event{Type: EventError, Err: fmt.Errorf("research: %w", err)})
 			return
 		}
 
 		writeArtifact(session, "researcher_draft.md", draft.Markdown)
+		writeArtifactJSON(session, "researcher_meta.json", stepMeta{
+			AgentID: "researcher", StartTime: researchStart, EndTime: time.Now(),
+			ClaudeSessionID: researchSessionID, Status: "done",
+			InputTokens: draftUsage.InputTokens, OutputTokens: draftUsage.OutputTokens,
+		})
 		emit(Event{Type: EventAgentDone, AgentID: "researcher",
 			InputTokens: draftUsage.InputTokens, OutputTokens: draftUsage.OutputTokens,
 			ResearchDraft: draft.Markdown})
@@ -439,6 +493,7 @@ research:
 		stream.SetAgent("planner")
 
 		planner := agent.NewPlanner(e.Runners.Planner, e.Config.Planner)
+		planStart := time.Now()
 
 		plannerAttempts := e.Config.Retry.PlannerAttempts
 		if plannerAttempts < 1 {
@@ -447,9 +502,10 @@ research:
 
 		var plan agent.RawPlan
 		var planUsage harness.TokenUsage
+		var planSessionID string
 		var planErr error
 		for attempt := 1; attempt <= plannerAttempts; attempt++ {
-			plan, planUsage, planErr = planner.RefineStreaming(ctx, draft.Markdown, &streamWriter{buf: stream})
+			plan, planUsage, planSessionID, planErr = planner.RefineStreaming(ctx, draft.Markdown, &streamWriter{buf: stream})
 			if planErr == nil {
 				break
 			}
@@ -459,11 +515,20 @@ research:
 			}
 		}
 		if planErr != nil {
+			writeArtifactJSON(session, "planner_meta.json", stepMeta{
+				AgentID: "planner", StartTime: planStart, EndTime: time.Now(),
+				ClaudeSessionID: planSessionID, Status: "failed", Error: planErr.Error(),
+			})
 			emit(Event{Type: EventAgentFailed, AgentID: "planner", Err: planErr})
 			emit(Event{Type: EventError, Err: fmt.Errorf("planning: %w", planErr)})
 			return
 		}
 
+		writeArtifactJSON(session, "planner_meta.json", stepMeta{
+			AgentID: "planner", StartTime: planStart, EndTime: time.Now(),
+			ClaudeSessionID: planSessionID, Status: "done",
+			InputTokens: planUsage.InputTokens, OutputTokens: planUsage.OutputTokens,
+		})
 		emit(Event{Type: EventAgentDone, AgentID: "planner",
 			InputTokens: planUsage.InputTokens, OutputTokens: planUsage.OutputTokens})
 
@@ -503,12 +568,22 @@ planGate:
 					emit(Event{Type: EventAgentStarted, AgentID: "planner"})
 					stream.SetAgent("planner")
 					planner := agent.NewPlanner(e.Runners.Planner, e.Config.Planner)
-					revised, revisedUsage, err := planner.RefineWithCommentsStreaming(ctx, finalPlanMarkdown, decision.Comment, &streamWriter{buf: stream})
+					revStart := time.Now()
+					revised, revisedUsage, revSessionID, err := planner.RefineWithCommentsStreaming(ctx, finalPlanMarkdown, decision.Comment, &streamWriter{buf: stream})
 					if err != nil {
+						writeArtifactJSON(session, "planner_meta.json", stepMeta{
+							AgentID: "planner", StartTime: revStart, EndTime: time.Now(),
+							ClaudeSessionID: revSessionID, Status: "failed", Error: err.Error(),
+						})
 						emit(Event{Type: EventAgentFailed, AgentID: "planner", Err: err})
 						emit(Event{Type: EventError, Err: fmt.Errorf("planner revision: %w", err)})
 						return
 					}
+					writeArtifactJSON(session, "planner_meta.json", stepMeta{
+						AgentID: "planner", StartTime: revStart, EndTime: time.Now(),
+						ClaudeSessionID: revSessionID, Status: "done",
+						InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens,
+					})
 					emit(Event{Type: EventAgentDone, AgentID: "planner",
 						InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens})
 					finalPlanMarkdown = revised.Markdown
@@ -541,16 +616,26 @@ planGate:
 	emit(Event{Type: EventPhaseChange, Phase: PhaseExecuting})
 	emit(Event{Type: EventAgentStarted, AgentID: "worker"})
 	stream.SetAgent("worker")
+	workerStart := time.Now()
 
 	execPrompt := agent.BuildExecutionPromptFromPlan(finalPlanMarkdown)
 	workResult, execErr := e.Runners.Worker.RunStreaming(ctx, execPrompt, "", &streamWriter{buf: stream})
 	if execErr != nil {
+		writeArtifactJSON(session, "worker_meta.json", stepMeta{
+			AgentID: "worker", StartTime: workerStart, EndTime: time.Now(),
+			Status: "failed", Error: execErr.Error(),
+		})
 		emit(Event{Type: EventAgentFailed, AgentID: "worker", Err: execErr})
 		emit(Event{Type: EventError, Err: execErr})
 		return
 	}
 
 	writeArtifact(session, "worker_output.txt", workResult.Output)
+	writeArtifactJSON(session, "worker_meta.json", stepMeta{
+		AgentID: "worker", StartTime: workerStart, EndTime: time.Now(),
+		ClaudeSessionID: workResult.SessionID, Status: "done",
+		InputTokens: workResult.Usage.InputTokens, OutputTokens: workResult.Usage.OutputTokens,
+	})
 	emit(Event{Type: EventAgentDone, AgentID: "worker", WorkOutput: workResult.Output,
 		InputTokens: workResult.Usage.InputTokens, OutputTokens: workResult.Usage.OutputTokens})
 
@@ -558,6 +643,7 @@ planGate:
 	emit(Event{Type: EventPhaseChange, Phase: PhaseSelfValidating})
 	emit(Event{Type: EventAgentStarted, AgentID: "validator"})
 	stream.SetAgent("validator")
+	valStart := time.Now()
 
 	var validationOutput string
 	retryBudget := e.Config.Retry.WorkerValidationRetries
@@ -571,10 +657,19 @@ planGate:
 		valResult, valErr := e.Runners.Worker.RunContinue(ctx, workResult.SessionID, validationPrompt, &streamWriter{buf: stream})
 		if valErr != nil {
 			slog.Warn("worker self-validation failed", "err", valErr)
+			writeArtifactJSON(session, "validator_meta.json", stepMeta{
+				AgentID: "validator", StartTime: valStart, EndTime: time.Now(),
+				ClaudeSessionID: valResult.SessionID, Status: "failed", Error: valErr.Error(),
+			})
 			emit(Event{Type: EventAgentFailed, AgentID: "validator", Err: valErr})
 			// Non-fatal: proceed with whatever output we have
 		} else {
 			validationOutput = valResult.Output
+			writeArtifactJSON(session, "validator_meta.json", stepMeta{
+				AgentID: "validator", StartTime: valStart, EndTime: time.Now(),
+				ClaudeSessionID: valResult.SessionID, Status: "done",
+				InputTokens: valResult.Usage.InputTokens, OutputTokens: valResult.Usage.OutputTokens,
+			})
 			emit(Event{Type: EventAgentDone, AgentID: "validator",
 				InputTokens: valResult.Usage.InputTokens, OutputTokens: valResult.Usage.OutputTokens})
 		}
@@ -584,9 +679,18 @@ planGate:
 		valResult, valErr := e.Runners.Worker.RunStreaming(ctx, validationPrompt, "", &streamWriter{buf: stream})
 		if valErr != nil {
 			slog.Warn("disconnected validation failed", "err", valErr)
+			writeArtifactJSON(session, "validator_meta.json", stepMeta{
+				AgentID: "validator", StartTime: valStart, EndTime: time.Now(),
+				ClaudeSessionID: valResult.SessionID, Status: "failed", Error: valErr.Error(),
+			})
 			emit(Event{Type: EventAgentFailed, AgentID: "validator", Err: valErr})
 		} else {
 			validationOutput = valResult.Output
+			writeArtifactJSON(session, "validator_meta.json", stepMeta{
+				AgentID: "validator", StartTime: valStart, EndTime: time.Now(),
+				ClaudeSessionID: valResult.SessionID, Status: "done",
+				InputTokens: valResult.Usage.InputTokens, OutputTokens: valResult.Usage.OutputTokens,
+			})
 			emit(Event{Type: EventAgentDone, AgentID: "validator",
 				InputTokens: valResult.Usage.InputTokens, OutputTokens: valResult.Usage.OutputTokens})
 		}
