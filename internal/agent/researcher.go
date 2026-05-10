@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"io"
+	"log/slog"
 	"strings"
 
 	"github.com/xiii/orqestra/internal/config"
@@ -28,9 +29,7 @@ func (r *Researcher) Research(ctx context.Context, prompt string) (RawPlan, harn
 	if err != nil {
 		return RawPlan{}, harness.TokenUsage{}, "", err
 	}
-	return RawPlan{
-		Markdown: strings.TrimSpace(stripCodeFences(result.Output)),
-	}, result.Usage, result.SessionID, nil
+	return r.parseResearchResultWithRecovery(result)
 }
 
 // ResearchStreaming uses RunStreaming and returns the raw markdown output.
@@ -39,7 +38,30 @@ func (r *Researcher) ResearchStreaming(ctx context.Context, prompt string, stdou
 	if err != nil {
 		return RawPlan{}, harness.TokenUsage{}, "", err
 	}
-	return RawPlan{
-		Markdown: strings.TrimSpace(stripCodeFences(result.Output)),
-	}, result.Usage, result.SessionID, nil
+	return r.parseResearchResultWithRecovery(result)
+}
+
+// parseResearchResultWithRecovery attempts plan-file side-channel recovery
+// when the researcher output lacks any markdown heading (suggesting the model
+// wrote to a plan file instead of returning text).
+func (r *Researcher) parseResearchResultWithRecovery(result harness.RunResult) (RawPlan, harness.TokenUsage, string, error) {
+	md := strings.TrimSpace(stripCodeFences(result.Output))
+
+	if strings.Contains(md, "#") {
+		return RawPlan{Markdown: md}, result.Usage, result.SessionID, nil
+	}
+
+	if result.SessionID == "" {
+		return RawPlan{Markdown: md}, result.Usage, result.SessionID, nil
+	}
+
+	recovered, recoverErr := recoverPlanFromSession(result.SessionID)
+	if recoverErr != nil {
+		slog.Debug("researcher plan file recovery failed", "session_id", result.SessionID, "err", recoverErr)
+		return RawPlan{Markdown: md}, result.Usage, result.SessionID, nil
+	}
+
+	slog.Info("researcher recovered plan from Claude CLI plan file", "session_id", result.SessionID)
+	recoveredMD := strings.TrimSpace(stripCodeFences(recovered))
+	return RawPlan{Markdown: recoveredMD}, result.Usage, result.SessionID, nil
 }

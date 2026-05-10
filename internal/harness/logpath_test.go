@@ -133,3 +133,70 @@ also not json
 		t.Fatalf("expected 1 entry (skipping malformed), got %d", len(entries))
 	}
 }
+
+func TestExtractPlanFilePath_Success(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "session.jsonl")
+
+	lines := `{"type":"user","message":{"content":[{"type":"text","text":"plan something"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"I will create a plan."}]}}
+{"type":"attachment","attachment":{"type":"plan_mode","planFilePath":"/Users/test/.claude/plans/abc123.md"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}
+`
+	if err := os.WriteFile(logPath, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ExtractPlanFilePath(logPath)
+	if err != nil {
+		t.Fatalf("ExtractPlanFilePath: %v", err)
+	}
+	if got != "/Users/test/.claude/plans/abc123.md" {
+		t.Errorf("got %q, want /Users/test/.claude/plans/abc123.md", got)
+	}
+}
+
+func TestExtractPlanFilePath_EarlyExit(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "session.jsonl")
+
+	// Two attachments — should return the first one immediately.
+	lines := `{"type":"attachment","attachment":{"type":"plan_mode","planFilePath":"/Users/test/.claude/plans/first.md"}}
+{"type":"attachment","attachment":{"type":"plan_mode","planFilePath":"/Users/test/.claude/plans/second.md"}}
+`
+	if err := os.WriteFile(logPath, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ExtractPlanFilePath(logPath)
+	if err != nil {
+		t.Fatalf("ExtractPlanFilePath: %v", err)
+	}
+	if got != "/Users/test/.claude/plans/first.md" {
+		t.Errorf("got %q, want first.md path", got)
+	}
+}
+
+func TestExtractPlanFilePath_NoAttachment(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "session.jsonl")
+
+	lines := `{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}
+`
+	if err := os.WriteFile(logPath, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ExtractPlanFilePath(logPath)
+	if err == nil {
+		t.Fatal("expected error for missing plan_mode attachment")
+	}
+}
+
+func TestExtractPlanFilePath_MissingFile(t *testing.T) {
+	_, err := ExtractPlanFilePath("/nonexistent/path.jsonl")
+	if err == nil {
+		t.Fatal("expected error for missing file")
+	}
+}

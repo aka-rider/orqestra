@@ -41,6 +41,42 @@ func ResolveSessionLogPath(repoPath, sessionID string) (string, error) {
 	return path, nil
 }
 
+// jsonlAttachmentMessage represents a JSONL line with a plan_mode attachment.
+type jsonlAttachmentMessage struct {
+	Type       string `json:"type"`
+	Attachment struct {
+		Type         string `json:"type"`
+		PlanFilePath string `json:"planFilePath"`
+	} `json:"attachment"`
+}
+
+// ExtractPlanFilePath scans a session JSONL file for a plan_mode attachment
+// and returns the plan file path. Returns an error if no attachment is found.
+func ExtractPlanFilePath(sessionLogPath string) (string, error) {
+	f, err := os.Open(sessionLogPath)
+	if err != nil {
+		return "", fmt.Errorf("open session log %q: %w", sessionLogPath, err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	for scanner.Scan() {
+		var msg jsonlAttachmentMessage
+		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+			continue
+		}
+		if msg.Type == "attachment" && msg.Attachment.Type == "plan_mode" && msg.Attachment.PlanFilePath != "" {
+			return msg.Attachment.PlanFilePath, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("scan session log %q: %w", sessionLogPath, err)
+	}
+	return "", fmt.Errorf("no plan_mode attachment found in %q", sessionLogPath)
+}
+
 // LogEntryKind classifies a parsed JSONL log entry for display.
 type LogEntryKind int
 
