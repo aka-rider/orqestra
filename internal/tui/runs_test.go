@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/agent"
 )
 
@@ -59,10 +59,10 @@ func TestTUI_RunsListNavigation(t *testing.T) {
 	m.runsListScreen.SetRuns(testRunSummaries())
 	m.state = StateRunsList
 	m.recalculateLayout()
-	m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width)
+	m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width())
 
 	// Verify view contains prompt text
-	view := m.View()
+	view := viewString(m)
 	if !strings.Contains(view, "Fix the bug") {
 		t.Error("runs list view should contain first run's prompt")
 	}
@@ -101,7 +101,7 @@ func TestTUI_RunsListNavigation(t *testing.T) {
 	}
 
 	// Esc returns to prompt
-	result, _ = sendKey(m, tea.KeyEsc)
+	result, _ = sendKey(m, tea.KeyEscape)
 	model = result.(Model)
 	if model.state != StatePrompt {
 		t.Errorf("expected StatePrompt after Esc, got %d", model.state)
@@ -163,7 +163,7 @@ func TestTUI_RunDetailLayout_ThreeZones(t *testing.T) {
 	m.recalculateLayout()
 	m.runDetailScreen.SyncViewports()
 
-	view := m.View()
+	view := viewString(m)
 
 	// Upper-left should contain prompt
 	if !strings.Contains(view, "Fix the bug") {
@@ -214,7 +214,7 @@ func TestTUI_RunDetail_KeyNavigation(t *testing.T) {
 	}
 
 	// Esc returns to runs list
-	result, _ := sendKey(m, tea.KeyEsc)
+	result, _ = sendKey(m, tea.KeyEscape)
 	model = result.(Model)
 	if model.state != StateRunsList {
 		t.Errorf("expected StateRunsList after Esc, got %d", model.state)
@@ -226,7 +226,7 @@ func TestTUI_CtrlR_FromPrompt(t *testing.T) {
 	m.state = StatePrompt
 	m.recalculateLayout()
 
-	result, _ := sendKey(m, tea.KeyCtrlR)
+	result, _ := sendCtrl(m, 'r')
 	model := result.(Model)
 
 	// Should transition to runs list (may be empty, but state should change)
@@ -241,7 +241,7 @@ func TestTUI_CtrlR_NotDuringPipeline(t *testing.T) {
 	m.pipelineScreen.content = ContentStreaming // mid-pipeline
 
 	// Ctrl+R should be a no-op during active pipeline (no handler for it)
-	result, _ := sendKey(m, tea.KeyCtrlR)
+	result, _ := sendCtrl(m, 'r')
 	model := result.(Model)
 
 	if model.state != StatePipeline {
@@ -253,9 +253,9 @@ func TestTUI_RunsListEmpty(t *testing.T) {
 	m := testModel()
 	m.state = StateRunsList
 	m.recalculateLayout()
-	m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width)
+	m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width())
 
-	view := m.View()
+	view := viewString(m)
 	if !strings.Contains(view, "No runs found") {
 		t.Error("empty runs list should show 'No runs found' message")
 	}

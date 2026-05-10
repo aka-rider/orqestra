@@ -3,7 +3,7 @@ package tui
 import (
 	"image"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // Layout constants — design constraints, not magic numbers.

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
@@ -76,11 +76,11 @@ type PipelineScreen struct {
 
 // NewPipelineScreen creates a new pipeline screen.
 func NewPipelineScreen(configName string) PipelineScreen {
-	cvp := viewport.New(0, 0)
+	cvp := viewport.New()
 	cvp.MouseWheelEnabled = true
-	svp := viewport.New(0, 0)
+	svp := viewport.New()
 	svp.MouseWheelEnabled = true
-	dvp := viewport.New(0, 0)
+	dvp := viewport.New()
 	dvp.MouseWheelEnabled = true
 
 	return PipelineScreen{
@@ -162,8 +162,8 @@ func (s *PipelineScreen) SyncViewports() {
 }
 
 func (s PipelineScreen) effectiveWidth() int {
-	if s.contentVP.Width+s.sidebarVP.Width+1 >= minWidth {
-		return s.contentVP.Width + s.sidebarVP.Width + 1
+	if s.contentVP.Width()+s.sidebarVP.Width()+1 >= minWidth {
+		return s.contentVP.Width() + s.sidebarVP.Width() + 1
 	}
 	return minWidth
 }
@@ -173,12 +173,12 @@ func (s *PipelineScreen) RecalculateLayout(width, contentHeight int) {
 	contentWidth := max(0, int(float64(width)*splitRatio))
 	sidebarWidth := max(0, width-contentWidth-1)
 
-	s.contentVP.Width = contentWidth
-	s.contentVP.Height = contentHeight
-	s.sidebarVP.Width = sidebarWidth
-	s.sidebarVP.Height = contentHeight
-	s.dashboardVP.Width = width
-	s.dashboardVP.Height = contentHeight
+	s.contentVP.SetWidth(contentWidth)
+	s.contentVP.SetHeight(contentHeight)
+	s.sidebarVP.SetWidth(sidebarWidth)
+	s.sidebarVP.SetHeight(contentHeight)
+	s.dashboardVP.SetWidth(width)
+	s.dashboardVP.SetHeight(contentHeight)
 }
 
 // ApplyEvent updates the screen based on a single orchestrator event.
@@ -280,7 +280,7 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 }
 
 // Update handles key events for the pipeline screen.
-func (s PipelineScreen) Update(msg tea.KeyMsg) (PipelineScreen, tea.Cmd) {
+func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	// Global pipeline keys first
 	switch msg.String() {
 	case "?":
@@ -296,7 +296,7 @@ func (s PipelineScreen) Update(msg tea.KeyMsg) (PipelineScreen, tea.Cmd) {
 	}
 
 	// PgUp / PgDown — delegate to active viewport
-	switch msg.Type {
+	switch msg.Code {
 	case tea.KeyPgUp, tea.KeyPgDown:
 		var cmd tea.Cmd
 		if s.showDashboard {
@@ -316,7 +316,7 @@ func (s PipelineScreen) Update(msg tea.KeyMsg) (PipelineScreen, tea.Cmd) {
 
 	// If dashboard is showing, Esc returns to split view
 	if s.showDashboard {
-		if msg.Type == tea.KeyEsc {
+		if msg.Code == tea.KeyEscape {
 			s.showDashboard = false
 			s.SyncViewports()
 		}
@@ -354,7 +354,8 @@ func (s PipelineScreen) Update(msg tea.KeyMsg) (PipelineScreen, tea.Cmd) {
 
 // HandleMouse routes mouse events to the appropriate viewport.
 func (s PipelineScreen) HandleMouse(msg tea.MouseMsg) (PipelineScreen, tea.Cmd) {
-	p := image.Pt(msg.X, msg.Y)
+	mouse := msg.Mouse()
+	p := image.Pt(mouse.X, mouse.Y)
 
 	if p.In(s.bounds.textarea) {
 		return s, nil
@@ -388,9 +389,22 @@ func (s PipelineScreen) UpdateSubModel(msg tea.Msg) (PipelineScreen, tea.Cmd) {
 	return s, nil
 }
 
-func (s PipelineScreen) handleCoachingKey(msg tea.KeyMsg) (PipelineScreen, tea.Cmd) {
-	switch msg.Type {
+func (s PipelineScreen) handleCoachingKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
+	if msg.String() == "ctrl+s" {
+		s.content = ContentStreaming
+		s.SyncViewports()
+		s.PendingIntent = SkipGatewayIntent{}
+		return s, nil
+	}
+	switch msg.Code {
 	case tea.KeyEnter:
+		if msg.Mod.Contains(tea.ModShift) || msg.Mod.Contains(tea.ModAlt) {
+			// Shift+Enter / Alt+Enter inserts a newline in the active answer field
+			if s.answerCursor < len(s.answerFields) {
+				s.answerFields[s.answerCursor].InsertString("\n")
+			}
+			return s, nil
+		}
 		answers := make([]orchestrator.GatewayAnswer, len(s.answerFields))
 		for i, f := range s.answerFields {
 			answers[i] = orchestrator.GatewayAnswer{
@@ -400,22 +414,20 @@ func (s PipelineScreen) handleCoachingKey(msg tea.KeyMsg) (PipelineScreen, tea.C
 		}
 		s.content = ContentStreaming
 		s.SyncViewports()
-		s.PendingIntent = SubmitGatewayIntent{Answers: answers}; return s, nil
-	case tea.KeyCtrlS:
-		s.content = ContentStreaming
-		s.SyncViewports()
-		s.PendingIntent = SkipGatewayIntent{}; return s, nil
+		s.PendingIntent = SubmitGatewayIntent{Answers: answers}
+		return s, nil
 	case tea.KeyTab:
+		if msg.Mod.Contains(tea.ModShift) {
+			if s.answerCursor > 0 {
+				s.answerFields[s.answerCursor].Blur()
+				s.answerCursor--
+				s.answerFields[s.answerCursor].Focus()
+			}
+			return s, nil
+		}
 		if s.answerCursor < len(s.answerFields)-1 {
 			s.answerFields[s.answerCursor].Blur()
 			s.answerCursor++
-			s.answerFields[s.answerCursor].Focus()
-		}
-		return s, nil
-	case tea.KeyShiftTab:
-		if s.answerCursor > 0 {
-			s.answerFields[s.answerCursor].Blur()
-			s.answerCursor--
 			s.answerFields[s.answerCursor].Focus()
 		}
 		return s, nil
@@ -429,15 +441,24 @@ func (s PipelineScreen) handleCoachingKey(msg tea.KeyMsg) (PipelineScreen, tea.C
 	return s, nil
 }
 
-func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyMsg) (PipelineScreen, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyCtrlE:
+func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
+	if msg.String() == "ctrl+e" {
 		if s.planFilePath != "" {
 			s.editorRunning = true
-			s.PendingIntent = OpenExternalEditorIntent{FilePath: s.planFilePath}; return s, nil
+			s.PendingIntent = OpenExternalEditorIntent{FilePath: s.planFilePath}
+			return s, nil
 		}
 		return s, nil
+	}
+	switch msg.Code {
 	case tea.KeyEnter:
+		if msg.Mod.Contains(tea.ModShift) || msg.Mod.Contains(tea.ModAlt) {
+			// Shift+Enter / Alt+Enter inserts a newline in the comment textarea
+			if s.hasPlanComment {
+				s.planComment.InsertString("\n")
+			}
+			return s, nil
+		}
 		if s.hasPlanComment {
 			comment := strings.TrimSpace(s.planComment.Value())
 			if comment != "" {
@@ -446,7 +467,8 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyMsg) (PipelineScreen, tea
 				s.awaitingPlanDecision = false
 				s.content = ContentStreaming
 				s.SyncViewports()
-				s.PendingIntent = CommentPlanIntent{Comment: comment}; return s, nil
+				s.PendingIntent = CommentPlanIntent{Comment: comment}
+				return s, nil
 			}
 		}
 		return s, nil
@@ -458,11 +480,12 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyMsg) (PipelineScreen, tea
 		s.hasPlanComment = false
 		s.content = ContentStreaming
 		s.SyncViewports()
-		s.PendingIntent = ApprovePlanIntent{}; return s, nil
+		s.PendingIntent = ApprovePlanIntent{}
+		return s, nil
 	case "e", "E":
 		s.awaitingPlanDecision = false
-		contentWidth := max(1, int(float64(s.contentVP.Width+s.sidebarVP.Width+1)*splitRatio))
-		contentHeight := max(4, s.contentVP.Height)
+		contentWidth := max(1, int(float64(s.contentVP.Width()+s.sidebarVP.Width()+1)*splitRatio))
+		contentHeight := max(4, s.contentVP.Height())
 		ta := textarea.New()
 		ta.SetWidth(max(1, contentWidth-2))
 		ta.SetHeight(max(1, contentHeight-2))
@@ -479,7 +502,8 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyMsg) (PipelineScreen, tea
 		return s, nil
 	case "s", "S":
 		s.awaitingPlanDecision = false
-		s.PendingIntent = CancelPlanIntent{}; return s, nil
+		s.PendingIntent = CancelPlanIntent{}
+		return s, nil
 	}
 
 	// Pass remaining keys to comment textarea
@@ -491,14 +515,16 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyMsg) (PipelineScreen, tea
 	return s, nil
 }
 
-func (s PipelineScreen) handlePlanEditKey(msg tea.KeyMsg) (PipelineScreen, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyCtrlS:
+func (s PipelineScreen) handlePlanEditKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
+	if msg.String() == "ctrl+s" {
 		edited := s.planEditor.Value()
 		s.content = ContentStreaming
 		s.SyncViewports()
-		s.PendingIntent = EditPlanIntent{ModifiedMarkdown: edited}; return s, nil
-	case tea.KeyEsc:
+		s.PendingIntent = EditPlanIntent{ModifiedMarkdown: edited}
+		return s, nil
+	}
+	switch msg.Code {
+	case tea.KeyEscape:
 		s.content = ContentPlanReview
 		s.SyncViewports()
 		return s, nil
@@ -511,9 +537,9 @@ func (s PipelineScreen) handlePlanEditKey(msg tea.KeyMsg) (PipelineScreen, tea.C
 	return s, nil
 }
 
-func (s PipelineScreen) handleAgentHistoryKey(msg tea.KeyMsg) (PipelineScreen, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+func (s PipelineScreen) handleAgentHistoryKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
+	switch msg.Code {
+	case tea.KeyEscape:
 		s.content = ContentStreaming
 		s.focusedAgent = 0
 		s.contentVP.GotoTop()
@@ -523,12 +549,13 @@ func (s PipelineScreen) handleAgentHistoryKey(msg tea.KeyMsg) (PipelineScreen, t
 	return s, nil
 }
 
-func (s PipelineScreen) handleStreamingKey(msg tea.KeyMsg) (PipelineScreen, tea.Cmd) {
+func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	if s.confirmNew {
 		switch msg.String() {
 		case "y", "Y":
 			s.confirmNew = false
-			s.PendingIntent = ConfirmNewRunIntent{}; return s, nil
+			s.PendingIntent = ConfirmNewRunIntent{}
+			return s, nil
 		default:
 			s.confirmNew = false
 			return s, nil
@@ -537,25 +564,28 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyMsg) (PipelineScreen, tea.
 
 	switch msg.String() {
 	case "s", "S":
-		s.PendingIntent = CancelPipelineIntent{}; return s, nil
+		s.PendingIntent = CancelPipelineIntent{}
+		return s, nil
 	case "n", "N":
 		if s.active && s.content == ContentStreaming {
 			s.confirmNew = true
 			return s, nil
 		}
-		s.PendingIntent = NavigateToPromptIntent{PreFillGoal: s.goal}; return s, nil
+		s.PendingIntent = NavigateToPromptIntent{PreFillGoal: s.goal}
+		return s, nil
 	}
 	return s, nil
 }
 
-func (s PipelineScreen) handleCompletionKey(msg tea.KeyMsg) (PipelineScreen, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyCtrlR:
-		s.PendingIntent = NavigateToRunsListIntent{}; return s, nil
+func (s PipelineScreen) handleCompletionKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
+	if msg.String() == "ctrl+r" {
+		s.PendingIntent = NavigateToRunsListIntent{}
+		return s, nil
 	}
 	switch msg.String() {
 	case "n", "N":
-		s.PendingIntent = NavigateToPromptIntent{PreFillGoal: s.goal}; return s, nil
+		s.PendingIntent = NavigateToPromptIntent{PreFillGoal: s.goal}
+		return s, nil
 	case "q", "Q":
 		return s, tea.Quit
 	}
@@ -801,7 +831,7 @@ func (s PipelineScreen) viewAgentHistory(_ int) string {
 }
 
 func (s PipelineScreen) viewDashboard() string {
-	w := s.dashboardVP.Width
+	w := s.dashboardVP.Width()
 	if w < minWidth {
 		w = minWidth
 	}
@@ -954,9 +984,9 @@ func (s PipelineScreen) viewSidebar(width int) string {
 func (s PipelineScreen) viewFooter() string {
 	switch s.content {
 	case ContentCoaching:
-		return keyStyle.Render(" [Enter] confirm | [Ctrl+S] skip | [Tab] next field       [?] help  [D] expand  [S] stop  [^C^C] quit")
+		return keyStyle.Render(" [Enter] confirm | [Shift+Enter] newline | [Ctrl+S] skip | [Tab] next   [?] help  [D] expand  [S] stop  [^C^C] quit")
 	case ContentPlanReview:
-		return keyStyle.Render(" [A] accept | [E] edit | [Ctrl+E] editor | [Enter] comment | [S] cancel   [?] help  [^C^C] quit")
+		return keyStyle.Render(" [A] accept | [E] edit | [Ctrl+E] editor | [Enter] comment | [Shift+Enter] newline | [S] cancel  [^C^C] quit")
 	case ContentPlanEdit:
 		return keyStyle.Render(" [Ctrl+S] save edits | [Esc] discard                       [?] help  [^C^C] quit")
 	case ContentAgentHistory:

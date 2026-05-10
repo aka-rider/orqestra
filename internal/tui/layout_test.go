@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // layoutTestModel creates a model at the given dimensions, suitable for layout tests.
@@ -66,7 +66,7 @@ func TestLayout_HeightInvariant(t *testing.T) {
 		for _, st := range states {
 			t.Run(st.name+"-"+itoa(sz[0])+"x"+itoa(sz[1]), func(t *testing.T) {
 				m := layoutTestModel(sz[0], sz[1], st.state)
-				view := m.View()
+				view := m.View().Content
 				got := lipgloss.Height(view)
 				if got != sz[1] {
 					t.Errorf("lipgloss.Height(View()) = %d, want %d", got, sz[1])
@@ -80,7 +80,7 @@ func TestLayout_HeightInvariant_SmallTerminal(t *testing.T) {
 	// At small sizes, the prompt screen may skip the split view;
 	// verify it doesn't panic and doesn't exceed the requested height.
 	m := layoutTestModel(60, 10, StatePrompt)
-	view := m.View()
+	view := m.View().Content
 	got := lipgloss.Height(view)
 	if got > 10 {
 		t.Errorf("prompt at 60x10: lipgloss.Height = %d, want <= 10", got)
@@ -88,7 +88,7 @@ func TestLayout_HeightInvariant_SmallTerminal(t *testing.T) {
 
 	// Pipeline at 60x10 should match exactly
 	m2 := layoutTestModel(60, 10, StatePipeline)
-	view2 := m2.View()
+	view2 := m2.View().Content
 	got2 := lipgloss.Height(view2)
 	if got2 != 10 {
 		t.Errorf("pipeline at 60x10: lipgloss.Height = %d, want 10", got2)
@@ -102,17 +102,17 @@ func TestLayout_RecalculateConstants(t *testing.T) {
 	sidebarWidth := 120 - contentWidth - 1
 	contentHeight := 40 - constHeaderHeight - constPipelineInputHeight - constFooterHeight
 
-	if m.pipelineScreen.contentVP.Width != contentWidth {
-		t.Errorf("contentVP.Width = %d, want %d", m.pipelineScreen.contentVP.Width, contentWidth)
+	if m.pipelineScreen.contentVP.Width() != contentWidth {
+		t.Errorf("contentVP.Width = %d, want %d", m.pipelineScreen.contentVP.Width(), contentWidth)
 	}
-	if m.pipelineScreen.contentVP.Height != contentHeight {
-		t.Errorf("contentVP.Height = %d, want %d", m.pipelineScreen.contentVP.Height, contentHeight)
+	if m.pipelineScreen.contentVP.Height() != contentHeight {
+		t.Errorf("contentVP.Height = %d, want %d", m.pipelineScreen.contentVP.Height(), contentHeight)
 	}
-	if m.pipelineScreen.sidebarVP.Width != sidebarWidth {
-		t.Errorf("sidebarVP.Width = %d, want %d", m.pipelineScreen.sidebarVP.Width, sidebarWidth)
+	if m.pipelineScreen.sidebarVP.Width() != sidebarWidth {
+		t.Errorf("sidebarVP.Width = %d, want %d", m.pipelineScreen.sidebarVP.Width(), sidebarWidth)
 	}
-	if m.pipelineScreen.dashboardVP.Width != 120 {
-		t.Errorf("dashboardVP.Width = %d, want 120", m.pipelineScreen.dashboardVP.Width)
+	if m.pipelineScreen.dashboardVP.Width() != 120 {
+		t.Errorf("dashboardVP.Width = %d, want 120", m.pipelineScreen.dashboardVP.Width())
 	}
 }
 
@@ -121,8 +121,8 @@ func TestLayout_RecalculatePromptMode(t *testing.T) {
 
 	contentHeight := 40 - constHeaderHeight - constPromptInputHeight - constFooterHeight
 
-	if m.pipelineScreen.contentVP.Height != contentHeight {
-		t.Errorf("contentVP.Height = %d, want %d (prompt mode)", m.pipelineScreen.contentVP.Height, contentHeight)
+	if m.pipelineScreen.contentVP.Height() != contentHeight {
+		t.Errorf("contentVP.Height = %d, want %d (prompt mode)", m.pipelineScreen.contentVP.Height(), contentHeight)
 	}
 }
 
@@ -133,7 +133,7 @@ func TestLayout_BelowMinimumNoOp(t *testing.T) {
 	m.recalculateLayout()
 
 	// Viewports should remain at zero (not set to negative)
-	if m.pipelineScreen.contentVP.Width < 0 || m.pipelineScreen.contentVP.Height < 0 {
+	if m.pipelineScreen.contentVP.Width() < 0 || m.pipelineScreen.contentVP.Height() < 0 {
 		t.Error("viewport dimensions should not be negative below minimum size")
 	}
 }

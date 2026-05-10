@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
@@ -59,12 +59,21 @@ func testConfig() *config.Config {
 	}
 }
 
-func sendKey(m tea.Model, key tea.KeyType) (tea.Model, tea.Cmd) {
-	return m.Update(tea.KeyMsg{Type: key})
+func sendKey(m tea.Model, key rune) (tea.Model, tea.Cmd) {
+	return m.Update(tea.KeyPressMsg{Code: key})
 }
 
 func sendRune(m tea.Model, r string) (tea.Model, tea.Cmd) {
-	return m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(r)})
+	return m.Update(tea.KeyPressMsg{Code: rune(r[0]), Text: r})
+}
+
+func sendCtrl(m tea.Model, key rune) (tea.Model, tea.Cmd) {
+	return m.Update(tea.KeyPressMsg{Code: key, Mod: tea.ModCtrl})
+}
+
+// viewString extracts the rendered content string from the tea.View returned by Model.View().
+func viewString(m Model) string {
+	return m.View().Content
 }
 
 func TestTUI_PromptSubmit(t *testing.T) {
@@ -110,7 +119,7 @@ func TestTUI_PromptSkipGateway(t *testing.T) {
 	m := testModel()
 	m.promptScreen.SetValue("add a feature")
 
-	result, cmd := sendKey(m, tea.KeyCtrlS)
+	result, cmd := sendCtrl(m, 's')
 	model := result.(Model)
 
 	if model.state != StatePipeline {
@@ -233,7 +242,7 @@ func TestTUI_CoachingSkip(t *testing.T) {
 	m.pipelineScreen.answerFields = makeAnswerFields(m.pipelineScreen.gatewayResult.Questions, m.effectiveWidth())
 	m.pipelineScreen.answerCursor = 0
 
-	result, _ := sendKey(m, tea.KeyCtrlS)
+	result, _ := sendCtrl(m, 's')
 	model := result.(Model)
 
 	if model.pipelineScreen.content != ContentStreaming {
@@ -324,7 +333,7 @@ func TestTUI_PlanEditSave(t *testing.T) {
 	model.pipelineScreen.planEditor.SetValue(`{"goal":"Modified","steps":["s1"],"acceptance":["a1"]}`)
 
 	// Press Ctrl+S to save
-	result2, _ := sendKey(model, tea.KeyCtrlS)
+	result2, _ := sendCtrl(model, 's')
 	model2 := result2.(Model)
 
 	if model2.pipelineScreen.content != ContentStreaming {
@@ -360,7 +369,7 @@ func TestTUI_PlanEditDiscard(t *testing.T) {
 	}
 
 	// Press Esc to discard
-	result2, _ := sendKey(model, tea.KeyEsc)
+	result2, _ := sendKey(model, tea.KeyEscape)
 	model2 := result2.(Model)
 
 	if model2.pipelineScreen.content != ContentPlanReview {
@@ -412,7 +421,7 @@ func TestTUI_AgentNavBack(t *testing.T) {
 	m.pipelineScreen.agents = []AgentRow{{ID: "gateway", State: "done"}}
 
 	// Press Esc to go back
-	result, _ := sendKey(m, tea.KeyEsc)
+	result, _ := sendKey(m, tea.KeyEscape)
 	model := result.(Model)
 
 	if model.pipelineScreen.content != ContentStreaming {
@@ -461,7 +470,7 @@ func TestTUI_NewRunConfirm(t *testing.T) {
 	}
 
 	// View should show confirmation message
-	view := model.View()
+	view := viewString(model)
 	if !strings.Contains(view, "Pipeline is active") {
 		t.Error("expected confirmation message in view")
 	}
@@ -526,13 +535,13 @@ func TestTUI_FullDashboard(t *testing.T) {
 	}
 
 	// View should contain dashboard content
-	view := model.View()
+	view := viewString(model)
 	if !strings.Contains(view, "gateway") || !strings.Contains(view, "planner") {
 		t.Error("expected dashboard to show agent names")
 	}
 
 	// Press Esc to return
-	result2, _ := sendKey(model, tea.KeyEsc)
+	result2, _ := sendKey(model, tea.KeyEscape)
 	model2 := result2.(Model)
 
 	if model2.pipelineScreen.showDashboard {
@@ -544,7 +553,7 @@ func TestTUI_DoubleCtrlC(t *testing.T) {
 	m := testModel()
 
 	// First Ctrl+C
-	result, cmd := sendKey(m, tea.KeyCtrlC)
+	result, cmd := sendCtrl(m, 'c')
 	model := result.(Model)
 	if cmd != nil {
 		t.Error("first Ctrl+C should not quit")
@@ -554,7 +563,7 @@ func TestTUI_DoubleCtrlC(t *testing.T) {
 	}
 
 	// Second Ctrl+C
-	_, cmd = sendKey(model, tea.KeyCtrlC)
+	_, cmd = sendCtrl(model, 'c')
 	if cmd == nil {
 		t.Error("second Ctrl+C should trigger quit")
 	}
@@ -620,22 +629,22 @@ func TestTUI_PgUpPgDown(t *testing.T) {
 	// PgDown should change viewport offset
 	result, _ := sendKey(m, tea.KeyPgDown)
 	model := result.(Model)
-	if model.pipelineScreen.contentVP.YOffset == 0 {
+	if model.pipelineScreen.contentVP.YOffset() == 0 {
 		t.Error("expected viewport YOffset > 0 after PgDown")
 	}
 
 	// PgUp should return to top
 	result2, _ := sendKey(model, tea.KeyPgUp)
 	model2 := result2.(Model)
-	if model2.pipelineScreen.contentVP.YOffset != 0 {
-		t.Errorf("expected YOffset=0 after PgUp from first page, got %d", model2.pipelineScreen.contentVP.YOffset)
+	if model2.pipelineScreen.contentVP.YOffset() != 0 {
+		t.Errorf("expected YOffset=0 after PgUp from first page, got %d", model2.pipelineScreen.contentVP.YOffset())
 	}
 
 	// PgUp at 0 should stay at 0
 	result3, _ := sendKey(model2, tea.KeyPgUp)
 	model3 := result3.(Model)
-	if model3.pipelineScreen.contentVP.YOffset != 0 {
-		t.Errorf("expected YOffset=0, got %d", model3.pipelineScreen.contentVP.YOffset)
+	if model3.pipelineScreen.contentVP.YOffset() != 0 {
+		t.Errorf("expected YOffset=0, got %d", model3.pipelineScreen.contentVP.YOffset())
 	}
 }
 
@@ -652,7 +661,7 @@ func TestTUI_SidebarTokens(t *testing.T) {
 	m.recalculateLayout()
 	m.pipelineScreen.SyncViewports()
 
-	view := m.View()
+	view := viewString(m)
 
 	if !strings.Contains(view, "1.6k") {
 		t.Error("expected sidebar to show formatted token count '1.6k' for gateway")
@@ -675,7 +684,7 @@ func TestTUI_DashboardTokens(t *testing.T) {
 	m.recalculateLayout()
 	m.pipelineScreen.SyncViewports()
 
-	view := m.View()
+	view := viewString(m)
 	if !strings.Contains(view, "In Tok") {
 		t.Error("expected dashboard header with 'In Tok'")
 	}
@@ -754,7 +763,7 @@ func TestTUI_StreamingOutput(t *testing.T) {
 	m.pipelineScreen.SyncViewports()
 
 	// Verify the view renders the streamed content
-	view := m.View()
+	view := viewString(m)
 	if !strings.Contains(view, "Analyzing prompt") {
 		t.Error("expected streaming output to appear in view")
 	}
@@ -914,7 +923,7 @@ func TestTUI_ConfigNameInHeader(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	view := m.View()
+	view := viewString(m)
 	if !strings.Contains(view, "test.yaml") {
 		t.Error("expected config name 'test.yaml' in pipeline header")
 	}
@@ -1012,7 +1021,7 @@ func TestTUI_PlanReviewExternalEditor(t *testing.T) {
 	m.pipelineScreen.planComment = textarea.New()
 
 	// Press Ctrl+E to open external editor
-	result, cmd := sendKey(m, tea.KeyCtrlE)
+	result, cmd := sendCtrl(m, 'e')
 	model := result.(Model)
 
 	if !model.pipelineScreen.editorRunning {
@@ -1249,7 +1258,7 @@ func TestTUI_PlanReviewInputHeight(t *testing.T) {
 	m.pipelineScreen.planComment.SetWidth(80)
 	m.pipelineScreen.planComment.SetHeight(2)
 
-	view := m.View()
+	view := viewString(m)
 	lines := strings.Split(view, "\n")
 
 	// The view must not exceed the terminal height.
@@ -1257,4 +1266,34 @@ func TestTUI_PlanReviewInputHeight(t *testing.T) {
 	if len(lines) > m.height+1 {
 		t.Errorf("plan review view exceeds terminal height: %d lines for %d-row terminal", len(lines), m.height)
 	}
+}
+
+func TestTUI_ShiftEnterNewline(t *testing.T) {
+	m := testModel()
+	m.promptScreen.SetValue("line one")
+
+	// Shift+Enter should NOT submit — should stay in StatePrompt
+	result, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+	model := result.(Model)
+
+	if model.state != StatePrompt {
+		t.Errorf("expected StatePrompt after Shift+Enter, got %d", model.state)
+	}
+
+	// Alt+Enter should also NOT submit
+	result2, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
+	model2 := result2.(Model)
+
+	if model2.state != StatePrompt {
+		t.Errorf("expected StatePrompt after Alt+Enter, got %d", model2.state)
+	}
+
+	// Plain Enter SHOULD submit
+	result3, _ := sendKey(model2, tea.KeyEnter)
+	model3 := result3.(Model)
+
+	if model3.state != StatePipeline {
+		t.Errorf("expected StatePipeline after plain Enter, got %d", model3.state)
+	}
+	model3.cancel()
 }

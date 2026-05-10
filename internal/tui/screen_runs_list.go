@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/agent"
 )
 
@@ -19,7 +19,7 @@ type RunsListScreen struct {
 
 // NewRunsListScreen creates a new runs list screen.
 func NewRunsListScreen() RunsListScreen {
-	vp := viewport.New(0, 0)
+	vp := viewport.New()
 	vp.MouseWheelEnabled = true
 	return RunsListScreen{viewport: vp}
 }
@@ -73,13 +73,13 @@ func (s *RunsListScreen) SyncViewport(width int) {
 
 // Update handles key events for the runs list screen.
 func (s RunsListScreen) Update(msg tea.Msg) (RunsListScreen, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyMsg)
+	keyMsg, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return s, nil
 	}
 
-	switch keyMsg.Type {
-	case tea.KeyEsc:
+	switch keyMsg.Code {
+	case tea.KeyEscape:
 		s.PendingIntent = NavigateBackIntent{}
 		return s, nil
 	case tea.KeyEnter:
@@ -91,20 +91,20 @@ func (s RunsListScreen) Update(msg tea.Msg) (RunsListScreen, tea.Cmd) {
 	case tea.KeyUp:
 		if s.cursor > 0 {
 			s.cursor--
-			s.SyncViewport(s.viewport.Width)
+			s.SyncViewport(s.viewport.Width())
 		}
 		return s, nil
 	case tea.KeyDown:
 		if s.cursor < len(s.runs)-1 {
 			s.cursor++
-			s.SyncViewport(s.viewport.Width)
+			s.SyncViewport(s.viewport.Width())
 		}
 		return s, nil
 	case tea.KeyPgUp:
-		s.viewport.HalfViewUp()
+		s.viewport.HalfPageUp()
 		return s, nil
 	case tea.KeyPgDown:
-		s.viewport.HalfViewDown()
+		s.viewport.HalfPageDown()
 		return s, nil
 	}
 
@@ -112,12 +112,12 @@ func (s RunsListScreen) Update(msg tea.Msg) (RunsListScreen, tea.Cmd) {
 	case "j":
 		if s.cursor < len(s.runs)-1 {
 			s.cursor++
-			s.SyncViewport(s.viewport.Width)
+			s.SyncViewport(s.viewport.Width())
 		}
 	case "k":
 		if s.cursor > 0 {
 			s.cursor--
-			s.SyncViewport(s.viewport.Width)
+			s.SyncViewport(s.viewport.Width())
 		}
 	case "q":
 		s.PendingIntent = NavigateBackIntent{}

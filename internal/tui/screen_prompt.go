@@ -4,9 +4,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // PromptScreen manages the task prompt input and file picker.
@@ -49,7 +49,7 @@ func (s *PromptScreen) SetWidth(w int) { s.textarea.SetWidth(w) }
 
 // Update handles key events for the prompt screen.
 func (s PromptScreen) Update(msg tea.Msg) (PromptScreen, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyMsg)
+	keyMsg, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		// Pass non-key messages to textarea (e.g., blink)
 		var cmd tea.Cmd
@@ -61,23 +61,32 @@ func (s PromptScreen) Update(msg tea.Msg) (PromptScreen, tea.Cmd) {
 		return s.handleFilePickerKey(keyMsg)
 	}
 
-	switch keyMsg.Type {
-	case tea.KeyEnter:
-		prompt := strings.TrimSpace(s.textarea.Value())
-		if prompt == "" {
-			return s, nil
-		}
-		s.PendingIntent = StartPipelineIntent{Prompt: prompt, SkipGateway: false}
-		return s, nil
-	case tea.KeyCtrlS:
+	// Ctrl combos first (no named constants in v2)
+	switch keyMsg.String() {
+	case "ctrl+s":
 		prompt := strings.TrimSpace(s.textarea.Value())
 		if prompt == "" {
 			return s, nil
 		}
 		s.PendingIntent = StartPipelineIntent{Prompt: prompt, SkipGateway: true}
 		return s, nil
-	case tea.KeyCtrlR:
+	case "ctrl+r":
 		s.PendingIntent = NavigateToRunsListIntent{}
+		return s, nil
+	}
+
+	switch keyMsg.Code {
+	case tea.KeyEnter:
+		if keyMsg.Mod.Contains(tea.ModShift) || keyMsg.Mod.Contains(tea.ModAlt) {
+			// Shift+Enter / Alt+Enter inserts a newline
+			s.textarea.InsertString("\n")
+			return s, nil
+		}
+		prompt := strings.TrimSpace(s.textarea.Value())
+		if prompt == "" {
+			return s, nil
+		}
+		s.PendingIntent = StartPipelineIntent{Prompt: prompt, SkipGateway: false}
 		return s, nil
 	default:
 		var cmd tea.Cmd
@@ -105,7 +114,7 @@ func (s PromptScreen) View(width, height int) string {
 
 	// Footer (2 lines)
 	footer := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
-		keyStyle.Render(" [Enter] submit | [Ctrl+S] skip gateway | [Ctrl+R] runs  [^C^C] quit")
+		keyStyle.Render(" [Enter] submit | [Shift+Enter] newline | [Ctrl+S] skip gateway | [Ctrl+R] runs  [^C^C] quit")
 
 	// Input zone (divider + instruction + textarea + newline)
 	input := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
@@ -163,9 +172,9 @@ func (s PromptScreen) View(width, height int) string {
 }
 
 // handleFilePickerKey processes key events while the file picker overlay is active.
-func (s PromptScreen) handleFilePickerKey(msg tea.KeyMsg) (PromptScreen, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+func (s PromptScreen) handleFilePickerKey(msg tea.KeyPressMsg) (PromptScreen, tea.Cmd) {
+	switch msg.Code {
+	case tea.KeyEscape:
 		s.fp.stopScan()
 		s.fpActive = false
 		val := s.textarea.Value()
@@ -219,8 +228,8 @@ func (s PromptScreen) handleFilePickerKey(msg tea.KeyMsg) (PromptScreen, tea.Cmd
 		return s, nil
 
 	default:
-		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
-			s.fpQuery += string(msg.Runes)
+		if len(msg.Text) > 0 && msg.Code != tea.KeyBackspace && msg.Code != tea.KeyEnter {
+			s.fpQuery += msg.Text
 			s.fp.refilter(s.fpQuery)
 			var cmd tea.Cmd
 			s.textarea, cmd = s.textarea.Update(msg)

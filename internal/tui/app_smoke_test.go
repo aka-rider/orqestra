@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
@@ -160,11 +160,11 @@ func TestLayout_CtrlCAlwaysQuits(t *testing.T) {
 			m.recalculateLayout()
 
 			// First Ctrl+C — should not quit yet.
-			result, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+			result, _ := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 			m = result.(Model)
 
 			// Second Ctrl+C — should produce a quit command.
-			result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+			result, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 			_ = result.(Model)
 
 			if cmd == nil {

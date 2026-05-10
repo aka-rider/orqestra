@@ -7,8 +7,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
@@ -166,7 +166,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case StatePipeline:
 			m.pipelineScreen.SyncViewports()
 		case StateRunsList:
-			m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width)
+			m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width())
 		case StateRunDetail:
 			m.runDetailScreen.SyncViewports()
 		}
@@ -175,7 +175,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 
 	case tickMsg:
@@ -244,8 +244,8 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleKey processes key events.
-func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.Type == tea.KeyCtrlC {
+func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+c" {
 		m.ctrlC++
 		if m.ctrlC >= 2 {
 			return m, tea.Quit
@@ -268,7 +268,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleRunsListKey delegates to RunsListScreen and handles intents.
-func (m Model) handleRunsListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleRunsListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.runsListScreen, cmd = m.runsListScreen.Update(msg)
 	if intent := m.runsListScreen.PendingIntent; intent != nil {
@@ -299,7 +299,7 @@ func (m Model) handleRunsListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleRunDetailKey delegates to RunDetailScreen and handles intents.
-func (m Model) handleRunDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleRunDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.runDetailScreen, cmd = m.runDetailScreen.Update(msg)
 	if intent := m.runDetailScreen.PendingIntent; intent != nil {
@@ -308,7 +308,7 @@ func (m Model) handleRunDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case NavigateBackIntent:
 			m.state = StateRunsList
 			m.recalculateLayout()
-			m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width)
+			m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width())
 			return m, nil
 		}
 	}
@@ -316,7 +316,7 @@ func (m Model) handleRunDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handlePromptKey delegates to PromptScreen and handles intents.
-func (m Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.promptScreen, cmd = m.promptScreen.Update(msg)
 	if intent := m.promptScreen.PendingIntent; intent != nil {
@@ -337,7 +337,7 @@ func (m Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handlePipelineKey delegates to PipelineScreen and handles intents.
-func (m Model) handlePipelineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handlePipelineKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.pipelineScreen, cmd = m.pipelineScreen.Update(msg)
 	if intent := m.pipelineScreen.PendingIntent; intent != nil {
@@ -434,18 +434,22 @@ func (m *Model) startPipeline(prompt string, skipGateway bool) tea.Cmd {
 }
 
 // View renders the current screen.
-func (m Model) View() string {
+func (m Model) View() tea.View {
+	var content string
 	switch m.state {
 	case StatePrompt:
-		return m.promptScreen.View(m.effectiveWidth(), m.height)
+		content = m.promptScreen.View(m.effectiveWidth(), m.height)
 	case StatePipeline:
-		return m.pipelineScreen.View(m.effectiveWidth(), m.height)
+		content = m.pipelineScreen.View(m.effectiveWidth(), m.height)
 	case StateRunsList:
-		return m.runsListScreen.View(m.effectiveWidth(), m.height)
+		content = m.runsListScreen.View(m.effectiveWidth(), m.height)
 	case StateRunDetail:
-		return m.runDetailScreen.View(m.effectiveWidth(), m.height)
+		content = m.runDetailScreen.View(m.effectiveWidth(), m.height)
 	}
-	return ""
+	v := tea.NewView(content)
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
 }
 
 func (m Model) effectiveWidth() int {
@@ -495,18 +499,18 @@ func (m *Model) recalculateLayout() {
 	}
 
 	// Runs list: full-width viewport
-	m.runsListScreen.viewport.Width = m.width
-	m.runsListScreen.viewport.Height = contentHeight
+	m.runsListScreen.viewport.SetWidth(m.width)
+	m.runsListScreen.viewport.SetHeight(contentHeight)
 
 	// Run detail: 3-zone layout
 	if m.state == StateRunDetail {
 		upperHeight := max(0, contentHeight-constRunLogHeight-1)
-		m.runDetailScreen.detailVP.Width = contentWidth
-		m.runDetailScreen.detailVP.Height = upperHeight
-		m.runDetailScreen.stepsVP.Width = sidebarWidth
-		m.runDetailScreen.stepsVP.Height = upperHeight
-		m.runDetailScreen.logVP.Width = m.width
-		m.runDetailScreen.logVP.Height = constRunLogHeight
+		m.runDetailScreen.detailVP.SetWidth(contentWidth)
+		m.runDetailScreen.detailVP.SetHeight(upperHeight)
+		m.runDetailScreen.stepsVP.SetWidth(sidebarWidth)
+		m.runDetailScreen.stepsVP.SetHeight(upperHeight)
+		m.runDetailScreen.logVP.SetWidth(m.width)
+		m.runDetailScreen.logVP.SetHeight(constRunLogHeight)
 	}
 
 	// Update textarea width for prompt mode

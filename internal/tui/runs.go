@@ -46,5 +46,5 @@ func (m *Model) navigateToRunsList() {
 	m.runsListScreen.SetRuns(runs)
 	m.state = StateRunsList
 	m.recalculateLayout()
-	m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width)
+	m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width())
 }

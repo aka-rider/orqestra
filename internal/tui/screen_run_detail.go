@@ -6,8 +6,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/harness"
 )
@@ -25,11 +25,11 @@ type RunDetailScreen struct {
 
 // NewRunDetailScreen creates a new run detail screen.
 func NewRunDetailScreen() RunDetailScreen {
-	dvp := viewport.New(0, 0)
+	dvp := viewport.New()
 	dvp.MouseWheelEnabled = true
-	svp := viewport.New(0, 0)
+	svp := viewport.New()
 	svp.MouseWheelEnabled = true
-	lvp := viewport.New(0, 0)
+	lvp := viewport.New()
 	lvp.MouseWheelEnabled = true
 	return RunDetailScreen{
 		detailVP: dvp,
@@ -54,7 +54,7 @@ func (s *RunDetailScreen) SyncViewports() {
 		leftContent.WriteString("\n    ⇩  ⇩  ⇩\n\n")
 	}
 	if s.detail.PlanMarkdown != "" {
-		rendered := renderMarkdown(s.detail.PlanMarkdown, s.detailVP.Width)
+		rendered := renderMarkdown(s.detail.PlanMarkdown, s.detailVP.Width())
 		leftContent.WriteString(rendered)
 	} else {
 		leftContent.WriteString(dimStyle.Render("(no plan available)"))
@@ -62,7 +62,7 @@ func (s *RunDetailScreen) SyncViewports() {
 	s.detailVP.SetContent(leftContent.String())
 
 	// Right content — step menu
-	s.stepsVP.SetContent(s.viewRunSteps(s.stepsVP.Width))
+	s.stepsVP.SetContent(s.viewRunSteps(s.stepsVP.Width()))
 
 	// Log content
 	if len(s.logLines) == 0 {
@@ -180,29 +180,30 @@ func (s RunDetailScreen) viewRunSteps(width int) string {
 
 // Update handles key events for the run detail screen.
 func (s RunDetailScreen) Update(msg tea.Msg) (RunDetailScreen, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyMsg)
+	keyMsg, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return s, nil
 	}
 
-	switch keyMsg.Type {
-	case tea.KeyEsc:
+	if keyMsg.String() == "ctrl+e" {
+		return s.openStepLog()
+	}
+	switch keyMsg.Code {
+	case tea.KeyEscape:
 		s.PendingIntent = NavigateBackIntent{}
 		return s, nil
 	case tea.KeyUp:
-		s.logVP.LineUp(1)
+		s.logVP.ScrollUp(1)
 		return s, nil
 	case tea.KeyDown:
-		s.logVP.LineDown(1)
+		s.logVP.ScrollDown(1)
 		return s, nil
 	case tea.KeyPgUp:
-		s.detailVP.HalfViewUp()
+		s.detailVP.HalfPageUp()
 		return s, nil
 	case tea.KeyPgDown:
-		s.detailVP.HalfViewDown()
+		s.detailVP.HalfPageDown()
 		return s, nil
-	case tea.KeyCtrlE:
-		return s.openStepLog()
 	}
 
 	switch keyMsg.String() {
@@ -237,7 +238,7 @@ func (s RunDetailScreen) View(width, height int) string {
 
 	contentWidth := max(0, int(float64(width)*splitRatio))
 	sidebarWidth := max(0, width-contentWidth-1)
-	upperHeight := s.detailVP.Height
+	upperHeight := s.detailVP.Height()
 	upper := joinSplitView(s.detailVP.View(), s.stepsVP.View(), contentWidth, sidebarWidth, upperHeight)
 
 	// Divider
