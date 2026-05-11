@@ -34,6 +34,7 @@ const (
 	ContentAgentHistory                    // frozen output of a previously-run agent
 	ContentCompletion                      // QA report, summary
 	ContentUserQuestion                    // MCP AskUserQuestion picker
+	ContentPlanDiff                        // line diff of last plan revision
 )
 
 // AgentRow tracks a single agent's status in the sidebar.

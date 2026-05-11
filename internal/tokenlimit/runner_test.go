@@ -56,7 +56,7 @@ func TestLimitedRunner_RunPrint_BudgetExhaustedBlocks(t *testing.T) {
 	// Pre-exhaust the budget.
 	limiter.store.Record(context.Background(), "large", "other", 200)
 
-	runner := NewLimitedRunner(inner, limiter, "large", "planner")
+	runner := NewLimitedRunner(inner, limiter, "large", "architect")
 	_, err := runner.RunPrint(context.Background(), "prompt", "sys")
 	if !IsBudgetExhausted(err) {
 		t.Fatalf("expected ErrBudgetExhausted, got %v", err)
@@ -73,7 +73,7 @@ func TestLimitedRunner_RunPrint_PassthroughOnBudgetOK(t *testing.T) {
 		},
 	}
 	limiter := newTestLimiter(t, map[string]int64{"large": 10000})
-	runner := NewLimitedRunner(inner, limiter, "large", "planner")
+	runner := NewLimitedRunner(inner, limiter, "large", "architect")
 
 	result, err := runner.RunPrint(context.Background(), "prompt", "sys")
 	if err != nil {
@@ -97,7 +97,7 @@ func TestLimitedRunner_RunPrint_PostRecordBudgetError(t *testing.T) {
 	limiter := newTestLimiter(t, map[string]int64{"large": 1000})
 	limiter.store.Record(context.Background(), "large", "prior", 500)
 
-	runner := NewLimitedRunner(inner, limiter, "large", "planner")
+	runner := NewLimitedRunner(inner, limiter, "large", "architect")
 	result, err := runner.RunPrint(context.Background(), "prompt", "sys")
 
 	// Result output must still be returned even alongside the budget error.
@@ -118,7 +118,7 @@ func TestLimitedRunner_RunPrint_ZeroTokensSkipsRecord(t *testing.T) {
 		},
 	}
 	limiter := newTestLimiter(t, map[string]int64{"large": 1000})
-	runner := NewLimitedRunner(inner, limiter, "large", "planner")
+	runner := NewLimitedRunner(inner, limiter, "large", "architect")
 
 	_, err := runner.RunPrint(context.Background(), "prompt", "sys")
 	if err != nil {
@@ -140,7 +140,7 @@ func TestLimitedRunner_RunPrint_RecordsOnInnerError(t *testing.T) {
 		},
 	}
 	limiter := newTestLimiter(t, map[string]int64{"large": 10000})
-	runner := NewLimitedRunner(inner, limiter, "large", "planner")
+	runner := NewLimitedRunner(inner, limiter, "large", "architect")
 
 	_, err := runner.RunPrint(context.Background(), "prompt", "sys")
 	if !errors.Is(err, innerErr) {
@@ -160,7 +160,7 @@ func TestLimitedRunner_RunPrint_NilUsageSkipsRecord(t *testing.T) {
 		},
 	}
 	limiter := newTestLimiter(t, map[string]int64{"large": 1000})
-	runner := NewLimitedRunner(inner, limiter, "large", "planner")
+	runner := NewLimitedRunner(inner, limiter, "large", "architect")
 
 	_, err := runner.RunPrint(context.Background(), "prompt", "sys")
 	if err != nil {
@@ -183,7 +183,7 @@ func TestLimitedRunner_RunPrint_NoLimit_AlwaysPasses(t *testing.T) {
 	}
 	// No limit configured for "large".
 	limiter := newTestLimiter(t, map[string]int64{})
-	runner := NewLimitedRunner(inner, limiter, "large", "planner")
+	runner := NewLimitedRunner(inner, limiter, "large", "architect")
 
 	result, err := runner.RunPrint(context.Background(), "prompt", "sys")
 	if err != nil {
@@ -267,12 +267,12 @@ func TestLimitedRunner_RunStreaming_PostRecordBudgetError(t *testing.T) {
 func TestErrBudgetExhausted_ErrorFormat(t *testing.T) {
 	err := &ErrBudgetExhausted{
 		Model:   "claude-opus-4-5",
-		AgentID: "planner",
+		AgentID: "architect",
 		Used:    1500,
 		Limit:   1000,
 	}
 	msg := err.Error()
-	for _, want := range []string{"claude-opus-4-5", "planner", "1500", "1000"} {
+	for _, want := range []string{"claude-opus-4-5", "architect", "1500", "1000"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error message %q missing %q", msg, want)
 		}
@@ -287,7 +287,7 @@ func TestLimiter_StatusAll(t *testing.T) {
 		"sonnet": 5000,
 	})
 	ctx := context.Background()
-	limiter.store.Record(ctx, "large", "planner", 2000)
+	limiter.store.Record(ctx, "large", "architect", 2000)
 	limiter.store.Record(ctx, "sonnet", "validator", 1000)
 
 	statuses, err := limiter.StatusAll(ctx)
@@ -464,7 +464,7 @@ func TestLimitedRunner_RunStreaming_NoLimit_AlwaysPasses(t *testing.T) {
 func TestLimiter_Status_ByAgentBreakdown(t *testing.T) {
 	limiter := newTestLimiter(t, map[string]int64{"large": 5000})
 	ctx := context.Background()
-	limiter.store.Record(ctx, "large", "planner", 1000)
+	limiter.store.Record(ctx, "large", "architect", 1000)
 	limiter.store.Record(ctx, "large", "worker", 500)
 
 	status, err := limiter.Status(ctx, "large")
@@ -485,7 +485,7 @@ func TestLimiter_Status_ByAgentBreakdown(t *testing.T) {
 func TestLimiter_Status_Unlimited(t *testing.T) {
 	limiter := newTestLimiter(t, map[string]int64{}) // no limit for "large"
 	ctx := context.Background()
-	limiter.store.Record(ctx, "large", "planner", 1000)
+	limiter.store.Record(ctx, "large", "architect", 1000)
 
 	status, err := limiter.Status(ctx, "large")
 	if err != nil {

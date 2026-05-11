@@ -161,7 +161,7 @@ func (s PromptScreen) View(width, height int) string {
 		sidebarBuf.WriteString(" ● gateway     gate\n")
 		sidebarBuf.WriteString("   awaiting input\n")
 		sidebarBuf.WriteString("\n")
-		sidebarBuf.WriteString(" ○ planner        -\n")
+		sidebarBuf.WriteString(" ○ architect      -\n")
 		sidebarBuf.WriteString(" ○ workers        -\n")
 		sidebarBuf.WriteString(" ○ qa             -")
 

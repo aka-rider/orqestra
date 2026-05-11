@@ -20,7 +20,8 @@ type QuestionBridge struct {
 	questions     chan MCPToolCall
 	pendingAnswer chan MCPAnswer
 	done          chan struct{}
-	once          sync.Once
+	mu            sync.Mutex
+	stopped       bool
 }
 
 // NewQuestionBridge creates a bridge that will listen on the given socket path.
@@ -35,7 +36,16 @@ func NewQuestionBridge(socketPath string) *QuestionBridge {
 
 // Start creates the Unix socket and begins accepting connections.
 // Each connection handles exactly one question/answer exchange.
+// Start is safe to call after Stop — the bridge resets its internal state.
 func (b *QuestionBridge) Start(ctx context.Context) error {
+	b.mu.Lock()
+	if b.stopped {
+		// Reset for reuse after a previous Stop
+		b.done = make(chan struct{})
+		b.stopped = false
+	}
+	b.mu.Unlock()
+
 	// Clean up stale socket
 	os.Remove(b.socketPath) // fire-and-forget: may not exist
 
@@ -124,14 +134,19 @@ func (b *QuestionBridge) handleConnection(ctx context.Context, conn net.Conn) {
 }
 
 // Stop closes the bridge and cleans up the socket file.
+// Safe to call multiple times.
 func (b *QuestionBridge) Stop() {
-	b.once.Do(func() {
-		close(b.done)
-		if b.listener != nil {
-			b.listener.Close()
-		}
-		os.Remove(b.socketPath) // fire-and-forget: best-effort cleanup
-	})
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stopped {
+		return
+	}
+	b.stopped = true
+	close(b.done)
+	if b.listener != nil {
+		b.listener.Close()
+	}
+	os.Remove(b.socketPath) // fire-and-forget: best-effort cleanup
 }
 
 // SocketPath returns the Unix socket path for MCP config injection.

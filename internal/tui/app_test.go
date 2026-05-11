@@ -39,7 +39,7 @@ func testModel() Model {
 		Runners: orchestrator.Runners{
 			Gateway:    &noopRunner{},
 			Researcher: &noopRunner{},
-			Planner:    &noopRunner{},
+			Architect:  &noopRunner{},
 			Worker:     &noopRunner{},
 		},
 	}
@@ -54,7 +54,7 @@ func testConfig() *config.Config {
 	return &config.Config{
 		Gateway:    config.GatewayConfig{SystemPrompt: "test"},
 		Researcher: config.ResearcherConfig{},
-		Planner:    config.PlannerConfig{},
+		Architect:  config.ArchitectConfig{},
 		Worker:     config.WorkerConfig{},
 	}
 }
@@ -398,7 +398,7 @@ func TestTUI_AgentNavigation(t *testing.T) {
 	m.pipelineScreen.content = ContentStreaming
 	m.pipelineScreen.agents = []AgentRow{
 		{ID: "gateway", State: "done"},
-		{ID: "planner", State: "running"},
+		{ID: "architect", State: "running"},
 	}
 
 	// Press 1 to view gateway history
@@ -523,7 +523,7 @@ func TestTUI_FullDashboard(t *testing.T) {
 	m.pipelineScreen.content = ContentStreaming
 	m.pipelineScreen.agents = []AgentRow{
 		{ID: "gateway", State: "done"},
-		{ID: "planner", State: "running"},
+		{ID: "architect", State: "running"},
 	}
 
 	// Press D to toggle dashboard
@@ -536,7 +536,7 @@ func TestTUI_FullDashboard(t *testing.T) {
 
 	// View should contain dashboard content
 	view := viewString(model)
-	if !strings.Contains(view, "gateway") || !strings.Contains(view, "planner") {
+	if !strings.Contains(view, "gateway") || !strings.Contains(view, "architect") {
 		t.Error("expected dashboard to show agent names")
 	}
 
@@ -656,7 +656,7 @@ func TestTUI_SidebarTokens(t *testing.T) {
 	m.height = 40
 	m.pipelineScreen.agents = []AgentRow{
 		{ID: "gateway", State: "done", Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402},
-		{ID: "planner", State: "running", StartedAt: time.Now().Add(-24 * time.Second), InputTokens: 0, OutputTokens: 0},
+		{ID: "architect", State: "running", StartedAt: time.Now().Add(-24 * time.Second), InputTokens: 0, OutputTokens: 0},
 	}
 	m.recalculateLayout()
 	m.pipelineScreen.SyncViewports()
@@ -791,10 +791,10 @@ func TestTUI_StreamingOutputReset(t *testing.T) {
 	}
 
 	// Simulate second agent — buffer should reset
-	stream.SetAgent("planner")
+	stream.SetAgent("architect")
 
 	agentID2, lines2, _ := stream.Snapshot()
-	if agentID2 != "planner" {
+	if agentID2 != "architect" {
 		t.Errorf("expected agent 'planner', got %q", agentID2)
 	}
 	if len(lines2) != 0 {
@@ -845,7 +845,7 @@ func TestTUI_NewRunClearsStaleState(t *testing.T) {
 	// Simulate stale state from a previous run
 	m.pipelineScreen.agents = []AgentRow{
 		{ID: "gateway", State: "done"},
-		{ID: "planner", State: "failed"},
+		{ID: "architect", State: "failed"},
 	}
 	m.pipelineScreen.lastErr = fmt.Errorf("planner failed")
 	m.pipelineScreen.finalPlan = "# Old Plan"
@@ -1106,7 +1106,7 @@ func TestTUI_DrainLoopPlanGate(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
-	m.pipelineScreen.agents = []AgentRow{{ID: "planner", State: "running", StartedAt: time.Now()}}
+	m.pipelineScreen.agents = []AgentRow{{ID: "architect", State: "running", StartedAt: time.Now()}}
 
 	events := make(chan orchestrator.Event, 16)
 	m.events = events
@@ -1114,7 +1114,7 @@ func TestTUI_DrainLoopPlanGate(t *testing.T) {
 	planMD := "# Plan\n\n## Goal\nAdd X.\n\n## Work Packages\n\n### 1. Step 1"
 
 	// Buffer all three events before the TUI reads any of them.
-	events <- orchestrator.Event{Type: orchestrator.EventAgentDone, AgentID: "planner", InputTokens: 100, OutputTokens: 50}
+	events <- orchestrator.Event{Type: orchestrator.EventAgentDone, AgentID: "architect", InputTokens: 100, OutputTokens: 50}
 	events <- orchestrator.Event{Type: orchestrator.EventPlanReady, FinalPlan: planMD}
 	events <- orchestrator.Event{Type: orchestrator.EventGateRequest, Gate: orchestrator.GateRequest{
 		Type:              orchestrator.GatePlanApproval,
@@ -1172,7 +1172,7 @@ func TestTUI_DrainLoopChannelCloseAfterGate(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
-	m.pipelineScreen.agents = []AgentRow{{ID: "planner", State: "running", StartedAt: time.Now()}}
+	m.pipelineScreen.agents = []AgentRow{{ID: "architect", State: "running", StartedAt: time.Now()}}
 
 	events := make(chan orchestrator.Event, 16)
 	m.events = events
@@ -1224,7 +1224,7 @@ func TestTUI_GlobalKeysBlockedInPlanReview(t *testing.T) {
 	m.pipelineScreen.planComment.SetWidth(80)
 	m.pipelineScreen.planComment.SetHeight(2)
 	m.pipelineScreen.planComment.Focus()
-	m.pipelineScreen.agents = []AgentRow{{ID: "planner", State: "done"}}
+	m.pipelineScreen.agents = []AgentRow{{ID: "architect", State: "done"}}
 
 	// Press "d" — must NOT toggle dashboard
 	result, _ := sendRune(m, "d")
@@ -1296,4 +1296,145 @@ func TestTUI_ShiftEnterNewline(t *testing.T) {
 		t.Errorf("expected StatePipeline after plain Enter, got %d", model3.state)
 	}
 	model3.cancel()
+}
+
+func TestTUI_ChatResponse(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nOriginal"
+	m.pipelineScreen.hasPlanComment = true
+	m.pipelineScreen.planComment = textarea.New()
+	m.pipelineScreen.planComment.SetWidth(80)
+	m.pipelineScreen.planComment.SetHeight(2)
+	m.pipelineScreen.planComment.Focus()
+	m.width = 120
+	m.height = 40
+	m.recalculateLayout()
+
+	// Simulate EventChatResponse
+	m.pipelineScreen.ApplyEvent(orchestrator.Event{
+		Type:     orchestrator.EventChatResponse,
+		ChatText: "Step 3 initializes the config parser.",
+	}, m.width)
+
+	// Verify state
+	if m.pipelineScreen.content != ContentPlanReview {
+		t.Errorf("expected ContentPlanReview, got %d", m.pipelineScreen.content)
+	}
+	if len(m.pipelineScreen.chatHistory) != 1 {
+		t.Fatalf("expected 1 chat entry, got %d", len(m.pipelineScreen.chatHistory))
+	}
+	if m.pipelineScreen.chatHistory[0].Role != "architect" {
+		t.Errorf("expected architect role, got %q", m.pipelineScreen.chatHistory[0].Role)
+	}
+	if !m.pipelineScreen.hasPlanComment {
+		t.Error("expected comment textarea restored")
+	}
+	if m.pipelineScreen.finalPlan != "# Plan\n\n## Goal\nOriginal" {
+		t.Error("expected plan unchanged after chat-only response")
+	}
+
+	// Verify render includes chat history
+	view := m.pipelineScreen.viewPlanReview(100)
+	if !strings.Contains(view, "Architect:") {
+		t.Error("expected 'Architect:' prefix in rendered view")
+	}
+	if !strings.Contains(view, "config parser") {
+		t.Error("expected chat text in rendered view")
+	}
+}
+
+func TestTUI_PlanDiffToggle(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nNew"
+	m.pipelineScreen.planDiff = "--- a/plan.md\n+++ b/plan.md\n@@ -1,4 +1,4 @@\n # Plan\n \n ## Goal\n-Old.\n+New.\n"
+	m.pipelineScreen.awaitingPlanDecision = true
+	m.width = 120
+	m.height = 40
+	m.recalculateLayout()
+
+	// Press D to enter diff mode
+	result, _ := m.Update(tea.KeyPressMsg{Code: 100, Text: "d"}) // 'd'
+	model := result.(Model)
+	if model.pipelineScreen.content != ContentPlanDiff {
+		t.Errorf("expected ContentPlanDiff, got %d", model.pipelineScreen.content)
+	}
+
+	// Verify diff renders
+	view := model.pipelineScreen.viewPlanDiff(100)
+	if !strings.Contains(view, "Plan Diff") {
+		t.Error("expected diff header in view")
+	}
+
+	// Press Esc to return
+	result2, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	model2 := result2.(Model)
+	if model2.pipelineScreen.content != ContentPlanReview {
+		t.Errorf("expected ContentPlanReview after Esc, got %d", model2.pipelineScreen.content)
+	}
+}
+
+func TestTUI_PlanDiffIgnoredWithoutHistory(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest"
+	m.pipelineScreen.planDiff = "" // no history (initial plan, no revisions)
+	m.width = 120
+	m.height = 40
+	m.recalculateLayout()
+
+	result, _ := m.Update(tea.KeyPressMsg{Code: 100, Text: "d"})
+	model := result.(Model)
+	// Should stay in plan review — no diff available
+	if model.pipelineScreen.content != ContentPlanReview {
+		t.Errorf("expected ContentPlanReview (no diff available), got %d", model.pipelineScreen.content)
+	}
+}
+
+func TestTUI_ReviewTokenAccumulation(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.chatHistory = []ChatEntry{{Role: "you", Text: "q1"}}
+
+	m.pipelineScreen.ApplyEvent(orchestrator.Event{
+		Type:         orchestrator.EventAgentDone,
+		AgentID:      "architect",
+		InputTokens:  1000,
+		OutputTokens: 500,
+	}, m.width)
+
+	if m.pipelineScreen.reviewTokensIn != 1000 {
+		t.Errorf("reviewTokensIn = %d, want 1000", m.pipelineScreen.reviewTokensIn)
+	}
+	if m.pipelineScreen.reviewTokensOut != 500 {
+		t.Errorf("reviewTokensOut = %d, want 500", m.pipelineScreen.reviewTokensOut)
+	}
+}
+
+func TestTUI_ViewPlanDiffViewport(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentPlanDiff
+	m.pipelineScreen.planDiff = "diff --git a/plan.md b/plan.md\n# Plan\n-Old.\n+New.\n"
+	m.pipelineScreen.diffViewport.SetWidth(100)
+	m.pipelineScreen.diffViewport.SetHeight(20)
+	m.pipelineScreen.diffViewport.SetContent(m.pipelineScreen.planDiff)
+	m.width = 120
+	m.height = 40
+	m.recalculateLayout()
+
+	view := m.pipelineScreen.viewPlanDiff(100)
+	if !strings.Contains(view, "Plan Diff") {
+		t.Error("expected diff header")
+	}
+	if !strings.Contains(view, "-Old.") || !strings.Contains(view, "+New.") {
+		t.Error("expected viewport content in view")
+	}
 }

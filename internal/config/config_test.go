@@ -13,8 +13,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Researcher.Model != "medium" {
 		t.Errorf("researcher model = %q, want %q", cfg.Researcher.Model, "medium")
 	}
-	if cfg.Planner.Model != "large" {
-		t.Errorf("planner model = %q, want %q", cfg.Planner.Model, "large")
+	if cfg.Architect.Model != "large" {
+		t.Errorf("architect model = %q, want %q", cfg.Architect.Model, "large")
 	}
 	if cfg.Worker.Model != "medium" {
 		t.Errorf("worker model = %q, want %q", cfg.Worker.Model, "medium")
@@ -25,8 +25,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Retry.ResearcherAttempts < 1 {
 		t.Error("researcher attempts should be at least 1")
 	}
-	if cfg.Retry.PlannerAttempts < 1 {
-		t.Error("planner attempts should be at least 1")
+	if cfg.Retry.ArchitectAttempts < 1 {
+		t.Error("architect attempts should be at least 1")
 	}
 }
 
@@ -74,8 +74,8 @@ worker:
 	if cfg.Researcher.Model != "medium" {
 		t.Errorf("expected researcher model medium, got %q", cfg.Researcher.Model)
 	}
-	if cfg.Planner.Model != "large" {
-		t.Errorf("expected planner model large, got %q", cfg.Planner.Model)
+	if cfg.Architect.Model != "large" {
+		t.Errorf("expected architect model large, got %q", cfg.Architect.Model)
 	}
 }
 

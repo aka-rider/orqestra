@@ -16,7 +16,7 @@ func IsNewFormat(md string) bool {
 	return strings.HasPrefix(strings.TrimSpace(md), "# Plan")
 }
 
-// Specification is the shared contract between Planner, Worker, and Validator.
+// Specification is the shared contract between Architect, Worker, and Validator.
 // DEPRECATED: Used by --plan <old-format> loading and internal/scheduler/.
 // Not created in the new pipeline.
 type Specification struct {

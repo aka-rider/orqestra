@@ -13,37 +13,37 @@ import (
 	"github.com/xiii/orqestra/internal/harness"
 )
 
-// plannerMockCLIRunner is a test double for the CLIRunner interface.
-type plannerMockCLIRunner struct {
+// architectMockCLIRunner is a test double for the CLIRunner interface.
+type architectMockCLIRunner struct {
 	response  string
 	sessionID string
 	err       error
 }
 
-func (m *plannerMockCLIRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
+func (m *architectMockCLIRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
 	if m.err != nil {
 		return harness.RunResult{}, m.err
 	}
 	return harness.RunResult{Output: m.response, SessionID: m.sessionID}, nil
 }
 
-func (m *plannerMockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
+func (m *architectMockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
 	if m.err != nil {
 		return harness.RunResult{}, m.err
 	}
 	return harness.RunResult{Output: m.response, SessionID: m.sessionID}, nil
 }
 
-func TestPlanner_Refine_Success(t *testing.T) {
+func TestArchitect_Refine_Success(t *testing.T) {
 	planMD := "# Plan\n\n## Goal\nBuild a thing.\n\n## Work Packages\n\n### 1. Do stuff\n\n**Steps:**\n1. Edit foo.go\n\n**Done when:**\n- Tests pass"
-	mock := &plannerMockCLIRunner{response: planMD}
+	mock := &architectMockCLIRunner{response: planMD}
 
-	cfg := config.PlannerConfig{
+	cfg := config.ArchitectConfig{
 		Model:        "test-model",
 		SystemPrompt: "You are the architect.",
 	}
 
-	p := NewPlanner(mock, cfg)
+	p := NewArchitect(mock, cfg)
 	plan, _, _, err := p.Refine(context.Background(), "some researcher draft")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -53,35 +53,35 @@ func TestPlanner_Refine_Success(t *testing.T) {
 	}
 }
 
-func TestPlanner_Refine_MissingPlanHeader(t *testing.T) {
-	mock := &plannerMockCLIRunner{response: "## Goal\nDo something\n\n## Work Packages\n..."}
+func TestArchitect_Refine_MissingPlanHeader(t *testing.T) {
+	mock := &architectMockCLIRunner{response: "## Goal\nDo something\n\n## Work Packages\n..."}
 
-	cfg := config.PlannerConfig{Model: "test"}
-	p := NewPlanner(mock, cfg)
+	cfg := config.ArchitectConfig{Model: "test"}
+	p := NewArchitect(mock, cfg)
 	_, _, _, err := p.Refine(context.Background(), "draft")
 	if err == nil {
 		t.Fatal("expected error for missing '# Plan' header")
 	}
 }
 
-func TestPlanner_Refine_MissingWorkPackages(t *testing.T) {
-	mock := &plannerMockCLIRunner{response: "# Plan\n\n## Goal\nDo something"}
+func TestArchitect_Refine_MissingWorkPackages(t *testing.T) {
+	mock := &architectMockCLIRunner{response: "# Plan\n\n## Goal\nDo something"}
 
-	cfg := config.PlannerConfig{Model: "test"}
-	p := NewPlanner(mock, cfg)
+	cfg := config.ArchitectConfig{Model: "test"}
+	p := NewArchitect(mock, cfg)
 	_, _, _, err := p.Refine(context.Background(), "draft")
 	if err == nil {
 		t.Fatal("expected error for missing '## Work Packages' section")
 	}
 }
 
-func TestPlanner_Refine_CodeFenceStripping(t *testing.T) {
+func TestArchitect_Refine_CodeFenceStripping(t *testing.T) {
 	planMD := "# Plan\n\n## Goal\nBuild.\n\n## Work Packages\n\n### 1. Do"
 	wrapped := "```markdown\n" + planMD + "\n```"
-	mock := &plannerMockCLIRunner{response: wrapped}
+	mock := &architectMockCLIRunner{response: wrapped}
 
-	cfg := config.PlannerConfig{Model: "test"}
-	p := NewPlanner(mock, cfg)
+	cfg := config.ArchitectConfig{Model: "test"}
+	p := NewArchitect(mock, cfg)
 	plan, _, _, err := p.Refine(context.Background(), "draft")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -91,23 +91,23 @@ func TestPlanner_Refine_CodeFenceStripping(t *testing.T) {
 	}
 }
 
-func TestPlanner_Refine_CLIError(t *testing.T) {
-	mock := &plannerMockCLIRunner{err: fmt.Errorf("connection refused")}
+func TestArchitect_Refine_CLIError(t *testing.T) {
+	mock := &architectMockCLIRunner{err: fmt.Errorf("connection refused")}
 
-	cfg := config.PlannerConfig{Model: "test"}
-	p := NewPlanner(mock, cfg)
+	cfg := config.ArchitectConfig{Model: "test"}
+	p := NewArchitect(mock, cfg)
 	_, _, _, err := p.Refine(context.Background(), "draft")
 	if err == nil {
 		t.Fatal("expected error propagation from CLI")
 	}
 }
 
-func TestPlanner_RefineWithComments(t *testing.T) {
+func TestArchitect_RefineWithComments(t *testing.T) {
 	planMD := "# Plan\n\n## Goal\nRevised.\n\n## Work Packages\n\n### 1. Fixed"
-	mock := &plannerMockCLIRunner{response: planMD}
+	mock := &architectMockCLIRunner{response: planMD}
 
-	cfg := config.PlannerConfig{Model: "test"}
-	p := NewPlanner(mock, cfg)
+	cfg := config.ArchitectConfig{Model: "test"}
+	p := NewArchitect(mock, cfg)
 	plan, _, _, err := p.RefineWithComments(context.Background(), "old plan", "please fix step 2")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -117,11 +117,11 @@ func TestPlanner_RefineWithComments(t *testing.T) {
 	}
 }
 
-func TestPlanner_RecoverySkippedWithoutSessionID(t *testing.T) {
+func TestArchitect_RecoverySkippedWithoutSessionID(t *testing.T) {
 	// Output that fails parsePlanResult, no session ID → original error returned.
-	mock := &plannerMockCLIRunner{response: "no plan header here"}
-	cfg := config.PlannerConfig{Model: "test"}
-	p := NewPlanner(mock, cfg)
+	mock := &architectMockCLIRunner{response: "no plan header here"}
+	cfg := config.ArchitectConfig{Model: "test"}
+	p := NewArchitect(mock, cfg)
 
 	_, _, _, err := p.Refine(context.Background(), "draft")
 	if err == nil {
@@ -132,14 +132,14 @@ func TestPlanner_RecoverySkippedWithoutSessionID(t *testing.T) {
 	}
 }
 
-func TestPlanner_RecoveryFailsGracefully(t *testing.T) {
+func TestArchitect_RecoveryFailsGracefully(t *testing.T) {
 	// Output that fails parsePlanResult, session ID present but no matching session log.
-	mock := &plannerMockCLIRunner{
+	mock := &architectMockCLIRunner{
 		response:  "no plan header here",
 		sessionID: "nonexistent-session-id-12345",
 	}
-	cfg := config.PlannerConfig{Model: "test"}
-	p := NewPlanner(mock, cfg)
+	cfg := config.ArchitectConfig{Model: "test"}
+	p := NewArchitect(mock, cfg)
 
 	_, _, _, err := p.Refine(context.Background(), "draft")
 	if err == nil {
@@ -151,7 +151,7 @@ func TestPlanner_RecoveryFailsGracefully(t *testing.T) {
 	}
 }
 
-func TestPlanner_RecoverySuccess(t *testing.T) {
+func TestArchitect_RecoverySuccess(t *testing.T) {
 	// Set up temp filesystem mimicking ~/.claude/ structure.
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -189,12 +189,12 @@ func TestPlanner_RecoverySuccess(t *testing.T) {
 	}
 
 	// Mock runner returns bad output but with a session ID.
-	mock := &plannerMockCLIRunner{
+	mock := &architectMockCLIRunner{
 		response:  "The plan has been saved to the plan file.",
 		sessionID: sessionID,
 	}
-	cfg := config.PlannerConfig{Model: "test"}
-	p := NewPlanner(mock, cfg)
+	cfg := config.ArchitectConfig{Model: "test"}
+	p := NewArchitect(mock, cfg)
 
 	plan, _, sid, err := p.Refine(context.Background(), "draft")
 	if err != nil {
@@ -208,7 +208,7 @@ func TestPlanner_RecoverySuccess(t *testing.T) {
 	}
 }
 
-func TestPlanner_RecoveryRejectsOutOfBoundsPath(t *testing.T) {
+func TestArchitect_RecoveryRejectsOutOfBoundsPath(t *testing.T) {
 	// Set up temp filesystem with a plan file outside ~/.claude/plans/.
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -244,12 +244,12 @@ func TestPlanner_RecoveryRejectsOutOfBoundsPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mock := &plannerMockCLIRunner{
+	mock := &architectMockCLIRunner{
 		response:  "no plan here",
 		sessionID: sessionID,
 	}
-	cfg := config.PlannerConfig{Model: "test"}
-	p := NewPlanner(mock, cfg)
+	cfg := config.ArchitectConfig{Model: "test"}
+	p := NewArchitect(mock, cfg)
 
 	_, _, _, err = p.Refine(context.Background(), "draft")
 	if err == nil {

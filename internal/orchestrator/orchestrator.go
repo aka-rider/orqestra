@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/plan"
 )
 
 // stepMeta is the per-agent metadata persisted as JSON in the session directory.
@@ -131,6 +134,7 @@ const (
 	EventComplete
 	EventError
 	EventRunDirReady    // emitted once after session dir is created
+	EventChatResponse   // emitted when architect answers without revising the plan
 	EventUserQuestion   // emitted when an agent asks the user a question via MCP
 )
 
@@ -160,6 +164,7 @@ type GateRequest struct {
 	GatewayResult     agent.GatewayResult
 	FinalPlanMarkdown string // for GatePlanApproval
 	PlanFilePath      string // absolute path to plan.md on disk (for external editor)
+	PlanDiff          string // unified diff from git micro-repo (empty if no history)
 }
 
 // DecisionType classifies user decisions at gates.
@@ -208,6 +213,9 @@ type Event struct {
 	InputTokens  int64
 	OutputTokens int64
 
+	// ChatText is set on EventChatResponse — architect answered without revising the plan.
+	ChatText string
+
 	// UserQuestion is set on EventUserQuestion.
 	UserQuestion harness.MCPToolCall
 }
@@ -244,7 +252,7 @@ type RunDirFactory func(slug string) (agent.SessionDir, error)
 type Runners struct {
 	Gateway    harness.CLIRunner
 	Researcher harness.CLIRunner
-	Planner    harness.CLIRunner
+	Architect  harness.CLIRunner
 	Worker     harness.ContinuableRunner
 }
 
@@ -359,10 +367,10 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 	}
 
 	// --- Gateway Evaluation ---
-	var plannerInput string
+	var architectInput string
 
 	if input.SkipGateway {
-		plannerInput = input.Prompt
+		architectInput = input.Prompt
 	} else if e.Runners.Gateway != nil {
 		emit(Event{Type: EventPhaseChange, Phase: PhaseGateway})
 		emit(Event{Type: EventAgentStarted, AgentID: "gateway"})
@@ -396,16 +404,33 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		})
 		emit(Event{Type: EventAgentDone, AgentID: "gateway",
 			InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens})
-		plannerInput = buildPlannerInput(input.Prompt, gwResult.Brief)
+		architectInput = buildArchitectInput(input.Prompt, gwResult.Brief)
 	} else {
-		plannerInput = input.Prompt
+		architectInput = input.Prompt
 	}
 
 	var finalPlanMarkdown string
+	var planSessionID string // function scope — survives across gate loop iterations
+	architect := agent.NewArchitect(e.Runners.Architect, e.Config.Architect)
+
+	// Initialize plan version history (git micro-repo)
+	var planRepo *plan.GitRepo
+	if session.Path != "" {
+		var repoErr error
+		planRepo, repoErr = plan.NewGitRepo(session.Path)
+		if repoErr != nil {
+			slog.Warn("plan history unavailable — diff disabled", "err", repoErr)
+		}
+	}
 
 	// If a pre-loaded plan was provided, skip research and planning
 	if input.PlanFile != "" {
 		finalPlanMarkdown = input.PlanFile
+		if planRepo != nil {
+			if err := planRepo.Commit(finalPlanMarkdown, "plan loaded from file"); err != nil {
+				slog.Warn("plan commit failed", "err", err)
+			}
+		}
 		goto planGate
 	}
 
@@ -428,7 +453,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		var researchSessionID string
 		var err error
 		for attempt := 1; attempt <= researchAttempts; attempt++ {
-			draft, draftUsage, researchSessionID, err = researcher.ResearchStreaming(ctx, plannerInput, &streamWriter{buf: stream})
+			draft, draftUsage, researchSessionID, err = researcher.ResearchStreaming(ctx, architectInput, &streamWriter{buf: stream})
 			if err == nil {
 				break
 			}
@@ -459,50 +484,55 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 
 		// --- Planning ---
 		emit(Event{Type: EventPhaseChange, Phase: PhasePlanning})
-		emit(Event{Type: EventAgentStarted, AgentID: "planner"})
-		stream.SetAgent("planner")
+		emit(Event{Type: EventAgentStarted, AgentID: "architect"})
+		stream.SetAgent("architect")
 
-		planner := agent.NewPlanner(e.Runners.Planner, e.Config.Planner)
 		planStart := time.Now()
 
-		plannerAttempts := e.Config.Retry.PlannerAttempts
-		if plannerAttempts < 1 {
-			plannerAttempts = 1
+		architectAttempts := e.Config.Retry.ArchitectAttempts
+		if architectAttempts < 1 {
+			architectAttempts = 1
 		}
 
-		var plan agent.RawPlan
+		var planResult agent.RawPlan
 		var planUsage harness.TokenUsage
-		var planSessionID string
 		var planErr error
-		for attempt := 1; attempt <= plannerAttempts; attempt++ {
-			plan, planUsage, planSessionID, planErr = planner.RefineStreaming(ctx, draft.Markdown, &streamWriter{buf: stream})
+		for attempt := 1; attempt <= architectAttempts; attempt++ {
+			var sid string
+			planResult, planUsage, sid, planErr = architect.RefineStreaming(ctx, draft.Markdown, &streamWriter{buf: stream})
 			if planErr == nil {
+				planSessionID = sid
 				break
 			}
-			if attempt < plannerAttempts {
-				slog.Warn("planner attempt failed, retrying", "attempt", attempt, "err", planErr)
-				stream.SetAgent("planner") // reset stream for retry
+			if attempt < architectAttempts {
+				slog.Warn("architect attempt failed, retrying", "attempt", attempt, "err", planErr)
+				stream.SetAgent("architect") // reset stream for retry
 			}
 		}
 		if planErr != nil {
-			writeArtifactJSON(session, "planner_meta.json", stepMeta{
-				AgentID: "planner", ModelRef: e.Config.Planner.Model, StartTime: planStart, EndTime: time.Now(),
+			writeArtifactJSON(session, "architect_meta.json", stepMeta{
+				AgentID: "architect", ModelRef: e.Config.Architect.Model, StartTime: planStart, EndTime: time.Now(),
 				ClaudeSessionID: planSessionID, Status: "failed", Error: planErr.Error(),
 			})
-			emit(Event{Type: EventAgentFailed, AgentID: "planner", Err: planErr})
+			emit(Event{Type: EventAgentFailed, AgentID: "architect", Err: planErr})
 			emit(Event{Type: EventError, Err: fmt.Errorf("planning: %w", planErr)})
 			return
 		}
 
-		writeArtifactJSON(session, "planner_meta.json", stepMeta{
-			AgentID: "planner", ModelRef: e.Config.Planner.Model, StartTime: planStart, EndTime: time.Now(),
+		writeArtifactJSON(session, "architect_meta.json", stepMeta{
+			AgentID: "architect", ModelRef: e.Config.Architect.Model, StartTime: planStart, EndTime: time.Now(),
 			ClaudeSessionID: planSessionID, Status: "done",
 			InputTokens: planUsage.InputTokens, OutputTokens: planUsage.OutputTokens,
 		})
-		emit(Event{Type: EventAgentDone, AgentID: "planner",
+		emit(Event{Type: EventAgentDone, AgentID: "architect",
 			InputTokens: planUsage.InputTokens, OutputTokens: planUsage.OutputTokens})
 
-		finalPlanMarkdown = plan.Markdown
+		finalPlanMarkdown = planResult.Markdown
+		if planRepo != nil {
+			if err := planRepo.Commit(finalPlanMarkdown, "initial plan from architect"); err != nil {
+				slog.Warn("plan commit failed", "err", err)
+			}
+		}
 	}
 
 planGate:
@@ -511,11 +541,16 @@ planGate:
 
 	if !input.AutoApprove {
 		for {
+			var planDiff string
+			if planRepo != nil {
+				planDiff, _ = planRepo.Diff()
+			}
 			writeArtifact(session, "final_plan.md", finalPlanMarkdown)
 			emit(Event{Type: EventGateRequest, Gate: GateRequest{
 				Type:              GatePlanApproval,
 				FinalPlanMarkdown: finalPlanMarkdown,
 				PlanFilePath:      session.ArtifactPath("final_plan.md"),
+				PlanDiff:          planDiff,
 			}})
 
 			select {
@@ -532,32 +567,91 @@ planGate:
 						return
 					}
 					finalPlanMarkdown = edited
+					if planRepo != nil {
+						if err := planRepo.Commit(edited, "manual edit"); err != nil {
+							slog.Warn("plan commit failed", "err", err)
+						}
+					}
 					continue // re-show gate with edited plan
 				case DecisionComment:
-					// Re-plan with comments
-					emit(Event{Type: EventAgentStarted, AgentID: "planner"})
-					stream.SetAgent("planner")
-					planner := agent.NewPlanner(e.Runners.Planner, e.Config.Planner)
+					emit(Event{Type: EventAgentStarted, AgentID: "architect"})
+					stream.SetAgent("architect")
 					revStart := time.Now()
-					revised, revisedUsage, revSessionID, err := planner.RefineWithCommentsStreaming(ctx, finalPlanMarkdown, decision.Comment, &streamWriter{buf: stream})
+
+					var chatResponse string
+					var revisedUsage harness.TokenUsage
+					var err error
+
+					planPath := session.ArtifactPath("final_plan.md")
+					if planRepo != nil {
+						planPath = planRepo.PlanPath()
+						// Write current plan to git repo's plan.md so architect can read it
+						_ = os.WriteFile(planPath, []byte(finalPlanMarkdown), 0o644)
+					}
+
+					if planSessionID != "" {
+						chatResponse, revisedUsage, err = architect.ContinueSession(
+							ctx, planSessionID, planPath, decision.Comment, &streamWriter{buf: stream})
+					} else {
+						// Fallback for cold start (--plan flag) — no session to resume
+						revised, revUsage, revSID, refineErr := architect.RefineWithCommentsStreaming(
+							ctx, finalPlanMarkdown, decision.Comment, &streamWriter{buf: stream})
+						if refineErr == nil {
+							planSessionID = revSID
+							finalPlanMarkdown = revised.Markdown
+							if planRepo != nil {
+								msg := commitMsg("revision", decision.Comment)
+								if commitErr := planRepo.Commit(finalPlanMarkdown, msg); commitErr != nil {
+									slog.Warn("plan commit failed", "err", commitErr)
+								}
+							}
+						}
+						revisedUsage = revUsage
+						err = refineErr
+						chatResponse = ""
+					}
+
 					if err != nil {
-						writeArtifactJSON(session, "planner_meta.json", stepMeta{
-							AgentID: "planner", ModelRef: e.Config.Planner.Model, StartTime: revStart, EndTime: time.Now(),
-							ClaudeSessionID: revSessionID, Status: "failed", Error: err.Error(),
+						writeArtifactJSON(session, "architect_revision_meta.json", stepMeta{
+							AgentID: "architect", ModelRef: e.Config.Architect.Model,
+							StartTime: revStart, EndTime: time.Now(),
+							ClaudeSessionID: planSessionID, Status: "failed", Error: err.Error(),
 						})
-						emit(Event{Type: EventAgentFailed, AgentID: "planner", Err: err})
-						emit(Event{Type: EventError, Err: fmt.Errorf("planner revision: %w", err)})
+						emit(Event{Type: EventAgentFailed, AgentID: "architect", Err: err})
+						emit(Event{Type: EventError, Err: fmt.Errorf("architect revision: %w", err)})
 						return
 					}
-					writeArtifactJSON(session, "planner_meta.json", stepMeta{
-						AgentID: "planner", ModelRef: e.Config.Planner.Model, StartTime: revStart, EndTime: time.Now(),
-						ClaudeSessionID: revSessionID, Status: "done",
+
+					writeArtifactJSON(session, "architect_revision_meta.json", stepMeta{
+						AgentID: "architect", ModelRef: e.Config.Architect.Model,
+						StartTime: revStart, EndTime: time.Now(),
+						ClaudeSessionID: planSessionID, Status: "done",
 						InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens,
 					})
-					emit(Event{Type: EventAgentDone, AgentID: "planner",
+					emit(Event{Type: EventAgentDone, AgentID: "architect",
 						InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens})
-					finalPlanMarkdown = revised.Markdown
-					continue // re-show gate with revised plan
+
+					// Check if the plan was revised (git status on plan file)
+					var changed bool
+					if planRepo != nil && planSessionID != "" {
+						statusOut, _ := exec.Command("git", "-C", filepath.Dir(planRepo.PlanPath()), "status", "--porcelain", "plan.md").Output()
+						if len(strings.TrimSpace(string(statusOut))) > 0 {
+							changed = true
+						}
+					}
+
+					if changed {
+						editedBytes, _ := os.ReadFile(planRepo.PlanPath())
+						finalPlanMarkdown = string(editedBytes)
+						msg := commitMsg("revision", decision.Comment)
+						if commitErr := planRepo.Commit(finalPlanMarkdown, msg); commitErr != nil {
+							slog.Warn("plan commit failed", "err", commitErr)
+						}
+					} else if chatResponse != "" {
+						// Chat-only response — no plan change
+						emit(Event{Type: EventChatResponse, ChatText: chatResponse})
+					}
+					continue // re-show gate with (possibly revised) plan
 				case DecisionApprove:
 					// proceed
 				}
@@ -684,9 +778,9 @@ planGate:
 	})
 }
 
-// buildPlannerInput constructs the planner prompt from the raw user prompt and
+// buildArchitectInput constructs the architect prompt from the raw user prompt and
 // gateway brief.
-func buildPlannerInput(rawPrompt string, brief agent.PromptBrief) string {
+func buildArchitectInput(rawPrompt string, brief agent.PromptBrief) string {
 	var b strings.Builder
 	b.WriteString(rawPrompt)
 	if brief.EndState != "" {
@@ -702,6 +796,17 @@ func buildPlannerInput(rawPrompt string, brief agent.PromptBrief) string {
 		b.WriteString(strings.Join(brief.NonScope, ", "))
 	}
 	return b.String()
+}
+
+// commitMsg builds a git commit message from a prefix and a comment.
+func commitMsg(prefix, comment string) string {
+	if comment == "" {
+		return prefix
+	}
+	if len(comment) > 50 {
+		return prefix + ": " + comment[:50]
+	}
+	return prefix + ": " + comment
 }
 
 // writeArtifact writes a string artifact to the session directory.

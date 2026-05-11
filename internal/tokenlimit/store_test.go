@@ -23,10 +23,10 @@ func TestStore_RecordAndQuery(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	if err := store.Record(ctx, "opus", "planner", 1000); err != nil {
+	if err := store.Record(ctx, "opus", "architect", 1000); err != nil {
 		t.Fatalf("Record() error: %v", err)
 	}
-	if err := store.Record(ctx, "opus", "planner", 500); err != nil {
+	if err := store.Record(ctx, "opus", "architect", 500); err != nil {
 		t.Fatalf("Record() error: %v", err)
 	}
 	if err := store.Record(ctx, "opus", "reviewer", 200); err != nil {
@@ -49,7 +49,7 @@ func TestStore_RecordAndQuery(t *testing.T) {
 		t.Fatalf("expected 2 agents, got %d", len(agents))
 	}
 	// Ordered by tokens_used DESC
-	if agents[0].AgentID != "planner" || agents[0].TokensUsed != 1500 {
+	if agents[0].AgentID != "architect" || agents[0].TokensUsed != 1500 {
 		t.Errorf("agents[0] = %+v, want planner/1500", agents[0])
 	}
 	if agents[1].AgentID != "reviewer" || agents[1].TokensUsed != 200 {
@@ -244,7 +244,7 @@ func TestLimiter_Status(t *testing.T) {
 	limits := map[string]int64{"opus": 1000}
 	lim := NewLimiter(store, limits)
 
-	store.Record(ctx, "opus", "planner", 300)
+	store.Record(ctx, "opus", "architect", 300)
 	store.Record(ctx, "opus", "worker", 200)
 
 	status, err := lim.Status(ctx, "opus")

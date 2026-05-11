@@ -753,7 +753,7 @@ func (r *GitRepo) Log() (string, error)         // oneline log
         if changed {
             editedBytes, _ := os.ReadFile(planPath)
             finalPlanMarkdown = string(editedBytes)
-            
+
             if planRepo != nil {
                 msg := "revision"
                 if len(decision.Comment) > 50 {

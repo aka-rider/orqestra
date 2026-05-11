@@ -157,7 +157,7 @@ func LoadRunDetail(runPath string) (RunDetail, error) {
 	}
 
 	// Load step metas in pipeline order
-	agentOrder := []string{"gateway", "researcher", "planner", "worker", "validator"}
+	agentOrder := []string{"gateway", "researcher", "architect", "worker", "validator"}
 	for _, agentID := range agentOrder {
 		metaFile := agentID + "_meta.json"
 		data, err := os.ReadFile(filepath.Join(runPath, metaFile))

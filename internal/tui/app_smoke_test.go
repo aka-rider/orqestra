@@ -120,6 +120,38 @@ func hydratedModels(t *testing.T) map[string]Model {
 		models["run-detail"] = m
 	}
 
+	// StatePipeline + ContentPlanReview with chat history
+	{
+		m := base()
+		m.state = StatePipeline
+		m.pipelineScreen.content = ContentPlanReview
+		m.pipelineScreen.hasPlan = true
+		m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nDo the thing."
+		m.pipelineScreen.chatHistory = []ChatEntry{
+			{Role: "you", Text: "Why step 3 before step 4?"},
+			{Role: "architect", Text: "Because config parser must init first."},
+		}
+		m.pipelineScreen.hasPlanComment = true
+		m.pipelineScreen.planComment = textarea.New()
+		m.pipelineScreen.planComment.SetWidth(80)
+		m.pipelineScreen.planComment.SetHeight(2)
+		m.pipelineScreen.planComment.CharLimit = 1024
+		m.pipelineScreen.planComment.Focus()
+		models["pipeline-plan-review-chat"] = m
+	}
+
+	// StatePipeline + ContentPlanDiff
+	{
+		m := base()
+		m.state = StatePipeline
+		m.pipelineScreen.content = ContentPlanDiff
+		m.pipelineScreen.hasPlan = true
+		m.pipelineScreen.planDiff = "--- a/plan.md\n+++ b/plan.md\n@@ -1,4 +1,4 @@\n # Plan\n \n ## Goal\n-Old.\n+New.\n"
+		m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nNew."
+		m.pipelineScreen.diffViewport.SetContent(m.pipelineScreen.planDiff)
+		models["pipeline-plan-diff"] = m
+	}
+
 	return models
 }
 

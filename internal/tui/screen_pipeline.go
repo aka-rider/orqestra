@@ -16,6 +16,13 @@ import (
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
+// ChatEntry is one turn in the user-architect conversation during plan review.
+type ChatEntry struct {
+	Role          string // "you" or "architect"
+	Text          string
+	HasPlanChange bool   // true if this entry accompanies a plan revision
+}
+
 // PipelineScreen manages the pipeline execution view with all content modes.
 type PipelineScreen struct {
 	content   ContentMode
@@ -49,6 +56,13 @@ type PipelineScreen struct {
 	planComment    textarea.Model
 	hasPlanComment bool
 	editorRunning  bool
+
+	// Conversation state during plan review
+	chatHistory     []ChatEntry
+	planDiff        string          // unified diff from git micro-repo
+	diffViewport    viewport.Model  // paginated viewport for diff rendering
+	reviewTokensIn  int64
+	reviewTokensOut int64
 
 	// Agent history navigation
 	focusedAgent int
@@ -124,6 +138,12 @@ func (s *PipelineScreen) Reset() {
 	s.hasPlanComment = false
 	s.editorRunning = false
 	s.awaitingPlanDecision = false
+	s.chatHistory = nil
+	s.planDiff = ""
+	s.diffViewport = viewport.New()
+	s.diffViewport.MouseWheelEnabled = true
+	s.reviewTokensIn = 0
+	s.reviewTokensOut = 0
 	s.focusedAgent = 0
 	s.runDir = ""
 	s.planFilePath = ""
@@ -150,6 +170,10 @@ func (s *PipelineScreen) SyncViewports() {
 	w := s.effectiveWidth()
 	contentWidth := max(0, int(float64(w)*splitRatio))
 	sidebarWidth := max(0, w-contentWidth-1)
+
+	// Keep diff viewport dimensions in sync
+	s.diffViewport.SetWidth(contentWidth)
+	s.diffViewport.SetHeight(max(1, s.contentVP.Height()-3))
 
 	if s.showDashboard {
 		s.dashboardVP.SetContent(s.viewDashboard())
@@ -211,6 +235,11 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 				s.agents[i].OutputTokens = event.OutputTokens
 			}
 		}
+		// Accumulate review tokens when in conversation mode
+		if event.AgentID == "architect" && len(s.chatHistory) > 0 {
+			s.reviewTokensIn += event.InputTokens
+			s.reviewTokensOut += event.OutputTokens
+		}
 
 	case orchestrator.EventAgentFailed:
 		for i := range s.agents {
@@ -251,6 +280,13 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 			s.answerCursor = 0
 
 		case orchestrator.GatePlanApproval:
+			s.planDiff = event.Gate.PlanDiff
+			s.diffViewport.SetContent(s.planDiff)
+			if len(s.chatHistory) > 0 && s.planDiff != "" {
+				s.chatHistory = append(s.chatHistory, ChatEntry{
+					Role: "architect", Text: "(plan revised — see diff with [D])", HasPlanChange: true,
+				})
+			}
 			s.awaitingPlanDecision = true
 			s.content = ContentPlanReview
 			s.finalPlan = event.Gate.FinalPlanMarkdown
@@ -258,7 +294,7 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 			s.planFilePath = event.Gate.PlanFilePath
 			contentWidth := max(1, int(float64(width)*splitRatio))
 			s.planComment = textarea.New()
-			s.planComment.Placeholder = "Comment to refine the plan..."
+			s.planComment.Placeholder = "Ask a question or request changes..."
 			s.planComment.SetWidth(max(1, contentWidth-4))
 			s.planComment.SetHeight(2)
 			s.planComment.CharLimit = 1024
@@ -272,6 +308,19 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 
 	case orchestrator.EventRunDirReady:
 		s.runDir = event.RunDir
+
+	case orchestrator.EventChatResponse:
+		s.chatHistory = append(s.chatHistory, ChatEntry{Role: "architect", Text: event.ChatText})
+		s.content = ContentPlanReview
+		s.awaitingPlanDecision = true
+		contentWidth := max(1, int(float64(width)*splitRatio))
+		s.planComment = textarea.New()
+		s.planComment.Placeholder = "Ask a question or request changes..."
+		s.planComment.SetWidth(max(1, contentWidth-4))
+		s.planComment.SetHeight(2)
+		s.planComment.CharLimit = 1024
+		s.planComment.Focus()
+		s.hasPlanComment = true
 
 	case orchestrator.EventError:
 		s.lastErr = event.Err
@@ -317,7 +366,7 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		s.SyncViewports()
 		return s, nil
 	case "d", "D":
-		if s.content != ContentCoaching && s.content != ContentPlanEdit && s.content != ContentPlanReview && s.content != ContentUserQuestion {
+		if s.content != ContentCoaching && s.content != ContentPlanEdit && s.content != ContentPlanReview && s.content != ContentPlanDiff && s.content != ContentUserQuestion {
 			s.showDashboard = !s.showDashboard
 			s.SyncViewports()
 			return s, nil
@@ -373,6 +422,8 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		return s.handlePlanReviewKey(msg)
 	case ContentPlanEdit:
 		return s.handlePlanEditKey(msg)
+	case ContentPlanDiff:
+		return s.handlePlanDiffKey(msg)
 	case ContentAgentHistory:
 		return s.handleAgentHistoryKey(msg)
 	case ContentCompletion:
@@ -595,6 +646,7 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 		if s.hasPlanComment {
 			comment := strings.TrimSpace(s.planComment.Value())
 			if comment != "" {
+				s.chatHistory = append(s.chatHistory, ChatEntry{Role: "you", Text: comment})
 				s.planComment.Reset()
 				s.hasPlanComment = false
 				s.awaitingPlanDecision = false
@@ -637,6 +689,14 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 		s.awaitingPlanDecision = false
 		s.PendingIntent = CancelPlanIntent{}
 		return s, nil
+	case "d", "D":
+		if s.planDiff != "" {
+			s.content = ContentPlanDiff
+			s.hasPlanComment = false
+			s.contentVP.GotoTop()
+			s.SyncViewports()
+		}
+		return s, nil
 	}
 
 	// Pass remaining keys to comment textarea
@@ -668,6 +728,29 @@ func (s PipelineScreen) handlePlanEditKey(msg tea.KeyPressMsg) (PipelineScreen, 
 		return s, cmd
 	}
 	return s, nil
+}
+
+func (s PipelineScreen) handlePlanDiffKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
+	if msg.Code == tea.KeyEscape || msg.String() == "d" || msg.String() == "D" {
+		s.content = ContentPlanReview
+		s.contentVP.GotoTop()
+		contentWidth := max(1, int(float64(s.contentVP.Width()+s.sidebarVP.Width()+1)*splitRatio))
+		s.planComment = textarea.New()
+		s.planComment.Placeholder = "Ask a question or request changes..."
+		s.planComment.SetWidth(max(1, contentWidth-4))
+		s.planComment.SetHeight(2)
+		s.planComment.CharLimit = 1024
+		s.planComment.Focus()
+		s.hasPlanComment = true
+		s.awaitingPlanDecision = true
+		s.SyncViewports()
+		return s, nil
+	}
+
+	// Pass navigation keys to the diff viewport
+	var cmd tea.Cmd
+	s.diffViewport, cmd = s.diffViewport.Update(msg)
+	return s, cmd
 }
 
 func (s PipelineScreen) handleAgentHistoryKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
@@ -836,6 +919,8 @@ func (s PipelineScreen) viewContent(width int) string {
 		return s.viewPlanReview(width)
 	case ContentPlanEdit:
 		return s.viewPlanEdit(width)
+	case ContentPlanDiff:
+		return s.viewPlanDiff(width)
 	case ContentAgentHistory:
 		return s.viewAgentHistory(width)
 	case ContentCompletion:
@@ -965,7 +1050,46 @@ func (s PipelineScreen) viewPlanReview(width int) string {
 	if !s.hasPlan {
 		return " Waiting for plan...\n"
 	}
-	return renderMarkdown(s.finalPlan, width)
+	var b strings.Builder
+	if len(s.chatHistory) > 0 {
+		for _, entry := range s.chatHistory {
+			if entry.Role == "architect" {
+				b.WriteString(goalStyle.Render(" Architect: "))
+			} else {
+				b.WriteString(dimStyle.Render(" You: "))
+			}
+			lines := strings.SplitN(entry.Text, "\n", 4)
+			for i, line := range lines {
+				if i == 3 {
+					b.WriteString(dimStyle.Render("    ...\n"))
+					break
+				}
+				if i > 0 {
+					b.WriteString("    ")
+				}
+				b.WriteString(line)
+				b.WriteString("\n")
+			}
+		}
+		b.WriteString(dividerStyle.Render(strings.Repeat("─", max(1, width-2))))
+		b.WriteString("\n")
+	}
+	b.WriteString(renderMarkdown(s.finalPlan, width))
+	return b.String()
+}
+
+func (s PipelineScreen) viewPlanDiff(width int) string {
+	var b strings.Builder
+	b.WriteString(goalStyle.Render(" Plan Diff (last revision)"))
+	b.WriteString("\n")
+	b.WriteString(dividerStyle.Render(strings.Repeat("─", max(1, width-2))))
+	b.WriteString("\n")
+	if s.planDiff == "" {
+		b.WriteString(" No diff available.\n")
+	} else {
+		b.WriteString(s.diffViewport.View())
+	}
+	return b.String()
 }
 
 func (s PipelineScreen) viewCompletion(_ int) string {
@@ -1185,7 +1309,17 @@ func (s PipelineScreen) viewFooter() string {
 		}
 		return keyStyle.Render(" [↑↓] navigate | [Enter] select | [Esc] skip                [?] help  [^C^C] quit")
 	case ContentPlanReview:
-		return keyStyle.Render(" [A] accept | [E] edit | [Ctrl+E] editor | [Enter] comment | [Shift+Enter] newline | [S] cancel  [^C^C] quit")
+		footer := " [A] accept | [E] edit | [Ctrl+E] editor | [Enter] comment | [Shift+Enter] newline"
+		if s.planDiff != "" {
+			footer += " | [D] diff"
+		}
+		footer += " | [S] cancel  [^C^C] quit"
+		if len(s.chatHistory) > 0 && (s.reviewTokensIn+s.reviewTokensOut > 0) {
+			footer += dimStyle.Render(fmt.Sprintf("  Review: %s", formatTokens(s.reviewTokensIn+s.reviewTokensOut)))
+		}
+		return keyStyle.Render(footer)
+	case ContentPlanDiff:
+		return keyStyle.Render(" [Esc] return to plan                                        [?] help  [^C^C] quit")
 	case ContentPlanEdit:
 		return keyStyle.Render(" [Ctrl+S] save edits | [Esc] discard                       [?] help  [^C^C] quit")
 	case ContentAgentHistory:

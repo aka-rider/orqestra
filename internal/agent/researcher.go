@@ -12,7 +12,7 @@ import (
 
 // Researcher generates a draft implementation plan from a user prompt via
 // Claude Code. The researcher has full tool access and explores the codebase
-// deeply, producing a markdown draft that the Planner refines.
+// deeply, producing a markdown draft that the Architect refines.
 type Researcher struct {
 	runner harness.CLIRunner
 	cfg    config.ResearcherConfig

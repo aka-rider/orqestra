@@ -47,7 +47,7 @@ func testEngine(gatewayOutput, researcherOutput, plannerOutput, workerOutput, va
 		Runners: Runners{
 			Gateway:    &mockRunner{output: gatewayOutput},
 			Researcher: &mockRunner{output: researcherOutput},
-			Planner:    &mockRunner{output: plannerOutput},
+			Architect:  &mockRunner{output: plannerOutput},
 			Worker:     &mockRunner{output: workerOutput, sessionID: "sess-123"},
 		},
 	}
@@ -328,7 +328,7 @@ func TestStreamBuffer_SetAgentClearsActivities(t *testing.T) {
 	sb := NewStreamBuffer(200)
 	sb.SetAgent("worker")
 	sb.AppendActivity("Read", "go.mod")
-	sb.SetAgent("planner")
+	sb.SetAgent("architect")
 
 	_, _, acts := sb.Snapshot()
 	if len(acts) != 0 {

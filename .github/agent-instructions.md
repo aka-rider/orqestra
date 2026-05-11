@@ -1,6 +1,6 @@
 # Orqestra — Agent, Sandbox & Pipeline Instructions
 
-[text](../Makefile)
+[How to build/test/run](../Makefile)
 
 <agent_architecture>
 

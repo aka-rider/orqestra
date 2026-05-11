@@ -3,6 +3,7 @@ package config
 import (
 	_ "embed"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"regexp"
@@ -50,7 +51,7 @@ type Config struct {
 	Models         map[string]ModelConfig    `yaml:"models"`
 	Pipeline       PipelineConfig            `yaml:"pipeline"`
 	Researcher     ResearcherConfig          `yaml:"researcher"`
-	Planner        PlannerConfig             `yaml:"planner"`
+	Architect      ArchitectConfig           `yaml:"architect"`
 	Worker         WorkerConfig              `yaml:"worker"`
 	Retry          RetryConfig               `yaml:"retry"`
 	ExecutionGraph ExecutionGraphConfig      `yaml:"execution_graph"`
@@ -67,8 +68,8 @@ type ResearcherConfig struct {
 	PermissionMode  string    `yaml:"permission_mode"`
 }
 
-// PlannerConfig is used for the senior architect planner.
-type PlannerConfig struct {
+// ArchitectConfig is used for the senior architect.
+type ArchitectConfig struct {
 	Model           string    `yaml:"model"`
 	SystemPrompt    string    `yaml:"system_prompt"`
 	AllowedTools    []string  `yaml:"allowed_tools"`
@@ -89,7 +90,7 @@ type WorkerConfig struct {
 
 type RetryConfig struct {
 	ResearcherAttempts      int `yaml:"researcher_attempts"`
-	PlannerAttempts         int `yaml:"planner_attempts"`
+	ArchitectAttempts       int `yaml:"architect_attempts"`
 	WorkerValidationRetries int `yaml:"worker_validation_retries"`
 }
 
@@ -203,6 +204,9 @@ func Load(path string) (*Config, error) {
 		return nil, formatYAMLError(path, err)
 	}
 
+	// Backward compat: migrate legacy "planner:" key to "architect:"
+	migratePlannerKey(data, cfg)
+
 	// Check for forbidden legacy keys.
 	if err := checkForbiddenKeys(data); err != nil {
 		return nil, fmt.Errorf("config %q: %w", path, err)
@@ -223,9 +227,9 @@ func checkForbiddenKeys(data []byte) error {
 		return nil // validation will catch parse errors
 	}
 	forbidden := map[string]string{
-		"validator":       "The 'validator' role has been replaced by 'planner'. Rename 'validator:' to 'planner:' and update model/prompt.",
+		"validator":       "The 'validator' role has been replaced by 'architect'. Rename 'validator:' to 'architect:' and update model/prompt.",
 		"qa":              "The 'qa' role has been removed. Worker self-validates via session continuation. Remove the 'qa:' section.",
-		"project_manager": "The 'project_manager' role has been removed. The planner structures work packages for the worker. Remove the 'project_manager:' section.",
+		"project_manager": "The 'project_manager' role has been removed. The architect structures work packages for the worker. Remove the 'project_manager:' section.",
 	}
 	for key, msg := range forbidden {
 		if _, ok := raw[key]; ok {
@@ -235,13 +239,44 @@ func checkForbiddenKeys(data []byte) error {
 	return nil
 }
 
+// migratePlannerKey handles backward compat: if user config has "planner:" but no
+// "architect:", unmarshal the planner section into Architect and log a deprecation warning.
+func migratePlannerKey(data []byte, cfg *Config) {
+	var raw map[string]yaml.Node
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return
+	}
+	_, hasArchitect := raw["architect"]
+	plannerNode, hasPlanner := raw["planner"]
+	if hasPlanner && !hasArchitect {
+		slog.Warn("deprecated config key 'planner:' — use 'architect:'")
+		var legacy ArchitectConfig
+		if err := plannerNode.Decode(&legacy); err == nil {
+			cfg.Architect = legacy
+		}
+	}
+	// Also migrate retry.planner_attempts -> retry.architect_attempts
+	if retryNode, ok := raw["retry"]; ok {
+		var retryRaw map[string]yaml.Node
+		if err := retryNode.Decode(&retryRaw); err == nil {
+			if pa, hasPa := retryRaw["planner_attempts"]; hasPa {
+				var val int
+				if pa.Decode(&val) == nil && cfg.Retry.ArchitectAttempts == 0 {
+					slog.Warn("deprecated config key 'planner_attempts' — use 'architect_attempts'")
+					cfg.Retry.ArchitectAttempts = val
+				}
+			}
+		}
+	}
+}
+
 // validate checks that all model references point to existing providers.
 func (c *Config) validate() error {
 	if c.Researcher.Model == "" {
 		return fmt.Errorf("missing mandatory researcher.model parameter")
 	}
-	if c.Planner.Model == "" {
-		return fmt.Errorf("missing mandatory planner.model parameter")
+	if c.Architect.Model == "" {
+		return fmt.Errorf("missing mandatory architect.model parameter")
 	}
 	if c.Worker.Model == "" {
 		return fmt.Errorf("missing mandatory worker.model parameter")
@@ -250,7 +285,7 @@ func (c *Config) validate() error {
 	// Verify pipeline model refs resolve to defined model entries.
 	for _, ref := range []struct{ role, ref string }{
 		{"researcher", c.Researcher.Model},
-		{"planner", c.Planner.Model},
+		{"architect", c.Architect.Model},
 		{"worker", c.Worker.Model},
 		{"small", "small"},
 	} {

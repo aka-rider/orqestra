@@ -160,9 +160,9 @@ researcher:
       "consider", "various". Replace with the specific action.
     - Do not invent files, APIs, or product requirements not in the codebase.
     - Your output is MARKDOWN. No JSON, no code fences around the whole output.
-    - Do not present your draft as final. The planner will restructure it.
+    - Do not present your draft as final. The architect will restructure it.
 
-planner:
+architect:
   model: large
   permission_mode: plan
   allowed_tools:
@@ -193,6 +193,8 @@ planner:
     4. Structure the plan into sequential work packages.
     5. Criticize your own plan. Identify top-5 issues that would cause the worker to fail or produce a wrong implementation. Fix them.
     6. Produce the final plan as a markdown document.
+    7. If the reviewer sends follow-up messages, handle them per the
+       CONVERSATION REVIEW rules above.
 
     THE WORKER WILL:
     - Receive your entire plan verbatim as its execution prompt
@@ -274,6 +276,26 @@ planner:
     - Begin your response with "# Plan" and end after the last section.
     - Do not include commentary before or after the plan.
 
+    CONVERSATION REVIEW:
+    After producing the initial plan, the human reviewer may send follow-up
+    messages via session continuation. When this happens:
+
+    - If the reviewer asks a QUESTION (e.g. "Why did you choose X?",
+      "What happens if Y?"), answer conversationally. Do NOT output
+      "# Plan" or any plan structure. Just answer.
+    - If the reviewer requests a CHANGE (e.g. "Remove WP1", "Add error
+      handling to step 3", "Split this into two packages"), revise the
+      plan and output the COMPLETE updated plan starting with "# Plan".
+      Output the entire plan, not just the changed parts — the system
+      replaces the previous version wholesale.
+    - You do NOT need to classify the reviewer's intent. Let your output
+      structure speak: if you changed the plan, output "# Plan". If you
+      didn't, don't.
+    - The continuation prompt will include <current_plan> and
+      <reviewer_message> tags. The <current_plan> is the ground truth —
+      it may differ from what you remember if the reviewer edited it
+      externally.
+
 worker:
   model: medium
   permission_mode: full
@@ -281,7 +303,7 @@ worker:
 
 retry:
   researcher_attempts: 1
-  planner_attempts: 2
+  architect_attempts: 2
   worker_validation_retries: 1
 
 sandbox:

@@ -637,8 +637,8 @@ func filterMCPConfig(names []string) string {
 
 // buildFinalArgs returns extraArgs with inline MCP servers merged in.
 // If inlineMCPServers is set, it finds existing --mcp-config in extraArgs,
-// merges inline servers into it, and also auto-adds the inline tool names
-// to --allowed-tools and --disallowed-tools (for the built-in AskUserQuestion).
+// merges inline servers into it, and also auto-disallows the built-in
+// AskUserQuestion tool (which hangs in -p mode).
 func (c *ClaudeCLI) buildFinalArgs() []string {
 	if len(c.inlineMCPServers) == 0 {
 		return c.extraArgs
@@ -671,11 +671,19 @@ func (c *ClaudeCLI) buildFinalArgs() []string {
 
 	// Merge inline servers
 	for name, def := range c.inlineMCPServers {
-		data, _ := json.Marshal(def)
+		data, err := json.Marshal(def)
+		if err != nil {
+			slog.Error("buildFinalArgs: marshal inline MCP server", "name", name, "err", err)
+			continue
+		}
 		existing.MCPServers[name] = data
 	}
 
-	merged, _ := json.Marshal(existing)
+	merged, err := json.Marshal(existing)
+	if err != nil {
+		slog.Error("buildFinalArgs: marshal merged MCP config", "err", err)
+		return c.extraArgs
+	}
 
 	if mcpIdx >= 0 {
 		args[mcpIdx] = string(merged)
@@ -683,8 +691,19 @@ func (c *ClaudeCLI) buildFinalArgs() []string {
 		args = append(args, "--strict-mcp-config", "--mcp-config", string(merged))
 	}
 
-	// Auto-disallow built-in AskUserQuestion (hangs in -p mode)
-	args = append(args, "--disallowed-tools", "AskUserQuestion")
+	// Merge "AskUserQuestion" into existing --disallowed-tools (or add new flag)
+	disallowIdx := -1
+	for i, arg := range args {
+		if arg == "--disallowed-tools" && i+1 < len(args) {
+			disallowIdx = i + 1
+			break
+		}
+	}
+	if disallowIdx >= 0 {
+		args[disallowIdx] = args[disallowIdx] + ",AskUserQuestion"
+	} else {
+		args = append(args, "--disallowed-tools", "AskUserQuestion")
+	}
 
 	return args
 }
