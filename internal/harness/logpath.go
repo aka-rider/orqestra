@@ -62,19 +62,27 @@ func ExtractPlanFilePath(sessionLogPath string) (string, error) {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
+	var lineCount int
+	var typesSeen []string
 	for scanner.Scan() {
+		lineCount++
 		var msg jsonlAttachmentMessage
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
 			continue
 		}
+		typesSeen = append(typesSeen, msg.Type)
 		if msg.Type == "attachment" && msg.Attachment.Type == "plan_mode" && msg.Attachment.PlanFilePath != "" {
+			slog.Debug("found plan_mode attachment in JSONL",
+				"path", sessionLogPath, "line", lineCount, "plan_file", msg.Attachment.PlanFilePath)
 			return msg.Attachment.PlanFilePath, nil
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return "", fmt.Errorf("scan session log %q: %w", sessionLogPath, err)
 	}
-	return "", fmt.Errorf("no plan_mode attachment found in %q", sessionLogPath)
+	slog.Debug("no plan_mode attachment in JSONL",
+		"path", sessionLogPath, "lines_scanned", lineCount, "types_seen", typesSeen)
+	return "", fmt.Errorf("no plan_mode attachment found in %q (%d lines scanned)", sessionLogPath, lineCount)
 }
 
 // LogEntryKind classifies a parsed JSONL log entry for display.

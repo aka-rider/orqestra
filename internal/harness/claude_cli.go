@@ -24,9 +24,10 @@ type TokenUsage struct {
 
 // RunResult captures the output and token usage from a CLIRunner invocation.
 type RunResult struct {
-	Output    string
-	Usage     TokenUsage // zero value if the harness did not report usage
-	SessionID string     // populated from stream-json result event when available
+	Output       string
+	Usage        TokenUsage // zero value if the harness did not report usage
+	SessionID    string     // populated from stream-json result event when available
+	PlanFilePath string     // plan file path captured from result event (may be empty)
 }
 
 // CLIRunner is the interface for running claude CLI commands.
@@ -46,11 +47,11 @@ type ContinuableRunner interface {
 
 // ClaudeCLI executes the `claude` binary as a subprocess.
 type ClaudeCLI struct {
-	resolved          config.ResolvedModel
-	small             *config.ResolvedModel // optional small/fast model
-	extraArgs         []string
-	binary            string // path to claude binary, defaults to "claude"
-	inlineMCPServers  map[string]inlineMCPDef // MCP servers injected at runtime
+	resolved         config.ResolvedModel
+	small            *config.ResolvedModel // optional small/fast model
+	extraArgs        []string
+	binary           string                  // path to claude binary, defaults to "claude"
+	inlineMCPServers map[string]inlineMCPDef // MCP servers injected at runtime
 }
 
 // inlineMCPDef defines an MCP server to inject into --mcp-config.
@@ -157,6 +158,12 @@ func WithPermissionMode(mode string) ClaudeCLIOption {
 	return WithExtraArgs("--permission-mode", mode)
 }
 
+// WithSettings passes a JSON settings object to the CLI via --settings.
+// Example: WithSettings(`{"plansDirectory":"/tmp/plans"}`)
+func WithSettings(jsonStr string) ClaudeCLIOption {
+	return WithExtraArgs("--settings", jsonStr)
+}
+
 // WithBinary overrides the claude binary path.
 func WithBinary(path string) ClaudeCLIOption {
 	return func(c *ClaudeCLI) {
@@ -243,6 +250,7 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 	var resultIsError bool
 	var usage TokenUsage
 	var sessionID string
+	var planFilePath string
 	scanner := bufio.NewScanner(cmdStdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large lines
 	for scanner.Scan() {
@@ -311,6 +319,9 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 			if event.SessionID != "" {
 				sessionID = event.SessionID
 			}
+			if event.PlanFilePath != "" {
+				planFilePath = event.PlanFilePath
+			}
 			if event.Usage != nil {
 				usage = TokenUsage{
 					InputTokens:  event.Usage.InputTokens,
@@ -338,7 +349,7 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 		return RunResult{}, fmt.Errorf("claude CLI produced no result message in stream")
 	}
 
-	return RunResult{Output: result, Usage: usage, SessionID: sessionID}, nil
+	return RunResult{Output: result, Usage: usage, SessionID: sessionID, PlanFilePath: planFilePath}, nil
 }
 
 // RunContinue resumes a previous Claude CLI session with a follow-up prompt.
@@ -367,6 +378,7 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 	var resultIsError bool
 	var usage TokenUsage
 	var newSessionID string
+	var planFilePath string
 	scanner := bufio.NewScanner(cmdStdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
@@ -431,6 +443,9 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 			if event.SessionID != "" {
 				newSessionID = event.SessionID
 			}
+			if event.PlanFilePath != "" {
+				planFilePath = event.PlanFilePath
+			}
 			if event.Usage != nil {
 				usage = TokenUsage{
 					InputTokens:  event.Usage.InputTokens,
@@ -453,7 +468,7 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 		return RunResult{}, fmt.Errorf("claude CLI continue error: %s", result)
 	}
 
-	return RunResult{Output: result, Usage: usage, SessionID: newSessionID}, nil
+	return RunResult{Output: result, Usage: usage, SessionID: newSessionID, PlanFilePath: planFilePath}, nil
 }
 
 // streamEvent represents a parsed event from Claude CLI's stream-json output.
@@ -467,7 +482,8 @@ type streamEvent struct {
 	ContentBlock json.RawMessage `json:"content_block,omitempty"`
 	Usage        *streamUsage    `json:"usage,omitempty"`
 	SessionID    string          `json:"session_id,omitempty"`
-	Event        json.RawMessage `json:"event,omitempty"` // inner event for stream_event wrapper
+	PlanFilePath string          `json:"planFilePath,omitempty"` // plan file path from result event
+	Event        json.RawMessage `json:"event,omitempty"`        // inner event for stream_event wrapper
 }
 
 // streamUsage captures token usage from the Claude CLI result event.

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -40,21 +41,68 @@ func validPlanMarkdown() string {
 	return "# Plan\n\n## Goal\nAdd feature X.\n\n## Work Packages\n\n### 1. Add X\n\n**Steps:**\n1. Create pkg/x.go\n\n**Done when:**\n- go test ./pkg passes"
 }
 
-func testEngine(gatewayOutput, researcherOutput, plannerOutput, workerOutput, validationOutput string) *Engine {
+// setupTestPlanFile creates a fake Claude CLI plan file and session JSONL in a temp HOME directory.
+// Must be called after t.Setenv("HOME", ...) or it sets HOME itself. Returns the session ID used.
+func setupTestPlanFile(t *testing.T, sessionID, planContent string) {
+	t.Helper()
+	home := os.Getenv("HOME")
+	if home == "" || !filepath.IsAbs(home) {
+		t.Fatal("HOME must be set to a temp dir before calling setupTestPlanFile")
+	}
+
+	plansDir := filepath.Join(home, ".claude", "plans")
+	if err := os.MkdirAll(plansDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	planFile := filepath.Join(plansDir, sessionID+"-plan.md")
+	if err := os.WriteFile(planFile, []byte(planContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projDir := filepath.Join(home, ".claude", "projects", harness.CwdToDash(resolved))
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
+	jsonlContent := fmt.Sprintf(`{"type":"attachment","attachment":{"type":"plan_mode","planFilePath":%q}}`, planFile)
+	if err := os.WriteFile(jsonlPath, []byte(jsonlContent+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testEngineWithPlanFiles(t *testing.T, gatewayOutput, researcherOutput, plannerOutput, workerOutput, validationOutput string) *Engine {
+	t.Helper()
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	researcherSID := "test-researcher-sid"
+	architectSID := "test-architect-sid"
+
+	setupTestPlanFile(t, researcherSID, researcherOutput)
+	setupTestPlanFile(t, architectSID, plannerOutput)
+
 	cfg := config.DefaultConfig()
 	return &Engine{
 		Config: cfg,
 		Runners: Runners{
 			Gateway:    &mockRunner{output: gatewayOutput},
-			Researcher: &mockRunner{output: researcherOutput},
-			Architect:  &mockRunner{output: plannerOutput},
+			Researcher: &mockRunner{output: "saved", sessionID: researcherSID},
+			Architect:  &mockRunner{output: "saved", sessionID: architectSID},
 			Worker:     &mockRunner{output: workerOutput, sessionID: "sess-123"},
 		},
 	}
 }
 
 func TestEngine_GatewayAcceptNoGate(t *testing.T) {
-	engine := testEngine(acceptGatewayJSON(), "## Draft\nstuff", validPlanMarkdown(), "done", "✅ all pass")
+	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft\nstuff", validPlanMarkdown(), "done", "✅ all pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
@@ -74,7 +122,7 @@ func TestEngine_GatewayCoachCoercedToAccept(t *testing.T) {
 	// Coach verdict is coerced to accept — no coaching gate fires.
 	// Update mock to include end_state since it's now required.
 	coachJSON := `{"verdict":"coach","brief":{"task":"Improve something","end_state":"Something is improved","scope":[],"non_scope":[]},"questions":[{"text":"Which module?","options":["a","b"],"default":"a"}],"confidence":0.3}`
-	engine := testEngine(coachJSON, "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, coachJSON, "## Draft", validPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "make it better"})
@@ -103,7 +151,7 @@ func TestEngine_GatewayCoachCoercedToAccept(t *testing.T) {
 }
 
 func TestEngine_PlanApprovalGate(t *testing.T) {
-	engine := testEngine(acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
@@ -130,7 +178,7 @@ func TestEngine_PlanApprovalGate(t *testing.T) {
 }
 
 func TestEngine_CancelAtGate(t *testing.T) {
-	engine := testEngine(acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
@@ -152,7 +200,7 @@ func TestEngine_CancelAtGate(t *testing.T) {
 }
 
 func TestEngine_SkipGateway(t *testing.T) {
-	engine := testEngine(acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X", SkipGateway: true, AutoApprove: true})
@@ -169,7 +217,7 @@ func TestEngine_SkipGateway(t *testing.T) {
 }
 
 func TestEngine_HeadlessAutoApprove(t *testing.T) {
-	engine := testEngine(acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
@@ -193,7 +241,7 @@ func TestEngine_HeadlessAutoApprove(t *testing.T) {
 }
 
 func TestEngine_PhaseOrder(t *testing.T) {
-	engine := testEngine(acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
@@ -217,7 +265,7 @@ func TestEngine_PhaseOrder(t *testing.T) {
 }
 
 func TestEngine_NoExecute(t *testing.T) {
-	engine := testEngine(acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true, NoExecute: true})
@@ -241,7 +289,7 @@ func TestEngine_NoExecute(t *testing.T) {
 }
 
 func TestEngine_ValidationFailureDetection(t *testing.T) {
-	engine := testEngine(acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "❌ test failed — expected 200 got 404")
+	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "❌ test failed — expected 200 got 404")
 
 	ctx := context.Background()
 	result, err := engine.Run(ctx, Input{Prompt: "Add feature X", AutoApprove: true}, nil)
@@ -367,7 +415,7 @@ func TestStreamWriter_ImplementsActivitySink(t *testing.T) {
 }
 
 func TestEngine_PlanFileBeforeGate(t *testing.T) {
-	engine := testEngine(acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
 
 	// Set up a RunDirFactory that creates a temp directory
 	tmpDir := t.TempDir()

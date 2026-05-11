@@ -63,7 +63,7 @@ Add a /health endpoint that returns 200 OK with a JSON body.`
 
 	// Step 2: Ask a question — expect chat-only response
 	buf.Reset()
-	chatResponse, chatUsage, err := architect.ContinueSession(ctx, sessionID, planPath, "Why this approach?", &buf)
+	chatResponse, _, chatUsage, err := architect.ContinueSession(ctx, sessionID, planPath, "Why this approach?", &buf)
 	if err != nil {
 		t.Fatalf("ContinueSession (question) failed: %v", err)
 	}
@@ -84,7 +84,7 @@ Add a /health endpoint that returns 200 OK with a JSON body.`
 
 	// Step 3: Request revision — expect plan update
 	buf.Reset()
-	revResponse, revUsage, err := architect.ContinueSession(ctx, sessionID, planPath, "Remove the first work package entirely", &buf)
+	revResponse, _, revUsage, err := architect.ContinueSession(ctx, sessionID, planPath, "Remove the first work package entirely", &buf)
 	if err != nil {
 		t.Fatalf("ContinueSession (revision) failed: %v", err)
 	}
@@ -115,5 +115,77 @@ Add a /health endpoint that returns 200 OK with a JSON body.`
 		if turns < 3 {
 			t.Errorf("expected at least 3 user turns (initial + question + revision), got %d", turns)
 		}
+	}
+}
+
+// TestPlanFileLifecycle answers 3 questions:
+// 1. Does --resume update the plan file, or only the initial call?
+// 2. Does --settings '{"plansDirectory":"/absolute/path"}' work outside project root?
+//    ANSWERED: No. Plan file always lands in ~/.claude/plans/.
+// 3. Does --settings persist across --resume, or must it be re-passed?
+//    ANSWERED: N/A (--settings plansDirectory doesn't redirect).
+func TestPlanFileLifecycle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	runner := harness.NewClaudeCLI(
+		e2eResolvedModel(),
+		harness.WithPermissionMode("plan"),
+	)
+
+	var buf bytes.Buffer
+	systemPrompt := "You are a software architect. Write a concise 3-step plan. Be brief."
+
+	result1, err := runner.RunStreaming(ctx, "Create a simple README validation script", systemPrompt, &buf)
+	if err != nil {
+		t.Fatalf("RunStreaming failed: %v", err)
+	}
+
+	sessionID := result1.SessionID
+	if sessionID == "" {
+		t.Fatal("expected non-empty session ID from first call")
+	}
+	t.Logf("Session ID: %s", sessionID)
+	t.Logf("RunStreaming stdout length: %d", buf.Len())
+
+	// Read plan file via unified extraction
+	initialContent, err := ReadPlanFromRun(result1)
+	if err != nil {
+		t.Fatalf("ReadPlanFromRun after initial call: %v", err)
+	}
+	t.Logf("Initial plan content (%d bytes): %.200s", len(initialContent), initialContent)
+
+	// --- Question turn (no revision expected) ---
+	buf.Reset()
+	result2, err := runner.RunContinue(ctx, sessionID, "Can you elaborate on step 1? Just answer briefly, do NOT rewrite the plan.", &buf)
+	if err != nil {
+		t.Fatalf("RunContinue (question) failed: %v", err)
+	}
+
+	afterQuestion, err := ReadPlanFromRun(result2)
+	if err != nil {
+		t.Fatalf("ReadPlanFromRun after question: %v", err)
+	}
+	contentChangedOnQuestion := initialContent != afterQuestion
+	t.Logf("Content changed on question: %v", contentChangedOnQuestion)
+
+	// --- Revision turn (plan change expected) ---
+	buf.Reset()
+	result3, err := runner.RunContinue(ctx, sessionID, "Add a new step 4 about running a linter. Rewrite the full plan.", &buf)
+	if err != nil {
+		t.Fatalf("RunContinue (revision) failed: %v", err)
+	}
+
+	afterRevision, err := ReadPlanFromRun(result3)
+	if err != nil {
+		t.Fatalf("ReadPlanFromRun after revision: %v", err)
+	}
+	contentChangedOnRevision := afterQuestion != afterRevision
+	t.Logf("Content changed on revision: %v", contentChangedOnRevision)
+
+	t.Logf("Summary: { content_changed_on_question: %v, content_changed_on_revision: %v }",
+		contentChangedOnQuestion, contentChangedOnRevision)
+	if contentChangedOnRevision {
+		t.Logf("Revised plan (%d bytes): %.300s", len(afterRevision), afterRevision)
 	}
 }

@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/xiii/orqestra/internal/config"
@@ -33,7 +31,7 @@ func (a *Architect) Refine(ctx context.Context, researcherDraft string) (RawPlan
 	if err != nil {
 		return RawPlan{}, harness.TokenUsage{}, "", fmt.Errorf("architect refine: %w", err)
 	}
-	return a.parsePlanResultWithRecovery(result)
+	return a.extractArchitectPlan(result)
 }
 
 // RefineStreaming is like Refine but streams output.
@@ -43,7 +41,7 @@ func (a *Architect) RefineStreaming(ctx context.Context, researcherDraft string,
 	if err != nil {
 		return RawPlan{}, harness.TokenUsage{}, "", fmt.Errorf("architect refine streaming: %w", err)
 	}
-	return a.parsePlanResultWithRecovery(result)
+	return a.extractArchitectPlan(result)
 }
 
 // RefineWithComments takes a previous plan and human comments, producing a revised plan.
@@ -53,7 +51,7 @@ func (a *Architect) RefineWithComments(ctx context.Context, previousPlan, commen
 	if err != nil {
 		return RawPlan{}, harness.TokenUsage{}, "", fmt.Errorf("architect refine with comments: %w", err)
 	}
-	return a.parsePlanResultWithRecovery(result)
+	return a.extractArchitectPlan(result)
 }
 
 // RefineWithCommentsStreaming is like RefineWithComments but streams output.
@@ -63,11 +61,13 @@ func (a *Architect) RefineWithCommentsStreaming(ctx context.Context, previousPla
 	if err != nil {
 		return RawPlan{}, harness.TokenUsage{}, "", fmt.Errorf("architect refine with comments streaming: %w", err)
 	}
-	return a.parsePlanResultWithRecovery(result)
+	return a.extractArchitectPlan(result)
 }
 
 // continuePromptTemplate is the prompt used when resuming an architect session.
 // It includes the current plan as ground truth and the reviewer's message.
+// The architect communicates plan changes via the plan file (permission_mode: plan),
+// not via stdout formatting.
 const continuePromptTemplate = `The current implementation plan is below. The reviewer sent a message.
 
 <current_plan>
@@ -79,121 +79,48 @@ const continuePromptTemplate = `The current implementation plan is below. The re
 </reviewer_message>
 
 If the reviewer asks a question, answer it using your knowledge of the codebase from this session.
-If the reviewer requests changes, revise the plan and output the complete updated plan.
-Begin with your response. Then, ONLY if you changed the plan, output the full revised plan starting with "# Plan".
-Do NOT output "# Plan" unless you actually changed the plan.`
+If the reviewer requests changes, revise the plan.`
 
 // ContinueSession resumes the architect's session to handle a reviewer comment.
 // It uses RunContinue (--resume) to maintain the full conversation context.
-// The method writes the revised plan directly to planPath if the architect makes changes.
-// Returns the chat response text, token usage, and error.
-// The caller should check git status on planPath to detect whether the plan was revised.
-func (a *Architect) ContinueSession(ctx context.Context, sessionID, planPath, comment string, stdout io.Writer) (string, harness.TokenUsage, error) {
+// After the run, it reads the plan file from ~/.claude/plans/ to detect revisions.
+// Returns chat response text, the revised plan (nil if unchanged), token usage, and error.
+func (a *Architect) ContinueSession(ctx context.Context, sessionID, currentPlan, comment string, stdout io.Writer) (string, *RawPlan, harness.TokenUsage, error) {
 	cr, ok := a.runner.(harness.ContinuableRunner)
 	if !ok {
-		return "", harness.TokenUsage{}, fmt.Errorf("architect runner does not support session continuation")
+		return "", nil, harness.TokenUsage{}, fmt.Errorf("architect runner does not support session continuation")
 	}
-
-	// Read current plan from disk as ground truth
-	planData, err := os.ReadFile(planPath)
-	if err != nil {
-		return "", harness.TokenUsage{}, fmt.Errorf("read plan for continuation: %w", err)
-	}
-	currentPlan := string(planData)
 
 	prompt := fmt.Sprintf(continuePromptTemplate, currentPlan, comment)
 	result, err := cr.RunContinue(ctx, sessionID, prompt, stdout)
 	if err != nil {
-		return "", harness.TokenUsage{}, fmt.Errorf("architect continue session: %w", err)
+		return "", nil, harness.TokenUsage{}, fmt.Errorf("architect continue session: %w", err)
 	}
 
-	return result.Output, result.Usage, nil
+	// Read the plan file to detect whether the architect revised it.
+	planContent, readErr := ReadPlanFromRun(result)
+	if readErr != nil {
+		slog.Debug("could not read plan file after continue", "session_id", sessionID, "err", readErr)
+		return result.Output, nil, result.Usage, nil
+	}
+
+	if planContent != strings.TrimSpace(currentPlan) {
+		plan := RawPlan{Markdown: planContent}
+		return result.Output, &plan, result.Usage, nil
+	}
+
+	return result.Output, nil, result.Usage, nil
 }
 
-// parsePlanResult extracts markdown from a run result and performs basic sanity checks.
-func (a *Architect) parsePlanResult(result harness.RunResult) (RawPlan, harness.TokenUsage, string, error) {
-	md := strings.TrimSpace(stripCodeFences(result.Output))
-
-	// Basic sanity: must start with "# Plan" and contain "## Work Packages"
-	if !strings.HasPrefix(md, "# Plan") {
-		return RawPlan{}, harness.TokenUsage{}, "", fmt.Errorf("architect output does not start with '# Plan' (got: %s)", truncateRaw(md, 100))
-	}
-	if !strings.Contains(md, "## Work Packages") {
-		return RawPlan{}, harness.TokenUsage{}, "", fmt.Errorf("architect output missing '## Work Packages' section")
-	}
-
-	return RawPlan{
-		Markdown: md,
-	}, result.Usage, result.SessionID, nil
-}
-
-// parsePlanResultWithRecovery wraps parsePlanResult with plan-file side-channel recovery.
-// When parsePlanResult fails and the result has a session ID, it attempts to read
-// the plan from the Claude CLI plan file (written via permission_mode: plan).
-func (a *Architect) parsePlanResultWithRecovery(result harness.RunResult) (RawPlan, harness.TokenUsage, string, error) {
-	plan, usage, sessionID, parseErr := a.parsePlanResult(result)
-	if parseErr == nil {
-		return plan, usage, sessionID, nil
-	}
-
-	if result.SessionID == "" {
-		return RawPlan{}, harness.TokenUsage{}, "", parseErr
-	}
-
-	recovered, recoverErr := recoverPlanFromSession(result.SessionID)
-	if recoverErr != nil {
-		slog.Debug("plan file recovery failed", "session_id", result.SessionID, "err", recoverErr)
-		return RawPlan{}, harness.TokenUsage{}, "", parseErr
-	}
-
-	result.Output = recovered
-	slog.Info("recovered plan from Claude CLI plan file", "session_id", result.SessionID)
-	return a.parsePlanResult(result)
-}
-
-// recoverPlanFromSession reads a plan from the Claude CLI plan file
-// referenced in the session JSONL's plan_mode attachment.
-func recoverPlanFromSession(sessionID string) (string, error) {
-	cwd, err := os.Getwd()
+// extractArchitectPlan reads the plan from the Claude CLI plan file and validates
+// that it contains the required ## Work Packages section.
+func (a *Architect) extractArchitectPlan(result harness.RunResult) (RawPlan, harness.TokenUsage, string, error) {
+	content, err := ReadPlanFromRun(result)
 	if err != nil {
-		return "", fmt.Errorf("get cwd: %w", err)
+		return RawPlan{}, harness.TokenUsage{}, "", fmt.Errorf("extract architect plan: %w", err)
 	}
-
-	jsonlPath, err := harness.ResolveSessionLogPath(cwd, sessionID)
-	if err != nil {
-		return "", fmt.Errorf("resolve session log: %w", err)
+	if !strings.Contains(content, "## Work Packages") {
+		return RawPlan{}, harness.TokenUsage{}, "", fmt.Errorf("architect plan file missing '## Work Packages' section (got: %s)", truncateRaw(content, 100))
 	}
-
-	planFilePath, err := harness.ExtractPlanFilePath(jsonlPath)
-	if err != nil {
-		return "", fmt.Errorf("extract plan file path: %w", err)
-	}
-
-	// Security gate: plan file must reside under ~/.claude/plans/
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("get home dir: %w", err)
-	}
-	allowedPrefix := filepath.Join(home, ".claude", "plans") + string(filepath.Separator)
-	absPath, err := filepath.Abs(planFilePath)
-	if err != nil {
-		return "", fmt.Errorf("resolve plan file path: %w", err)
-	}
-	if !strings.HasPrefix(absPath, allowedPrefix) {
-		return "", fmt.Errorf("plan file %q is outside allowed directory %q", absPath, allowedPrefix)
-	}
-
-	data, err := os.ReadFile(absPath)
-	if err != nil {
-		return "", fmt.Errorf("read plan file %q: %w", absPath, err)
-	}
-	return string(data), nil
-}
-
-// truncateRaw limits a raw string for error messages.
-func truncateRaw(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
+	return RawPlan{Markdown: content}, result.Usage, result.SessionID, nil
 }

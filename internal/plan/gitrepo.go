@@ -89,6 +89,11 @@ func (r *GitRepo) PlanPath() string {
 	return filepath.Join(r.dir, "plan.md")
 }
 
+// Dir returns the absolute path to the plan-history directory.
+func (r *GitRepo) Dir() string {
+	return r.dir
+}
+
 func gitRun(dir string, args ...string) error {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir

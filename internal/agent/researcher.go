@@ -2,9 +2,8 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"io"
-	"log/slog"
-	"strings"
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
@@ -29,7 +28,7 @@ func (r *Researcher) Research(ctx context.Context, prompt string) (RawPlan, harn
 	if err != nil {
 		return RawPlan{}, harness.TokenUsage{}, "", err
 	}
-	return r.parseResearchResultWithRecovery(result)
+	return r.extractResearchDraft(result)
 }
 
 // ResearchStreaming uses RunStreaming and returns the raw markdown output.
@@ -38,30 +37,16 @@ func (r *Researcher) ResearchStreaming(ctx context.Context, prompt string, stdou
 	if err != nil {
 		return RawPlan{}, harness.TokenUsage{}, "", err
 	}
-	return r.parseResearchResultWithRecovery(result)
+	return r.extractResearchDraft(result)
 }
 
-// parseResearchResultWithRecovery attempts plan-file side-channel recovery
-// when the researcher output lacks any markdown heading (suggesting the model
-// wrote to a plan file instead of returning text).
-func (r *Researcher) parseResearchResultWithRecovery(result harness.RunResult) (RawPlan, harness.TokenUsage, string, error) {
-	md := strings.TrimSpace(stripCodeFences(result.Output))
-
-	if strings.Contains(md, "#") {
-		return RawPlan{Markdown: md}, result.Usage, result.SessionID, nil
+// extractResearchDraft reads the research draft from the Claude CLI plan file.
+// No structural validation — the researcher's sections (## Goal, ## Draft Steps, etc.)
+// differ from the architect's and are not validated here.
+func (r *Researcher) extractResearchDraft(result harness.RunResult) (RawPlan, harness.TokenUsage, string, error) {
+	content, err := ReadPlanFromRun(result)
+	if err != nil {
+		return RawPlan{}, harness.TokenUsage{}, "", fmt.Errorf("extract research draft: %w", err)
 	}
-
-	if result.SessionID == "" {
-		return RawPlan{Markdown: md}, result.Usage, result.SessionID, nil
-	}
-
-	recovered, recoverErr := recoverPlanFromSession(result.SessionID)
-	if recoverErr != nil {
-		slog.Debug("researcher plan file recovery failed", "session_id", result.SessionID, "err", recoverErr)
-		return RawPlan{Markdown: md}, result.Usage, result.SessionID, nil
-	}
-
-	slog.Info("researcher recovered plan from Claude CLI plan file", "session_id", result.SessionID)
-	recoveredMD := strings.TrimSpace(stripCodeFences(recovered))
-	return RawPlan{Markdown: recoveredMD}, result.Usage, result.SessionID, nil
+	return RawPlan{Markdown: content}, result.Usage, result.SessionID, nil
 }
