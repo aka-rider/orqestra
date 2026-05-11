@@ -28,6 +28,12 @@ const (
 
 	// Run detail lower pane height (raw agent JSONL log)
 	constRunLogHeight = 8
+
+	// Content pane inset — 1-char left padding on each side.
+	constContentInset = 2
+
+	// Default context window size for the dashboard progress bar.
+	constDefaultContextWindow = 200_000
 )
 
 // layoutBounds holds the computed bounding rectangles for each zone.

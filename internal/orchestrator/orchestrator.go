@@ -543,7 +543,11 @@ planGate:
 		for {
 			var planDiff string
 			if planRepo != nil {
-				planDiff, _ = planRepo.Diff()
+				diff, diffErr := planRepo.Diff()
+				if diffErr != nil {
+					slog.Warn("plan diff failed", "err", diffErr)
+				}
+				planDiff = diff
 			}
 			writeArtifact(session, "final_plan.md", finalPlanMarkdown)
 			emit(Event{Type: EventGateRequest, Gate: GateRequest{
@@ -585,7 +589,7 @@ planGate:
 					planPath := session.ArtifactPath("final_plan.md")
 					if planRepo != nil {
 						planPath = planRepo.PlanPath()
-						// Write current plan to git repo's plan.md so architect can read it
+						// fire-and-forget: ContinueSession reads this file and will report its own error if missing
 						_ = os.WriteFile(planPath, []byte(finalPlanMarkdown), 0o644)
 					}
 
@@ -634,14 +638,20 @@ planGate:
 					// Check if the plan was revised (git status on plan file)
 					var changed bool
 					if planRepo != nil && planSessionID != "" {
-						statusOut, _ := exec.Command("git", "-C", filepath.Dir(planRepo.PlanPath()), "status", "--porcelain", "plan.md").Output()
-						if len(strings.TrimSpace(string(statusOut))) > 0 {
+						statusOut, statusErr := exec.Command("git", "-C", filepath.Dir(planRepo.PlanPath()), "status", "--porcelain", "plan.md").Output()
+						if statusErr != nil {
+							slog.Warn("git status check failed", "err", statusErr)
+						} else if len(strings.TrimSpace(string(statusOut))) > 0 {
 							changed = true
 						}
 					}
 
 					if changed {
-						editedBytes, _ := os.ReadFile(planRepo.PlanPath())
+						editedBytes, readErr := os.ReadFile(planRepo.PlanPath())
+						if readErr != nil {
+							emit(Event{Type: EventError, Err: fmt.Errorf("read revised plan: %w", readErr)})
+							return
+						}
 						finalPlanMarkdown = string(editedBytes)
 						msg := commitMsg("revision", decision.Comment)
 						if commitErr := planRepo.Commit(finalPlanMarkdown, msg); commitErr != nil {

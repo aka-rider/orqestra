@@ -953,9 +953,9 @@ func (s PipelineScreen) viewStreaming(width int) string {
 	}
 
 	if len(streamLines) > 0 {
-		b.WriteString(dividerStyle.Render(strings.Repeat("─", width-2)))
+		b.WriteString(dividerStyle.Render(strings.Repeat("─", max(1, width-constContentInset))))
 		b.WriteString("\n")
-		maxLineWidth := width - 2
+		maxLineWidth := width - constContentInset
 		if maxLineWidth < 1 {
 			maxLineWidth = 1
 		}
@@ -1071,7 +1071,7 @@ func (s PipelineScreen) viewPlanReview(width int) string {
 				b.WriteString("\n")
 			}
 		}
-		b.WriteString(dividerStyle.Render(strings.Repeat("─", max(1, width-2))))
+		b.WriteString(dividerStyle.Render(strings.Repeat("─", max(1, width-constContentInset))))
 		b.WriteString("\n")
 	}
 	b.WriteString(renderMarkdown(s.finalPlan, width))
@@ -1082,7 +1082,7 @@ func (s PipelineScreen) viewPlanDiff(width int) string {
 	var b strings.Builder
 	b.WriteString(goalStyle.Render(" Plan Diff (last revision)"))
 	b.WriteString("\n")
-	b.WriteString(dividerStyle.Render(strings.Repeat("─", max(1, width-2))))
+	b.WriteString(dividerStyle.Render(strings.Repeat("─", max(1, width-constContentInset))))
 	b.WriteString("\n")
 	if s.planDiff == "" {
 		b.WriteString(" No diff available.\n")
@@ -1131,12 +1131,12 @@ func (s PipelineScreen) viewPlanEdit(_ int) string {
 	return b.String()
 }
 
-func (s PipelineScreen) viewAgentHistory(_ int) string {
+func (s PipelineScreen) viewAgentHistory(width int) string {
 	var b strings.Builder
 	if s.focusedAgent > 0 && s.focusedAgent <= len(s.agents) {
 		a := s.agents[s.focusedAgent-1]
 		b.WriteString(fmt.Sprintf(" Agent: %s (%s)\n", goalStyle.Render(a.ID), a.State))
-		b.WriteString(dividerStyle.Render(strings.Repeat("─", 40)))
+		b.WriteString(dividerStyle.Render(strings.Repeat("─", max(1, width-constContentInset))))
 		b.WriteString("\n")
 		b.WriteString(" (output history not captured in this mode)\n")
 	} else {
@@ -1193,7 +1193,7 @@ func (s PipelineScreen) viewDashboard() string {
 			if a.Elapsed.Seconds() > 0 {
 				tokPS = fmt.Sprintf("%.1f", float64(a.OutputTokens)/a.Elapsed.Seconds())
 			}
-			pct := float64(a.InputTokens+a.OutputTokens) / 200000.0 * 100
+			pct := float64(a.InputTokens+a.OutputTokens) / constDefaultContextWindow * 100
 			if pct > 100 {
 				pct = 100
 			}

@@ -92,7 +92,15 @@ func (r *GitRepo) PlanPath() string {
 func gitRun(dir string, args ...string) error {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
+	var stderr strings.Builder
 	cmd.Stdout = nil
-	cmd.Stderr = nil
-	return cmd.Run()
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return fmt.Errorf("%w: %s", err, msg)
+		}
+		return err
+	}
+	return nil
 }
