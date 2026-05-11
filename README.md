@@ -41,6 +41,8 @@ In my workflow, I use Opus for planning, Gemini for plan validation and improvem
 It boils down to the bunch of claudecode running yolo in sandboxes. Talking to each other.
 The control plane is hardcoded — no stochastic behaviour on critical paths.
 
+[Excalidraw diagram](https://excalidraw.com/#json=pDZImriX8jpDFaBLKgkkJ,Xnnel90qoNk_oqPqMHtOHg)
+
 ### Agent
 
 A harness influences the developement process by a lot. Same prompt using the same model, in VSCode Copilot, Codex, or ClaudeCode will produce different results.
