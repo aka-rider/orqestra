@@ -1438,3 +1438,39 @@ func TestTUI_ViewPlanDiffViewport(t *testing.T) {
 		t.Error("expected viewport content in view")
 	}
 }
+
+func TestTUI_ChatHistory_UserAndArchitect(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest"
+	m.pipelineScreen.awaitingPlanDecision = true
+	decisions := make(chan orchestrator.Decision, 1)
+	m.decisions = decisions
+	m.events = make(chan orchestrator.Event, 1)
+	m.pipelineScreen.hasPlanComment = true
+	m.pipelineScreen.planComment = textarea.New()
+	m.pipelineScreen.planComment.SetWidth(80)
+	m.pipelineScreen.planComment.SetHeight(2)
+	m.pipelineScreen.planComment.Focus()
+	m.pipelineScreen.planComment.SetValue("why this approach?")
+	m.width = 120
+	m.height = 40
+	m.recalculateLayout()
+
+	// Press Enter to submit comment
+	result, _ := sendKey(m, tea.KeyEnter)
+	model := result.(Model)
+
+	// Verify user's message was added to chat history
+	if len(model.pipelineScreen.chatHistory) != 1 {
+		t.Fatalf("expected 1 chat entry, got %d", len(model.pipelineScreen.chatHistory))
+	}
+	if model.pipelineScreen.chatHistory[0].Role != "you" {
+		t.Errorf("expected 'you' role, got %q", model.pipelineScreen.chatHistory[0].Role)
+	}
+	if model.pipelineScreen.chatHistory[0].Text != "why this approach?" {
+		t.Errorf("expected 'why this approach?', got %q", model.pipelineScreen.chatHistory[0].Text)
+	}
+}

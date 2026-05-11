@@ -133,9 +133,9 @@ const (
 	EventGateRequest
 	EventComplete
 	EventError
-	EventRunDirReady    // emitted once after session dir is created
-	EventChatResponse   // emitted when architect answers without revising the plan
-	EventUserQuestion   // emitted when an agent asks the user a question via MCP
+	EventRunDirReady  // emitted once after session dir is created
+	EventChatResponse // emitted when architect answers without revising the plan
+	EventUserQuestion // emitted when an agent asks the user a question via MCP
 )
 
 // Phase represents the current pipeline phase.

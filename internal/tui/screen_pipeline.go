@@ -20,7 +20,7 @@ import (
 type ChatEntry struct {
 	Role          string // "you" or "architect"
 	Text          string
-	HasPlanChange bool   // true if this entry accompanies a plan revision
+	HasPlanChange bool // true if this entry accompanies a plan revision
 }
 
 // PipelineScreen manages the pipeline execution view with all content modes.
@@ -59,8 +59,8 @@ type PipelineScreen struct {
 
 	// Conversation state during plan review
 	chatHistory     []ChatEntry
-	planDiff        string          // unified diff from git micro-repo
-	diffViewport    viewport.Model  // paginated viewport for diff rendering
+	planDiff        string         // unified diff from git micro-repo
+	diffViewport    viewport.Model // paginated viewport for diff rendering
 	reviewTokensIn  int64
 	reviewTokensOut int64
 
