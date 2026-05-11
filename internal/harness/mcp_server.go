@@ -1,0 +1,365 @@
+package harness
+
+import (
+	"bufio"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"os"
+	"strings"
+)
+
+// --- MCP JSON-RPC 2.0 types ---
+
+type jsonRPCRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"` // null for notifications
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+type jsonRPCResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *jsonRPCError   `json:"error,omitempty"`
+}
+
+type jsonRPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// --- MCP Tool Schema (Claude Code AskUserQuestion-compatible) ---
+
+// The tool schema is a superset of Claude Code's built-in AskUserQuestion
+// (which has only {"question":"string"}). Our version adds optional fields
+// for options, multi-select, and custom input. A model trained on the
+// built-in schema will naturally call with just "question" — which works.
+
+var askUserQuestionSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "question": {
+      "type": "string",
+      "description": "The question to ask the user. Keep it clear and concise."
+    },
+    "options": {
+      "type": "array",
+      "description": "Optional pre-defined answer choices. Omit for freeform text input.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "The selectable option text."
+          },
+          "hint": {
+            "type": "string",
+            "description": "Optional context hint shown alongside the option."
+          }
+        },
+        "required": ["label"]
+      }
+    },
+    "allow_custom": {
+      "type": "boolean",
+      "description": "Whether the user can provide custom text alongside or instead of selecting options. Defaults to true."
+    },
+    "multi_select": {
+      "type": "boolean",
+      "description": "Whether multiple options can be selected simultaneously. Defaults to false."
+    }
+  },
+  "required": ["question"]
+}`)
+
+// MCPToolCall is the parsed input from a tools/call invocation.
+type MCPToolCall struct {
+	Question    string          `json:"question"`
+	Options     []MCPToolOption `json:"options,omitempty"`
+	AllowCustom *bool           `json:"allow_custom,omitempty"`
+	MultiSelect bool            `json:"multi_select,omitempty"`
+}
+
+// MCPToolOption is a single selectable option in a question.
+type MCPToolOption struct {
+	Label string `json:"label"`
+	Hint  string `json:"hint,omitempty"`
+}
+
+// MCPAnswer is the answer received back from the question bridge.
+type MCPAnswer struct {
+	SelectedIndices []int          `json:"selected_indices,omitempty"`
+	CustomTexts     map[int]string `json:"custom_texts,omitempty"`
+	Skipped         bool           `json:"skipped,omitempty"`
+	FreeformText    string         `json:"freeform_text,omitempty"`
+}
+
+// RunMCPServer starts a minimal MCP JSON-RPC 2.0 server on stdin/stdout.
+// It connects to the QuestionBridge via the given Unix socket path.
+// The server exits cleanly when stdin is closed (MCP lifecycle).
+func RunMCPServer(socketPath string) error {
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var req jsonRPCRequest
+		if err := json.Unmarshal(line, &req); err != nil {
+			slog.Debug("mcp-bridge: invalid JSON-RPC", "err", err)
+			continue
+		}
+
+		resp := handleMCPRequest(req, socketPath)
+		if resp == nil {
+			continue // notification, no response needed
+		}
+
+		out, err := json.Marshal(resp)
+		if err != nil {
+			slog.Error("mcp-bridge: marshal response", "err", err)
+			continue
+		}
+		fmt.Fprintf(os.Stdout, "%s\n", out)
+	}
+
+	return scanner.Err()
+}
+
+// handleMCPRequest processes a single JSON-RPC request. Returns nil for notifications.
+func handleMCPRequest(req jsonRPCRequest, socketPath string) *jsonRPCResponse {
+	switch req.Method {
+	case "initialize":
+		return respondMCP(req.ID, map[string]any{
+			"protocolVersion": "2024-11-05",
+			"serverInfo": map[string]string{
+				"name":    "orqestra-bridge",
+				"version": "0.1.0",
+			},
+			"capabilities": map[string]any{
+				"tools": map[string]any{},
+			},
+		})
+
+	case "notifications/initialized":
+		return nil // notification, no response
+
+	case "tools/list":
+		return respondMCP(req.ID, map[string]any{
+			"tools": []map[string]any{
+				{
+					"name":        "AskUserQuestion",
+					"description": "Ask the user a question. Use this when you need clarification, want the user to choose between options, or need any input from the user. The user will see your question in the Orqestra TUI and can respond with text or by selecting from options you provide.",
+					"inputSchema": json.RawMessage(askUserQuestionSchema),
+				},
+			},
+		})
+
+	case "tools/call":
+		return handleToolCall(req, socketPath)
+
+	default:
+		if req.ID == nil {
+			return nil // unknown notification, ignore
+		}
+		return &jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error:   &jsonRPCError{Code: -32601, Message: fmt.Sprintf("method not found: %s", req.Method)},
+		}
+	}
+}
+
+func handleToolCall(req jsonRPCRequest, socketPath string) *jsonRPCResponse {
+	var params struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return &jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error:   &jsonRPCError{Code: -32602, Message: "invalid params"},
+		}
+	}
+
+	if params.Name != "AskUserQuestion" {
+		return &jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error:   &jsonRPCError{Code: -32602, Message: fmt.Sprintf("unknown tool: %s", params.Name)},
+		}
+	}
+
+	var toolCall MCPToolCall
+	if err := json.Unmarshal(params.Arguments, &toolCall); err != nil {
+		return &jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error:   &jsonRPCError{Code: -32602, Message: fmt.Sprintf("invalid tool arguments: %v", err)},
+		}
+	}
+
+	if toolCall.Question == "" {
+		return respondMCPToolResult(req.ID, true, "Error: question is required")
+	}
+
+	// Send question to bridge, block for answer
+	answer, err := sendQuestionToBridge(socketPath, toolCall)
+	if err != nil {
+		return respondMCPToolResult(req.ID, true, fmt.Sprintf("Error communicating with Orqestra: %v", err))
+	}
+
+	// Format answer for the model
+	text := FormatAnswer(toolCall, answer)
+	return respondMCPToolResult(req.ID, false, text)
+}
+
+// sendQuestionToBridge dials the Unix socket, sends the question, and blocks for the answer.
+func sendQuestionToBridge(socketPath string, toolCall MCPToolCall) (MCPAnswer, error) {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return MCPAnswer{}, fmt.Errorf("dial bridge socket: %w", err)
+	}
+	defer conn.Close()
+
+	// Write length-prefixed JSON
+	payload, err := json.Marshal(toolCall)
+	if err != nil {
+		return MCPAnswer{}, fmt.Errorf("marshal question: %w", err)
+	}
+	if err := writeFrame(conn, payload); err != nil {
+		return MCPAnswer{}, fmt.Errorf("write question: %w", err)
+	}
+
+	// Read length-prefixed JSON answer
+	answerData, err := readFrame(conn)
+	if err != nil {
+		return MCPAnswer{}, fmt.Errorf("read answer: %w", err)
+	}
+
+	var answer MCPAnswer
+	if err := json.Unmarshal(answerData, &answer); err != nil {
+		return MCPAnswer{}, fmt.Errorf("unmarshal answer: %w", err)
+	}
+	return answer, nil
+}
+
+// FormatAnswer converts an MCPAnswer to a human-readable text tool result.
+func FormatAnswer(toolCall MCPToolCall, answer MCPAnswer) string {
+	if answer.Skipped {
+		return "The user explicitly skipped this question. Proceed with your best judgment based on the codebase evidence you've gathered."
+	}
+
+	// Freeform (no options provided)
+	if len(toolCall.Options) == 0 {
+		if answer.FreeformText != "" {
+			return fmt.Sprintf("User's answer: %s", answer.FreeformText)
+		}
+		return "User confirmed without providing additional input. Proceed with your best judgment."
+	}
+
+	// Single-select
+	if !toolCall.MultiSelect {
+		if len(answer.SelectedIndices) == 0 {
+			if answer.FreeformText != "" {
+				return fmt.Sprintf("User's answer: %s", answer.FreeformText)
+			}
+			return "User confirmed without selecting any option. Proceed with your best judgment."
+		}
+		idx := answer.SelectedIndices[0]
+		if idx < 0 || idx >= len(toolCall.Options) {
+			return "User confirmed without selecting any option. Proceed with your best judgment."
+		}
+		label := toolCall.Options[idx].Label
+		if custom, ok := answer.CustomTexts[idx]; ok && custom != "" {
+			return fmt.Sprintf("Selected: %s\n  Context: %s", label, custom)
+		}
+		return fmt.Sprintf("Selected: %s", label)
+	}
+
+	// Multi-select
+	selected := answer.SelectedIndices
+	if len(selected) == 0 {
+		if answer.FreeformText != "" {
+			return fmt.Sprintf("User's answer: %s", answer.FreeformText)
+		}
+		return "User confirmed without selecting any option. Proceed with your best judgment."
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Selected (%d of %d):\n", len(selected), len(toolCall.Options))
+	for _, idx := range selected {
+		if idx < 0 || idx >= len(toolCall.Options) {
+			continue
+		}
+		fmt.Fprintf(&b, "- %s\n", toolCall.Options[idx].Label)
+		if custom, ok := answer.CustomTexts[idx]; ok && custom != "" {
+			fmt.Fprintf(&b, "  Context: %s\n", custom)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// --- Wire protocol: length-prefixed JSON frames ---
+
+func writeFrame(w io.Writer, data []byte) error {
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
+	if _, err := w.Write(lenBuf[:]); err != nil {
+		return err
+	}
+	_, err := w.Write(data)
+	return err
+}
+
+func readFrame(r io.Reader) ([]byte, error) {
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+		return nil, err
+	}
+	n := binary.BigEndian.Uint32(lenBuf[:])
+	if n > 1<<20 { // 1 MB sanity limit
+		return nil, fmt.Errorf("frame too large: %d bytes", n)
+	}
+	data := make([]byte, n)
+	if _, err := io.ReadFull(r, data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// --- Response helpers ---
+
+func respondMCP(id json.RawMessage, result any) *jsonRPCResponse {
+	data, _ := json.Marshal(result)
+	return &jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  data,
+	}
+}
+
+func respondMCPToolResult(id json.RawMessage, isError bool, text string) *jsonRPCResponse {
+	content := []map[string]string{{"type": "text", "text": text}}
+	result := map[string]any{
+		"content": content,
+	}
+	if isError {
+		result["isError"] = true
+	}
+	data, _ := json.Marshal(result)
+	return &jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  data,
+	}
+}

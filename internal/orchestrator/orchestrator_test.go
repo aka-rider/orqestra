@@ -36,10 +36,6 @@ func acceptGatewayJSON() string {
 	return `{"verdict":"accept","brief":{"task":"Add feature X","end_state":"Feature X works","scope":["pkg"],"non_scope":[]},"questions":[],"confidence":0.9}`
 }
 
-func coachGatewayJSON() string {
-	return `{"verdict":"coach","brief":{"task":"Improve something","end_state":"","scope":[],"non_scope":[]},"questions":[{"text":"Which module?","options":["a","b"],"default":"a"}],"confidence":0.3}`
-}
-
 func validPlanMarkdown() string {
 	return "# Plan\n\n## Goal\nAdd feature X.\n\n## Work Packages\n\n### 1. Add X\n\n**Steps:**\n1. Create pkg/x.go\n\n**Done when:**\n- go test ./pkg passes"
 }
@@ -74,32 +70,34 @@ func TestEngine_GatewayAcceptNoGate(t *testing.T) {
 	}
 }
 
-func TestEngine_GatewayCoachGate(t *testing.T) {
-	engine := testEngine(coachGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
+func TestEngine_GatewayCoachCoercedToAccept(t *testing.T) {
+	// Coach verdict is coerced to accept — no coaching gate fires.
+	// Update mock to include end_state since it's now required.
+	coachJSON := `{"verdict":"coach","brief":{"task":"Improve something","end_state":"Something is improved","scope":[],"non_scope":[]},"questions":[{"text":"Which module?","options":["a","b"],"default":"a"}],"confidence":0.3}`
+	engine := testEngine(coachJSON, "## Draft", validPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "make it better"})
 
-	var gotGateRequest bool
+	var gotCoachGate bool
 	timeout := time.After(5 * time.Second)
 	for {
 		select {
 		case event, ok := <-channels.Events:
 			if !ok {
-				if !gotGateRequest {
-					t.Fatal("events channel closed without gate request")
+				if gotCoachGate {
+					t.Error("should NOT have received coaching gate — coaching loop is removed")
 				}
 				return
 			}
 			if event.Type == EventGateRequest && event.Gate.Type == GateGatewayCoach {
-				gotGateRequest = true
-				channels.Decisions <- Decision{Type: DecisionSkip}
+				gotCoachGate = true
 			}
 			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
 				channels.Decisions <- Decision{Type: DecisionApprove}
 			}
 		case <-timeout:
-			t.Fatal("timeout waiting for gate request")
+			t.Fatal("timeout")
 		}
 	}
 }

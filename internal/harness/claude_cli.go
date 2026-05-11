@@ -46,10 +46,17 @@ type ContinuableRunner interface {
 
 // ClaudeCLI executes the `claude` binary as a subprocess.
 type ClaudeCLI struct {
-	resolved  config.ResolvedModel
-	small     *config.ResolvedModel // optional small/fast model
-	extraArgs []string
-	binary    string // path to claude binary, defaults to "claude"
+	resolved          config.ResolvedModel
+	small             *config.ResolvedModel // optional small/fast model
+	extraArgs         []string
+	binary            string // path to claude binary, defaults to "claude"
+	inlineMCPServers  map[string]inlineMCPDef // MCP servers injected at runtime
+}
+
+// inlineMCPDef defines an MCP server to inject into --mcp-config.
+type inlineMCPDef struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
 }
 
 // NewClaudeCLI creates a CLIRunner backed by the claude CLI binary.
@@ -157,6 +164,19 @@ func WithBinary(path string) ClaudeCLIOption {
 	}
 }
 
+// WithInlineMCPServer injects an MCP server definition that will be merged
+// into the --mcp-config JSON at CLI invocation time. This is used to inject
+// the orqestra question bridge as an MCP tool available to the model.
+// The built-in AskUserQuestion is auto-disallowed when a bridge is configured.
+func WithInlineMCPServer(name, command string, args []string) ClaudeCLIOption {
+	return func(c *ClaudeCLI) {
+		if c.inlineMCPServers == nil {
+			c.inlineMCPServers = make(map[string]inlineMCPDef)
+		}
+		c.inlineMCPServers[name] = inlineMCPDef{Command: command, Args: args}
+	}
+}
+
 // RunPrint runs `claude --print -p <prompt> --system-prompt <systemPrompt> --output-format json`
 // and returns the output.
 func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (RunResult, error) {
@@ -164,7 +184,7 @@ func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
 	}
-	args = append(args, c.extraArgs...)
+	args = append(args, c.buildFinalArgs()...)
 
 	cmd := exec.CommandContext(ctx, c.binary, args...)
 	cmd.Env = c.buildEnv()
@@ -202,7 +222,7 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
 	}
-	args = append(args, c.extraArgs...)
+	args = append(args, c.buildFinalArgs()...)
 
 	cmd := exec.CommandContext(ctx, c.binary, args...)
 	cmd.Env = c.buildEnv()
@@ -326,7 +346,7 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 // same session that performed the implementation.
 func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, stdout io.Writer) (RunResult, error) {
 	args := []string{"--resume", sessionID, "-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"}
-	args = append(args, c.extraArgs...)
+	args = append(args, c.buildFinalArgs()...)
 
 	cmd := exec.CommandContext(ctx, c.binary, args...)
 	cmd.Env = c.buildEnv()
@@ -613,4 +633,58 @@ func filterMCPConfig(names []string) string {
 		return `{"mcpServers":{}}`
 	}
 	return string(out)
+}
+
+// buildFinalArgs returns extraArgs with inline MCP servers merged in.
+// If inlineMCPServers is set, it finds existing --mcp-config in extraArgs,
+// merges inline servers into it, and also auto-adds the inline tool names
+// to --allowed-tools and --disallowed-tools (for the built-in AskUserQuestion).
+func (c *ClaudeCLI) buildFinalArgs() []string {
+	if len(c.inlineMCPServers) == 0 {
+		return c.extraArgs
+	}
+
+	// Deep copy extraArgs so we can modify
+	args := make([]string, len(c.extraArgs))
+	copy(args, c.extraArgs)
+
+	// Find and merge --mcp-config
+	type mcpConfig struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+
+	var existing mcpConfig
+	mcpIdx := -1
+	for i, arg := range args {
+		if arg == "--mcp-config" && i+1 < len(args) {
+			mcpIdx = i + 1
+			if err := json.Unmarshal([]byte(args[mcpIdx]), &existing); err != nil {
+				existing = mcpConfig{MCPServers: make(map[string]json.RawMessage)}
+			}
+			break
+		}
+	}
+
+	if existing.MCPServers == nil {
+		existing.MCPServers = make(map[string]json.RawMessage)
+	}
+
+	// Merge inline servers
+	for name, def := range c.inlineMCPServers {
+		data, _ := json.Marshal(def)
+		existing.MCPServers[name] = data
+	}
+
+	merged, _ := json.Marshal(existing)
+
+	if mcpIdx >= 0 {
+		args[mcpIdx] = string(merged)
+	} else {
+		args = append(args, "--strict-mcp-config", "--mcp-config", string(merged))
+	}
+
+	// Auto-disallow built-in AskUserQuestion (hangs in -p mode)
+	args = append(args, "--disallowed-tools", "AskUserQuestion")
+
+	return args
 }

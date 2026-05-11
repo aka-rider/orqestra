@@ -32,10 +32,12 @@ Replace the stateless cold re-prompt in the plan review gate with a persistent p
 - It re-appends `c.extraArgs` which includes `--allowed-tools`, `--disallowed-tools`, `--permission-mode`.
 - Returns `RunResult{Output, Usage, SessionID}` — same structure as `RunStreaming`.
 
-### Plan extraction (planner.go)
+### Plan extraction (architect.go)
 
-- `parsePlanResultWithRecovery` (line ~96): tries stdout first (look for `# Plan` + `## Work Packages`), falls back to session JSONL side-channel (`~/.claude/plans/`).
-- For chat-only responses (model answers a question without revising), stdout parsing fails AND the side-channel finds the OLD plan file (unchanged). `ContinueSession` must treat this as "no plan change" — not "error."
+- The legacy `parsePlanResultWithRecovery` and `RawPlan`-based regex parsing are **DELETED**.
+- Streaming `stdout` is maintained purely for observability (TUI rendering the streaming thought process).
+- The **source of truth** is purely the `plan-history/plan.md` file tracked via the git micro-repo.
+- The Architect is instructed to edit `plan-history/plan.md` directly via the Claude Harness (using built-in bash/file_editor tools enabled via `permission_mode` settings). Orqestra checks the git repo after execution to determine if the plan was revised.
 
 ### TUI architecture (internal/tui/)
 
@@ -166,7 +168,7 @@ The codebase uses "planner" for the agent that produces implementation plans, bu
 
 Every plan mutation — initial plan, architect revision, external editor save, in-TUI edit — is committed to a bare git repository inside the session directory. This gives us:
 
-- **Diff**: `git diff --no-color HEAD~1 HEAD -- plan.md` produces a real unified diff. No custom diff algorithm.
+- **Diff**: `git diff --color=always HEAD~1 HEAD -- plan.md` produces a real unified diff. No custom diff algorithm. Bubbletea text viewports inherently support color sequence rendering.
 - **History**: `git log --oneline -- plan.md` shows the full revision trail.
 - **100% coverage**: external editor edits get committed too, so `[D]` always works.
 - **No `previousPlan` string field**: git IS the history.
@@ -225,7 +227,7 @@ func (r *GitRepo) Log() (string, error)         // oneline log
 
 ## Risks
 
-1. **`--resume` may not preserve tool restrictions**. If the resumed session gets Write access, the model could modify files. Mitigation: `ClaudeCLI.RunContinue` appends `c.extraArgs` on every invocation (verified in source). The E2E test (WP6) validates by inspecting JSONL.
+1. **`--resume` may not preserve tool restrictions**. If the resumed session gets Write access, the model could modify files. Mitigation: `ClaudeCLI.RunContinue` appends `c.extraArgs` on every invocation (verified in source). The E2E tests (WP1, WP10) validate by inspecting JSONL.
 2. **Side-channel plan file may not update on `--resume` turns**. Mitigation: `parsePlanResultWithRecovery` tries stdout first — if the model outputs the full plan, the side-channel is not needed. If both fail, `ContinueSession` treats it as chat-only.
 3. **`planSessionID` scoping**. Moving to function scope means `goto planGate` path leaves it `""`. Gate loop checks for empty ID and falls back.
 4. **System prompt drift on resumed sessions**. The `--resume` flag may not re-apply the system prompt from the original invocation. Mitigation: the continuation sub-prompt includes the current plan as ground truth. The E2E test validates the model produces coherent responses.
@@ -316,7 +318,7 @@ func (r *GitRepo) Log() (string, error)         // oneline log
 
 **Steps:**
 
-1. In `internal/config/pipeline.yaml`, in the `planner:` → `system_prompt:` block, append a `CONVERSATION REVIEW` section after the `RULES:` block (before the closing `|`):
+1. In `internal/config/pipeline.yaml`, in the `planner:` → `system_prompt:` block, append a `CONVERSATION REVIEW` section after the final `RULES:` rule (`- Do not include commentary before or after the plan.`), at the same indentation level as `RULES:`:
 
    ```yaml
        CONVERSATION REVIEW:
@@ -431,112 +433,6 @@ func (r *GitRepo) Log() (string, error)         // oneline log
 - `go test ./internal/tui/...` passes.
 - `go test ./internal/tokenlimit/...` passes.
 
-### 5. Change Architect runner type to ContinuableRunner and add ContinueSession method
-
-**Steps:**
-
-1. In `internal/agent/architect.go`, change `runner harness.CLIRunner` → `runner harness.ContinuableRunner`.
-
-2. In `internal/agent/architect.go`, change `NewArchitect` parameter: `func NewArchitect(runner harness.CLIRunner, cfg config.ArchitectConfig)` → `func NewArchitect(runner harness.ContinuableRunner, cfg config.ArchitectConfig)`.
-
-3. In `internal/orchestrator/orchestrator.go`, in the `Runners` struct, change `Architect harness.CLIRunner` → `Architect harness.ContinuableRunner`.
-
-4. In `cmd/orqestra/main.go` `buildEngine` function, after `architectRunner = wrapRunner(architectRunner, limiter, cfg, cfg.Architect.Model, "architect")`:
-
-   ```go
-   continuableArchitect, ok := architectRunner.(harness.ContinuableRunner)
-   if !ok {
-       slog.Error("architect runner does not support session continuation")
-       os.Exit(exitInvalidInput)
-   }
-   ```
-
-   Use `continuableArchitect` when assigning `Runners.Architect` in the `Engine` construction below.
-
-5. In `cmd/orqestra/main.go` `runPlanOnly` function, after `architectRunner` is created from `NewClaudeCLIFromConfig`:
-
-   ```go
-   continuableArchitect, ok := architectRunner.(harness.ContinuableRunner)
-   if !ok {
-       slog.Error("architect runner does not support session continuation")
-       os.Exit(exitInvalidInput)
-   }
-   architect := agent.NewArchitect(continuableArchitect, cfg.Architect)
-   ```
-
-6. Add `continuePromptTemplate` constant to `internal/agent/architect.go` (the frozen template from WP2):
-
-   ```go
-   const continuePromptTemplate = `The current implementation plan is below. The reviewer sent a message.
-
-   <current_plan>
-   %s
-   </current_plan>
-
-   <reviewer_message>
-   %s
-   </reviewer_message>
-
-   If the reviewer asks a question, answer it using your knowledge of the codebase from this session.
-   If the reviewer requests changes, revise the plan and output the complete updated plan.
-   Begin with your response. Then, ONLY if you changed the plan, output the full revised plan starting with "# Plan".`
-   ```
-
-7. Add `ContinueSession` method to `Architect`:
-
-   ```go
-   // ContinueSession resumes the architect's Claude session with a user message.
-   // Returns:
-   //   - plan: non-nil if the model produced a revised plan, nil if chat-only
-   //   - response: the model's full text output
-   //   - usage: token consumption for this turn
-   //   - err: harness errors (NOT parse errors — those mean "no plan change")
-   func (a *Architect) ContinueSession(ctx context.Context, sessionID, currentPlan, userMessage string, stdout io.Writer) (*RawPlan, string, harness.TokenUsage, error) {
-       prompt := fmt.Sprintf(continuePromptTemplate, currentPlan, userMessage)
-       result, err := a.runner.RunContinue(ctx, sessionID, prompt, stdout)
-       if err != nil {
-           return nil, "", harness.TokenUsage{}, fmt.Errorf("architect continue session: %w", err)
-       }
-       plan, usage, _, parseErr := a.parsePlanResultWithRecovery(result)
-       if parseErr != nil {
-           // Parse failure is expected for chat-only responses
-           return nil, result.Output, result.Usage, nil
-       }
-       return &plan, result.Output, usage, nil
-   }
-   ```
-
-8. Update existing mock in `internal/agent/architect_test.go`: `architectMockCLIRunner` must implement `ContinuableRunner`. Add:
-
-   ```go
-   func (m *architectMockCLIRunner) RunContinue(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
-       if m.err != nil {
-           return harness.RunResult{}, m.err
-       }
-       return harness.RunResult{Output: m.response, SessionID: m.sessionID}, nil
-   }
-   ```
-
-   Verify all existing `TestArchitect_*` tests still pass.
-
-9. Add new tests in `internal/agent/architect_test.go`:
-   - `TestContinueSession_PlanRevised`: mock returns output containing `# Plan\n\n## Goal\n...\n\n## Work Packages\n...`. Assert `*RawPlan` non-nil, `plan.Markdown` starts with `# Plan`, `response` is the full output, `err` is nil.
-   - `TestContinueSession_ChatOnly`: mock returns `"The first work package was designed that way because the config parser must be initialized before the resolver can run."`. Assert `*RawPlan` is nil, `response` contains the text, `err` is nil.
-   - `TestContinueSession_HarnessError`: mock returns `fmt.Errorf("connection refused")`. Assert `err != nil`, `*RawPlan` is nil.
-   - `TestContinueSession_PromptContainsPlanAndMessage`: add a `capturedPrompt string` field to the mock, capture the prompt in `RunContinue`. Assert the prompt contains both `<current_plan>` and `<reviewer_message>` tags with the provided values.
-
-10. Update `internal/orchestrator/orchestrator_test.go`: the `mockRunner` already implements `RunContinue`. Verify `testEngine` still compiles with the new `Runners.Architect` type (it should — `*mockRunner` implements `ContinuableRunner`).
-
-11. Update `internal/tui/app_test.go`: the `noopRunner` already implements `RunContinue`. Verify `testModel()` still compiles.
-
-**Done when:**
-
-- `go build ./cmd/orqestra` compiles.
-- `go test ./internal/agent/... -run TestArchitect` passes (all existing + new tests).
-- `go test ./internal/agent/... -run TestContinueSession` passes with all four cases.
-- `go test ./internal/orchestrator/...` passes (all existing tests).
-- `go test ./internal/tui/...` passes (all existing tests).
-
 ### 6. Plan version history via git micro-repo (`plan/gitrepo.go`)
 
 **Rationale:** Every plan mutation — architect revision, external editor save, in-TUI edit — must produce a diffable version. A git repo inside the session dir gives us real unified diffs with zero custom algorithms, and covers 100% of mutation paths.
@@ -604,7 +500,7 @@ func (r *GitRepo) Log() (string, error)         // oneline log
        if !r.HasHistory() {
            return "", nil
        }
-       out, err := exec.Command("git", "-C", r.dir, "diff", "--no-color", "HEAD~1", "HEAD", "--", "plan.md").Output()
+       out, err := exec.Command("git", "-C", r.dir, "diff", "--color=always", "HEAD~1", "HEAD", "--", "plan.md").Output()
        if err != nil {
            return "", fmt.Errorf("git diff: %w", err)
        }
@@ -617,7 +513,10 @@ func (r *GitRepo) Log() (string, error)         // oneline log
        if err != nil {
            return false
        }
-       count, _ := strconv.Atoi(strings.TrimSpace(string(out)))
+       count, err := strconv.Atoi(strings.TrimSpace(string(out)))
+       if err != nil {
+           return false
+       }
        return count > 1
    }
 
@@ -766,7 +665,10 @@ func (r *GitRepo) Log() (string, error)         // oneline log
    ```go
    var planDiff string
    if planRepo != nil {
-       planDiff, _ = planRepo.Diff()
+       planDiff, err = planRepo.Diff()
+       if err != nil {
+           slog.Warn("git diff failed", "err", err)
+       }
    }
    writeArtifact(session, "final_plan.md", finalPlanMarkdown)
    emit(Event{Type: EventGateRequest, Gate: GateRequest{
@@ -803,23 +705,21 @@ func (r *GitRepo) Log() (string, error)         // oneline log
         stream.SetAgent("architect")
         revStart := time.Now()
 
-        var revisedPlan *agent.RawPlan
         var chatResponse string
         var revisedUsage harness.TokenUsage
         var revSessionID string
         var err error
 
+        planPath := filepath.Join(session.Path, "plan-history", "plan.md")
+
         if planSessionID != "" {
-            revisedPlan, chatResponse, revisedUsage, err = architect.ContinueSession(
-                ctx, planSessionID, finalPlanMarkdown, decision.Comment, &streamWriter{buf: stream})
+            chatResponse, revisedUsage, err = architect.ContinueSession(
+                ctx, planSessionID, planPath, decision.Comment, &streamWriter{buf: stream})
             revSessionID = planSessionID
         } else {
-            var plan agent.RawPlan
-            plan, revisedUsage, revSessionID, err = architect.RefineWithCommentsStreaming(
-                ctx, finalPlanMarkdown, decision.Comment, &streamWriter{buf: stream})
-            if err == nil {
-                revisedPlan = &plan
-            }
+            // Fallback for cold start edits - RefineStreaming will mutate the file natively
+            chatResponse, revisedUsage, revSessionID, err = architect.RefineStreaming(
+                ctx, planPath, finalPlanMarkdown, &streamWriter{buf: stream})
         }
 
         if err != nil {
@@ -842,8 +742,18 @@ func (r *GitRepo) Log() (string, error)         // oneline log
         emit(Event{Type: EventAgentDone, AgentID: "architect",
             InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens})
 
-        if revisedPlan != nil {
-            finalPlanMarkdown = revisedPlan.Markdown
+        var changed bool
+        if planRepo != nil {
+            statusOut, _ := exec.Command("git", "-C", filepath.Join(session.Path, "plan-history"), "status", "--porcelain", "plan.md").Output()
+            if len(strings.TrimSpace(string(statusOut))) > 0 {
+                changed = true
+            }
+        }
+
+        if changed {
+            editedBytes, _ := os.ReadFile(planPath)
+            finalPlanMarkdown = string(editedBytes)
+            
             if planRepo != nil {
                 msg := "revision"
                 if len(decision.Comment) > 50 {
@@ -851,11 +761,12 @@ func (r *GitRepo) Log() (string, error)         // oneline log
                 } else if decision.Comment != "" {
                     msg = "revision: " + decision.Comment
                 }
-                if err := planRepo.Commit(revisedPlan.Markdown, msg); err != nil {
-                    slog.Warn("plan commit failed", "err", err)
+                if commitErr := planRepo.Commit(finalPlanMarkdown, msg); commitErr != nil {
+                    slog.Warn("plan commit failed", "err", commitErr)
                 }
             }
         } else {
+            // No uncommitted changes detected to plan.md => it was chat-only!
             emit(Event{Type: EventChatResponse, ChatText: chatResponse})
         }
         continue
@@ -874,9 +785,10 @@ func (r *GitRepo) Log() (string, error)         // oneline log
 - Send `DecisionApprove` on next gate.
 
 13. Add test `TestEngine_PlanComment_FallbackCold` in `orchestrator_test.go`:
-   - Use `Input{PlanFile: validPlanMarkdown()}` — this skips research/planning, so `planSessionID == ""`.
-   - Send `DecisionComment{Comment: "fix it"}`.
-   - Assert: `RefineWithCommentsStreaming` is called (not `RunContinue`). The architect mock's `RunContinue` should NOT be called. Use a tracking mock that records which methods were invoked.
+
+- Use `Input{PlanFile: validPlanMarkdown()}` — this skips research/planning, so `planSessionID == ""`.
+- Send `DecisionComment{Comment: "fix it"}`.
+- Assert: `RefineWithCommentsStreaming` is called (not `RunContinue`). The architect mock's `RunContinue` should NOT be called. Use a tracking mock that records which methods were invoked.
 
 **Done when:**
 
@@ -950,6 +862,7 @@ This WP specifies every UI element, every keystroke, every render function, and 
    ```go
    case orchestrator.GatePlanApproval:
        s.planDiff = event.Gate.PlanDiff
+       s.diffViewport.SetContent(s.planDiff)
        if len(s.chatHistory) > 0 && s.planDiff != "" {
            s.chatHistory = append(s.chatHistory, ChatEntry{
                Role: "architect", Text: "(plan revised — see diff with [D])", HasPlanChange: true,
@@ -1189,7 +1102,7 @@ This WP specifies every UI element, every keystroke, every render function, and 
         return keyStyle.Render(" [Esc] return to plan                                        [?] help  [^C^C] quit")
     ```
 
-16. Add `viewPlanDiff` method that renders the precomputed `git diff` output with color:
+16. Add `viewPlanDiff` method that renders the diff viewport:
 
     ```go
     func (s PipelineScreen) viewPlanDiff(width int) string {
@@ -1198,27 +1111,15 @@ This WP specifies every UI element, every keystroke, every render function, and 
         b.WriteString("\n")
         b.WriteString(dividerStyle.Render(strings.Repeat("─", max(1, width-2))))
         b.WriteString("\n")
-        // s.planDiff is a unified diff from git — colorize +/- lines
-        for _, line := range strings.Split(s.planDiff, "\n") {
-            switch {
-            case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
-                b.WriteString(passStyle.Render(line))
-            case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
-                b.WriteString(failStyle.Render(line))
-            case strings.HasPrefix(line, "@@"):
-                b.WriteString(phaseStyle.Render(line))
-            case strings.HasPrefix(line, "diff ") || strings.HasPrefix(line, "index "):
-                continue // skip git header noise
-            default:
-                b.WriteString(line)
-            }
-            b.WriteString("\n")
-        }
+
+        // Let the viewport render the content with pagination
+        b.WriteString(s.diffViewport.View())
+
         return b.String()
     }
     ```
 
-    No custom diff algorithm. The `planDiff` string arrives from the orchestrator via `EventGateRequest.PlanDiff`, which is the raw output of `git diff --no-color HEAD~1 HEAD -- plan.md`.
+    No custom diff algorithm. The `planDiff` string arrives from the orchestrator via `EventGateRequest.PlanDiff`, which is the raw output of `git diff --color=always HEAD~1 HEAD -- plan.md`.
 
 #### 5f. Key event routing for ContentPlanDiff
 
@@ -1246,9 +1147,21 @@ This WP specifies every UI element, every keystroke, every render function, and 
             s.hasPlanComment = true
             s.awaitingPlanDecision = true
             s.SyncViewports()
+            return s, nil
         }
-        return s, nil
+
+        // Pass navigation keys to the diff viewport
+        var cmd tea.Cmd
+        s.diffViewport, cmd = s.diffViewport.Update(msg)
+        return s, cmd
     }
+    ```
+
+18b. Add `diffViewport` dimensions sync. Over in `SyncViewports()` method, add:
+
+    ```go
+    s.diffViewport.Width = s.contentVP.Width()
+    s.diffViewport.Height = s.contentVP.Height() - 3 // accounting for header borders
     ```
 
 19. In the `Update` method's `"d", "D"` global key handler, add `ContentPlanDiff` to the exclusion list:
@@ -1490,28 +1403,25 @@ This WP specifies every UI element, every keystroke, every render function, and 
    }
    ```
 
-6. Add `TestTUI_ViewPlanDiffColorize` in `app_test.go`:
+6. Add `TestTUI_ViewPlanDiffViewport` in `app_test.go`:
 
    ```go
-   func TestTUI_ViewPlanDiffColorize(t *testing.T) {
+   func TestTUI_ViewPlanDiffViewport(t *testing.T) {
        m := testModel()
        m.state = StatePipeline
        m.pipelineScreen.content = ContentPlanDiff
-       m.pipelineScreen.planDiff = "diff --git a/plan.md b/plan.md\nindex abc..def 100644\n--- a/plan.md\n+++ b/plan.md\n@@ -1,3 +1,3 @@\n # Plan\n-Old.\n+New.\n"
+       m.pipelineScreen.diffViewport = viewport.New(100, 20)
+       m.pipelineScreen.diffViewport.SetContent("diff --git a/plan.md b/plan.md\n# Plan\n-Old.\n+New.\n")
        m.width = 120
        m.height = 40
 
        view := m.pipelineScreen.viewPlanDiff(100)
-       // git header noise should be stripped
-       if strings.Contains(view, "diff --git") {
-           t.Error("expected git header stripped from view")
-       }
-       if strings.Contains(view, "index abc") {
-           t.Error("expected index line stripped from view")
-       }
-       // +/- lines should be present (colored by styles, but text is there)
+       // The view should contain the diff header and the viewport content
        if !strings.Contains(view, "Plan Diff") {
            t.Error("expected diff header")
+       }
+       if !strings.Contains(view, "-Old.") || !strings.Contains(view, "+New.") {
+           t.Error("expected viewport content in view")
        }
    }
    ```

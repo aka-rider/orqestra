@@ -78,8 +78,12 @@ func (g *Gateway) Evaluate(ctx context.Context, rawPrompt string, stdout io.Writ
 	}
 
 	switch gwResult.Verdict {
-	case GatewayVerdictAccept, GatewayVerdictCoach:
+	case GatewayVerdictAccept:
 		// valid
+	case GatewayVerdictCoach:
+		// Legacy: treat as accept — questions are now resolved via MCP AskUserQuestion.
+		slog.Warn("gateway returned 'coach' verdict, treating as 'accept'")
+		gwResult.Verdict = GatewayVerdictAccept
 	default:
 		return GatewayResult{}, harness.TokenUsage{}, "", fmt.Errorf("gateway evaluation returned invalid verdict %q", gwResult.Verdict)
 	}
@@ -87,16 +91,8 @@ func (g *Gateway) Evaluate(ctx context.Context, rawPrompt string, stdout io.Writ
 	if gwResult.Brief.Task == "" {
 		return GatewayResult{}, harness.TokenUsage{}, "", errors.New("gateway evaluation returned empty brief.task")
 	}
-	if gwResult.Verdict == GatewayVerdictAccept {
-		if gwResult.Brief.EndState == "" {
-			return GatewayResult{}, harness.TokenUsage{}, "", errors.New("gateway accepted but returned empty brief.end_state")
-		}
-	}
-	if gwResult.Verdict == GatewayVerdictCoach && len(gwResult.Questions) == 0 {
-		return GatewayResult{}, harness.TokenUsage{}, "", errors.New("gateway coach verdict requires at least one question")
-	}
-	if len(gwResult.Questions) > 3 {
-		return GatewayResult{}, harness.TokenUsage{}, "", fmt.Errorf("gateway returned %d questions, max is 3", len(gwResult.Questions))
+	if gwResult.Brief.EndState == "" {
+		return GatewayResult{}, harness.TokenUsage{}, "", errors.New("gateway accepted but returned empty brief.end_state")
 	}
 
 	return gwResult, result.Usage, result.SessionID, nil

@@ -130,7 +130,8 @@ const (
 	EventGateRequest
 	EventComplete
 	EventError
-	EventRunDirReady // emitted once after session dir is created
+	EventRunDirReady    // emitted once after session dir is created
+	EventUserQuestion   // emitted when an agent asks the user a question via MCP
 )
 
 // Phase represents the current pipeline phase.
@@ -206,6 +207,9 @@ type Event struct {
 	// Token usage from the agent's RunResult. Set on EventAgentDone.
 	InputTokens  int64
 	OutputTokens int64
+
+	// UserQuestion is set on EventUserQuestion.
+	UserQuestion harness.MCPToolCall
 }
 
 // Input is the user's request to the orchestrator.
@@ -246,9 +250,10 @@ type Runners struct {
 
 // Engine is the hardcoded Go orchestrator that runs the full pipeline.
 type Engine struct {
-	Config        *config.Config
-	Runners       Runners
-	RunDirFactory RunDirFactory
+	Config         *config.Config
+	Runners        Runners
+	RunDirFactory  RunDirFactory
+	QuestionBridge *harness.QuestionBridge
 }
 
 // RunChannels provides bidirectional communication between Engine and TUI.
@@ -307,8 +312,6 @@ func (e *Engine) Run(ctx context.Context, input Input, emit func(Event)) (Result
 	return result, nil
 }
 
-const maxCoachingRounds = 3
-
 func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, decisions <-chan Decision, stream *StreamBuffer) {
 	emit := func(ev Event) {
 		select {
@@ -333,6 +336,28 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		writeArtifact(session, "prompt.md", input.Prompt)
 	}
 
+	// --- Question Bridge ---
+	if e.QuestionBridge != nil {
+		if err := e.QuestionBridge.Start(ctx); err != nil {
+			slog.Warn("question bridge failed to start, continuing without question support", "err", err)
+		} else {
+			defer e.QuestionBridge.Stop()
+			go func() {
+				for {
+					select {
+					case q, ok := <-e.QuestionBridge.Questions():
+						if !ok {
+							return
+						}
+						emit(Event{Type: EventUserQuestion, UserQuestion: q})
+					case <-ctx.Done():
+						return
+					}
+				}
+			}()
+		}
+	}
+
 	// --- Gateway Evaluation ---
 	var plannerInput string
 
@@ -344,93 +369,38 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		stream.SetAgent("gateway")
 
 		gw := agent.NewGateway(e.Runners.Gateway, e.Config.Gateway)
-		prompt := input.Prompt
 		gwStart := time.Now()
-		var gwSessionID string
 
-		for round := 0; round < maxCoachingRounds; round++ {
-			gwResult, gwUsage, sessID, err := gw.Evaluate(ctx, prompt, &streamWriter{buf: stream})
-			if sessID != "" {
-				gwSessionID = sessID
-			}
-			if err != nil {
-				writeArtifactJSON(session, "gateway_meta.json", stepMeta{
-					AgentID: "gateway", ModelRef: e.Config.Gateway.Model, StartTime: gwStart, EndTime: time.Now(),
-					ClaudeSessionID: gwSessionID, Status: "failed", Error: err.Error(),
-				})
-				emit(Event{Type: EventAgentFailed, AgentID: "gateway", Err: err})
-				emit(Event{Type: EventError, Err: err})
-				return
-			}
-
-			if gwResult.Verdict == agent.GatewayVerdictAccept {
-				writeArtifactJSON(session, "gateway_meta.json", stepMeta{
-					AgentID: "gateway", ModelRef: e.Config.Gateway.Model, StartTime: gwStart, EndTime: time.Now(),
-					ClaudeSessionID: gwSessionID, Status: "done",
-					InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens,
-				})
-				emit(Event{Type: EventAgentDone, AgentID: "gateway",
-					InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens})
-				plannerInput = buildPlannerInput(input.Prompt, gwResult.Brief)
-				break
-			}
-
-			if input.AutoApprove {
-				writeArtifactJSON(session, "gateway_meta.json", stepMeta{
-					AgentID: "gateway", ModelRef: e.Config.Gateway.Model, StartTime: gwStart, EndTime: time.Now(),
-					ClaudeSessionID: gwSessionID, Status: "done",
-					InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens,
-				})
-				emit(Event{Type: EventAgentDone, AgentID: "gateway",
-					InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens})
-				plannerInput = buildPlannerInput(input.Prompt, gwResult.Brief)
-				break
-			}
-
-			emit(Event{Type: EventGateRequest, Gate: GateRequest{
-				Type:          GateGatewayCoach,
-				GatewayResult: gwResult,
-			}})
-
-			select {
-			case decision := <-decisions:
-				switch decision.Type {
-				case DecisionCancel:
-					emit(Event{Type: EventAgentCancelled, AgentID: "gateway"})
-					emit(Event{Type: EventComplete, Phase: PhaseDone})
-					return
-				case DecisionSkip:
-					writeArtifactJSON(session, "gateway_meta.json", stepMeta{
-						AgentID: "gateway", ModelRef: e.Config.Gateway.Model, StartTime: gwStart, EndTime: time.Now(),
-						ClaudeSessionID: gwSessionID, Status: "done",
-					})
-					emit(Event{Type: EventAgentDone, AgentID: "gateway"})
-					plannerInput = input.Prompt
-					goto research
-				case DecisionApprove:
-					prompt = incorporateAnswers(prompt, gwResult, decision.GatewayAnswers)
-				}
-			case <-ctx.Done():
-				emit(Event{Type: EventAgentCancelled, AgentID: "gateway"})
-				return
-			}
-
-			if round == maxCoachingRounds-1 {
-				writeArtifactJSON(session, "gateway_meta.json", stepMeta{
-					AgentID: "gateway", ModelRef: e.Config.Gateway.Model, StartTime: gwStart, EndTime: time.Now(),
-					ClaudeSessionID: gwSessionID, Status: "done",
-					InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens,
-				})
-				emit(Event{Type: EventAgentDone, AgentID: "gateway",
-					InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens})
-				plannerInput = buildPlannerInput(input.Prompt, gwResult.Brief)
-			}
+		// Single gateway call — questions are resolved via MCP AskUserQuestion tool
+		// during RunStreaming, not via coaching loop.
+		gwResult, gwUsage, gwSessionID, err := gw.Evaluate(ctx, input.Prompt, &streamWriter{buf: stream})
+		if err != nil {
+			writeArtifactJSON(session, "gateway_meta.json", stepMeta{
+				AgentID: "gateway", ModelRef: e.Config.Gateway.Model, StartTime: gwStart, EndTime: time.Now(),
+				ClaudeSessionID: gwSessionID, Status: "failed", Error: err.Error(),
+			})
+			emit(Event{Type: EventAgentFailed, AgentID: "gateway", Err: err})
+			emit(Event{Type: EventError, Err: err})
+			return
 		}
+
+		// Treat "coach" verdict as "accept" — questions were already resolved via MCP.
+		if gwResult.Verdict == agent.GatewayVerdictCoach {
+			slog.Warn("gateway returned 'coach' verdict, treating as 'accept' — questions should use AskUserQuestion MCP tool")
+		}
+
+		writeArtifactJSON(session, "gateway_meta.json", stepMeta{
+			AgentID: "gateway", ModelRef: e.Config.Gateway.Model, StartTime: gwStart, EndTime: time.Now(),
+			ClaudeSessionID: gwSessionID, Status: "done",
+			InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens,
+		})
+		emit(Event{Type: EventAgentDone, AgentID: "gateway",
+			InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens})
+		plannerInput = buildPlannerInput(input.Prompt, gwResult.Brief)
 	} else {
 		plannerInput = input.Prompt
 	}
 
-research:
 	var finalPlanMarkdown string
 
 	// If a pre-loaded plan was provided, skip research and planning
@@ -730,20 +700,6 @@ func buildPlannerInput(rawPrompt string, brief agent.PromptBrief) string {
 	if len(brief.NonScope) > 0 {
 		b.WriteString("\nOut of scope: ")
 		b.WriteString(strings.Join(brief.NonScope, ", "))
-	}
-	return b.String()
-}
-
-// incorporateAnswers enriches the prompt with user answers to coaching questions.
-func incorporateAnswers(prompt string, gwResult agent.GatewayResult, answers []GatewayAnswer) string {
-	var b strings.Builder
-	b.WriteString(prompt)
-	b.WriteString("\n\nClarifications:\n")
-	for _, ans := range answers {
-		if ans.QuestionIndex < len(gwResult.Questions) {
-			q := gwResult.Questions[ans.QuestionIndex]
-			b.WriteString(fmt.Sprintf("- %s: %s\n", q.Text, ans.Answer))
-		}
 	}
 	return b.String()
 }

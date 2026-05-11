@@ -43,9 +43,10 @@ func TestGateway_AcceptClearPrompt(t *testing.T) {
 	}
 }
 
-func TestGateway_CoachVaguePrompt(t *testing.T) {
+func TestGateway_CoachCoercedToAccept(t *testing.T) {
+	// Coach verdict is coerced to accept — questions were resolved via MCP AskUserQuestion.
 	runner := &gatewayMockRunner{
-		output: `{"verdict":"coach","brief":{"task":"Improve the codebase","end_state":"","scope":[],"non_scope":[]},"questions":[{"text":"Which module or package should be improved?","options":["internal/tui","internal/agent","internal/config"],"default":"internal/tui"}],"confidence":0.3}`,
+		output: `{"verdict":"coach","brief":{"task":"Improve the codebase","end_state":"Codebase is improved","scope":[],"non_scope":[]},"questions":[{"text":"Which module?","options":["tui","agent"],"default":"tui"}],"confidence":0.3}`,
 	}
 
 	gw := NewGateway(runner, config.GatewayConfig{SystemPrompt: "test"})
@@ -53,14 +54,11 @@ func TestGateway_CoachVaguePrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.Verdict != GatewayVerdictCoach {
-		t.Errorf("expected verdict coach, got %q", result.Verdict)
-	}
-	if len(result.Questions) == 0 {
-		t.Error("expected coaching questions")
+	if result.Verdict != GatewayVerdictAccept {
+		t.Errorf("expected verdict coerced to accept, got %q", result.Verdict)
 	}
 	if result.Brief.Task == "" {
-		t.Error("expected brief.task to be partially populated even for coach verdict")
+		t.Error("expected brief.task to be populated")
 	}
 }
 
@@ -109,18 +107,19 @@ func TestGateway_AcceptRequiresEndState(t *testing.T) {
 	}
 }
 
-func TestGateway_MaxThreeQuestions(t *testing.T) {
+func TestGateway_CoachMissingEndState(t *testing.T) {
+	// Coach verdict coerced to accept — but missing end_state is an error.
 	runner := &gatewayMockRunner{
-		output: `{"verdict":"coach","brief":{"task":"Do something","end_state":"","scope":[],"non_scope":[]},"questions":[{"text":"Q1","options":[],"default":""},{"text":"Q2","options":[],"default":""},{"text":"Q3","options":[],"default":""},{"text":"Q4","options":[],"default":""}],"confidence":0.2}`,
+		output: `{"verdict":"coach","brief":{"task":"Do something","end_state":"","scope":[],"non_scope":[]},"questions":[{"text":"Q1","options":[],"default":""}],"confidence":0.2}`,
 	}
 
 	gw := NewGateway(runner, config.GatewayConfig{SystemPrompt: "test"})
 	_, _, _, err := gw.Evaluate(context.Background(), "vague input", nil)
 	if err == nil {
-		t.Fatal("expected error for more than 3 questions")
+		t.Fatal("expected error for empty end_state")
 	}
-	if !strings.Contains(err.Error(), "max is 3") {
-		t.Errorf("expected max questions error, got: %v", err)
+	if !strings.Contains(err.Error(), "empty brief.end_state") {
+		t.Errorf("expected end_state error, got: %v", err)
 	}
 }
 
@@ -167,18 +166,19 @@ func TestGateway_RunnerError(t *testing.T) {
 	}
 }
 
-func TestGateway_CoachRequiresQuestions(t *testing.T) {
+func TestGateway_CoachWithEndStateAccepted(t *testing.T) {
+	// Coach verdict with a valid end_state is coerced to accept.
 	runner := &gatewayMockRunner{
-		output: `{"verdict":"coach","brief":{"task":"Something vague","end_state":"","scope":[],"non_scope":[]},"questions":[],"confidence":0.3}`,
+		output: `{"verdict":"coach","brief":{"task":"Something vague","end_state":"Vague thing is done","scope":[],"non_scope":[]},"questions":[],"confidence":0.3}`,
 	}
 
 	gw := NewGateway(runner, config.GatewayConfig{SystemPrompt: "test"})
-	_, _, _, err := gw.Evaluate(context.Background(), "be vague", nil)
-	if err == nil {
-		t.Fatal("expected error when coach verdict has no questions")
+	result, _, _, err := gw.Evaluate(context.Background(), "be vague", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "at least one question") {
-		t.Errorf("expected question-required error, got: %v", err)
+	if result.Verdict != GatewayVerdictAccept {
+		t.Errorf("expected coerced accept, got %q", result.Verdict)
 	}
 }
 

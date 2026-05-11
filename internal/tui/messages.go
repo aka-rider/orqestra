@@ -3,6 +3,7 @@ package tui
 import (
 	"time"
 
+	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
@@ -118,3 +119,10 @@ func (OpenExternalEditorIntent) isIntent() {}
 type ConfirmNewRunIntent struct{}
 
 func (ConfirmNewRunIntent) isIntent() {}
+
+// SubmitQuestionAnswerIntent submits a user's answer to an MCP AskUserQuestion.
+type SubmitQuestionAnswerIntent struct {
+	Answer harness.MCPAnswer
+}
+
+func (SubmitQuestionAnswerIntent) isIntent() {}

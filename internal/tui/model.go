@@ -33,6 +33,7 @@ const (
 	ContentPlanEdit                        // editable textarea for plan modification
 	ContentAgentHistory                    // frozen output of a previously-run agent
 	ContentCompletion                      // QA report, summary
+	ContentUserQuestion                    // MCP AskUserQuestion picker
 )
 
 // AgentRow tracks a single agent's status in the sidebar.
@@ -354,6 +355,11 @@ func (m Model) handlePipelineKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case SkipGatewayIntent:
 			if m.decisions != nil {
 				m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionSkip}
+			}
+			return m, nil
+		case SubmitQuestionAnswerIntent:
+			if m.engine != nil && m.engine.QuestionBridge != nil {
+				m.engine.QuestionBridge.SendAnswer(i.Answer)
 			}
 			return m, nil
 		case ApprovePlanIntent:
