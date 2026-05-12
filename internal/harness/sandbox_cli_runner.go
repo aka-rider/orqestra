@@ -18,34 +18,45 @@ import (
 // SandboxCLIRunner implements CLIRunner by running the claude CLI
 // directly on macOS under a sandbox (sandbox-exec) policy.
 type SandboxCLIRunner struct {
-	cfg      config.SandboxConfig
-	profiles []sandbox.Snapshot
-	repoPath string
-	env      []string
-	writable bool
+	cfg          config.SandboxConfig
+	profiles     []sandbox.Snapshot
+	repoPath     string
+	worktreePath string // if set, worker runs in this worktree (repo stays read-only)
+	env          []string
+	writable     bool
 }
 
 // SandboxCLIRunnerConfig configures the seatbelt CLI runner.
 type SandboxCLIRunnerConfig struct {
-	Cfg      config.SandboxConfig
-	Profiles []sandbox.Snapshot
-	RepoPath string
-	Env      []string // harness env (model routing)
-	Writable bool     // true for workers
+	Cfg          config.SandboxConfig
+	Profiles     []sandbox.Snapshot
+	RepoPath     string
+	WorktreePath string // optional worktree path; when set repo is read-only and worktree is read-write
+	Env          []string // harness env (model routing)
+	Writable     bool     // true for workers
 }
 
 // NewSandboxCLIRunner creates a CLI runner backed by seatbelt.
 func NewSandboxCLIRunner(cfg SandboxCLIRunnerConfig) *SandboxCLIRunner {
 	return &SandboxCLIRunner{
-		cfg:      cfg.Cfg,
-		profiles: cfg.Profiles,
-		repoPath: cfg.RepoPath,
-		env:      cfg.Env,
-		writable: cfg.Writable,
+		cfg:          cfg.Cfg,
+		profiles:     cfg.Profiles,
+		repoPath:     cfg.RepoPath,
+		worktreePath: cfg.WorktreePath,
+		env:          cfg.Env,
+		writable:     cfg.Writable,
 	}
 }
 
-// RunPrint runs the claude CLI with --print under seatbelt.
+// WithWorktree returns a new SandboxCLIRunner configured to execute inside the
+// given worktree path. The main repo becomes read-only; the worktree is read-write.
+// This is used by the orchestrator after creating the per-run git worktree.
+func (r *SandboxCLIRunner) WithWorktree(path string) *SandboxCLIRunner {
+	copy := *r
+	copy.worktreePath = path
+	copy.writable = false // repo is read-only when a worktree is set
+	return &copy
+}
 func (r *SandboxCLIRunner) RunPrint(ctx context.Context, prompt, systemPrompt string) (RunResult, error) {
 	args := r.buildCommand(prompt, systemPrompt, false)
 	output, err := r.run(ctx, args, nil)
@@ -92,6 +103,7 @@ func (r *SandboxCLIRunner) run(ctx context.Context, args []string, stdout io.Wri
 	sb, err := sandbox.New(sandbox.Config{
 		RepoPath:     r.repoPath,
 		RepoWritable: r.writable,
+		WorktreePath: r.worktreePath,
 		Profiles:     r.profiles,
 		HarnessEnv:   r.env,
 		ProxyEnv:     r.cfg.ProxyEnv,

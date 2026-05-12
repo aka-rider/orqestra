@@ -11,12 +11,13 @@ import (
 // ProfileBuilder assembles a complete SBPL profile from system base rules,
 // workspace path, home, tmpdir, and zero or more tool snapshots.
 type ProfileBuilder struct {
-	workspace    Path
-	home         string
-	tmpDir       string // resolved TMPDIR
-	snapshots    []Snapshot
-	RepoWritable bool  // if false, workspace (repo) is read-only
-	SessionPath  *Path // optional separate session directory (always read+write)
+	workspace     Path
+	home          string
+	tmpDir        string // resolved TMPDIR
+	snapshots     []Snapshot
+	RepoWritable  bool  // if false, workspace (repo) is read-only
+	SessionPath   *Path // optional separate session directory (always read+write)
+	WorktreePath  *Path // optional worktree directory (always read+write; main repo stays read-only)
 }
 
 // NewProfileBuilder creates a builder with mandatory system paths.
@@ -150,6 +151,15 @@ func (b *ProfileBuilder) Build() (string, error) {
 ;; Session (always read+write)
 (allow file-read* file-write* file-map-executable process-exec
   (subpath "` + b.SessionPath.Resolved + `"))
+`)
+	}
+
+	// --- Worktree directory (always read+write if provided; overrides repo read-only) ---
+	if b.WorktreePath != nil {
+		sb.WriteString(`
+;; Worktree (always read+write — isolated workspace for worker)
+(allow file-read* file-write* file-map-executable process-exec
+  (subpath "` + b.WorktreePath.Resolved + `"))
 `)
 	}
 

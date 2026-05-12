@@ -38,7 +38,7 @@ func TestArchitectSessionContinuation(t *testing.T) {
 ## Recommendation
 Add a /health endpoint that returns 200 OK with a JSON body.`
 
-	plan, _, sessionID, err := architect.RefineStreaming(ctx, simpleResearchDraft, &buf)
+	plan, _, sessionID, err := architect.RefineStreaming(ctx, "build a feature", PromptBrief{Task: "build feature"}, simpleResearchDraft, &buf)
 	if err != nil {
 		t.Fatalf("RefineStreaming failed: %v", err)
 	}
@@ -119,11 +119,11 @@ Add a /health endpoint that returns 200 OK with a JSON body.`
 }
 
 // TestPlanFileLifecycle answers 3 questions:
-// 1. Does --resume update the plan file, or only the initial call?
-// 2. Does --settings '{"plansDirectory":"/absolute/path"}' work outside project root?
-//    ANSWERED: No. Plan file always lands in ~/.claude/plans/.
-// 3. Does --settings persist across --resume, or must it be re-passed?
-//    ANSWERED: N/A (--settings plansDirectory doesn't redirect).
+//  1. Does --resume update the plan file, or only the initial call?
+//  2. Does --settings '{"plansDirectory":"/absolute/path"}' work outside project root?
+//     ANSWERED: No. Plan file always lands in ~/.claude/plans/.
+//  3. Does --settings persist across --resume, or must it be re-passed?
+//     ANSWERED: N/A (--settings plansDirectory doesn't redirect).
 func TestPlanFileLifecycle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()

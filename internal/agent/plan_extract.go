@@ -23,7 +23,7 @@ func ReadPlanFromRun(result harness.RunResult) (string, error) {
 	if result.PlanFilePath != "" {
 		content, err := readSecurePlanFile(result.PlanFilePath)
 		if err == nil {
-			return normalizePlanHeader(content), nil
+			return strings.TrimSpace(content), nil
 		}
 		slog.Debug("plan file path from stream invalid, falling back to JSONL scan",
 			"path", result.PlanFilePath, "err", err)
@@ -49,14 +49,14 @@ func ReadPlanFromRun(result harness.RunResult) (string, error) {
 		if fbErr != nil {
 			return "", fmt.Errorf("extract plan for session %s: JSONL scan failed (%w), plans dir scan failed (%w)", result.SessionID, err, fbErr)
 		}
-		return normalizePlanHeader(fallbackContent), nil
+		return strings.TrimSpace(fallbackContent), nil
 	}
 
 	content, err := readSecurePlanFile(planFilePath)
 	if err != nil {
 		return "", fmt.Errorf("read plan file for session %s: %w", result.SessionID, err)
 	}
-	return normalizePlanHeader(content), nil
+	return strings.TrimSpace(content), nil
 }
 
 // readSecurePlanFile reads a plan file after verifying it resides under ~/.claude/plans/.
@@ -128,20 +128,6 @@ func scanPlansDirectory() (string, error) {
 		return "", fmt.Errorf("plan file %q is empty", newest)
 	}
 	return content, nil
-}
-
-// normalizePlanHeader prepends "# Plan\n\n" if content starts with
-// "## Goal" or "## Context" but not "# Plan". Claude Code's plan files
-// sometimes omit the top-level heading.
-func normalizePlanHeader(md string) string {
-	trimmed := strings.TrimSpace(md)
-	if strings.HasPrefix(trimmed, "# Plan") {
-		return trimmed
-	}
-	if strings.HasPrefix(trimmed, "## Goal") || strings.HasPrefix(trimmed, "## Context") {
-		return "# Plan\n\n" + trimmed
-	}
-	return trimmed
 }
 
 // truncateRaw limits a raw string for error messages.

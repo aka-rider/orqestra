@@ -23,10 +23,11 @@ const (
 
 // PromptBrief is the gateway's structured interpretation of user intent.
 type PromptBrief struct {
-	Task     string   `json:"task"`
-	EndState string   `json:"end_state"`
-	Scope    []string `json:"scope"`
-	NonScope []string `json:"non_scope"`
+	Task            string   `json:"task"`
+	EndState        string   `json:"end_state"`
+	Scope           []string `json:"scope"`
+	NonScope        []string `json:"non_scope"`
+	DesignQuestions []string `json:"design_questions"`
 }
 
 // Question is a coaching question with options and a pre-filled default.

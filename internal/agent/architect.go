@@ -25,8 +25,9 @@ func NewArchitect(runner harness.CLIRunner, cfg config.ArchitectConfig) *Archite
 }
 
 // Refine takes a researcher's draft markdown and produces the final plan.
-func (a *Architect) Refine(ctx context.Context, researcherDraft string) (RawPlan, harness.TokenUsage, string, error) {
-	prompt := "Refine this researcher draft into a final implementation plan:\n\n" + researcherDraft
+func (a *Architect) Refine(ctx context.Context, userPrompt string, brief PromptBrief, researcherFacts string) (RawPlan, harness.TokenUsage, string, error) {
+	prompt := fmt.Sprintf("<user_request>\n%s\n</user_request>\n\n<gateway_brief>\nTask: %s\nEnd state: %s\nScope: %s\nNon-scope: %s\nDesign questions: %s\n</gateway_brief>\n\n<codebase_research>\n%s\n</codebase_research>\n\nUsing the codebase research above, produce an implementation plan for the user's request.",
+		userPrompt, brief.Task, brief.EndState, strings.Join(brief.Scope, ", "), strings.Join(brief.NonScope, ", "), strings.Join(brief.DesignQuestions, ", "), researcherFacts)
 	result, err := a.runner.RunPrint(ctx, prompt, a.cfg.SystemPrompt)
 	if err != nil {
 		return RawPlan{}, harness.TokenUsage{}, "", fmt.Errorf("architect refine: %w", err)
@@ -35,8 +36,9 @@ func (a *Architect) Refine(ctx context.Context, researcherDraft string) (RawPlan
 }
 
 // RefineStreaming is like Refine but streams output.
-func (a *Architect) RefineStreaming(ctx context.Context, researcherDraft string, stdout io.Writer) (RawPlan, harness.TokenUsage, string, error) {
-	prompt := "Refine this researcher draft into a final implementation plan:\n\n" + researcherDraft
+func (a *Architect) RefineStreaming(ctx context.Context, userPrompt string, brief PromptBrief, researcherFacts string, stdout io.Writer) (RawPlan, harness.TokenUsage, string, error) {
+	prompt := fmt.Sprintf("<user_request>\n%s\n</user_request>\n\n<gateway_brief>\nTask: %s\nEnd state: %s\nScope: %s\nNon-scope: %s\nDesign questions: %s\n</gateway_brief>\n\n<codebase_research>\n%s\n</codebase_research>\n\nUsing the codebase research above, produce an implementation plan for the user's request.",
+		userPrompt, brief.Task, brief.EndState, strings.Join(brief.Scope, ", "), strings.Join(brief.NonScope, ", "), strings.Join(brief.DesignQuestions, ", "), researcherFacts)
 	result, err := a.runner.RunStreaming(ctx, prompt, a.cfg.SystemPrompt, stdout)
 	if err != nil {
 		return RawPlan{}, harness.TokenUsage{}, "", fmt.Errorf("architect refine streaming: %w", err)
@@ -105,7 +107,8 @@ func (a *Architect) ContinueSession(ctx context.Context, sessionID, currentPlan,
 	}
 
 	if planContent != strings.TrimSpace(currentPlan) {
-		plan := RawPlan{Markdown: planContent}
+		warnings := CheckPlanHealth(planContent)
+		plan := RawPlan{Markdown: planContent, Warnings: warnings}
 		return result.Output, &plan, result.Usage, nil
 	}
 
@@ -113,14 +116,14 @@ func (a *Architect) ContinueSession(ctx context.Context, sessionID, currentPlan,
 }
 
 // extractArchitectPlan reads the plan from the Claude CLI plan file and validates
-// that it contains the required ## Work Packages section.
+// that it contains content. It also runs a structural health check.
 func (a *Architect) extractArchitectPlan(result harness.RunResult) (RawPlan, harness.TokenUsage, string, error) {
 	content, err := ReadPlanFromRun(result)
 	if err != nil {
 		return RawPlan{}, harness.TokenUsage{}, "", fmt.Errorf("extract architect plan: %w", err)
 	}
-	if !strings.Contains(content, "## Work Packages") {
-		return RawPlan{}, harness.TokenUsage{}, "", fmt.Errorf("architect plan file missing '## Work Packages' section (got: %s)", truncateRaw(content, 100))
-	}
-	return RawPlan{Markdown: content}, result.Usage, result.SessionID, nil
+
+	warnings := CheckPlanHealth(content)
+
+	return RawPlan{Markdown: content, Warnings: warnings}, result.Usage, result.SessionID, nil
 }

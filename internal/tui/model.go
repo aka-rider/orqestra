@@ -34,6 +34,7 @@ const (
 	ContentCompletion                      // QA report, summary
 	ContentUserQuestion                    // MCP AskUserQuestion picker
 	ContentPlanDiff                        // line diff of last plan revision
+	ContentMergeConflict                   // post-run merge conflict resolution
 )
 
 // AgentRow tracks a single agent's status in the sidebar.
@@ -438,6 +439,11 @@ func (m Model) handlePipelineKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case OpenExternalEditorIntent:
 			return m, openExternalEditor(i.FilePath)
+		case AbortMergeIntent:
+			if m.decisions != nil {
+				m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionMergeAbort}
+			}
+			return m, nil
 		}
 	}
 	return m, cmd

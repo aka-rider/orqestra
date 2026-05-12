@@ -33,7 +33,7 @@ func (m *researcherMockRunner) RunStreaming(_ context.Context, _, _ string, _ io
 
 func TestResearcher_Research_Success(t *testing.T) {
 	sessionID := "test-researcher-success"
-	draft := "## Goal\nBuild something.\n\n## Context\nFound foo.go.\n\n## Draft Steps\n1. Edit foo.go\n\n## Draft Acceptance\n- Tests pass\n\n## Gotchas\nNone.\n\n## Risks\nNone."
+	draft := "## Goal\nBuild something.\n\n## Codebase Facts\n- foo.go exists, contains X\n\n## Constraints Discovered\n- None\n\n## Open Questions\n- None"
 	setupPlanFile(t, sessionID, draft)
 
 	mock := &researcherMockRunner{response: "saved", sessionID: sessionID}
@@ -47,8 +47,7 @@ func TestResearcher_Research_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Content starts with ## Goal → normalization prepends # Plan
-	expected := "# Plan\n\n" + draft
+	expected := draft
 	if plan.Markdown != expected {
 		t.Errorf("draft mismatch:\ngot:  %s\nwant: %s", plan.Markdown, expected)
 	}
@@ -84,7 +83,7 @@ func TestResearcher_ErrorWithoutSessionID(t *testing.T) {
 
 func TestResearcher_PlanFileExtraction(t *testing.T) {
 	sessionID := "researcher-extraction-session"
-	planMD := "## Goal\nRecovered draft.\n\n## Context\nFound stuff."
+	planMD := "## Goal\nRecovered draft.\n\n## Codebase Facts\nFound stuff."
 	setupPlanFile(t, sessionID, planMD)
 
 	mock := &researcherMockRunner{
@@ -98,9 +97,9 @@ func TestResearcher_PlanFileExtraction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected plan file extraction to succeed, got: %v", err)
 	}
-	// Content starts with ## Goal, normalization prepends # Plan
-	if !strings.HasPrefix(plan.Markdown, "# Plan\n\n## Goal") {
-		t.Errorf("expected normalized header, got: %s", plan.Markdown[:50])
+	// Content starts with ## Goal, normalization removed, so check directly.
+	if !strings.HasPrefix(plan.Markdown, "## Goal") {
+		t.Errorf("expected header, got: %s", truncateRaw(plan.Markdown, 50))
 	}
 	if sid != sessionID {
 		t.Errorf("session ID = %q, want %q", sid, sessionID)

@@ -87,4 +87,12 @@ var (
 	fpBorderStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("12"))
+
+	// Question (AskUserQuestion) styles
+	questionHintStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240")).
+				Faint(true)
+
+	questionGutterStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240"))
 )

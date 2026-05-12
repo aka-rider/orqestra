@@ -77,6 +77,9 @@ type PipelineScreen struct {
 	questionTextarea     textarea.Model // for freeform or inline custom text
 	hasQuestionTA        bool           // true when freeform textarea is active
 
+	// Merge conflict state
+	mergeConflict orchestrator.MergeConflictInfo
+
 	// UI state
 	configName    string
 	showDashboard bool
@@ -146,6 +149,13 @@ func (s *PipelineScreen) Reset() {
 	s.confirmNew = false
 	s.active = false
 	s.phase = ""
+	s.userQuestion = harness.MCPToolCall{}
+	s.questionCursor = 0
+	s.questionSelected = nil
+	s.questionCustom = nil
+	s.questionCustomActive = -1
+	s.hasQuestionTA = false
+	s.mergeConflict = orchestrator.MergeConflictInfo{}
 	s.contentVP.SetContent("")
 	s.sidebarVP.SetContent("")
 	s.dashboardVP.SetContent("")
@@ -322,6 +332,11 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 			s.hasQuestionTA = false
 		}
 
+	case orchestrator.EventMergeConflict:
+		s.mergeConflict = event.MergeConflict
+		s.content = ContentMergeConflict
+		s.contentVP.GotoTop()
+
 	case orchestrator.EventComplete:
 		s.content = ContentCompletion
 		s.active = false
@@ -404,6 +419,8 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		return s.handleCompletionKey(msg)
 	case ContentStreaming:
 		return s.handleStreamingKey(msg)
+	case ContentMergeConflict:
+		return s.handleMergeConflictKey(msg)
 	}
 	return s, nil
 }
@@ -874,10 +891,16 @@ func (s PipelineScreen) viewInputZone() string {
 		}
 		return status
 	case ContentUserQuestion:
+		if s.questionCustomActive >= 0 {
+			return keyStyle.Render(" [Tab/Enter] save context | [Esc] discard")
+		}
 		if s.hasQuestionTA {
 			return keyStyle.Render(" Type your answer, then [Enter] to submit | [Esc] skip")
 		}
-		return keyStyle.Render(" Select an option, then [Enter] to confirm | [Esc] skip")
+		if s.userQuestion.MultiSelect {
+			return keyStyle.Render(" [Space] toggle | [Tab] add context | [Enter] confirm | [Esc] skip")
+		}
+		return keyStyle.Render(" [Space] select | [Tab] add context | [Enter] confirm | [Esc] skip")
 	case ContentPlanReview:
 		if s.hasPlanComment {
 			return s.planComment.View() + "\n" +
@@ -886,6 +909,8 @@ func (s PipelineScreen) viewInputZone() string {
 		return keyStyle.Render(" [A] accept | [E] edit | [Ctrl+E] editor | [Enter] comment | [S] cancel")
 	case ContentPlanEdit:
 		return keyStyle.Render(" [Ctrl+S] save edits | [Esc] discard")
+	case ContentMergeConflict:
+		return keyStyle.Render(" [A] abort merge and keep worktree branch | [Esc] back to stream")
 	case ContentAgentHistory:
 		agentName := ""
 		if s.focusedAgent > 0 && s.focusedAgent <= len(s.agents) {
@@ -917,6 +942,8 @@ func (s PipelineScreen) viewContent(width int) string {
 		return s.viewAgentHistory(width)
 	case ContentCompletion:
 		return s.viewCompletion(width)
+	case ContentMergeConflict:
+		return s.viewMergeConflict(width)
 	}
 	return ""
 }
@@ -1009,9 +1036,18 @@ func (s PipelineScreen) viewUserQuestion(width int) string {
 
 		b.WriteString(fmt.Sprintf("%s%s%s", cursor, marker, label))
 		if opt.Hint != "" {
-			b.WriteString(fmt.Sprintf("  %s", dimStyle.Render(opt.Hint)))
+			b.WriteString(fmt.Sprintf("  %s", questionHintStyle.Render(opt.Hint)))
+		}
+		// Show custom text indicator if text was added for this option
+		if text, ok := s.questionCustom[i]; ok && text != "" && s.questionCustomActive != i {
+			b.WriteString(fmt.Sprintf("  %s", questionHintStyle.Render("✎ "+text)))
 		}
 		b.WriteString("\n")
+
+		// Render inline custom text editor when expanded for this option
+		if s.questionCustomActive == i {
+			b.WriteString(fmt.Sprintf("     %s %s\n", questionGutterStyle.Render("┊"), s.questionTextarea.View()))
+		}
 	}
 
 	return b.String()
@@ -1303,6 +1339,8 @@ func (s PipelineScreen) viewFooter() string {
 		return keyStyle.Render(" [Esc] return to plan                                        [?] help  [^C^C] quit")
 	case ContentPlanEdit:
 		return keyStyle.Render(" [Ctrl+S] save edits | [Esc] discard                       [?] help  [^C^C] quit")
+	case ContentMergeConflict:
+		return keyStyle.Render(" [A] abort merge | [Esc] continue                           [?] help  [^C^C] quit")
 	case ContentAgentHistory:
 		return keyStyle.Render(" [Esc] back to live                                        [?] help  [D] expand  [S] stop  [N] new  [^C^C] quit")
 	case ContentCompletion:
@@ -1335,6 +1373,44 @@ func renderActivityLog(activities []orchestrator.Activity, width int) string {
 		}
 		b.WriteString("\n")
 	}
+	return b.String()
+}
+
+func (s PipelineScreen) handleMergeConflictKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
+	switch msg.String() {
+	case "a", "A":
+		s.content = ContentStreaming
+		s.SyncViewports()
+		s.PendingIntent = AbortMergeIntent{}
+		return s, nil
+	}
+	switch msg.Code {
+	case tea.KeyEscape:
+		s.content = ContentStreaming
+		s.SyncViewports()
+		return s, nil
+	}
+	return s, nil
+}
+
+func (s PipelineScreen) viewMergeConflict(width int) string {
+	var b strings.Builder
+	b.WriteString(warnStyle.Render(" Merge Conflict"))
+	b.WriteString("\n")
+	b.WriteString(dividerStyle.Render(strings.Repeat("─", max(1, width-constContentInset))))
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf(" The worktree branch %s has conflicts with %s.\n\n",
+		goalStyle.Render(s.mergeConflict.WorktreeBranch),
+		goalStyle.Render(s.mergeConflict.TargetBranch)))
+	b.WriteString(" Conflicting files:\n")
+	for _, f := range s.mergeConflict.ConflictFiles {
+		b.WriteString(fmt.Sprintf("   %s %s\n", errorStyle.Render("✗"), f))
+	}
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render(fmt.Sprintf(" The worktree branch %q is preserved.\n", s.mergeConflict.WorktreeBranch)))
+	b.WriteString(dimStyle.Render(" Resolve manually: git merge " + s.mergeConflict.WorktreeBranch + "\n"))
+	b.WriteString("\n")
+	b.WriteString(keyStyle.Render(" [A] abort (keep branch for manual merge)   [Esc] continue"))
 	return b.String()
 }
 

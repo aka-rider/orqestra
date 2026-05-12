@@ -46,7 +46,7 @@ func TestArchitect_Refine_Success(t *testing.T) {
 	}
 
 	p := NewArchitect(mock, cfg)
-	plan, _, sid, err := p.Refine(context.Background(), "some researcher draft")
+	plan, _, sid, err := p.Refine(context.Background(), "user prompt", PromptBrief{Task: "test"}, "some researcher draft")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -58,16 +58,16 @@ func TestArchitect_Refine_Success(t *testing.T) {
 	}
 }
 
-func TestArchitect_Refine_MissingWorkPackages(t *testing.T) {
-	sessionID := "test-no-wp"
-	setupPlanFile(t, sessionID, "# Plan\n\n## Goal\nDo something")
+func TestArchitect_Refine_EmptyPlan(t *testing.T) {
+	sessionID := "test-empty-plan"
+	setupPlanFile(t, sessionID, "   \n  \t  ")
 
 	mock := &architectMockCLIRunner{response: "done", sessionID: sessionID}
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
-	_, _, _, err := p.Refine(context.Background(), "draft")
+	_, _, _, err := p.Refine(context.Background(), "prompt", PromptBrief{}, "draft")
 	if err == nil {
-		t.Fatal("expected error for missing '## Work Packages' section")
+		t.Fatal("expected error for empty plan file")
 	}
 }
 
@@ -76,7 +76,7 @@ func TestArchitect_Refine_CLIError(t *testing.T) {
 
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
-	_, _, _, err := p.Refine(context.Background(), "draft")
+	_, _, _, err := p.Refine(context.Background(), "prompt", PromptBrief{}, "draft")
 	if err == nil {
 		t.Fatal("expected error propagation from CLI")
 	}
@@ -104,7 +104,7 @@ func TestArchitect_ErrorWithoutSessionID(t *testing.T) {
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
 
-	_, _, _, err := p.Refine(context.Background(), "draft")
+	_, _, _, err := p.Refine(context.Background(), "prompt", PromptBrief{}, "draft")
 	if err == nil {
 		t.Fatal("expected error when no session ID is present")
 	}
@@ -124,7 +124,7 @@ func TestArchitect_ErrorWithMissingJSONL(t *testing.T) {
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
 
-	_, _, _, err := p.Refine(context.Background(), "draft")
+	_, _, _, err := p.Refine(context.Background(), "prompt", PromptBrief{}, "draft")
 	if err == nil {
 		t.Fatal("expected error when JSONL is missing")
 	}
@@ -143,7 +143,7 @@ func TestArchitect_PlanFileExtraction(t *testing.T) {
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
 
-	plan, _, sid, err := p.Refine(context.Background(), "draft")
+	plan, _, sid, err := p.Refine(context.Background(), "prompt", PromptBrief{}, "draft")
 	if err != nil {
 		t.Fatalf("expected plan file extraction to succeed, got: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestArchitect_RejectsOutOfBoundsPath(t *testing.T) {
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
 
-	_, _, _, err := p.Refine(context.Background(), "draft")
+	_, _, _, err := p.Refine(context.Background(), "prompt", PromptBrief{}, "draft")
 	if err == nil {
 		t.Fatal("expected error for out-of-bounds plan file path")
 	}
@@ -211,22 +211,4 @@ func setupOutOfBoundsPlanFile(t *testing.T, home, sessionID string) string {
 	}
 
 	return evilFile
-}
-
-func TestArchitect_PlanFileNormalization(t *testing.T) {
-	sessionID := "test-normalize"
-	// Plan starts with ## Goal but no # Plan — normalization should prepend
-	setupPlanFile(t, sessionID, "## Goal\nBuild a thing.\n\n## Work Packages\n\n### 1. Do")
-
-	mock := &architectMockCLIRunner{response: "done", sessionID: sessionID}
-	cfg := config.ArchitectConfig{Model: "test"}
-	p := NewArchitect(mock, cfg)
-
-	plan, _, _, err := p.Refine(context.Background(), "draft")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.HasPrefix(plan.Markdown, "# Plan\n\n## Goal") {
-		t.Errorf("expected normalized plan header, got: %s", plan.Markdown[:50])
-	}
 }

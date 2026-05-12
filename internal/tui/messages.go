@@ -114,3 +114,8 @@ type SubmitQuestionAnswerIntent struct {
 }
 
 func (SubmitQuestionAnswerIntent) isIntent() {}
+
+// AbortMergeIntent aborts the post-run merge (user chose not to resolve conflicts).
+type AbortMergeIntent struct{}
+
+func (AbortMergeIntent) isIntent() {}

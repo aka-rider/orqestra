@@ -15,6 +15,7 @@ import (
 type Config struct {
 	RepoPath     string            // absolute path to the repository root, mandatory
 	SessionPath  string            // absolute path to the session directory (optional; if empty, repo is the sole workspace)
+	WorktreePath string            // absolute path to the git worktree (optional; always read+write; main repo stays read-only when set)
 	RepoWritable bool              // if false, repo root is read-only; session root is always read+write
 	Profiles     []Snapshot        // tool snapshots from detect package
 	HarnessEnv   []string          // exact key=value env from harness (e.g. ANTHROPIC_BASE_URL=...)
@@ -24,10 +25,11 @@ type Config struct {
 
 // Sandbox wraps sandbox-exec execution with an SBPL profile.
 type Sandbox struct {
-	sbplPath    string   // pre-compiled SBPL profile stored in a chmod 0400 temp file
-	env         []string // pre-compiled scrubbed environment
-	repoPath    string   // resolved repo root
-	sessionPath string   // resolved session root (may be empty for legacy single-workspace)
+	sbplPath     string   // pre-compiled SBPL profile stored in a chmod 0400 temp file
+	env          []string // pre-compiled scrubbed environment
+	repoPath     string   // resolved repo root
+	sessionPath  string   // resolved session root (may be empty for legacy single-workspace)
+	worktreePath string   // resolved worktree root (may be empty when no worktree is used)
 }
 
 // New creates a Sandbox after validating configuration and compiling the SBPL profile.
@@ -77,6 +79,26 @@ func New(cfg Config) (*Sandbox, error) {
 		}
 	}
 
+	// Resolve worktree path if provided.
+	var absWorktree string
+	if cfg.WorktreePath != "" {
+		absWorktree, err = filepath.Abs(cfg.WorktreePath)
+		if err != nil {
+			return nil, fmt.Errorf("seatbelt: resolve worktree path: %w", err)
+		}
+		absWorktree, err = filepath.EvalSymlinks(absWorktree)
+		if err != nil {
+			return nil, fmt.Errorf("seatbelt: resolve worktree symlinks: %w", err)
+		}
+		wtInfo, wtErr := os.Stat(absWorktree)
+		if wtErr != nil {
+			return nil, fmt.Errorf("seatbelt: worktree %q: %w", absWorktree, wtErr)
+		}
+		if !wtInfo.IsDir() {
+			return nil, fmt.Errorf("seatbelt: worktree %q is not a directory", absWorktree)
+		}
+	}
+
 	// Verify sandbox-exec is available
 	if _, err := exec.LookPath("sandbox-exec"); err != nil {
 		return nil, fmt.Errorf("seatbelt: sandbox-exec not found in PATH: %w", err)
@@ -103,6 +125,9 @@ func New(cfg Config) (*Sandbox, error) {
 	builder.RepoWritable = cfg.RepoWritable
 	if absSession != "" {
 		builder.SessionPath = &Path{Resolved: absSession, IsDir: true}
+	}
+	if absWorktree != "" {
+		builder.WorktreePath = &Path{Resolved: absWorktree, IsDir: true}
 	}
 	for _, snap := range cfg.Profiles {
 		builder.Add(snap)
@@ -144,10 +169,11 @@ func New(cfg Config) (*Sandbox, error) {
 	}
 
 	return &Sandbox{
-		sbplPath:    sbplPath,
-		env:         env,
-		repoPath:    absRepo,
-		sessionPath: absSession,
+		sbplPath:     sbplPath,
+		env:          env,
+		repoPath:     absRepo,
+		sessionPath:  absSession,
+		worktreePath: absWorktree,
 	}, nil
 }
 
@@ -203,9 +229,13 @@ func (s *Sandbox) Wrap(cmd *exec.Cmd) error {
 	cmd.Path = "/bin/sh"
 	cmd.Args = newArgs
 
-	// Set working directory to workspace
+	// Set working directory: worktree takes precedence over repo root
 	if cmd.Dir == "" {
-		cmd.Dir = s.repoPath
+		if s.worktreePath != "" {
+			cmd.Dir = s.worktreePath
+		} else {
+			cmd.Dir = s.repoPath
+		}
 	}
 
 	return nil

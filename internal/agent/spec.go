@@ -9,6 +9,7 @@ import (
 // RawPlan is the new pipeline's plan type: raw markdown, no parsing.
 type RawPlan struct {
 	Markdown string
+	Warnings []string
 }
 
 // IsNewFormat returns true if the markdown starts with "# Plan" — the new format.

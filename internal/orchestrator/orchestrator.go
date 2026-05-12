@@ -14,6 +14,7 @@ import (
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/plan"
+	"github.com/xiii/orqestra/internal/worktree"
 )
 
 // stepMeta is the per-agent metadata persisted as JSON in the session directory.
@@ -134,6 +135,7 @@ const (
 	EventRunDirReady  // emitted once after session dir is created
 	EventChatResponse // emitted when architect answers without revising the plan
 	EventUserQuestion // emitted when an agent asks the user a question via MCP
+	EventMergeConflict // emitted when the post-run merge has conflicts
 )
 
 // Phase represents the current pipeline phase.
@@ -163,6 +165,7 @@ type GateRequest struct {
 	FinalPlanMarkdown string // for GatePlanApproval
 	PlanFilePath      string // absolute path to plan.md on disk (for external editor)
 	PlanDiff          string // unified diff from git micro-repo (empty if no history)
+	PlanWarnings      []string
 }
 
 // DecisionType classifies user decisions at gates.
@@ -173,8 +176,16 @@ const (
 	DecisionEdit
 	DecisionSkip
 	DecisionCancel
-	DecisionComment // comment-only refinement at plan gate
+	DecisionComment      // comment-only refinement at plan gate
+	DecisionMergeAbort   // abort the post-run merge, keep the worktree branch
 )
+
+// MergeConflictInfo is carried by EventMergeConflict.
+type MergeConflictInfo struct {
+	WorktreeBranch string   // branch that was merged (for display)
+	TargetBranch   string   // branch that received the merge
+	ConflictFiles  []string // list of conflicting files
+}
 
 // Decision is sent from TUI to pipeline at gates.
 type Decision struct {
@@ -209,6 +220,9 @@ type Event struct {
 
 	// UserQuestion is set on EventUserQuestion.
 	UserQuestion harness.MCPToolCall
+
+	// MergeConflict is set on EventMergeConflict.
+	MergeConflict MergeConflictInfo
 }
 
 // Input is the user's request to the orchestrator.
@@ -249,10 +263,14 @@ type Runners struct {
 
 // Engine is the hardcoded Go orchestrator that runs the full pipeline.
 type Engine struct {
-	Config         *config.Config
-	Runners        Runners
-	RunDirFactory  RunDirFactory
-	QuestionBridge *harness.QuestionBridge
+	Config                *config.Config
+	Runners               Runners
+	RunDirFactory         RunDirFactory
+	QuestionBridge        *harness.QuestionBridge
+	// WorktreeRunnerFactory, when set, is called just before the worker phase to
+	// create a ContinuableRunner scoped to the worktree at the given path.
+	// If nil, the default Runners.Worker is used with repo write access.
+	WorktreeRunnerFactory func(worktreePath string) harness.ContinuableRunner
 }
 
 // RunChannels provides bidirectional communication between Engine and TUI.
@@ -358,10 +376,12 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 	}
 
 	// --- Gateway Evaluation ---
-	var architectInput string
+	var researcherInput string
+	var gwBrief agent.PromptBrief
 
 	if input.SkipGateway {
-		architectInput = input.Prompt
+		researcherInput = input.Prompt
+		gwBrief = agent.PromptBrief{Task: "User request (gateway skipped)"}
 	} else if e.Runners.Gateway != nil {
 		emit(Event{Type: EventPhaseChange, Phase: PhaseGateway})
 		emit(Event{Type: EventAgentStarted, AgentID: "gateway"})
@@ -395,12 +415,16 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		})
 		emit(Event{Type: EventAgentDone, AgentID: "gateway",
 			InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens})
-		architectInput = buildArchitectInput(input.Prompt, gwResult.Brief)
+
+		gwBrief = gwResult.Brief
+		researcherInput = buildResearcherInput(input.Prompt, gwResult.Brief)
 	} else {
-		architectInput = input.Prompt
+		researcherInput = input.Prompt
+		gwBrief = agent.PromptBrief{Task: "User request (gateway not configured)"}
 	}
 
 	var finalPlanMarkdown string
+	var finalPlanWarnings []string
 	var planSessionID string // function scope — survives across gate loop iterations
 	architect := agent.NewArchitect(e.Runners.Architect, e.Config.Architect)
 
@@ -444,7 +468,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		var researchSessionID string
 		var err error
 		for attempt := 1; attempt <= researchAttempts; attempt++ {
-			draft, draftUsage, researchSessionID, err = researcher.ResearchStreaming(ctx, architectInput, &streamWriter{buf: stream})
+			draft, draftUsage, researchSessionID, err = researcher.ResearchStreaming(ctx, researcherInput, &streamWriter{buf: stream})
 			if err == nil {
 				break
 			}
@@ -490,7 +514,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		var planErr error
 		for attempt := 1; attempt <= architectAttempts; attempt++ {
 			var sid string
-			planResult, planUsage, sid, planErr = architect.RefineStreaming(ctx, draft.Markdown, &streamWriter{buf: stream})
+			planResult, planUsage, sid, planErr = architect.RefineStreaming(ctx, input.Prompt, gwBrief, draft.Markdown, &streamWriter{buf: stream})
 			if planErr == nil {
 				planSessionID = sid
 				break
@@ -518,6 +542,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		emit(Event{Type: EventAgentDone, AgentID: "architect",
 			InputTokens: planUsage.InputTokens, OutputTokens: planUsage.OutputTokens})
 
+		finalPlanWarnings = planResult.Warnings
 		finalPlanMarkdown = planResult.Markdown
 		if planRepo != nil {
 			if err := planRepo.Commit(finalPlanMarkdown, "initial plan from architect"); err != nil {
@@ -546,6 +571,7 @@ planGate:
 				FinalPlanMarkdown: finalPlanMarkdown,
 				PlanFilePath:      session.ArtifactPath("final_plan.md"),
 				PlanDiff:          planDiff,
+				PlanWarnings:      finalPlanWarnings,
 			}})
 
 			select {
@@ -555,13 +581,9 @@ planGate:
 					emit(Event{Type: EventComplete, Phase: PhaseDone})
 					return
 				case DecisionEdit:
-					// Basic sanity check on edited content
 					edited := strings.TrimSpace(decision.EditedContent)
-					if !strings.HasPrefix(edited, "# Plan") {
-						emit(Event{Type: EventError, Err: fmt.Errorf("edited plan must start with '# Plan'")})
-						return
-					}
 					finalPlanMarkdown = edited
+					finalPlanWarnings = agent.CheckPlanHealth(edited)
 					if planRepo != nil {
 						if err := planRepo.Commit(edited, "manual edit"); err != nil {
 							slog.Warn("plan commit failed", "err", err)
@@ -616,6 +638,7 @@ planGate:
 
 					if revisedPlan != nil {
 						finalPlanMarkdown = revisedPlan.Markdown
+						finalPlanWarnings = revisedPlan.Warnings
 						if planRepo != nil {
 							msg := commitMsg("revision", decision.Comment)
 							if commitErr := planRepo.Commit(finalPlanMarkdown, msg); commitErr != nil {
@@ -657,9 +680,39 @@ planGate:
 	stream.SetAgent("worker")
 	workerStart := time.Now()
 
+	// Determine which branch to merge back into after the run.
+	repoPath, _ := os.Getwd()
+	targetBranch, branchErr := worktree.CurrentBranch(ctx, repoPath)
+	if branchErr != nil {
+		slog.Warn("cannot determine current branch — worktree isolation disabled", "err", branchErr)
+	}
+
+	// Create an isolated git worktree for the worker when possible.
+	var wt worktree.Worktree
+	var wtErr error
+	workerRunner := e.Runners.Worker
+
+	if session.Path != "" && targetBranch != "" && e.WorktreeRunnerFactory != nil {
+		runID := fmt.Sprintf("%d", workerStart.UnixMilli())
+		wt, wtErr = worktree.Create(ctx, repoPath, session.Path, runID)
+		if wtErr != nil {
+			slog.Warn("worktree creation failed — falling back to writable repo", "err", wtErr)
+			wt = worktree.Worktree{} // zero value = no worktree
+		} else {
+			workerRunner = e.WorktreeRunnerFactory(wt.Path)
+		}
+	}
+
 	execPrompt := agent.BuildExecutionPromptFromPlan(finalPlanMarkdown)
-	workResult, execErr := e.Runners.Worker.RunStreaming(ctx, execPrompt, "", &streamWriter{buf: stream})
+	workResult, execErr := workerRunner.RunStreaming(ctx, execPrompt, "", &streamWriter{buf: stream})
+
+	// Clean up worktree on failure or cancellation.
 	if execErr != nil {
+		if wt.Path != "" {
+			if rmErr := wt.Remove(context.Background(), true); rmErr != nil {
+				slog.Warn("worktree cleanup failed", "err", rmErr)
+			}
+		}
 		writeArtifactJSON(session, "worker_meta.json", stepMeta{
 			AgentID: "worker", ModelRef: e.Config.Worker.Model, StartTime: workerStart, EndTime: time.Now(),
 			Status: "failed", Error: execErr.Error(),
@@ -693,7 +746,7 @@ planGate:
 	validationPrompt := agent.WorkerValidationPrompt(retryBudget)
 
 	if workResult.SessionID != "" {
-		valResult, valErr := e.Runners.Worker.RunContinue(ctx, workResult.SessionID, validationPrompt, &streamWriter{buf: stream})
+		valResult, valErr := workerRunner.RunContinue(ctx, workResult.SessionID, validationPrompt, &streamWriter{buf: stream})
 		if valErr != nil {
 			slog.Warn("worker self-validation failed", "err", valErr)
 			writeArtifactJSON(session, "validator_meta.json", stepMeta{
@@ -715,7 +768,7 @@ planGate:
 	} else {
 		slog.Warn("no session ID from worker — attempting disconnected validation")
 		// Fallback: run validation as a new session (less effective but still useful)
-		valResult, valErr := e.Runners.Worker.RunStreaming(ctx, validationPrompt, "", &streamWriter{buf: stream})
+		valResult, valErr := workerRunner.RunStreaming(ctx, validationPrompt, "", &streamWriter{buf: stream})
 		if valErr != nil {
 			slog.Warn("disconnected validation failed", "err", valErr)
 			writeArtifactJSON(session, "validator_meta.json", stepMeta{
@@ -743,6 +796,49 @@ planGate:
 		status = StatusFailed
 	}
 
+	// --- Post-run worktree commit + merge ---
+	if wt.Path != "" {
+		commitMsg := fmt.Sprintf("feat: Orqestra automated run (%s)", wt.Branch)
+		committed, commitErr := wt.CommitAll(ctx, commitMsg)
+		if commitErr != nil {
+			slog.Warn("worktree commit failed — skipping merge", "err", commitErr)
+		} else if !committed {
+			slog.Info("worktree: nothing to commit — merge skipped")
+		}
+
+		if committed && commitErr == nil {
+			mergeResult, mergeErr := wt.MergeInto(ctx, targetBranch)
+			if mergeErr != nil {
+				slog.Warn("worktree merge failed", "err", mergeErr)
+				// Non-fatal: leave worktree branch intact for manual resolution
+			} else if !mergeResult.Merged {
+				// Conflicts — gate the user
+				emit(Event{
+					Type: EventMergeConflict,
+					MergeConflict: MergeConflictInfo{
+						WorktreeBranch: wt.Branch,
+						TargetBranch:   targetBranch,
+						ConflictFiles:  mergeResult.ConflictFiles,
+					},
+				})
+				select {
+				case decision := <-decisions:
+					if decision.Type == DecisionMergeAbort {
+						slog.Info("merge aborted by user", "branch", wt.Branch)
+					}
+					// Any other decision: user resolved externally or accepted abort
+				case <-ctx.Done():
+					// Context cancelled — leave worktree branch as-is
+				}
+			}
+		}
+
+		// Remove the worktree directory regardless of merge outcome
+		if rmErr := wt.Remove(context.Background(), true); rmErr != nil {
+			slog.Warn("worktree cleanup failed", "err", rmErr)
+		}
+	}
+
 	// --- Completion ---
 	emit(Event{Type: EventPhaseChange, Phase: PhaseDone})
 	emit(Event{Type: EventComplete, Phase: PhaseDone,
@@ -753,9 +849,9 @@ planGate:
 	})
 }
 
-// buildArchitectInput constructs the architect prompt from the raw user prompt and
+// buildResearcherInput constructs the researcher prompt from the raw user prompt and
 // gateway brief.
-func buildArchitectInput(rawPrompt string, brief agent.PromptBrief) string {
+func buildResearcherInput(rawPrompt string, brief agent.PromptBrief) string {
 	var b strings.Builder
 	b.WriteString(rawPrompt)
 	if brief.EndState != "" {

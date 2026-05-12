@@ -87,22 +87,6 @@ func TestReadPlanFromRun_MissingJSONL(t *testing.T) {
 	}
 }
 
-func TestReadPlanFromRun_NormalizesHeader(t *testing.T) {
-	sessionID := "test-normalize"
-	// Content starts with ## Goal but no # Plan — should be auto-prepended
-	planContent := "## Goal\nDo something.\n\n## Context\nStuff."
-	setupPlanFile(t, sessionID, planContent)
-
-	result := harness.RunResult{SessionID: sessionID}
-	content, err := ReadPlanFromRun(result)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	expected := "# Plan\n\n## Goal\nDo something.\n\n## Context\nStuff."
-	if content != expected {
-		t.Errorf("normalization mismatch:\ngot:  %q\nwant: %q", content, expected)
-	}
-}
 
 func TestReadPlanFromRun_SecurityGate(t *testing.T) {
 	tmp := t.TempDir()
@@ -186,24 +170,3 @@ func TestReadPlanFromRun_UsesStreamPlanFilePath(t *testing.T) {
 	}
 }
 
-func TestNormalizePlanHeader(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"already has Plan header", "# Plan\n\n## Goal\nFoo.", "# Plan\n\n## Goal\nFoo."},
-		{"starts with Goal", "## Goal\nFoo.", "# Plan\n\n## Goal\nFoo."},
-		{"starts with Context", "## Context\nFoo.", "# Plan\n\n## Context\nFoo."},
-		{"other content", "Hello world.", "Hello world."},
-		{"whitespace trimmed", "  \n# Plan\n\n## Goal\nFoo.\n  ", "# Plan\n\n## Goal\nFoo."},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := normalizePlanHeader(tt.in)
-			if got != tt.want {
-				t.Errorf("got %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
