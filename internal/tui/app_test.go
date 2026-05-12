@@ -11,7 +11,6 @@ import (
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
-	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/orchestrator"
@@ -152,110 +151,6 @@ func TestTUI_PromptEmptyIgnored(t *testing.T) {
 
 	if model.state != StatePrompt {
 		t.Error("expected to stay in StatePrompt with empty prompt")
-	}
-}
-
-func TestTUI_CoachingRender(t *testing.T) {
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentStreaming
-	m.events = make(chan orchestrator.Event, 1) // need a channel for waitForEvent
-
-	// Simulate receiving a coaching gate event
-	event := orchestrator.Event{
-		Type: orchestrator.EventGateRequest,
-		Gate: orchestrator.GateRequest{
-			Type: orchestrator.GateGatewayCoach,
-			GatewayResult: agent.GatewayResult{
-				Verdict: agent.GatewayVerdictCoach,
-				Brief:   agent.PromptBrief{Task: "Improve auth module"},
-				Questions: []agent.Question{
-					{Text: "Which part?", Options: []string{"login", "signup"}, Default: "login"},
-				},
-			},
-		},
-	}
-
-	m.pipelineScreen.ApplyEvent(event, m.width)
-
-	if m.pipelineScreen.content != ContentCoaching {
-		t.Errorf("expected ContentCoaching, got %d", m.pipelineScreen.content)
-	}
-	if len(m.pipelineScreen.answerFields) != 1 {
-		t.Fatalf("expected 1 answer field, got %d", len(m.pipelineScreen.answerFields))
-	}
-	if m.pipelineScreen.answerFields[0].Value() != "login" {
-		t.Errorf("expected default 'login', got %q", m.pipelineScreen.answerFields[0].Value())
-	}
-}
-
-func TestTUI_CoachingSubmit(t *testing.T) {
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentCoaching
-	decisions := make(chan orchestrator.Decision, 1)
-	m.decisions = decisions
-	m.pipelineScreen.gatewayResult = agent.GatewayResult{
-		Questions: []agent.Question{
-			{Text: "Which part?", Options: []string{"a", "b"}, Default: "a"},
-		},
-	}
-
-	// Create answer field with value
-	m.pipelineScreen.answerFields = makeAnswerFields(m.pipelineScreen.gatewayResult.Questions, m.effectiveWidth())
-	m.pipelineScreen.answerFields[0].SetValue("module b")
-	m.pipelineScreen.answerCursor = 0
-
-	// Press Enter to submit
-	result, _ := sendKey(m, tea.KeyEnter)
-	model := result.(Model)
-
-	if model.pipelineScreen.content != ContentStreaming {
-		t.Errorf("expected ContentStreaming after submit, got %d", model.pipelineScreen.content)
-	}
-
-	// Check decision was sent
-	select {
-	case d := <-decisions:
-		if d.Type != orchestrator.DecisionApprove {
-			t.Errorf("expected DecisionApprove, got %d", d.Type)
-		}
-		if len(d.GatewayAnswers) != 1 || d.GatewayAnswers[0].Answer != "module b" {
-			t.Errorf("unexpected answers: %+v", d.GatewayAnswers)
-		}
-	default:
-		t.Error("expected decision to be sent")
-	}
-}
-
-func TestTUI_CoachingSkip(t *testing.T) {
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentCoaching
-	decisions := make(chan orchestrator.Decision, 1)
-	m.decisions = decisions
-	m.pipelineScreen.gatewayResult = agent.GatewayResult{
-		Questions: []agent.Question{
-			{Text: "Q1?", Options: []string{"a"}, Default: "a"},
-		},
-	}
-	m.pipelineScreen.answerFields = makeAnswerFields(m.pipelineScreen.gatewayResult.Questions, m.effectiveWidth())
-	m.pipelineScreen.answerCursor = 0
-
-	result, _ := sendCtrl(m, 's')
-	model := result.(Model)
-
-	if model.pipelineScreen.content != ContentStreaming {
-		t.Errorf("expected ContentStreaming after skip, got %d", model.pipelineScreen.content)
-	}
-
-	select {
-	case d := <-decisions:
-		if d.Type != orchestrator.DecisionSkip {
-			t.Errorf("expected DecisionSkip, got %d", d.Type)
-		}
-	default:
-		t.Error("expected skip decision")
 	}
 }
 
@@ -588,25 +483,6 @@ func TestTUI_CompletionValidation(t *testing.T) {
 	if !m.pipelineScreen.hasValidation {
 		t.Error("expected hasValidation=true")
 	}
-}
-
-// makeAnswerFields creates textarea answer fields from questions (helper for tests).
-func makeAnswerFields(questions []agent.Question, width int) []textarea.Model {
-	fields := make([]textarea.Model, len(questions))
-	for i, q := range questions {
-		ta := textarea.New()
-		ta.SetWidth(width - 10)
-		ta.SetHeight(1)
-		ta.CharLimit = 512
-		if q.Default != "" {
-			ta.SetValue(q.Default)
-		}
-		if i == 0 {
-			ta.Focus()
-		}
-		fields[i] = ta
-	}
-	return fields
 }
 
 func TestTUI_PgUpPgDown(t *testing.T) {

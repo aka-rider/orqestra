@@ -176,18 +176,11 @@ const (
 	DecisionComment // comment-only refinement at plan gate
 )
 
-// GatewayAnswer holds a user's response to a coaching question.
-type GatewayAnswer struct {
-	QuestionIndex int
-	Answer        string
-}
-
 // Decision is sent from TUI to pipeline at gates.
 type Decision struct {
-	Type           DecisionType
-	GatewayAnswers []GatewayAnswer
-	EditedContent  string
-	Comment        string // for DecisionComment
+	Type          DecisionType
+	EditedContent string
+	Comment       string // for DecisionComment
 }
 
 // Event is emitted by the orchestrator to notify the TUI of progress.

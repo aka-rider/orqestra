@@ -2,6 +2,7 @@ package tui
 
 import (
 	"image"
+	"strings"
 
 	"charm.land/lipgloss/v2"
 )
@@ -41,6 +42,33 @@ type layoutBounds struct {
 	content  image.Rectangle
 	sidebar  image.Rectangle
 	textarea image.Rectangle
+}
+
+// renderPrefixedText hard-wraps text into the available width, applying style
+// per segment. The first segment is prefixed with prefix; continuations are
+// indented by the same number of spaces. Wrapping is done on raw bytes before
+// any ANSI escape codes are injected, so style is applied per-segment.
+func renderPrefixedText(style lipgloss.Style, prefix, text string, maxW int) string {
+	wrapW := max(1, maxW-len(prefix))
+	indent := strings.Repeat(" ", len(prefix))
+	var b strings.Builder
+	for i, rawLine := range strings.Split(text, "\n") {
+		cur := prefix
+		if i > 0 {
+			cur = indent
+		}
+		for len(rawLine) > wrapW {
+			b.WriteString(cur)
+			b.WriteString(style.Render(rawLine[:wrapW]))
+			b.WriteString("\n")
+			rawLine = rawLine[wrapW:]
+			cur = indent
+		}
+		b.WriteString(cur)
+		b.WriteString(style.Render(rawLine))
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // joinSplitView composes left and right panes with a border separator.

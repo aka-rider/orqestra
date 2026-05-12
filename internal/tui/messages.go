@@ -43,18 +43,6 @@ type CancelPipelineIntent struct{}
 
 func (CancelPipelineIntent) isIntent() {}
 
-// SubmitGatewayIntent submits the user's answers to gateway coaching questions.
-type SubmitGatewayIntent struct {
-	Answers []orchestrator.GatewayAnswer
-}
-
-func (SubmitGatewayIntent) isIntent() {}
-
-// SkipGatewayIntent skips the gateway coaching step entirely.
-type SkipGatewayIntent struct{}
-
-func (SkipGatewayIntent) isIntent() {}
-
 // ApprovePlanIntent approves the current plan to proceed with execution.
 type ApprovePlanIntent struct{}
 

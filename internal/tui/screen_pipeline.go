@@ -11,7 +11,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
-	"github.com/xiii/orqestra/internal/agent"
+	"charm.land/lipgloss/v2"
 	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
@@ -34,7 +34,6 @@ type PipelineScreen struct {
 	agents []AgentRow
 
 	// Content state
-	gatewayResult    agent.GatewayResult
 	finalPlan        string
 	hasPlan          bool
 	workerValidation string
@@ -43,10 +42,6 @@ type PipelineScreen struct {
 
 	// Streaming output — shared buffer polled on tick
 	streamBuf *orchestrator.StreamBuffer
-
-	// Coaching input
-	answerFields []textarea.Model
-	answerCursor int
 
 	// Plan edit state
 	planEditor    textarea.Model
@@ -74,11 +69,13 @@ type PipelineScreen struct {
 	awaitingPlanDecision bool
 
 	// User question state (MCP AskUserQuestion bridge)
-	userQuestion     harness.MCPToolCall
-	questionCursor   int
-	questionSelected map[int]bool   // for multi-select
-	questionTextarea textarea.Model // for freeform or custom text
-	hasQuestionTA    bool           // true when freeform textarea is active
+	userQuestion         harness.MCPToolCall
+	questionCursor       int
+	questionSelected     map[int]bool   // for multi-select
+	questionCustom       map[int]string // per-option custom context text
+	questionCustomActive int            // index of option with custom input open, -1 = none
+	questionTextarea     textarea.Model // for freeform or inline custom text
+	hasQuestionTA        bool           // true when freeform textarea is active
 
 	// UI state
 	configName    string
@@ -126,14 +123,11 @@ func (s *PipelineScreen) Start(goal string) {
 func (s *PipelineScreen) Reset() {
 	s.agents = nil
 	s.lastErr = nil
-	s.gatewayResult = agent.GatewayResult{}
 	s.finalPlan = ""
 	s.hasPlan = false
 	s.workerValidation = ""
 	s.hasValidation = false
 	s.streamBuf = nil
-	s.answerFields = nil
-	s.answerCursor = 0
 	s.hasPlanEditor = false
 	s.hasPlanComment = false
 	s.editorRunning = false
@@ -259,26 +253,6 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 	case orchestrator.EventGateRequest:
 		s.contentVP.GotoTop()
 		switch event.Gate.Type {
-		case orchestrator.GateGatewayCoach:
-			s.content = ContentCoaching
-			s.gatewayResult = event.Gate.GatewayResult
-			contentWidth := max(1, int(float64(width)*splitRatio))
-			s.answerFields = make([]textarea.Model, len(s.gatewayResult.Questions))
-			for i, q := range s.gatewayResult.Questions {
-				ta := textarea.New()
-				ta.SetWidth(max(1, contentWidth-4))
-				ta.SetHeight(1)
-				ta.CharLimit = 512
-				if q.Default != "" {
-					ta.SetValue(q.Default)
-				}
-				if i == 0 {
-					ta.Focus()
-				}
-				s.answerFields[i] = ta
-			}
-			s.answerCursor = 0
-
 		case orchestrator.GatePlanApproval:
 			s.planDiff = event.Gate.PlanDiff
 			s.diffViewport.SetContent(s.planDiff)
@@ -330,6 +304,8 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 		s.userQuestion = event.UserQuestion
 		s.questionCursor = 0
 		s.questionSelected = make(map[int]bool)
+		s.questionCustom = make(map[int]string)
+		s.questionCustomActive = -1
 		s.contentVP.GotoTop()
 		if len(event.UserQuestion.Options) == 0 {
 			// Freeform mode
@@ -366,7 +342,7 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		s.SyncViewports()
 		return s, nil
 	case "d", "D":
-		if s.content != ContentCoaching && s.content != ContentPlanEdit && s.content != ContentPlanReview && s.content != ContentPlanDiff && s.content != ContentUserQuestion {
+		if s.content != ContentPlanEdit && s.content != ContentPlanReview && s.content != ContentPlanDiff && s.content != ContentUserQuestion {
 			s.showDashboard = !s.showDashboard
 			s.SyncViewports()
 			return s, nil
@@ -402,7 +378,7 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	}
 
 	// Number keys for agent navigation (1-9)
-	if msg.String() >= "1" && msg.String() <= "9" && s.content != ContentCoaching && s.content != ContentPlanEdit && s.content != ContentPlanReview && s.content != ContentUserQuestion {
+	if msg.String() >= "1" && msg.String() <= "9" && s.content != ContentPlanEdit && s.content != ContentPlanReview && s.content != ContentUserQuestion {
 		idx := int(msg.String()[0] - '0')
 		if idx <= len(s.agents) {
 			s.focusedAgent = idx
@@ -414,8 +390,6 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	}
 
 	switch s.content {
-	case ContentCoaching:
-		return s.handleCoachingKey(msg)
 	case ContentUserQuestion:
 		return s.handleUserQuestionKey(msg)
 	case ContentPlanReview:
@@ -456,13 +430,6 @@ func (s PipelineScreen) HandleMouse(msg tea.MouseMsg) (PipelineScreen, tea.Cmd) 
 
 // UpdateSubModel passes non-key messages to focused sub-models (textareas).
 func (s PipelineScreen) UpdateSubModel(msg tea.Msg) (PipelineScreen, tea.Cmd) {
-	if s.content == ContentCoaching {
-		if s.answerCursor < len(s.answerFields) {
-			var cmd tea.Cmd
-			s.answerFields[s.answerCursor], cmd = s.answerFields[s.answerCursor].Update(msg)
-			return s, cmd
-		}
-	}
 	if s.content == ContentUserQuestion && s.hasQuestionTA {
 		var cmd tea.Cmd
 		s.questionTextarea, cmd = s.questionTextarea.Update(msg)
@@ -471,58 +438,6 @@ func (s PipelineScreen) UpdateSubModel(msg tea.Msg) (PipelineScreen, tea.Cmd) {
 	if s.content == ContentPlanEdit && s.hasPlanEditor {
 		var cmd tea.Cmd
 		s.planEditor, cmd = s.planEditor.Update(msg)
-		return s, cmd
-	}
-	return s, nil
-}
-
-func (s PipelineScreen) handleCoachingKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
-	if msg.String() == "ctrl+s" {
-		s.content = ContentStreaming
-		s.SyncViewports()
-		s.PendingIntent = SkipGatewayIntent{}
-		return s, nil
-	}
-	switch msg.Code {
-	case tea.KeyEnter:
-		if msg.Mod.Contains(tea.ModShift) || msg.Mod.Contains(tea.ModAlt) {
-			// Shift+Enter / Alt+Enter inserts a newline in the active answer field
-			if s.answerCursor < len(s.answerFields) {
-				s.answerFields[s.answerCursor].InsertString("\n")
-			}
-			return s, nil
-		}
-		answers := make([]orchestrator.GatewayAnswer, len(s.answerFields))
-		for i, f := range s.answerFields {
-			answers[i] = orchestrator.GatewayAnswer{
-				QuestionIndex: i,
-				Answer:        strings.TrimSpace(f.Value()),
-			}
-		}
-		s.content = ContentStreaming
-		s.SyncViewports()
-		s.PendingIntent = SubmitGatewayIntent{Answers: answers}
-		return s, nil
-	case tea.KeyTab:
-		if msg.Mod.Contains(tea.ModShift) {
-			if s.answerCursor > 0 {
-				s.answerFields[s.answerCursor].Blur()
-				s.answerCursor--
-				s.answerFields[s.answerCursor].Focus()
-			}
-			return s, nil
-		}
-		if s.answerCursor < len(s.answerFields)-1 {
-			s.answerFields[s.answerCursor].Blur()
-			s.answerCursor++
-			s.answerFields[s.answerCursor].Focus()
-		}
-		return s, nil
-	}
-	// Pass to active answer field
-	if s.answerCursor < len(s.answerFields) {
-		var cmd tea.Cmd
-		s.answerFields[s.answerCursor], cmd = s.answerFields[s.answerCursor].Update(msg)
 		return s, cmd
 	}
 	return s, nil
@@ -555,7 +470,51 @@ func (s PipelineScreen) handleUserQuestionKey(msg tea.KeyPressMsg) (PipelineScre
 		return s, cmd
 	}
 
-	// Options mode
+	// Custom text input is active — forward keys to textarea unless special
+	if s.questionCustomActive >= 0 {
+		switch msg.Code {
+		case tea.KeyTab:
+			// Confirm custom text and return to option navigation
+			text := strings.TrimSpace(s.questionTextarea.Value())
+			if text != "" {
+				s.questionCustom[s.questionCustomActive] = text
+			} else {
+				delete(s.questionCustom, s.questionCustomActive)
+			}
+			s.questionTextarea.Blur()
+			s.questionCustomActive = -1
+			s.hasQuestionTA = false
+			s.SyncViewports()
+			return s, nil
+		case tea.KeyEscape:
+			// Cancel custom edit, discard changes
+			s.questionTextarea.Blur()
+			s.questionCustomActive = -1
+			s.hasQuestionTA = false
+			s.SyncViewports()
+			return s, nil
+		case tea.KeyEnter:
+			// Confirm custom text (same as Tab-collapse) — do NOT submit the whole answer
+			if !msg.Mod.Contains(tea.ModShift) && !msg.Mod.Contains(tea.ModAlt) {
+				text := strings.TrimSpace(s.questionTextarea.Value())
+				if text != "" {
+					s.questionCustom[s.questionCustomActive] = text
+				} else {
+					delete(s.questionCustom, s.questionCustomActive)
+				}
+				s.questionTextarea.Blur()
+				s.questionCustomActive = -1
+				s.hasQuestionTA = false
+				s.SyncViewports()
+				return s, nil
+			}
+		}
+		var cmd tea.Cmd
+		s.questionTextarea, cmd = s.questionTextarea.Update(msg)
+		return s, cmd
+	}
+
+	// Options mode (no custom input active)
 	switch msg.Code {
 	case tea.KeyEscape:
 		s.content = ContentStreaming
@@ -574,7 +533,26 @@ func (s PipelineScreen) handleUserQuestionKey(msg tea.KeyPressMsg) (PipelineScre
 		}
 		s.SyncViewports()
 		return s, nil
+	case tea.KeyTab:
+		// Expand inline custom text input for highlighted option
+		contentWidth := max(1, int(float64(s.contentVP.Width()+s.sidebarVP.Width()+1)*splitRatio))
+		ta := textarea.New()
+		ta.Placeholder = "Add context..."
+		ta.SetWidth(max(1, contentWidth-6))
+		ta.SetHeight(1)
+		ta.CharLimit = 512
+		// Restore any previously entered custom text
+		if prev, ok := s.questionCustom[s.questionCursor]; ok {
+			ta.SetValue(prev)
+		}
+		ta.Focus()
+		s.questionTextarea = ta
+		s.questionCustomActive = s.questionCursor
+		s.hasQuestionTA = true
+		s.SyncViewports()
+		return s, nil
 	case tea.KeyEnter:
+		// Single-select shortcut: if nothing selected, select cursor AND confirm
 		answer := s.buildQuestionAnswer()
 		s.content = ContentStreaming
 		s.SyncViewports()
@@ -622,7 +600,17 @@ func (s PipelineScreen) buildQuestionAnswer() harness.MCPAnswer {
 	if len(selected) == 0 && !s.userQuestion.MultiSelect && len(s.userQuestion.Options) > 0 {
 		selected = []int{s.questionCursor}
 	}
-	return harness.MCPAnswer{SelectedIndices: selected}
+	// Populate custom texts from per-option context input
+	var customTexts map[int]string
+	for idx, text := range s.questionCustom {
+		if strings.TrimSpace(text) != "" {
+			if customTexts == nil {
+				customTexts = make(map[int]string)
+			}
+			customTexts[idx] = strings.TrimSpace(text)
+		}
+	}
+	return harness.MCPAnswer{SelectedIndices: selected, CustomTexts: customTexts}
 }
 
 func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
@@ -838,14 +826,15 @@ func (s PipelineScreen) View(width, height int) string {
 
 	// Input zone height depends on content mode
 	inputHeight := constPipelineInputHeight
-	if s.content == ContentPlanReview {
+	if s.content == ContentPlanReview && s.hasPlanComment {
 		inputHeight = constPlanReviewInputHeight
 	}
 
 	input := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
 		s.viewInputZone() + "\n"
 
-	// Content zone dimensions
+	// Content zone dimensions. The "\n" separator between body and input
+	// consumes one terminal line, so subtract it from available content height.
 	contentHeight := max(0, height-constHeaderHeight-inputHeight-constFooterHeight)
 	contentWidth := max(0, int(float64(w)*splitRatio))
 	sidebarWidth := max(0, w-contentWidth-1)
@@ -856,6 +845,12 @@ func (s PipelineScreen) View(width, height int) string {
 		body = s.dashboardVP.View()
 	} else {
 		body = joinSplitView(s.contentVP.View(), s.sidebarVP.View(), contentWidth, sidebarWidth, contentHeight)
+	}
+	// Clamp body to contentHeight. lipgloss.Place does not truncate when content
+	// exceeds the requested height, so if viewport heights are stale after a
+	// content-mode transition the body can overflow and push the footer off-screen.
+	if contentHeight > 0 {
+		body = lipgloss.NewStyle().MaxHeight(contentHeight).Render(body)
 	}
 
 	return header + body + "\n" + input + footer
@@ -878,8 +873,6 @@ func (s PipelineScreen) viewInputZone() string {
 			status = warnStyle.Render(" Pipeline is active. Start new run? [Y] yes / [any] cancel")
 		}
 		return status
-	case ContentCoaching:
-		return keyStyle.Render(" Answer the questions above, then [Enter] to confirm")
 	case ContentUserQuestion:
 		if s.hasQuestionTA {
 			return keyStyle.Render(" Type your answer, then [Enter] to submit | [Esc] skip")
@@ -887,7 +880,8 @@ func (s PipelineScreen) viewInputZone() string {
 		return keyStyle.Render(" Select an option, then [Enter] to confirm | [Esc] skip")
 	case ContentPlanReview:
 		if s.hasPlanComment {
-			return s.planComment.View()
+			return s.planComment.View() + "\n" +
+				keyStyle.Render(" [Enter] send | [Shift+Enter] newline | [Esc] cancel")
 		}
 		return keyStyle.Render(" [A] accept | [E] edit | [Ctrl+E] editor | [Enter] comment | [S] cancel")
 	case ContentPlanEdit:
@@ -911,8 +905,6 @@ func (s PipelineScreen) viewContent(width int) string {
 	switch s.content {
 	case ContentStreaming:
 		return s.viewStreaming(width)
-	case ContentCoaching:
-		return s.viewCoaching(width)
 	case ContentUserQuestion:
 		return s.viewUserQuestion(width)
 	case ContentPlanReview:
@@ -932,7 +924,7 @@ func (s PipelineScreen) viewContent(width int) string {
 func (s PipelineScreen) viewStreaming(width int) string {
 	var b strings.Builder
 	if s.goal != "" {
-		b.WriteString(fmt.Sprintf(" Goal: %s\n", goalStyle.Render(s.goal)))
+		b.WriteString(renderPrefixedText(goalStyle, " Goal: ", s.goal, width))
 	}
 
 	var streamAgent string
@@ -974,33 +966,12 @@ func (s PipelineScreen) viewStreaming(width int) string {
 	return b.String()
 }
 
-func (s PipelineScreen) viewCoaching(_ int) string {
-	var b strings.Builder
-	brief := s.gatewayResult.Brief
-	b.WriteString(fmt.Sprintf(" Task: %s\n", goalStyle.Render(brief.Task)))
-	if brief.EndState != "" {
-		b.WriteString(fmt.Sprintf(" End State: %s\n", brief.EndState))
-	}
-	b.WriteString("\n Questions:\n")
-	for i, q := range s.gatewayResult.Questions {
-		marker := "  "
-		if i == s.answerCursor {
-			marker = "▶ "
-		}
-		b.WriteString(fmt.Sprintf("%s%s\n", marker, q.Text))
-		if i < len(s.answerFields) {
-			b.WriteString(fmt.Sprintf("   %s\n", s.answerFields[i].View()))
-		}
-	}
-	return b.String()
-}
-
-func (s PipelineScreen) viewUserQuestion(_ int) string {
+func (s PipelineScreen) viewUserQuestion(width int) string {
 	var b strings.Builder
 	q := s.userQuestion
 
-	// Header: agent + question
-	b.WriteString(fmt.Sprintf(" %s asks:\n", phaseStyle.Render(q.Question)))
+	// Question header — wrapped to content width
+	b.WriteString(renderPrefixedText(phaseStyle, " ", q.Question, width))
 	b.WriteString("\n")
 
 	if len(q.Options) == 0 && s.hasQuestionTA {
@@ -1053,11 +1024,16 @@ func (s PipelineScreen) viewPlanReview(width int) string {
 	var b strings.Builder
 	if len(s.chatHistory) > 0 {
 		for _, entry := range s.chatHistory {
+			var roleLabel string
+			var labelLen int
 			if entry.Role == "architect" {
-				b.WriteString(goalStyle.Render(" Architect: "))
+				roleLabel = goalStyle.Render(" Architect: ")
+				labelLen = len(" Architect: ")
 			} else {
-				b.WriteString(dimStyle.Render(" You: "))
+				roleLabel = dimStyle.Render(" You: ")
+				labelLen = len(" You: ")
 			}
+			b.WriteString(roleLabel)
 			lines := strings.SplitN(entry.Text, "\n", 4)
 			for i, line := range lines {
 				if i == 3 {
@@ -1066,6 +1042,15 @@ func (s PipelineScreen) viewPlanReview(width int) string {
 				}
 				if i > 0 {
 					b.WriteString("    ")
+				}
+				var avail int
+				if i == 0 {
+					avail = width - labelLen
+				} else {
+					avail = width - 4
+				}
+				if avail > 0 && len(line) > avail {
+					line = line[:avail]
 				}
 				b.WriteString(line)
 				b.WriteString("\n")
@@ -1092,20 +1077,18 @@ func (s PipelineScreen) viewPlanDiff(width int) string {
 	return b.String()
 }
 
-func (s PipelineScreen) viewCompletion(_ int) string {
+func (s PipelineScreen) viewCompletion(width int) string {
 	var b strings.Builder
 	if s.goal != "" {
-		b.WriteString(fmt.Sprintf(" Goal: %s\n\n", goalStyle.Render(s.goal)))
+		b.WriteString(renderPrefixedText(goalStyle, " Goal: ", s.goal, width))
+		b.WriteString("\n")
 	}
 	if s.lastErr != nil {
-		b.WriteString(errorStyle.Render(fmt.Sprintf(" Error: %v", s.lastErr)))
-		b.WriteString("\n")
+		b.WriteString(renderPrefixedText(errorStyle, " Error: ", s.lastErr.Error(), width))
 	}
 	if s.hasValidation {
 		b.WriteString(" Validation:\n")
-		for _, line := range strings.Split(s.workerValidation, "\n") {
-			b.WriteString(fmt.Sprintf("   %s\n", line))
-		}
+		b.WriteString(renderPrefixedText(lipgloss.NewStyle(), "   ", s.workerValidation, width))
 	}
 	elapsed := time.Since(s.startTime).Truncate(time.Second)
 	b.WriteString(fmt.Sprintf("\n Elapsed: %s\n", elapsed))
@@ -1298,8 +1281,6 @@ func (s PipelineScreen) viewSidebar(width int) string {
 
 func (s PipelineScreen) viewFooter() string {
 	switch s.content {
-	case ContentCoaching:
-		return keyStyle.Render(" [Enter] confirm | [Shift+Enter] newline | [Ctrl+S] skip | [Tab] next   [?] help  [D] expand  [S] stop  [^C^C] quit")
 	case ContentUserQuestion:
 		if s.hasQuestionTA {
 			return keyStyle.Render(" [Enter] submit | [Esc] skip                               [?] help  [^C^C] quit")

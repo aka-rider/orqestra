@@ -28,7 +28,6 @@ type ContentMode int
 
 const (
 	ContentStreaming    ContentMode = iota // auto-follows active agent stream
-	ContentCoaching                        // gateway brief + questions
 	ContentPlanReview                      // rendered spec
 	ContentPlanEdit                        // editable textarea for plan modification
 	ContentAgentHistory                    // frozen output of a previously-run agent
@@ -188,6 +187,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case OrchestratorEventMsg:
+		prevContent := m.pipelineScreen.content
+		prevComment := m.pipelineScreen.hasPlanComment
 		m.pipelineScreen.ApplyEvent(msg.Event, m.width)
 		for {
 			select {
@@ -197,6 +198,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.pipelineScreen.content = ContentCompletion
 					}
 					if m.state == StatePipeline {
+						if inputHeightChanged(prevContent, m.pipelineScreen.content, prevComment, m.pipelineScreen.hasPlanComment) {
+							m.recalculateLayout()
+						}
 						m.pipelineScreen.SyncViewports()
 					}
 					return m, nil
@@ -204,6 +208,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pipelineScreen.ApplyEvent(ev, m.width)
 			default:
 				if m.state == StatePipeline {
+					if inputHeightChanged(prevContent, m.pipelineScreen.content, prevComment, m.pipelineScreen.hasPlanComment) {
+						m.recalculateLayout()
+					}
 					m.pipelineScreen.SyncViewports()
 				}
 				return m, waitForEvent(m.events)
@@ -211,10 +218,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case pipelineClosedMsg:
+		prevContent := m.pipelineScreen.content
+		prevComment := m.pipelineScreen.hasPlanComment
 		if !m.pipelineScreen.awaitingPlanDecision && m.pipelineScreen.content != ContentCompletion {
 			m.pipelineScreen.content = ContentCompletion
 		}
 		if m.state == StatePipeline {
+			if inputHeightChanged(prevContent, m.pipelineScreen.content, prevComment, m.pipelineScreen.hasPlanComment) {
+				m.recalculateLayout()
+			}
 			m.pipelineScreen.SyncViewports()
 		}
 		return m, nil
@@ -338,29 +350,36 @@ func (m Model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// planReviewHeightChanged reports whether a content mode transition requires a
+// layout recalculation. The taller input zone (constPlanReviewInputHeight) is
+// only active when content is ContentPlanReview AND the comment textarea is
+// visible, so both dimensions must be compared.
+func inputHeightChanged(prevContent, nextContent ContentMode, prevComment, nextComment bool) bool {
+	prevTall := prevContent == ContentPlanReview && prevComment
+	nextTall := nextContent == ContentPlanReview && nextComment
+	return prevTall != nextTall
+}
+
 // handlePipelineKey delegates to PipelineScreen and handles intents.
 func (m Model) handlePipelineKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	prevContent := m.pipelineScreen.content
+	prevComment := m.pipelineScreen.hasPlanComment
 	var cmd tea.Cmd
 	m.pipelineScreen, cmd = m.pipelineScreen.Update(msg)
+	if inputHeightChanged(prevContent, m.pipelineScreen.content, prevComment, m.pipelineScreen.hasPlanComment) {
+		m.recalculateLayout()
+	}
 	if intent := m.pipelineScreen.PendingIntent; intent != nil {
 		m.pipelineScreen.PendingIntent = nil
 		switch i := intent.(type) {
-		case SubmitGatewayIntent:
-			if m.decisions != nil {
-				m.decisions <- orchestrator.Decision{
-					Type:           orchestrator.DecisionApprove,
-					GatewayAnswers: i.Answers,
-				}
-			}
-			return m, nil
-		case SkipGatewayIntent:
-			if m.decisions != nil {
-				m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionSkip}
-			}
-			return m, nil
 		case SubmitQuestionAnswerIntent:
 			if m.engine != nil && m.engine.QuestionBridge != nil {
-				m.engine.QuestionBridge.SendAnswer(i.Answer)
+				bridge := m.engine.QuestionBridge
+				ans := i.Answer
+				return m, func() tea.Msg {
+					bridge.SendAnswer(ans)
+					return nil
+				}
 			}
 			return m, nil
 		case ApprovePlanIntent:
@@ -478,7 +497,7 @@ func (m *Model) recalculateLayout() {
 	case StatePrompt:
 		inputHeight = constPromptInputHeight
 	case StatePipeline:
-		if m.pipelineScreen.content == ContentPlanReview {
+		if m.pipelineScreen.content == ContentPlanReview && m.pipelineScreen.hasPlanComment {
 			inputHeight = constPlanReviewInputHeight
 		} else {
 			inputHeight = constPipelineInputHeight

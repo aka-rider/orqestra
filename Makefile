@@ -2,7 +2,7 @@
 .PHONY: build run test test-integration lint clean e2e sandbox-image sandbox-test
 
 THIS_MAKEFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
-BIN_DIR := "$(dir $(THIS_MAKEFILE_PATH))bin"
+BIN_DIR := $(dir $(THIS_MAKEFILE_PATH))bin
 BINARY := "$(BIN_DIR)/orqestra"
 
 build:

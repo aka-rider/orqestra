@@ -7,17 +7,12 @@ import (
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
-	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
 // hydratedModels returns a named set of models covering all stateful TUI views.
 func hydratedModels(t *testing.T) map[string]Model {
 	t.Helper()
-
-	questions := []agent.Question{
-		{Text: "Which part?", Options: []string{"login", "signup"}, Default: "login"},
-	}
 
 	base := func() Model {
 		m := testModel()
@@ -27,21 +22,6 @@ func hydratedModels(t *testing.T) map[string]Model {
 	}
 
 	models := make(map[string]Model)
-
-	// StatePipeline + ContentCoaching
-	{
-		m := base()
-		m.state = StatePipeline
-		m.pipelineScreen.content = ContentCoaching
-		m.pipelineScreen.gatewayResult = agent.GatewayResult{
-			Verdict:   agent.GatewayVerdictCoach,
-			Brief:     agent.PromptBrief{Task: "Improve auth"},
-			Questions: questions,
-		}
-		m.pipelineScreen.answerFields = makeAnswerFields(questions, m.width)
-		m.pipelineScreen.answerCursor = 0
-		models["pipeline-coaching"] = m
-	}
 
 	// StatePipeline + ContentPlanReview
 	{

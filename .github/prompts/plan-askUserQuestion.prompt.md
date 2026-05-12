@@ -94,7 +94,7 @@ Create `internal/harness/question_bridge.go`:
 Modify `internal/orchestrator/orchestrator.go`:
 
 - Add `QuestionBridge *harness.QuestionBridge` field to `Engine`
-- In `run()`, before research phase: start a forwarding goroutine that reads `bridge.Questions()` and emits `EventUserQuestion` events
+- In `run()`, before research phase: start a forwarding goroutine that reads `bridge.Questions()` and calls the existing `emit()` function (which writes to the events channel consumed by the TUI's `waitForEvent()` tea.Cmd loop). **Do NOT use `program.Send()` or direct struct mutation** — `emit()` is the correct mechanism already in use by all other events.
 - Add `QuestionAnswers chan<- orchestrator.QuestionAnswer` to `RunChannels`
 - In `Start()`: create the question answer channel, wire it to bridge
 
@@ -157,16 +157,34 @@ Add `handleUserQuestionKey(msg tea.KeyPressMsg)` to `PipelineScreen`:
   - **Single-select** (`MultiSelect == false`): select highlighted, deselect all others (radio behavior)
   - **Multi-select** (`MultiSelect == true`): toggle highlighted on/off (checkbox behavior)
 - **Tab**: expand/collapse inline custom text input for highlighted option
-  - When expanding: create a 1-line textarea positioned inline, focus it
-  - When collapsing: save custom text, blur textarea
+  - When expanding: create a 1-line textarea positioned inline, focus it; set `questionCustomActive = cursor`
+  - When collapsing: save `questionTextarea.Value()` into `questionCustom[questionCustomActive]`, blur textarea; set `questionCustomActive = -1`
 - **Enter**:
-  - If custom textarea is active: confirm custom text, close textarea, return to option navigation
+  - If custom textarea is active: confirm custom text (same as Tab-collapse), return to option navigation — do NOT confirm the whole answer yet
   - Otherwise: confirm selection → build `QuestionAnswer` → set `PendingIntent = SubmitQuestionAnswerIntent{...}` → switch to `ContentStreaming`
   - **Single-select shortcut**: if nothing selected yet, Enter on highlighted option selects it AND confirms in one keystroke
 - **Esc**:
-  - If custom textarea is active: cancel custom edit, discard text, return to option navigation
+  - If custom textarea is active: cancel custom edit, discard text, restore `questionCustom[questionCustomActive]` to previous value (or delete key if empty), return to option navigation; set `questionCustomActive = -1`
   - Otherwise: skip question → set `PendingIntent = SubmitQuestionAnswerIntent{Answer: {Skipped: true}}` → switch to `ContentStreaming`
 - When custom textarea is active: pass all other keys to textarea
+
+`buildQuestionAnswer()` **must** populate `MCPAnswer.CustomTexts` from `questionCustom`:
+```go
+func (s PipelineScreen) buildQuestionAnswer() harness.MCPAnswer {
+    // ... build SelectedIndices from questionSelected ...
+    customTexts := make(map[int]string)
+    for idx, text := range s.questionCustom {
+        if strings.TrimSpace(text) != "" {
+            customTexts[idx] = strings.TrimSpace(text)
+        }
+    }
+    if len(customTexts) > 0 {
+        answer.CustomTexts = customTexts
+    }
+    return answer
+}
+```
+**This is not optional** — `FormatAnswer()` in `mcp_server.go` already renders `CustomTexts` in the tool result; if `buildQuestionAnswer()` omits them the model silently receives degraded output.
 
 ### Step 5.4 — Rendering
 
@@ -224,15 +242,22 @@ Add to `viewContent()`:
 
 Modify `internal/tui/model.go` `handlePipelineKey()`:
 
-- Add case `SubmitQuestionAnswerIntent`:
-  - Write answer to `m.questionAnswers` channel (new field on `Model`)
-- Alternatively: call `bridge.SendAnswer()` directly (bridge reference on Model)
+- Add case `SubmitQuestionAnswerIntent` — **must return a `tea.Cmd`**, never block `Update()`:
+  ```go
+  case SubmitQuestionAnswerIntent:
+      bridge := m.engine.QuestionBridge
+      ans := i.Answer
+      return m, func() tea.Msg {
+          bridge.SendAnswer(ans)
+          return nil
+      }
+  ```
+  **Why**: `SendAnswer()` writes to a buffered channel (cap 1). If the bridge goroutine hasn't drained the previous answer yet (e.g. rapid sequential questions), a direct write in `Update()` blocks the Bubble Tea event loop indefinitely. Wrapping in `tea.Cmd` offloads the write to a goroutine, keeping `Update()` non-blocking per TUI architecture rules.
 
 Modify `Model`:
 
-- Add `questionBridge *harness.QuestionBridge` field
-- Set it in `startPipeline()` from engine
-- On `SubmitQuestionAnswerIntent`: call `m.questionBridge.SendAnswer(i.Answer)`
+- Access bridge via `m.engine.QuestionBridge` (engine is already on Model — no separate field needed)
+- Remove the `questionBridge *harness.QuestionBridge` field proposal — redundant, creates two paths to the same object
 
 ### Step 5.6 — Styles
 
@@ -242,6 +267,12 @@ Add to `internal/tui/styles.go`:
 - `questionSelectedStyle` — `passStyle` (green), selected option indicator
 - `questionCursorStyle` — `phaseStyle` (cyan), cursor indicator
 - `questionGutterStyle` — `dimStyle`, `┊` gutter for custom text
+
+### Step 5.7 — Decisions channel buffering invariant
+
+The `decisions` channel (type `chan<- orchestrator.Decision`) is written directly from `handlePipelineKey()` inside `Update()`. This is safe only if the channel is always buffered with capacity ≥ 1, ensuring the write never blocks when the orchestrator is momentarily not receiving.
+
+**Requirement**: In `orchestrator.go` `Start()`, always create `decisions` with `make(chan Decision, 1)`. Add a test asserting that sending on `decisions` does not block when orchestrator is not yet reading. This invariant applies to all intent dispatches that write to `decisions`: `ApprovePlanIntent`, `EditPlanIntent`, `CommentPlanIntent`, `CancelPlanIntent` — not just the new `SubmitQuestionAnswerIntent`.
 
 ---
 
@@ -281,23 +312,21 @@ Modify `internal/orchestrator/orchestrator.go`:
 
 ### Step 6.4 — TUI coaching removal
 
-Modify `internal/tui/screen_pipeline.go`:
+**Remove in this exact order** to maintain a compile-passing build after each step. Run `go build ./...` after each numbered step.
 
-- Remove `ContentCoaching` from `ContentMode` enum
-- Remove `answerFields []textarea.Model`, `answerCursor int` fields
-- Remove `handleCoachingKey()` method
-- Remove `viewCoaching()` method
-- Remove coaching branch from `UpdateSubModel()`
-- Remove coaching case from `viewContent()`, `viewInputZone()`
-- Remove `gatewayResult agent.GatewayResult` field (no longer needed for rendering)
+1. **orchestrator types** — remove `GatewayAnswer` struct, `GateGatewayCoach` constant, `incorporateAnswers()` function, `maxCoachingRounds` constant, gateway coaching loop from `run()`. `go build ./...` ✓
+2. **agent gateway** — remove coaching validations in `internal/agent/gateway.go` (Steps 6.2 + 6.3 complete here). `go build ./...` ✓
+3. **TUI messages** — remove `SubmitGatewayIntent` and `SkipGatewayIntent` from `internal/tui/messages.go`. **Do this before** touching screen files or `model.go` — the compiler will flag all remaining usages as errors, making them easy to find. `go build ./...` will fail at this point intentionally.
+4. **model.go intent cases** — remove `SubmitGatewayIntent` and `SkipGatewayIntent` switch cases from `handlePipelineKey()`. `go build ./...` ✓
+5. **screen_pipeline.go coaching** — remove `ContentCoaching` from `ContentMode` enum, `answerFields []textarea.Model`, `answerCursor int`, `handleCoachingKey()`, `viewCoaching()`, coaching branch from `UpdateSubModel()`, coaching cases from `viewContent()` and `viewInputZone()`, `gatewayResult agent.GatewayResult` field. `go build ./...` ✓
 
 Modify `internal/tui/messages.go`:
 
-- Remove `SubmitGatewayIntent` and `SkipGatewayIntent` types
+- Remove `SubmitGatewayIntent` and `SkipGatewayIntent` types (step 3 above)
 
 Modify `internal/tui/model.go`:
 
-- Remove `SubmitGatewayIntent` and `SkipGatewayIntent` handling from `handlePipelineKey()`
+- Remove `SubmitGatewayIntent` and `SkipGatewayIntent` handling from `handlePipelineKey()` (step 4 above)
 
 ### Step 6.5 — Researcher + planner prompt updates
 
@@ -410,6 +439,27 @@ User confirmed without selecting any option. Proceed with your best judgment.
 6. **Manual: full pipeline** — run `orqestra` with researcher model, verify question appears in TUI when model calls tool, answer flows back
 7. **Manual: skip behavior** — press Esc on question, verify model receives skip message and continues
 8. **Build**: `go build ./cmd/orqestra` succeeds, `go test ./...` passes
+
+### Anti-Regression Tests (required, one per blocker)
+
+**AR-1 — `SendAnswer` is deferred via `tea.Cmd`, never called in `Update()` (Blocker 1)**
+In `internal/tui/model_test.go`: dispatch `SubmitQuestionAnswerIntent` through `handlePipelineKey()` with a bridge whose `pendingAnswer` channel is at capacity (pre-filled, unbuffered, or capacity 0). Assert two structural properties — no timing involved:
+1. The returned `tea.Cmd` is **non-nil** — proves intent dispatch produced a command rather than calling `SendAnswer` inline.
+2. Execute the returned `tea.Cmd` (call `cmd()`) and assert it returns `nil` (the cmd has no follow-up message) AND that the bridge's answer channel received the expected value — proves `SendAnswer` runs inside the cmd, not before it.
+
+Use a mock bridge with a channel of capacity 0 (unbuffered): if `SendAnswer` were called inside `Update()` it would deadlock immediately; the test passing proves it is not.
+
+**AR-2 — `buildQuestionAnswer` populates `CustomTexts` (Blocker 2)**
+In `internal/tui/screen_pipeline_test.go`: construct a `PipelineScreen` with `questionCustom = map[int]string{0: "also use -race"}`, `questionSelected = map[int]bool{0: true}`, call `buildQuestionAnswer()`, assert `answer.CustomTexts[0] == "also use -race"`. Also assert that `FormatAnswer(toolCall, answer)` output contains `"Context: also use -race"`.
+
+**AR-3 — Phase 6 removal compiles cleanly at each step (Blocker 3)**
+In CI (`.github/workflows`), or as a note in the implementation checklist: after steps 1, 2, and 4 of the removal sequence, `go build ./...` must exit 0. Step 3 (message types removal) is the only intentional break point. Document this in the PR checklist, not as a test.
+
+**AR-4 — Goroutine → TUI event path is channel-based, not `program.Send` (Blocker 4)**
+In `internal/orchestrator/orchestrator_test.go`: write a unit test that directly calls the forwarding goroutine's body (extract it as a named helper, or test the `emit()` call in isolation). Seed the mock bridge's `Questions()` channel with one `MCPToolCall`, then call the forwarder synchronously, then read from the events channel with a non-blocking `select`. Assert the received event has `Type == EventUserQuestion` and the correct payload. No timers, no `time.Sleep` — the test is fully deterministic because the channel write and read happen in the same goroutine sequence.
+
+**AR-5 — `decisions` channel never blocks with capacity ≥ 1 (Blocker 5)**
+In `internal/orchestrator/orchestrator_test.go`: call `engine.Start()` and assert `cap(engine.RunChannels().Decisions) >= 1` using the built-in `cap()` function. This is a pure structural assertion — no goroutines, no timers. The capacity of a channel is immutable after creation, so `cap()` is the correct and deterministic way to verify this invariant. No write-and-drain dance needed.
 
 ## Decisions
 

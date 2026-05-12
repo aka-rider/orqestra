@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/lipgloss/v2"
 )
 
@@ -172,6 +174,63 @@ func TestLayout_BoundsNonOverlapping(t *testing.T) {
 	// Textarea should be below content
 	if m.pipelineScreen.bounds.textarea.Min.Y <= m.pipelineScreen.bounds.content.Min.Y {
 		t.Error("textarea should be below content zone")
+	}
+}
+
+// TestLayout_HeightInvariant_ContentModeTransition verifies that switching content
+// modes (e.g. ContentStreaming → ContentPlanReview) does not push the footer
+// off-screen. The root cause: ContentPlanReview uses a taller input zone
+// (constPlanReviewInputHeight vs constPipelineInputHeight), so if viewports are
+// not resized on transition the body overflows by exactly the height delta and
+// the footer disappears.
+func TestLayout_HeightInvariant_ContentModeTransition(t *testing.T) {
+	sizes := [][2]int{{80, 24}, {120, 40}, {200, 60}}
+
+	for _, sz := range sizes {
+		w, h := sz[0], sz[1]
+		t.Run(itoa(w)+"x"+itoa(h), func(t *testing.T) {
+			// Start in streaming mode — viewports sized for constPipelineInputHeight.
+			m := layoutTestModel(w, h, StatePipeline)
+
+			// Simulate transition to plan review — the bug was missing recalculateLayout.
+			m.pipelineScreen.content = ContentPlanReview
+			m.pipelineScreen.hasPlan = true
+			m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nDo the thing."
+			ta := textarea.New()
+			ta.SetWidth(max(1, w-4))
+			ta.SetHeight(2)
+			ta.CharLimit = 1024
+			ta.Focus()
+			m.pipelineScreen.planComment = ta
+			m.pipelineScreen.hasPlanComment = true
+
+			// The fix: recalculateLayout after content mode transition,
+			// matching what the OrchestratorEventMsg / handlePipelineKey
+			// handlers now do via planReviewHeightChanged.
+			m.recalculateLayout()
+			m.pipelineScreen.SyncViewports()
+
+			// View must still fill exactly h lines — footer must not disappear.
+			view := m.View().Content
+			got := lipgloss.Height(view)
+			if got != h {
+				t.Errorf("after ContentStreaming→ContentPlanReview: lipgloss.Height = %d, want %d (footer disappeared)", got, h)
+			}
+		})
+	}
+}
+
+// TestLayout_HeightInvariant_ErrorStateCompletion verifies that ContentCompletion
+// with an active lastErr also preserves the exact terminal height.
+func TestLayout_HeightInvariant_ErrorStateCompletion(t *testing.T) {
+	m := layoutTestModel(120, 40, StatePipeline)
+	m.pipelineScreen.content = ContentCompletion
+	m.pipelineScreen.lastErr = fmt.Errorf("worker failed: exit status 1")
+
+	view := m.View().Content
+	got := lipgloss.Height(view)
+	if got != 40 {
+		t.Errorf("ContentCompletion+lastErr: lipgloss.Height = %d, want 40", got)
 	}
 }
 

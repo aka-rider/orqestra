@@ -8,6 +8,7 @@ import (
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/harness"
 )
@@ -50,7 +51,7 @@ func (s *RunDetailScreen) SyncViewports() {
 	var leftContent strings.Builder
 	if s.detail.Prompt != "" {
 		leftContent.WriteString(dimStyle.Render("Input Prompt:") + "\n")
-		leftContent.WriteString(s.detail.Prompt + "\n")
+		leftContent.WriteString(renderPrefixedText(lipgloss.NewStyle(), "", s.detail.Prompt, max(1, s.detailVP.Width())))
 		leftContent.WriteString("\n    ⇩  ⇩  ⇩\n\n")
 	}
 	if s.detail.PlanMarkdown != "" {
