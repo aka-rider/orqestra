@@ -181,71 +181,40 @@ func TestTUI_PlanApprove(t *testing.T) {
 	}
 }
 
-func TestTUI_PlanEditSave(t *testing.T) {
+func TestTUI_PlanEditOpensExternalEditor(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentPlanReview
 	m.pipelineScreen.hasPlan = true
 	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nOriginal"
-	decisions := make(chan orchestrator.Decision, 1)
-	m.decisions = decisions
+	m.pipelineScreen.planFilePath = "/tmp/test-plan.md"
 
-	// Press Ctrl+E to enter edit mode
+	// Press Ctrl+E — should emit OpenExternalEditorIntent, not ContentPlanEdit
 	result, _ := sendCtrl(m, 'e')
 	model := result.(Model)
 
-	if model.pipelineScreen.content != ContentPlanEdit {
-		t.Fatalf("expected ContentPlanEdit, got %d", model.pipelineScreen.content)
+	// Content mode must NOT have changed to a removed state
+	if model.pipelineScreen.content != ContentPlanReview {
+		t.Errorf("expected ContentPlanReview (unchanged), got %d", model.pipelineScreen.content)
 	}
-	if !model.pipelineScreen.hasPlanEditor {
-		t.Fatal("expected hasPlanEditor=true")
-	}
-
-	// Simulate editing the content
-	model.pipelineScreen.planEditor.SetValue(`{"goal":"Modified","steps":["s1"],"acceptance":["a1"]}`)
-
-	// Press Ctrl+S to save
-	result2, _ := sendCtrl(model, 's')
-	model2 := result2.(Model)
-
-	if model2.pipelineScreen.content != ContentStreaming {
-		t.Errorf("expected ContentStreaming after save, got %d", model2.pipelineScreen.content)
-	}
-
-	select {
-	case d := <-decisions:
-		if d.Type != orchestrator.DecisionEdit {
-			t.Errorf("expected DecisionEdit, got %d", d.Type)
-		}
-		if !strings.Contains(d.EditedContent, "Modified") {
-			t.Errorf("expected edited content to contain 'Modified', got %q", d.EditedContent)
-		}
-	default:
-		t.Error("expected edit decision")
+	if !model.pipelineScreen.editorRunning {
+		t.Error("expected editorRunning=true after Ctrl+E")
 	}
 }
 
-func TestTUI_PlanEditDiscard(t *testing.T) {
+func TestTUI_PlanEditCtrlShiftEOpensExternalEditor(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentPlanReview
 	m.pipelineScreen.hasPlan = true
-	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nOriginal"
+	m.pipelineScreen.planFilePath = "/tmp/test-plan.md"
 
-	// Press Ctrl+E to enter edit mode
-	result, _ := sendCtrl(m, 'e')
+	// ctrl+shift+e should also open external editor
+	result, _ := sendCtrlShift(m, 'e')
 	model := result.(Model)
 
-	if model.pipelineScreen.content != ContentPlanEdit {
-		t.Fatal("expected ContentPlanEdit")
-	}
-
-	// Press Esc to discard
-	result2, _ := sendKey(model, tea.KeyEscape)
-	model2 := result2.(Model)
-
-	if model2.pipelineScreen.content != ContentPlanReview {
-		t.Errorf("expected ContentPlanReview after discard, got %d", model2.pipelineScreen.content)
+	if !model.pipelineScreen.editorRunning {
+		t.Error("expected editorRunning=true after Ctrl+Shift+E")
 	}
 }
 

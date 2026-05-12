@@ -238,10 +238,18 @@ func (s RunDetailScreen) View(width, height int) string {
 	header := headerStyle.Render(fmt.Sprintf(" %s  %s  %s  %s", icon, ts, dur, s.detail.Slug)) + "\n" +
 		dividerStyle.Render(strings.Repeat("─", width))
 
-	contentWidth := max(0, int(float64(width)*splitRatio))
+	contentWidth := max(0, int(float64(width)*0.6))
 	sidebarWidth := max(0, width-contentWidth-1)
 	upperHeight := s.detailVP.Height()
-	upper := joinSplitView(s.detailVP.View(), s.stepsVP.View(), contentWidth, sidebarWidth, upperHeight)
+
+	l := lipgloss.Place(contentWidth, upperHeight, lipgloss.Left, lipgloss.Top, s.detailVP.View())
+	r := lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder(), false, false, false, true).
+		BorderForeground(lipgloss.Color("238")).
+		Width(sidebarWidth).
+		Height(upperHeight).
+		Render(s.stepsVP.View())
+	upper := lipgloss.JoinHorizontal(lipgloss.Top, l, r)
 
 	// Divider
 	divider := dividerStyle.Render(strings.Repeat("─", width))

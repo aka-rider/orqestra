@@ -39,22 +39,6 @@ func hydratedModels(t *testing.T) map[string]Model {
 		models["pipeline-plan-review"] = m
 	}
 
-	// StatePipeline + ContentPlanEdit
-	{
-		m := base()
-		m.state = StatePipeline
-		m.pipelineScreen.content = ContentPlanEdit
-		m.pipelineScreen.hasPlan = true
-		m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nEdit me."
-		m.pipelineScreen.hasPlanEditor = true
-		m.pipelineScreen.planEditor = textarea.New()
-		m.pipelineScreen.planEditor.SetWidth(100)
-		m.pipelineScreen.planEditor.SetHeight(30)
-		m.pipelineScreen.planEditor.SetValue(m.pipelineScreen.finalPlan)
-		m.pipelineScreen.planEditor.Focus()
-		models["pipeline-plan-edit"] = m
-	}
-
 	// StatePipeline + ContentAgentHistory
 	{
 		m := base()

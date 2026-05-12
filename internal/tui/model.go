@@ -29,7 +29,6 @@ type ContentMode int
 const (
 	ContentStreaming     ContentMode = iota // auto-follows active agent stream
 	ContentPlanReview                       // rendered spec
-	ContentPlanEdit                         // editable textarea for plan modification
 	ContentAgentHistory                     // frozen output of a previously-run agent
 	ContentCompletion                       // QA report, summary
 	ContentUserQuestion                     // MCP AskUserQuestion picker
@@ -557,21 +556,21 @@ func (m *Model) recalculateLayout() {
 		inputHeight = 0
 	}
 
-	usedHeight := constHeaderHeight + inputHeight + constFooterHeight
+	// No header. Content gets full width. Sidebar is a bottom strip below the input zone.
+	usedHeight := inputHeight + constFooterHeight + constSidebarHeight
 	contentHeight := max(0, m.height-usedHeight)
-	contentWidth := max(0, int(float64(m.width)*splitRatio))
-	sidebarWidth := max(0, m.width-contentWidth-1)
 
 	// Pipeline viewports and bounds
 	m.pipelineScreen.RecalculateLayout(m.width, contentHeight)
+	inputTop := contentHeight
 	m.pipelineScreen.bounds = layoutBounds{
-		content: image.Rect(0, constHeaderHeight, contentWidth, constHeaderHeight+contentHeight),
-		sidebar: image.Rect(contentWidth+1, constHeaderHeight, m.width, constHeaderHeight+contentHeight),
+		content: image.Rect(0, 0, m.width, contentHeight),
+		sidebar: image.Rect(0, inputTop+inputHeight, m.width, inputTop+inputHeight+constSidebarHeight),
 		textarea: image.Rect(
 			0,
-			m.height-constFooterHeight-inputHeight,
+			contentHeight,
 			m.width,
-			m.height-constFooterHeight,
+			contentHeight+inputHeight,
 		),
 	}
 
@@ -579,12 +578,13 @@ func (m *Model) recalculateLayout() {
 	m.runsListScreen.viewport.SetWidth(m.width)
 	m.runsListScreen.viewport.SetHeight(contentHeight)
 
-	// Run detail: 3-zone layout
+	// Run detail: full-width upper pane (steps remain on right for historical view)
 	if m.state == StateRunDetail {
 		upperHeight := max(0, contentHeight-constRunLogHeight-1)
-		m.runDetailScreen.detailVP.SetWidth(contentWidth)
+		halfW := m.width / 2
+		m.runDetailScreen.detailVP.SetWidth(halfW)
 		m.runDetailScreen.detailVP.SetHeight(upperHeight)
-		m.runDetailScreen.stepsVP.SetWidth(sidebarWidth)
+		m.runDetailScreen.stepsVP.SetWidth(m.width - halfW - 1)
 		m.runDetailScreen.stepsVP.SetHeight(upperHeight)
 		m.runDetailScreen.logVP.SetWidth(m.width)
 		m.runDetailScreen.logVP.SetHeight(constRunLogHeight)
