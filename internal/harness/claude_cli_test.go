@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -164,6 +165,96 @@ func assertEnvNotContains(t *testing.T, env []string, prefix string) {
 	for _, e := range env {
 		if strings.HasPrefix(e, prefix) {
 			t.Errorf("env should not contain %q but found: %s", prefix, e)
+		}
+	}
+}
+
+func TestBuildFinalArgs_InlineOnly_NoStrictMCP(t *testing.T) {
+	cli := NewClaudeCLI(config.ResolvedModel{Type: "anthropic"},
+		WithInlineMCPServer("orqestra", "/usr/bin/orqestra", []string{"mcp-bridge"}),
+	)
+
+	args := cli.buildFinalArgs()
+
+	for _, arg := range args {
+		if arg == "--strict-mcp-config" {
+			t.Error("inline-only MCP should NOT add --strict-mcp-config")
+		}
+	}
+
+	found := false
+	for i, arg := range args {
+		if arg == "--mcp-config" && i+1 < len(args) {
+			found = true
+			var cfg struct {
+				MCPServers map[string]json.RawMessage `json:"mcpServers"`
+			}
+			if err := json.Unmarshal([]byte(args[i+1]), &cfg); err != nil {
+				t.Fatalf("failed to parse --mcp-config JSON: %v", err)
+			}
+			if _, ok := cfg.MCPServers["orqestra"]; !ok {
+				t.Error("--mcp-config missing 'orqestra' server")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected --mcp-config in args")
+	}
+}
+
+func TestBuildFinalArgs_InlineWithStrict_KeepsStrict(t *testing.T) {
+	// Simulate what WithMCPServers produces: --strict-mcp-config + --mcp-config with servers
+	cli := NewClaudeCLI(config.ResolvedModel{Type: "anthropic"},
+		WithExtraArgs("--strict-mcp-config", "--mcp-config", `{"mcpServers":{"context7":{"command":"npx","args":["context7"]}}}`),
+		WithInlineMCPServer("orqestra", "/usr/bin/orqestra", []string{"mcp-bridge"}),
+	)
+
+	args := cli.buildFinalArgs()
+
+	hasStrict := false
+	for _, arg := range args {
+		if arg == "--strict-mcp-config" {
+			hasStrict = true
+		}
+	}
+	if !hasStrict {
+		t.Error("expected --strict-mcp-config to be preserved when explicitly set")
+	}
+
+	for i, arg := range args {
+		if arg == "--mcp-config" && i+1 < len(args) {
+			var cfg struct {
+				MCPServers map[string]json.RawMessage `json:"mcpServers"`
+			}
+			if err := json.Unmarshal([]byte(args[i+1]), &cfg); err != nil {
+				t.Fatalf("failed to parse --mcp-config JSON: %v", err)
+			}
+			if _, ok := cfg.MCPServers["orqestra"]; !ok {
+				t.Error("--mcp-config should contain merged 'orqestra' server")
+			}
+			if _, ok := cfg.MCPServers["context7"]; !ok {
+				t.Error("--mcp-config should preserve existing 'context7' server")
+			}
+			break
+		}
+	}
+}
+
+func TestBuildFinalArgs_NoAutoDisallowAskUserQuestion(t *testing.T) {
+	cli := NewClaudeCLI(config.ResolvedModel{Type: "anthropic"},
+		WithDisallowedTools([]string{"ExitPlanMode"}),
+		WithInlineMCPServer("orqestra", "/usr/bin/orqestra", []string{"mcp-bridge"}),
+	)
+
+	args := cli.buildFinalArgs()
+
+	for i, arg := range args {
+		if arg == "--disallowed-tools" && i+1 < len(args) {
+			if strings.Contains(args[i+1], "AskUserQuestion") {
+				t.Error("buildFinalArgs should NOT auto-disallow AskUserQuestion")
+			}
+			break
 		}
 	}
 }

@@ -55,7 +55,8 @@ macOS `sandbox-exec` (seatbelt) with kernel-enforced path permissions.
 
 ### Workflow
 
-```
+```mermaid
+flowchart TD
 User Prompt
     → Researcher  (explores codebase, writes researcher_draft.md)
     → Architect   (consumes draft, produces implementation spec)
@@ -206,6 +207,7 @@ sandbox:
 ```
 
 **Config key notes:**
+
 - Model names (`large`, `medium`, `small`) are arbitrary — only the keys referenced by role configs matter.
 - Each role (`researcher`, `architect`, `critic`, `worker`) has its own `model:` key.
 - `binary:` in a model entry overrides the `claude` executable path; applies only to `native`-type providers, not `openai`-type.
@@ -249,6 +251,7 @@ providers:
 ```
 
 **Important:** Local model agents bypass the Claude Code CLI harness entirely — they communicate directly with the OpenAI-compatible REST endpoint. This means:
+
 - No Claude Code MCP integrations, memory, or reasoning loops for those agents.
 - `binary:` has no effect on `openai`-type providers.
 - The `sandbox-exec` profile still applies to the *harness process*, but the model runs outside the sandbox.

@@ -3,7 +3,6 @@
 researcher:
   model: medium
   permission_mode: plan
-  allowed_tools: ["*"]
   disallowed_tools: [ExitPlanMode]
   system_prompt: |
     You are a codebase researcher. Explore the code deeply and produce a
@@ -74,7 +73,6 @@ researcher:
 architect:
   model: large
   permission_mode: plan
-  allowed_tools: ["*"]
   disallowed_tools: [ExitPlanMode]
   system_prompt: |
     You are the Principal Engineer. You receive a user request and a
@@ -189,8 +187,7 @@ architect:
 critic:
   model: medium
   permission_mode: plan
-  allowed_tools: [Read, Grep, Glob, LS, Bash, "mcp__orqestra__*"]
-  disallowed_tools: [Write, Edit, ExitPlanMode, MultiEdit, NotebookEdit]
+  disallowed_tools: [ExitPlanMode]
   system_prompt: |
     You are the Plan Critic. You receive an implementation plan produced by
     an architect and the original user request. Your job is to find execution

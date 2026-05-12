@@ -174,7 +174,8 @@ func WithBinary(path string) ClaudeCLIOption {
 // WithInlineMCPServer injects an MCP server definition that will be merged
 // into the --mcp-config JSON at CLI invocation time. This is used to inject
 // the orqestra question bridge as an MCP tool available to the model.
-// The built-in AskUserQuestion is auto-disallowed when a bridge is configured.
+// When no explicit WithMCPServers filtering is active, inline servers are
+// additive — the user's default MCPs from ~/.claude.json remain available.
 func WithInlineMCPServer(name, command string, args []string) ClaudeCLIOption {
 	return func(c *ClaudeCLI) {
 		if c.inlineMCPServers == nil {
@@ -652,9 +653,11 @@ func filterMCPConfig(names []string) string {
 }
 
 // buildFinalArgs returns extraArgs with inline MCP servers merged in.
-// If inlineMCPServers is set, it finds existing --mcp-config in extraArgs,
-// merges inline servers into it, and also auto-disallows the built-in
-// AskUserQuestion tool (which hangs in -p mode).
+// buildFinalArgs merges inlineMCPServers into existing --mcp-config if present.
+// When --strict-mcp-config was already set (via WithMCPServers), inline servers
+// are merged into the existing filtered config. When no strict filtering was
+// requested, inline servers are added via --mcp-config only (additive — the
+// user's default MCPs from ~/.claude.json remain available).
 func (c *ClaudeCLI) buildFinalArgs() []string {
 	if len(c.inlineMCPServers) == 0 {
 		return c.extraArgs
@@ -702,23 +705,14 @@ func (c *ClaudeCLI) buildFinalArgs() []string {
 	}
 
 	if mcpIdx >= 0 {
+		// --mcp-config already exists (with --strict-mcp-config from WithMCPServers);
+		// update the config in place, keeping strict filtering.
 		args[mcpIdx] = string(merged)
 	} else {
-		args = append(args, "--strict-mcp-config", "--mcp-config", string(merged))
-	}
-
-	// Merge "AskUserQuestion" into existing --disallowed-tools (or add new flag)
-	disallowIdx := -1
-	for i, arg := range args {
-		if arg == "--disallowed-tools" && i+1 < len(args) {
-			disallowIdx = i + 1
-			break
-		}
-	}
-	if disallowIdx >= 0 {
-		args[disallowIdx] = args[disallowIdx] + ",AskUserQuestion"
-	} else {
-		args = append(args, "--disallowed-tools", "AskUserQuestion")
+		// No explicit MCP filtering — add inline servers additively.
+		// Do NOT add --strict-mcp-config: let user's default MCPs from
+		// ~/.claude.json remain available alongside the inline servers.
+		args = append(args, "--mcp-config", string(merged))
 	}
 
 	return args
