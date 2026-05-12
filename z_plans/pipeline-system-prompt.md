@@ -56,7 +56,9 @@ Output your response using the following strict XML structure:
 
 ```yaml
 [The completely optimized pipeline.yaml, ready for production]
-</optimized_pipeline_yaml>
 
+```
+
+</optimized_pipeline_yaml>
 
 </execution_protocol>

@@ -114,7 +114,7 @@ func (s PromptScreen) View(width, height int) string {
 
 	// Footer (2 lines)
 	footer := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
-		keyStyle.Render(" [Enter] submit | [Shift+Enter] newline | [Ctrl+S] skip gateway | [Ctrl+R] runs  [^C^C] quit")
+		keyStyle.Render(" [Enter] submit | [Shift+Enter] newline | [^S] skip gateway | [^R] runs  [^C] quit")
 
 	// Input zone (divider + instruction + textarea + newline)
 	input := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +

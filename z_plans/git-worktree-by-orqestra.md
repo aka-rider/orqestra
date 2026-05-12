@@ -2,7 +2,14 @@
 
 ## Goal
 
-Implement git worktree-based sandbox isolation so each agent run operates in an isolated environment. This prevents LLM changes from mixing with uncommitted human work, enables parallel runs, and allows atomic apply-to-main.
+The user wants workers to operate in an isolated git worktree rather than the main repository directory. This requires:
+
+Creating a git worktree before the worker starts.
+Configuring the sandbox so the main repo is read-only and the worktree is read-write.
+Committing the changes in the worktree if the run is successful.
+Merging the worktree changes back into the main branch.
+Handling merge conflicts gracefully.
+Updating the TUI to surface the worktree state, approval, and conflict resolution options.
 
 ## Principles & Architecture
 

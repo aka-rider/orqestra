@@ -84,7 +84,7 @@ type PipelineScreen struct {
 	configName    string
 	showDashboard bool
 	showHelp      bool
-	confirmNew    bool
+	ctrlCPending  bool // set by parent model when Ctrl+C time gate is active
 	active        bool // true while pipeline is running
 
 	// Viewports
@@ -146,7 +146,6 @@ func (s *PipelineScreen) Reset() {
 	s.planFilePath = ""
 	s.showDashboard = false
 	s.showHelp = false
-	s.confirmNew = false
 	s.active = false
 	s.phase = ""
 	s.userQuestion = harness.MCPToolCall{}
@@ -268,7 +267,7 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 			s.diffViewport.SetContent(s.planDiff)
 			if len(s.chatHistory) > 0 && s.planDiff != "" {
 				s.chatHistory = append(s.chatHistory, ChatEntry{
-					Role: "architect", Text: "(plan revised — see diff with [D])", HasPlanChange: true,
+					Role: "architect", Text: "(plan revised — see diff with [^D])", HasPlanChange: true,
 				})
 			}
 			s.awaitingPlanDecision = true
@@ -352,11 +351,11 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	// Global pipeline keys first
 	switch msg.String() {
-	case "?":
+	case "ctrl+h":
 		s.showHelp = !s.showHelp
 		s.SyncViewports()
 		return s, nil
-	case "d", "D":
+	case "ctrl+d":
 		if s.content != ContentPlanEdit && s.content != ContentPlanReview && s.content != ContentPlanDiff && s.content != ContentUserQuestion {
 			s.showDashboard = !s.showDashboard
 			s.SyncViewports()
@@ -392,9 +391,12 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		return s, nil
 	}
 
-	// Number keys for agent navigation (1-9)
-	if msg.String() >= "1" && msg.String() <= "9" && s.content != ContentPlanEdit && s.content != ContentPlanReview && s.content != ContentUserQuestion {
-		idx := int(msg.String()[0] - '0')
+	// Alt+1-9 for agent navigation
+	altKeys := map[string]int{
+		"alt+1": 1, "alt+2": 2, "alt+3": 3, "alt+4": 4, "alt+5": 5,
+		"alt+6": 6, "alt+7": 7, "alt+8": 8, "alt+9": 9,
+	}
+	if idx, ok := altKeys[msg.String()]; ok && s.content != ContentPlanEdit && s.content != ContentPlanReview && s.content != ContentUserQuestion {
 		if idx <= len(s.agents) {
 			s.focusedAgent = idx
 			s.content = ContentAgentHistory
@@ -578,18 +580,6 @@ func (s PipelineScreen) handleUserQuestionKey(msg tea.KeyPressMsg) (PipelineScre
 	}
 
 	switch msg.String() {
-	case "j":
-		if s.questionCursor < len(opts)-1 {
-			s.questionCursor++
-		}
-		s.SyncViewports()
-		return s, nil
-	case "k":
-		if s.questionCursor > 0 {
-			s.questionCursor--
-		}
-		s.SyncViewports()
-		return s, nil
 	case " ":
 		if s.userQuestion.MultiSelect {
 			s.questionSelected[s.questionCursor] = !s.questionSelected[s.questionCursor]
@@ -631,24 +621,20 @@ func (s PipelineScreen) buildQuestionAnswer() harness.MCPAnswer {
 }
 
 func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
-	if msg.String() == "ctrl+e" {
-		if s.planFilePath != "" {
-			s.editorRunning = true
-			s.PendingIntent = OpenExternalEditorIntent{FilePath: s.planFilePath}
+	// When the comment textarea is focused, forward all non-modifier keys to it.
+	// Only Ctrl+* combos, Esc, and Enter pass through as actions.
+	if s.hasPlanComment {
+		switch msg.Code {
+		case tea.KeyEscape:
+			s.planComment.Blur()
+			s.hasPlanComment = false
+			s.SyncViewports()
 			return s, nil
-		}
-		return s, nil
-	}
-	switch msg.Code {
-	case tea.KeyEnter:
-		if msg.Mod.Contains(tea.ModShift) || msg.Mod.Contains(tea.ModAlt) {
-			// Shift+Enter / Alt+Enter inserts a newline in the comment textarea
-			if s.hasPlanComment {
+		case tea.KeyEnter:
+			if msg.Mod.Contains(tea.ModShift) || msg.Mod.Contains(tea.ModAlt) {
 				s.planComment.InsertString("\n")
+				return s, nil
 			}
-			return s, nil
-		}
-		if s.hasPlanComment {
 			comment := strings.TrimSpace(s.planComment.Value())
 			if comment != "" {
 				s.chatHistory = append(s.chatHistory, ChatEntry{Role: "you", Text: comment})
@@ -660,19 +646,32 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 				s.PendingIntent = CommentPlanIntent{Comment: comment}
 				return s, nil
 			}
+			return s, nil
 		}
-		return s, nil
+		// Ctrl/Alt combos fall through to action handlers below
+		if !msg.Mod.Contains(tea.ModCtrl) && !msg.Mod.Contains(tea.ModAlt) && !msg.Mod.Contains(tea.ModMeta) {
+			var cmd tea.Cmd
+			s.planComment, cmd = s.planComment.Update(msg)
+			return s, cmd
+		}
 	}
 
 	switch msg.String() {
-	case "a", "A":
+	case "ctrl+shift+e":
+		if s.planFilePath != "" {
+			s.editorRunning = true
+			s.PendingIntent = OpenExternalEditorIntent{FilePath: s.planFilePath}
+			return s, nil
+		}
+		return s, nil
+	case "ctrl+a":
 		s.awaitingPlanDecision = false
 		s.hasPlanComment = false
 		s.content = ContentStreaming
 		s.SyncViewports()
 		s.PendingIntent = ApprovePlanIntent{}
 		return s, nil
-	case "e", "E":
+	case "ctrl+e":
 		s.awaitingPlanDecision = false
 		contentWidth := max(1, int(float64(s.contentVP.Width()+s.sidebarVP.Width()+1)*splitRatio))
 		contentHeight := max(4, s.contentVP.Height())
@@ -690,11 +689,7 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 		s.content = ContentPlanEdit
 		s.SyncViewports()
 		return s, nil
-	case "s", "S":
-		s.awaitingPlanDecision = false
-		s.PendingIntent = CancelPlanIntent{}
-		return s, nil
-	case "d", "D":
+	case "ctrl+d":
 		if s.planDiff != "" {
 			s.content = ContentPlanDiff
 			s.hasPlanComment = false
@@ -704,12 +699,6 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 		return s, nil
 	}
 
-	// Pass remaining keys to comment textarea
-	if s.hasPlanComment {
-		var cmd tea.Cmd
-		s.planComment, cmd = s.planComment.Update(msg)
-		return s, cmd
-	}
 	return s, nil
 }
 
@@ -735,8 +724,32 @@ func (s PipelineScreen) handlePlanEditKey(msg tea.KeyPressMsg) (PipelineScreen, 
 	return s, nil
 }
 
+// HandleCtrlCCancel handles the first Ctrl+C press by emitting the appropriate
+// cancel intent based on current content mode.
+func (s PipelineScreen) HandleCtrlCCancel() PipelineScreen {
+	switch s.content {
+	case ContentPlanReview:
+		s.awaitingPlanDecision = false
+		s.hasPlanComment = false
+		s.PendingIntent = CancelPlanIntent{}
+	case ContentStreaming, ContentAgentHistory:
+		s.PendingIntent = CancelPipelineIntent{}
+	case ContentPlanEdit:
+		// Cancel edit and return to review — don't cancel the whole pipeline
+		s.content = ContentPlanReview
+		s.SyncViewports()
+	case ContentUserQuestion:
+		s.content = ContentStreaming
+		s.SyncViewports()
+		s.PendingIntent = SubmitQuestionAnswerIntent{Answer: harness.MCPAnswer{Skipped: true}}
+	default:
+		s.PendingIntent = CancelPipelineIntent{}
+	}
+	return s
+}
+
 func (s PipelineScreen) handlePlanDiffKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
-	if msg.Code == tea.KeyEscape || msg.String() == "d" || msg.String() == "D" {
+	if msg.Code == tea.KeyEscape || msg.String() == "ctrl+d" {
 		s.content = ContentPlanReview
 		s.contentVP.GotoTop()
 		contentWidth := max(1, int(float64(s.contentVP.Width()+s.sidebarVP.Width()+1)*splitRatio))
@@ -771,25 +784,10 @@ func (s PipelineScreen) handleAgentHistoryKey(msg tea.KeyPressMsg) (PipelineScre
 }
 
 func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
-	if s.confirmNew {
-		switch msg.String() {
-		case "y", "Y":
-			s.confirmNew = false
-			s.PendingIntent = ConfirmNewRunIntent{}
-			return s, nil
-		default:
-			s.confirmNew = false
-			return s, nil
-		}
-	}
-
 	switch msg.String() {
-	case "s", "S":
-		s.PendingIntent = CancelPipelineIntent{}
-		return s, nil
-	case "n", "N":
-		if s.active && s.content == ContentStreaming {
-			s.confirmNew = true
+	case "ctrl+n":
+		if s.active {
+			s.PendingIntent = ConfirmNewRunIntent{}
 			return s, nil
 		}
 		s.PendingIntent = NavigateToPromptIntent{PreFillGoal: s.goal}
@@ -799,15 +797,14 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 }
 
 func (s PipelineScreen) handleCompletionKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
-	if msg.String() == "ctrl+r" {
+	switch msg.String() {
+	case "ctrl+r":
 		s.PendingIntent = NavigateToRunsListIntent{}
 		return s, nil
-	}
-	switch msg.String() {
-	case "n", "N":
+	case "ctrl+n":
 		s.PendingIntent = NavigateToPromptIntent{PreFillGoal: s.goal}
 		return s, nil
-	case "q", "Q":
+	case "ctrl+q":
 		return s, tea.Quit
 	}
 	return s, nil
@@ -886,9 +883,6 @@ func (s PipelineScreen) viewInputZone() string {
 		if s.lastErr != nil {
 			status = errorStyle.Render(fmt.Sprintf(" Error: %v", s.lastErr))
 		}
-		if s.confirmNew {
-			status = warnStyle.Render(" Pipeline is active. Start new run? [Y] yes / [any] cancel")
-		}
 		return status
 	case ContentUserQuestion:
 		if s.questionCustomActive >= 0 {
@@ -906,11 +900,11 @@ func (s PipelineScreen) viewInputZone() string {
 			return s.planComment.View() + "\n" +
 				keyStyle.Render(" [Enter] send | [Shift+Enter] newline | [Esc] cancel")
 		}
-		return keyStyle.Render(" [A] accept | [E] edit | [Ctrl+E] editor | [Enter] comment | [S] cancel")
+		return keyStyle.Render(" [^A] accept | [^E] edit | [^⇧E] editor | [Enter] comment | [^D] diff")
 	case ContentPlanEdit:
 		return keyStyle.Render(" [Ctrl+S] save edits | [Esc] discard")
 	case ContentMergeConflict:
-		return keyStyle.Render(" [A] abort merge and keep worktree branch | [Esc] back to stream")
+		return keyStyle.Render(" [^A] abort merge and keep worktree branch | [Esc] back to stream")
 	case ContentAgentHistory:
 		agentName := ""
 		if s.focusedAgent > 0 && s.focusedAgent <= len(s.agents) {
@@ -1236,21 +1230,20 @@ func (s PipelineScreen) viewDashboard() string {
 func (s PipelineScreen) viewHelp() string {
 	return ` Orqestra Keybindings
 ─────────────────────────────────
- [Enter]      Submit prompt / confirm
- [Ctrl+S]     Skip gateway / save edits
- [Tab]        Next field (coaching)
- [Shift+Tab]  Previous field (coaching)
- [PgUp/PgDn]  Scroll content
- [A]          Accept plan
- [E]          Edit plan
- [S]          Stop/cancel running agent
- [N]          New run
- [D]          Toggle full dashboard
- [1-9]        View agent output
- [Esc]        Back / dismiss
- [?]          Toggle this help
- [Q]          Quit (at completion)
- [Ctrl+C x2]  Force quit
+ [Enter]       Submit prompt / confirm
+ [Ctrl+S]      Skip gateway / save edits
+ [PgUp/PgDn]   Scroll content
+ [Ctrl+A]      Accept plan / abort merge
+ [Ctrl+E]      Edit plan (in-TUI)
+ [Ctrl+⇧E]     Open external editor
+ [Ctrl+D]      Toggle dashboard / diff
+ [Ctrl+N]      New run
+ [Ctrl+R]      Historical runs
+ [Ctrl+Q]      Quit (at completion)
+ [Ctrl+H]      Toggle this help
+ [Alt+1-9]     View agent output
+ [Ctrl+C]      Cancel → exit (time-gated)
+ [Esc]         Back / dismiss
 `
 }
 
@@ -1316,37 +1309,41 @@ func (s PipelineScreen) viewSidebar(width int) string {
 }
 
 func (s PipelineScreen) viewFooter() string {
+	ctrlCHint := "[^C] cancel"
+	if s.ctrlCPending {
+		ctrlCHint = warnStyle.Render("[^C] EXIT")
+	}
 	switch s.content {
 	case ContentUserQuestion:
 		if s.hasQuestionTA {
-			return keyStyle.Render(" [Enter] submit | [Esc] skip                               [?] help  [^C^C] quit")
+			return keyStyle.Render(" [Enter] submit | [Esc] skip                           [^H] help  ") + ctrlCHint
 		}
 		if s.userQuestion.MultiSelect {
-			return keyStyle.Render(" [↑↓] navigate | [Space] toggle | [Enter] confirm | [Esc] skip   [?] help  [^C^C] quit")
+			return keyStyle.Render(" [↑↓] navigate | [Space] toggle | [Enter] confirm | [Esc] skip   [^H] help  ") + ctrlCHint
 		}
-		return keyStyle.Render(" [↑↓] navigate | [Enter] select | [Esc] skip                [?] help  [^C^C] quit")
+		return keyStyle.Render(" [↑↓] navigate | [Enter] select | [Esc] skip            [^H] help  ") + ctrlCHint
 	case ContentPlanReview:
-		footer := " [A] accept | [E] edit | [Ctrl+E] editor | [Enter] comment | [Shift+Enter] newline"
+		footer := " [^A] accept | [^E] edit | [^⇧E] editor | [Enter] comment | [Shift+Enter] newline"
 		if s.planDiff != "" {
-			footer += " | [D] diff"
+			footer += " | [^D] diff"
 		}
-		footer += " | [S] cancel  [^C^C] quit"
+		footer += "  " + ctrlCHint
 		if len(s.chatHistory) > 0 && (s.reviewTokensIn+s.reviewTokensOut > 0) {
 			footer += dimStyle.Render(fmt.Sprintf("  Review: %s", formatTokens(s.reviewTokensIn+s.reviewTokensOut)))
 		}
 		return keyStyle.Render(footer)
 	case ContentPlanDiff:
-		return keyStyle.Render(" [Esc] return to plan                                        [?] help  [^C^C] quit")
+		return keyStyle.Render(" [Esc] return to plan | [^D] return to plan              [^H] help  ") + ctrlCHint
 	case ContentPlanEdit:
-		return keyStyle.Render(" [Ctrl+S] save edits | [Esc] discard                       [?] help  [^C^C] quit")
+		return keyStyle.Render(" [Ctrl+S] save edits | [Esc] discard                     [^H] help  ") + ctrlCHint
 	case ContentMergeConflict:
-		return keyStyle.Render(" [A] abort merge | [Esc] continue                           [?] help  [^C^C] quit")
+		return keyStyle.Render(" [^A] abort merge | [Esc] continue                       [^H] help  ") + ctrlCHint
 	case ContentAgentHistory:
-		return keyStyle.Render(" [Esc] back to live                                        [?] help  [D] expand  [S] stop  [N] new  [^C^C] quit")
+		return keyStyle.Render(" [Esc] back to live                  [^D] expand  [^N] new  [^H] help  ") + ctrlCHint
 	case ContentCompletion:
-		return keyStyle.Render(" [N] new run | [Ctrl+R] runs | [Q] quit                    [?] help")
+		return keyStyle.Render(" [^N] new run | [^R] runs | [^Q] quit                    [^H] help")
 	default:
-		return keyStyle.Render(" [S] stop | [N] new run                                    [?] help  [D] expand  [1-9] agent  [^C^C] quit")
+		return keyStyle.Render(" [^N] new run                    [^D] expand  [Alt+N] agent  [^H] help  ") + ctrlCHint
 	}
 }
 
@@ -1378,7 +1375,7 @@ func renderActivityLog(activities []orchestrator.Activity, width int) string {
 
 func (s PipelineScreen) handleMergeConflictKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	switch msg.String() {
-	case "a", "A":
+	case "ctrl+a":
 		s.content = ContentStreaming
 		s.SyncViewports()
 		s.PendingIntent = AbortMergeIntent{}
@@ -1410,7 +1407,7 @@ func (s PipelineScreen) viewMergeConflict(width int) string {
 	b.WriteString(dimStyle.Render(fmt.Sprintf(" The worktree branch %q is preserved.\n", s.mergeConflict.WorktreeBranch)))
 	b.WriteString(dimStyle.Render(" Resolve manually: git merge " + s.mergeConflict.WorktreeBranch + "\n"))
 	b.WriteString("\n")
-	b.WriteString(keyStyle.Render(" [A] abort (keep branch for manual merge)   [Esc] continue"))
+	b.WriteString(keyStyle.Render(" [^A] abort (keep branch for manual merge)   [Esc] continue"))
 	return b.String()
 }
 

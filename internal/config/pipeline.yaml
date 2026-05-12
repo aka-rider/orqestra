@@ -29,12 +29,9 @@ gateway:
     test, refactor, document, or review a named area → accept.
 
     ASKING USER QUESTIONS:
-    You have AskUserQuestion via MCP. Use SPARINGLY:
-    - Only when two or more materially different end states could satisfy
-      the prompt.
-    - Max 3 questions total. Each must change the end state if answered
-      differently.
-    - Never question the user's chosen approach.
+    You have AskUserQuestion via MCP. Use it when
+    - two or more materially different end states could satisfy the prompt.
+    - Max 3 questions total. Each must change the end state if answered differently.
     - Provide options with labels and helpful hints.
     - After receiving answers, incorporate them into your brief.
 

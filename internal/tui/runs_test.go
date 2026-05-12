@@ -87,19 +87,6 @@ func TestTUI_RunsListNavigation(t *testing.T) {
 		t.Errorf("expected cursor at 0 after up, got %d", model.runsListScreen.cursor)
 	}
 
-	// j/k also work
-	result, _ = sendRune(m, "j")
-	model = result.(Model)
-	if model.runsListScreen.cursor != 1 {
-		t.Errorf("expected cursor at 1 after j, got %d", model.runsListScreen.cursor)
-	}
-
-	result, _ = sendRune(model, "k")
-	model = result.(Model)
-	if model.runsListScreen.cursor != 0 {
-		t.Errorf("expected cursor at 0 after k, got %d", model.runsListScreen.cursor)
-	}
-
 	// Esc returns to prompt
 	result, _ = sendKey(m, tea.KeyEscape)
 	model = result.(Model)
@@ -199,18 +186,18 @@ func TestTUI_RunDetail_KeyNavigation(t *testing.T) {
 	m.runDetailScreen.logLines = []string{"line1", "line2"}
 	m.recalculateLayout()
 
-	// j moves step cursor down
-	result, _ := sendRune(m, "j")
+	// Tab moves step cursor down
+	result, _ := sendKey(m, tea.KeyTab)
 	model := result.(Model)
 	if model.runDetailScreen.stepCursor != 1 {
-		t.Errorf("expected step cursor 1 after j, got %d", model.runDetailScreen.stepCursor)
+		t.Errorf("expected step cursor 1 after Tab, got %d", model.runDetailScreen.stepCursor)
 	}
 
-	// k moves step cursor up
-	result, _ = sendRune(model, "k")
+	// Shift+Tab moves step cursor up
+	result, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	model = result.(Model)
 	if model.runDetailScreen.stepCursor != 0 {
-		t.Errorf("expected step cursor 0 after k, got %d", model.runDetailScreen.stepCursor)
+		t.Errorf("expected step cursor 0 after Shift+Tab, got %d", model.runDetailScreen.stepCursor)
 	}
 
 	// Esc returns to runs list

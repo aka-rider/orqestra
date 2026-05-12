@@ -70,6 +70,14 @@ func sendCtrl(m tea.Model, key rune) (tea.Model, tea.Cmd) {
 	return m.Update(tea.KeyPressMsg{Code: key, Mod: tea.ModCtrl})
 }
 
+func sendCtrlShift(m tea.Model, key rune) (tea.Model, tea.Cmd) {
+	return m.Update(tea.KeyPressMsg{Code: key, Mod: tea.ModCtrl | tea.ModShift})
+}
+
+func sendAlt(m tea.Model, key rune) (tea.Model, tea.Cmd) {
+	return m.Update(tea.KeyPressMsg{Code: key, Mod: tea.ModAlt})
+}
+
 // viewString extracts the rendered content string from the tea.View returned by Model.View().
 func viewString(m Model) string {
 	return m.View().Content
@@ -187,7 +195,7 @@ func TestTUI_PlanApprove(t *testing.T) {
 	decisions := make(chan orchestrator.Decision, 1)
 	m.decisions = decisions
 
-	result, _ := sendRune(m, "a")
+	result, _ := sendCtrl(m, 'a')
 	model := result.(Model)
 
 	if model.pipelineScreen.content != ContentStreaming {
@@ -213,8 +221,8 @@ func TestTUI_PlanEditSave(t *testing.T) {
 	decisions := make(chan orchestrator.Decision, 1)
 	m.decisions = decisions
 
-	// Press E to enter edit mode
-	result, _ := sendRune(m, "e")
+	// Press Ctrl+E to enter edit mode
+	result, _ := sendCtrl(m, 'e')
 	model := result.(Model)
 
 	if model.pipelineScreen.content != ContentPlanEdit {
@@ -255,8 +263,8 @@ func TestTUI_PlanEditDiscard(t *testing.T) {
 	m.pipelineScreen.hasPlan = true
 	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nOriginal"
 
-	// Press E to enter edit mode
-	result, _ := sendRune(m, "e")
+	// Press Ctrl+E to enter edit mode
+	result, _ := sendCtrl(m, 'e')
 	model := result.(Model)
 
 	if model.pipelineScreen.content != ContentPlanEdit {
@@ -276,14 +284,19 @@ func TestTUI_CancelAgent(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.active = true
 	cancelled := false
 	m.cancel = func() { cancelled = true }
 
-	result, _ := sendRune(m, "s")
-	_ = result.(Model)
+	// First Ctrl+C cancels the pipeline
+	result, _ := sendCtrl(m, 'c')
+	model := result.(Model)
 
 	if !cancelled {
 		t.Error("expected cancel func to be called")
+	}
+	if !model.ctrlCPending {
+		t.Error("expected ctrlCPending=true after first Ctrl+C")
 	}
 }
 
@@ -296,8 +309,8 @@ func TestTUI_AgentNavigation(t *testing.T) {
 		{ID: "architect", State: "running"},
 	}
 
-	// Press 1 to view gateway history
-	result, _ := sendRune(m, "1")
+	// Press Alt+1 to view gateway history
+	result, _ := sendAlt(m, '1')
 	model := result.(Model)
 
 	if model.pipelineScreen.content != ContentAgentHistory {
@@ -333,7 +346,7 @@ func TestTUI_NewRun(t *testing.T) {
 	m.pipelineScreen.content = ContentCompletion
 	m.pipelineScreen.goal = "original goal"
 
-	result, _ := sendRune(m, "n")
+	result, _ := sendCtrl(m, 'n')
 	model := result.(Model)
 
 	if model.state != StatePrompt {
@@ -353,35 +366,18 @@ func TestTUI_NewRunConfirm(t *testing.T) {
 	cancelled := false
 	m.cancel = func() { cancelled = true }
 
-	// Press N during active pipeline — should show confirmation
-	result, _ := sendRune(m, "n")
+	// Press Ctrl+N during active pipeline — directly confirms new run
+	result, _ := sendCtrl(m, 'n')
 	model := result.(Model)
 
-	if model.state != StatePipeline {
-		t.Error("expected to stay in StatePipeline until confirmed")
-	}
-	if !model.pipelineScreen.confirmNew {
-		t.Error("expected confirmNew=true")
-	}
-
-	// View should show confirmation message
-	view := viewString(model)
-	if !strings.Contains(view, "Pipeline is active") {
-		t.Error("expected confirmation message in view")
-	}
-
-	// Press Y to confirm
-	result2, _ := sendRune(model, "y")
-	model2 := result2.(Model)
-
-	if model2.state != StatePrompt {
-		t.Errorf("expected StatePrompt after Y confirm, got %d", model2.state)
+	if model.state != StatePrompt {
+		t.Errorf("expected StatePrompt after Ctrl+N, got %d", model.state)
 	}
 	if !cancelled {
 		t.Error("expected cancel to be called")
 	}
-	if !strings.Contains(model2.promptScreen.Value(), "active task") {
-		t.Errorf("expected prompt pre-filled with goal, got %q", model2.promptScreen.Value())
+	if !strings.Contains(model.promptScreen.Value(), "active task") {
+		t.Errorf("expected prompt pre-filled with goal, got %q", model.promptScreen.Value())
 	}
 }
 
@@ -421,8 +417,8 @@ func TestTUI_FullDashboard(t *testing.T) {
 		{ID: "architect", State: "running"},
 	}
 
-	// Press D to toggle dashboard
-	result, _ := sendRune(m, "d")
+	// Press Ctrl+D to toggle dashboard
+	result, _ := sendCtrl(m, 'd')
 	model := result.(Model)
 
 	if !model.pipelineScreen.showDashboard {
@@ -446,21 +442,57 @@ func TestTUI_FullDashboard(t *testing.T) {
 
 func TestTUI_DoubleCtrlC(t *testing.T) {
 	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.active = true
+	m.cancel = func() {}
 
-	// First Ctrl+C
+	// First Ctrl+C — cancels pipeline, sets pending
 	result, cmd := sendCtrl(m, 'c')
 	model := result.(Model)
-	if cmd != nil {
-		t.Error("first Ctrl+C should not quit")
+	if cmd == nil {
+		t.Error("first Ctrl+C should return timeout tick cmd")
 	}
-	if model.ctrlC != 1 {
-		t.Errorf("expected ctrlC=1, got %d", model.ctrlC)
+	if !model.ctrlCPending {
+		t.Error("expected ctrlCPending=true")
 	}
 
-	// Second Ctrl+C
+	// Second Ctrl+C within time gate — should quit
 	_, cmd = sendCtrl(model, 'c')
 	if cmd == nil {
 		t.Error("second Ctrl+C should trigger quit")
+	}
+}
+
+func TestTUI_CtrlCQuitWhenIdle(t *testing.T) {
+	m := testModel()
+
+	// Ctrl+C from prompt screen (idle) — immediate quit
+	_, cmd := sendCtrl(m, 'c')
+	if cmd == nil {
+		t.Error("Ctrl+C when idle should trigger immediate quit")
+	}
+}
+
+func TestTUI_CtrlCTimeoutResets(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.active = true
+	m.cancel = func() {}
+
+	// First Ctrl+C
+	result, _ := sendCtrl(m, 'c')
+	model := result.(Model)
+	if !model.ctrlCPending {
+		t.Fatal("expected ctrlCPending=true")
+	}
+
+	// Simulate timeout message
+	result2, _ := model.Update(ctrlCTimeoutMsg{})
+	model2 := result2.(Model)
+	if model2.ctrlCPending {
+		t.Error("expected ctrlCPending=false after timeout")
 	}
 }
 
@@ -729,8 +761,8 @@ func TestTUI_NewRunClearsStaleState(t *testing.T) {
 	m.pipelineScreen.workerValidation = "old validation"
 	m.pipelineScreen.hasValidation = true
 
-	// Press N to start new run
-	result, _ := sendRune(m, "n")
+	// Press Ctrl+N to start new run
+	result, _ := sendCtrl(m, 'n')
 	model := result.(Model)
 
 	if model.state != StatePrompt {
@@ -771,8 +803,8 @@ func TestTUI_RestartClearsErrorAndAgents(t *testing.T) {
 	m.pipelineScreen.agents = []AgentRow{{ID: "gateway", State: "done"}}
 	m.pipelineScreen.lastErr = fmt.Errorf("old error")
 
-	// Press N, then submit new prompt via Enter
-	result, _ := sendRune(m, "n")
+	// Press Ctrl+N, then submit new prompt via Enter
+	result, _ := sendCtrl(m, 'n')
 	model := result.(Model)
 	model.promptScreen.SetValue("new task")
 
@@ -896,12 +928,12 @@ func TestTUI_PlanReviewExternalEditor(t *testing.T) {
 	m.pipelineScreen.hasPlanComment = true
 	m.pipelineScreen.planComment = textarea.New()
 
-	// Press Ctrl+E to open external editor
-	result, cmd := sendCtrl(m, 'e')
+	// Press Ctrl+Shift+E to open external editor
+	result, cmd := sendCtrlShift(m, 'e')
 	model := result.(Model)
 
 	if !model.pipelineScreen.editorRunning {
-		t.Error("expected editorRunning=true after Ctrl+E")
+		t.Error("expected editorRunning=true after Ctrl+Shift+E")
 	}
 	if cmd == nil {
 		t.Error("expected non-nil cmd (ExecProcess)")
@@ -1088,6 +1120,105 @@ func TestTUI_DrainLoopChannelCloseAfterGate(t *testing.T) {
 	}
 }
 
+// TestTUI_PlanReviewTextareaGuard verifies that bare letter keys go to the
+// comment textarea and do NOT trigger action shortcuts when the textarea is focused.
+// Regression test for: typing in plan comment caused gate to skip.
+func TestTUI_PlanReviewTextareaGuard(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest"
+	m.pipelineScreen.hasPlanComment = true
+	m.pipelineScreen.planComment = textarea.New()
+	m.pipelineScreen.planComment.SetWidth(80)
+	m.pipelineScreen.planComment.SetHeight(2)
+	m.pipelineScreen.planComment.Focus()
+	m.pipelineScreen.awaitingPlanDecision = true
+	decisions := make(chan orchestrator.Decision, 1)
+	m.decisions = decisions
+
+	// Type letters that used to be action shortcuts: a, e, s, d
+	for _, ch := range []string{"a", "e", "s", "d"} {
+		result, _ := sendRune(m, ch)
+		model := result.(Model)
+
+		if model.pipelineScreen.content != ContentPlanReview {
+			t.Errorf("typing %q switched content to %d — expected to stay in ContentPlanReview", ch, model.pipelineScreen.content)
+		}
+		if model.pipelineScreen.PendingIntent != nil {
+			t.Errorf("typing %q triggered intent %T — expected nil (key should go to textarea)", ch, model.pipelineScreen.PendingIntent)
+		}
+	}
+
+	// Confirm no decision was sent
+	select {
+	case d := <-decisions:
+		t.Errorf("unexpected decision sent: %+v", d)
+	default:
+		// expected — no decision
+	}
+}
+
+// TestTUI_PlanReviewCtrlAApproves verifies Ctrl+A approves plan even when
+// comment textarea is focused.
+func TestTUI_PlanReviewCtrlAApproves(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest"
+	m.pipelineScreen.hasPlanComment = true
+	m.pipelineScreen.planComment = textarea.New()
+	m.pipelineScreen.planComment.SetWidth(80)
+	m.pipelineScreen.planComment.SetHeight(2)
+	m.pipelineScreen.planComment.Focus()
+	m.pipelineScreen.awaitingPlanDecision = true
+	decisions := make(chan orchestrator.Decision, 1)
+	m.decisions = decisions
+
+	// Ctrl+A should approve even with textarea active
+	result, _ := sendCtrl(m, 'a')
+	model := result.(Model)
+
+	if model.pipelineScreen.content != ContentStreaming {
+		t.Errorf("expected ContentStreaming after Ctrl+A approve, got %d", model.pipelineScreen.content)
+	}
+
+	select {
+	case d := <-decisions:
+		if d.Type != orchestrator.DecisionApprove {
+			t.Errorf("expected DecisionApprove, got %d", d.Type)
+		}
+	default:
+		t.Error("expected approve decision")
+	}
+}
+
+// TestTUI_PlanReviewEscDismissesTextarea verifies Esc blurs the comment textarea
+// without cancelling the plan review.
+func TestTUI_PlanReviewEscDismissesTextarea(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.hasPlan = true
+	m.pipelineScreen.hasPlanComment = true
+	m.pipelineScreen.planComment = textarea.New()
+	m.pipelineScreen.planComment.SetWidth(80)
+	m.pipelineScreen.planComment.SetHeight(2)
+	m.pipelineScreen.planComment.Focus()
+
+	result, _ := sendKey(m, tea.KeyEscape)
+	model := result.(Model)
+
+	if model.pipelineScreen.hasPlanComment {
+		t.Error("expected hasPlanComment=false after Esc")
+	}
+	if model.pipelineScreen.content != ContentPlanReview {
+		t.Errorf("expected ContentPlanReview after Esc, got %d", model.pipelineScreen.content)
+	}
+}
+
 // TestTUI_GlobalKeysBlockedInPlanReview ensures "d" and number keys
 // are routed to the comment textarea, not to global handlers.
 func TestTUI_GlobalKeysBlockedInPlanReview(t *testing.T) {
@@ -1234,8 +1365,8 @@ func TestTUI_PlanDiffToggle(t *testing.T) {
 	m.height = 40
 	m.recalculateLayout()
 
-	// Press D to enter diff mode
-	result, _ := m.Update(tea.KeyPressMsg{Code: 100, Text: "d"}) // 'd'
+	// Press Ctrl+D to enter diff mode
+	result, _ := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 	model := result.(Model)
 	if model.pipelineScreen.content != ContentPlanDiff {
 		t.Errorf("expected ContentPlanDiff, got %d", model.pipelineScreen.content)
@@ -1266,7 +1397,7 @@ func TestTUI_PlanDiffIgnoredWithoutHistory(t *testing.T) {
 	m.height = 40
 	m.recalculateLayout()
 
-	result, _ := m.Update(tea.KeyPressMsg{Code: 100, Text: "d"})
+	result, _ := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 	model := result.(Model)
 	// Should stay in plan review — no diff available
 	if model.pipelineScreen.content != ContentPlanReview {

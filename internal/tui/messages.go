@@ -119,3 +119,6 @@ func (SubmitQuestionAnswerIntent) isIntent() {}
 type AbortMergeIntent struct{}
 
 func (AbortMergeIntent) isIntent() {}
+
+// ctrlCTimeoutMsg resets the Ctrl+C pending-quit state after the time gate expires.
+type ctrlCTimeoutMsg struct{}

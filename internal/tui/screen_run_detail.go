@@ -186,7 +186,8 @@ func (s RunDetailScreen) Update(msg tea.Msg) (RunDetailScreen, tea.Cmd) {
 		return s, nil
 	}
 
-	if keyMsg.String() == "ctrl+e" {
+	switch keyMsg.String() {
+	case "ctrl+e":
 		return s.openStepLog()
 	}
 	switch keyMsg.Code {
@@ -205,21 +206,21 @@ func (s RunDetailScreen) Update(msg tea.Msg) (RunDetailScreen, tea.Cmd) {
 	case tea.KeyPgDown:
 		s.detailVP.HalfPageDown()
 		return s, nil
-	}
-
-	switch keyMsg.String() {
-	case "j":
-		if s.stepCursor < len(s.detail.Steps)-1 {
-			s.stepCursor++
-			s.LoadStepLog()
-			s.SyncViewports()
+	case tea.KeyTab:
+		if keyMsg.Mod.Contains(tea.ModShift) {
+			if s.stepCursor > 0 {
+				s.stepCursor--
+				s.LoadStepLog()
+				s.SyncViewports()
+			}
+		} else {
+			if s.stepCursor < len(s.detail.Steps)-1 {
+				s.stepCursor++
+				s.LoadStepLog()
+				s.SyncViewports()
+			}
 		}
-	case "k":
-		if s.stepCursor > 0 {
-			s.stepCursor--
-			s.LoadStepLog()
-			s.SyncViewports()
-		}
+		return s, nil
 	}
 	return s, nil
 }
@@ -250,7 +251,7 @@ func (s RunDetailScreen) View(width, height int) string {
 
 	// Footer
 	footer := dividerStyle.Render(strings.Repeat("─", width)) + "\n" +
-		keyStyle.Render(" [↑↓] scroll log | [j/k] step | [PgUp/PgDn] scroll plan | [Ctrl+E] open log | [Esc] back  [^C^C] quit")
+		keyStyle.Render(" [↑↓] scroll log | [Tab/⇧Tab] step | [PgUp/PgDn] scroll plan | [^E] open log | [Esc] back  [^C] quit")
 
 	return header + "\n" + upper + "\n" + divider + "\n" + lower + "\n" + footer
 }

@@ -107,22 +107,6 @@ func (s RunsListScreen) Update(msg tea.Msg) (RunsListScreen, tea.Cmd) {
 		s.viewport.HalfPageDown()
 		return s, nil
 	}
-
-	switch keyMsg.String() {
-	case "j":
-		if s.cursor < len(s.runs)-1 {
-			s.cursor++
-			s.SyncViewport(s.viewport.Width())
-		}
-	case "k":
-		if s.cursor > 0 {
-			s.cursor--
-			s.SyncViewport(s.viewport.Width())
-		}
-	case "q":
-		s.PendingIntent = NavigateBackIntent{}
-		return s, nil
-	}
 	return s, nil
 }
 
@@ -138,7 +122,7 @@ func (s RunsListScreen) View(width, height int) string {
 
 	// Footer
 	footer := dividerStyle.Render(strings.Repeat("─", width)) + "\n" +
-		keyStyle.Render(" [↑↓/j/k] navigate | [Enter] view | [Esc] back  [^C^C] quit")
+		keyStyle.Render(" [↑↓] navigate | [Enter] view | [Esc] back  [^C] quit")
 
 	return header + "\n" + s.viewport.View() + "\n" + footer
 }

@@ -27,14 +27,14 @@ const (
 type ContentMode int
 
 const (
-	ContentStreaming    ContentMode = iota // auto-follows active agent stream
-	ContentPlanReview                      // rendered spec
-	ContentPlanEdit                        // editable textarea for plan modification
-	ContentAgentHistory                    // frozen output of a previously-run agent
-	ContentCompletion                      // QA report, summary
-	ContentUserQuestion                    // MCP AskUserQuestion picker
-	ContentPlanDiff                        // line diff of last plan revision
-	ContentMergeConflict                   // post-run merge conflict resolution
+	ContentStreaming     ContentMode = iota // auto-follows active agent stream
+	ContentPlanReview                       // rendered spec
+	ContentPlanEdit                         // editable textarea for plan modification
+	ContentAgentHistory                     // frozen output of a previously-run agent
+	ContentCompletion                       // QA report, summary
+	ContentUserQuestion                     // MCP AskUserQuestion picker
+	ContentPlanDiff                         // line diff of last plan revision
+	ContentMergeConflict                    // post-run merge conflict resolution
 )
 
 // AgentRow tracks a single agent's status in the sidebar.
@@ -68,8 +68,9 @@ type Model struct {
 	runDetailScreen RunDetailScreen
 
 	// Global UI state
-	ctrlC   int
-	lastErr error // navigation-level errors (e.g. loading runs)
+	ctrlCPending  bool
+	ctrlCDeadline time.Time
+	lastErr       error // navigation-level errors (e.g. loading runs)
 }
 
 // NewModel creates the initial TUI model.
@@ -187,6 +188,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case ctrlCTimeoutMsg:
+		m.ctrlCPending = false
+		return m, nil
+
 	case OrchestratorEventMsg:
 		prevContent := m.pipelineScreen.content
 		prevComment := m.pipelineScreen.hasPlanComment
@@ -261,13 +266,37 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 // handleKey processes key events.
 func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
-		m.ctrlC++
-		if m.ctrlC >= 2 {
+		// Second Ctrl+C within the time gate → quit immediately
+		if m.ctrlCPending && time.Now().Before(m.ctrlCDeadline) {
 			return m, tea.Quit
 		}
-		return m, nil
+		// Pipeline is idle or completed → quit immediately (nothing to cancel)
+		pipelineActive := m.state == StatePipeline &&
+			m.pipelineScreen.active &&
+			m.pipelineScreen.content != ContentCompletion
+		if !pipelineActive {
+			return m, tea.Quit
+		}
+		// First Ctrl+C with active pipeline → cancel and start time gate
+		m.ctrlCPending = true
+		m.ctrlCDeadline = time.Now().Add(3 * time.Second)
+		timeoutCmd := tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+			return ctrlCTimeoutMsg{}
+		})
+		// Dispatch cancel to the active pipeline screen
+		prevContent := m.pipelineScreen.content
+		prevComment := m.pipelineScreen.hasPlanComment
+		m.pipelineScreen = m.pipelineScreen.HandleCtrlCCancel()
+		if inputHeightChanged(prevContent, m.pipelineScreen.content, prevComment, m.pipelineScreen.hasPlanComment) {
+			m.recalculateLayout()
+		}
+		// Process any intent emitted by the cancel handler
+		if intent := m.pipelineScreen.PendingIntent; intent != nil {
+			m.pipelineScreen.PendingIntent = nil
+			return m.processIntent(intent, timeoutCmd)
+		}
+		return m, timeoutCmd
 	}
-	m.ctrlC = 0
 
 	switch m.state {
 	case StatePrompt:
@@ -372,81 +401,97 @@ func (m Model) handlePipelineKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if intent := m.pipelineScreen.PendingIntent; intent != nil {
 		m.pipelineScreen.PendingIntent = nil
-		switch i := intent.(type) {
-		case SubmitQuestionAnswerIntent:
-			if m.engine != nil && m.engine.QuestionBridge != nil {
-				bridge := m.engine.QuestionBridge
-				ans := i.Answer
-				return m, func() tea.Msg {
-					bridge.SendAnswer(ans)
-					return nil
-				}
-			}
-			return m, nil
-		case ApprovePlanIntent:
-			if m.decisions != nil {
-				m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionApprove}
-			}
-			return m, nil
-		case EditPlanIntent:
-			if m.decisions != nil {
-				m.decisions <- orchestrator.Decision{
-					Type:          orchestrator.DecisionEdit,
-					EditedContent: i.ModifiedMarkdown,
-				}
-			}
-			return m, nil
-		case CommentPlanIntent:
-			if m.decisions != nil {
-				m.decisions <- orchestrator.Decision{
-					Type:    orchestrator.DecisionComment,
-					Comment: i.Comment,
-				}
-			}
-			return m, waitForEvent(m.events)
-		case CancelPlanIntent:
-			if m.decisions != nil {
-				m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionCancel}
-			}
-			return m, nil
-		case CancelPipelineIntent:
-			if m.cancel != nil {
-				m.cancel()
-			}
-			return m, nil
-		case NavigateToPromptIntent:
-			m.pipelineScreen.Reset()
-			m.state = StatePrompt
-			m.promptScreen.Reset()
-			if i.PreFillGoal != "" {
-				m.promptScreen.SetValue(i.PreFillGoal)
-			}
-			return m, nil
-		case NavigateToRunsListIntent:
-			m.navigateToRunsList()
-			return m, nil
-		case ConfirmNewRunIntent:
-			if m.cancel != nil {
-				m.cancel()
-			}
-			goal := m.pipelineScreen.goal
-			m.pipelineScreen.Reset()
-			m.state = StatePrompt
-			m.promptScreen.Reset()
-			if goal != "" {
-				m.promptScreen.SetValue(goal)
-			}
-			return m, nil
-		case OpenExternalEditorIntent:
-			return m, openExternalEditor(i.FilePath)
-		case AbortMergeIntent:
-			if m.decisions != nil {
-				m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionMergeAbort}
-			}
-			return m, nil
-		}
+		return m.processIntent(intent, cmd)
 	}
 	return m, cmd
+}
+
+// processIntent executes a pipeline screen intent and optionally batches with
+// an additional command (e.g. the Ctrl+C timeout tick).
+func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.Cmd) {
+	batch := func(cmd tea.Cmd) tea.Cmd {
+		if extraCmd != nil && cmd != nil {
+			return tea.Batch(cmd, extraCmd)
+		}
+		if extraCmd != nil {
+			return extraCmd
+		}
+		return cmd
+	}
+	switch i := intent.(type) {
+	case SubmitQuestionAnswerIntent:
+		if m.engine != nil && m.engine.QuestionBridge != nil {
+			bridge := m.engine.QuestionBridge
+			ans := i.Answer
+			return m, batch(func() tea.Msg {
+				bridge.SendAnswer(ans)
+				return nil
+			})
+		}
+		return m, batch(nil)
+	case ApprovePlanIntent:
+		if m.decisions != nil {
+			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionApprove}
+		}
+		return m, batch(nil)
+	case EditPlanIntent:
+		if m.decisions != nil {
+			m.decisions <- orchestrator.Decision{
+				Type:          orchestrator.DecisionEdit,
+				EditedContent: i.ModifiedMarkdown,
+			}
+		}
+		return m, batch(nil)
+	case CommentPlanIntent:
+		if m.decisions != nil {
+			m.decisions <- orchestrator.Decision{
+				Type:    orchestrator.DecisionComment,
+				Comment: i.Comment,
+			}
+		}
+		return m, batch(waitForEvent(m.events))
+	case CancelPlanIntent:
+		if m.decisions != nil {
+			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionCancel}
+		}
+		return m, batch(nil)
+	case CancelPipelineIntent:
+		if m.cancel != nil {
+			m.cancel()
+		}
+		return m, batch(nil)
+	case NavigateToPromptIntent:
+		m.pipelineScreen.Reset()
+		m.state = StatePrompt
+		m.promptScreen.Reset()
+		if i.PreFillGoal != "" {
+			m.promptScreen.SetValue(i.PreFillGoal)
+		}
+		return m, batch(nil)
+	case NavigateToRunsListIntent:
+		m.navigateToRunsList()
+		return m, batch(nil)
+	case ConfirmNewRunIntent:
+		if m.cancel != nil {
+			m.cancel()
+		}
+		goal := m.pipelineScreen.goal
+		m.pipelineScreen.Reset()
+		m.state = StatePrompt
+		m.promptScreen.Reset()
+		if goal != "" {
+			m.promptScreen.SetValue(goal)
+		}
+		return m, batch(nil)
+	case OpenExternalEditorIntent:
+		return m, batch(openExternalEditor(i.FilePath))
+	case AbortMergeIntent:
+		if m.decisions != nil {
+			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionMergeAbort}
+		}
+		return m, batch(nil)
+	}
+	return m, batch(nil)
 }
 
 // startPipeline launches the orchestrator and returns a command to start listening.
@@ -472,6 +517,7 @@ func (m Model) View() tea.View {
 	case StatePrompt:
 		content = m.promptScreen.View(m.effectiveWidth(), m.height)
 	case StatePipeline:
+		m.pipelineScreen.ctrlCPending = m.ctrlCPending
 		content = m.pipelineScreen.View(m.effectiveWidth(), m.height)
 	case StateRunsList:
 		content = m.runsListScreen.View(m.effectiveWidth(), m.height)
