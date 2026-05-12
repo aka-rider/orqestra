@@ -61,7 +61,6 @@ func hydratedModels(t *testing.T) map[string]Model {
 		m.state = StatePipeline
 		m.pipelineScreen.content = ContentAgentHistory
 		m.pipelineScreen.agents = []AgentRow{
-			{ID: "gateway", State: "done", Elapsed: 10 * time.Second, StartedAt: time.Now().Add(-10 * time.Second), InputTokens: 500, OutputTokens: 200},
 			{ID: "researcher", State: "running", Elapsed: 30 * time.Second, StartedAt: time.Now().Add(-30 * time.Second), InputTokens: 2000, OutputTokens: 1000},
 		}
 		m.pipelineScreen.focusedAgent = 1
@@ -77,9 +76,7 @@ func hydratedModels(t *testing.T) map[string]Model {
 		m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nDone."
 		m.pipelineScreen.hasValidation = true
 		m.pipelineScreen.workerValidation = "pass"
-		m.pipelineScreen.agents = []AgentRow{
-			{ID: "gateway", State: "done", Elapsed: 5 * time.Second, StartedAt: time.Now().Add(-5 * time.Second), InputTokens: 300, OutputTokens: 100},
-		}
+		m.pipelineScreen.agents = []AgentRow{}
 		models["pipeline-completion"] = m
 	}
 

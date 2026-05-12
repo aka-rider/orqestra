@@ -33,10 +33,6 @@ func (m *mockRunner) RunContinue(_ context.Context, _, _ string, _ io.Writer) (h
 	return harness.RunResult{Output: m.output, SessionID: m.sessionID}, m.err
 }
 
-func acceptGatewayJSON() string {
-	return `{"verdict":"accept","brief":{"task":"Add feature X","end_state":"Feature X works","scope":["pkg"],"non_scope":[]},"questions":[],"confidence":0.9}`
-}
-
 func validPlanMarkdown() string {
 	return "# Plan\n\n## Goal\nAdd feature X.\n\n## Work Packages\n\n### 1. Add X\n\n**Steps:**\n1. Create pkg/x.go\n\n**Done when:**\n- go test ./pkg passes"
 }
@@ -78,7 +74,7 @@ func setupTestPlanFile(t *testing.T, sessionID, planContent string) {
 	}
 }
 
-func testEngineWithPlanFiles(t *testing.T, gatewayOutput, researcherOutput, plannerOutput, workerOutput, validationOutput string) *Engine {
+func testEngineWithPlanFiles(t *testing.T, researcherOutput, plannerOutput, workerOutput, validationOutput string) *Engine {
 	t.Helper()
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -93,7 +89,6 @@ func testEngineWithPlanFiles(t *testing.T, gatewayOutput, researcherOutput, plan
 	return &Engine{
 		Config: cfg,
 		Runners: Runners{
-			Gateway:    &mockRunner{output: gatewayOutput},
 			Researcher: &mockRunner{output: "saved", sessionID: researcherSID},
 			Architect:  &mockRunner{output: "saved", sessionID: architectSID},
 			Worker:     &mockRunner{output: workerOutput, sessionID: "sess-123"},
@@ -101,57 +96,8 @@ func testEngineWithPlanFiles(t *testing.T, gatewayOutput, researcherOutput, plan
 	}
 }
 
-func TestEngine_GatewayAcceptNoGate(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft\nstuff", validPlanMarkdown(), "done", "✅ all pass")
-
-	ctx := context.Background()
-	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
-
-	var gotGateRequest bool
-	for event := range channels.Events {
-		if event.Type == EventGateRequest {
-			gotGateRequest = true
-		}
-	}
-	if gotGateRequest {
-		t.Error("expected no gate request in auto-approve mode")
-	}
-}
-
-func TestEngine_GatewayCoachCoercedToAccept(t *testing.T) {
-	// Coach verdict is coerced to accept — no coaching gate fires.
-	// Update mock to include end_state since it's now required.
-	coachJSON := `{"verdict":"coach","brief":{"task":"Improve something","end_state":"Something is improved","scope":[],"non_scope":[]},"questions":[{"text":"Which module?","options":["a","b"],"default":"a"}],"confidence":0.3}`
-	engine := testEngineWithPlanFiles(t, coachJSON, "## Draft", validPlanMarkdown(), "done", "✅ pass")
-
-	ctx := context.Background()
-	channels := engine.Start(ctx, Input{Prompt: "make it better"})
-
-	var gotCoachGate bool
-	timeout := time.After(5 * time.Second)
-	for {
-		select {
-		case event, ok := <-channels.Events:
-			if !ok {
-				if gotCoachGate {
-					t.Error("should NOT have received coaching gate — coaching loop is removed")
-				}
-				return
-			}
-			if event.Type == EventGateRequest && event.Gate.Type == GateGatewayCoach {
-				gotCoachGate = true
-			}
-			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
-				channels.Decisions <- Decision{Type: DecisionApprove}
-			}
-		case <-timeout:
-			t.Fatal("timeout")
-		}
-	}
-}
-
 func TestEngine_PlanApprovalGate(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", validPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
@@ -178,7 +124,7 @@ func TestEngine_PlanApprovalGate(t *testing.T) {
 }
 
 func TestEngine_CancelAtGate(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", validPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
@@ -200,24 +146,18 @@ func TestEngine_CancelAtGate(t *testing.T) {
 }
 
 func TestEngine_SkipGateway(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", validPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
-	channels := engine.Start(ctx, Input{Prompt: "Add feature X", SkipGateway: true, AutoApprove: true})
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
 
-	var gotGatewayPhase bool
-	for event := range channels.Events {
-		if event.Type == EventPhaseChange && event.Phase == PhaseGateway {
-			gotGatewayPhase = true
-		}
+	for range channels.Events {
 	}
-	if gotGatewayPhase {
-		t.Error("expected no gateway phase when SkipGateway=true")
-	}
+	// No gateway phase should appear (it doesn't exist anymore)
 }
 
 func TestEngine_HeadlessAutoApprove(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", validPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
@@ -241,7 +181,7 @@ func TestEngine_HeadlessAutoApprove(t *testing.T) {
 }
 
 func TestEngine_PhaseOrder(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", validPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
@@ -253,7 +193,7 @@ func TestEngine_PhaseOrder(t *testing.T) {
 		}
 	}
 
-	expected := []Phase{PhaseGateway, PhaseResearching, PhasePlanning, PhaseExecuting, PhaseSelfValidating, PhaseDone}
+	expected := []Phase{PhaseResearching, PhasePlanning, PhaseExecuting, PhaseSelfValidating, PhaseDone}
 	if len(phases) != len(expected) {
 		t.Fatalf("phases = %v, want %v", phases, expected)
 	}
@@ -265,7 +205,7 @@ func TestEngine_PhaseOrder(t *testing.T) {
 }
 
 func TestEngine_NoExecute(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", validPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true, NoExecute: true})
@@ -289,7 +229,7 @@ func TestEngine_NoExecute(t *testing.T) {
 }
 
 func TestEngine_ValidationFailureDetection(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "❌ test failed — expected 200 got 404")
+	engine := testEngineWithPlanFiles(t, "## Draft", validPlanMarkdown(), "done", "❌ test failed — expected 200 got 404")
 
 	ctx := context.Background()
 	result, err := engine.Run(ctx, Input{Prompt: "Add feature X", AutoApprove: true}, nil)
@@ -415,7 +355,7 @@ func TestStreamWriter_ImplementsActivitySink(t *testing.T) {
 }
 
 func TestEngine_PlanFileBeforeGate(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, acceptGatewayJSON(), "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", validPlanMarkdown(), "done", "✅ pass")
 
 	// Set up a RunDirFactory that creates a temp directory
 	tmpDir := t.TempDir()

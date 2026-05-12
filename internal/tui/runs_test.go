@@ -44,7 +44,6 @@ func testRunDetail() agent.RunDetail {
 			Duration:  3 * time.Minute,
 		},
 		Steps: []agent.StepMeta{
-			{AgentID: "gateway", StartTime: time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC), EndTime: time.Date(2026, 5, 10, 12, 0, 10, 0, time.UTC), Status: "done", InputTokens: 500, OutputTokens: 200},
 			{AgentID: "researcher", StartTime: time.Date(2026, 5, 10, 12, 0, 10, 0, time.UTC), EndTime: time.Date(2026, 5, 10, 12, 1, 0, 0, time.UTC), Status: "done", InputTokens: 2000, OutputTokens: 1000, ClaudeSessionID: "sess-abc"},
 			{AgentID: "worker", StartTime: time.Date(2026, 5, 10, 12, 1, 0, 0, time.UTC), EndTime: time.Date(2026, 5, 10, 12, 3, 0, 0, time.UTC), Status: "done", InputTokens: 5000, OutputTokens: 3000, ClaudeSessionID: "sess-def"},
 		},
@@ -104,13 +103,13 @@ func TestTUI_RunsListEnterLoadsDetail(t *testing.T) {
 	os.WriteFile(filepath.Join(sessDir, "final_plan.md"), []byte("# Plan\n\n## Goal\nTest\n\n## Work Packages\n\n### 1. Do"), 0o644)
 
 	meta := agent.StepMeta{
-		AgentID:   "gateway",
+		AgentID:   "researcher",
 		StartTime: time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
 		EndTime:   time.Date(2026, 5, 10, 12, 0, 10, 0, time.UTC),
 		Status:    "done",
 	}
 	data, _ := json.MarshalIndent(meta, "", "  ")
-	os.WriteFile(filepath.Join(sessDir, "gateway_meta.json"), data, 0o644)
+	os.WriteFile(filepath.Join(sessDir, "researcher_meta.json"), data, 0o644)
 
 	m := testModel()
 	m.runsListScreen.SetRuns([]agent.RunSummary{{
@@ -163,9 +162,6 @@ func TestTUI_RunDetailLayout_ThreeZones(t *testing.T) {
 	}
 
 	// Right column should contain step names
-	if !strings.Contains(view, "gateway") {
-		t.Error("detail view should contain 'gateway' step")
-	}
 	if !strings.Contains(view, "researcher") {
 		t.Error("detail view should contain 'researcher' step")
 	}
@@ -261,7 +257,7 @@ func TestTUI_RunStepNoSessionID(t *testing.T) {
 	m.runDetailScreen.SetDetail(agent.RunDetail{
 		RunSummary: agent.RunSummary{Status: "done"},
 		Steps: []agent.StepMeta{
-			{AgentID: "gateway", Status: "done"}, // no ClaudeSessionID
+			{AgentID: "researcher", Status: "done"}, // no ClaudeSessionID
 		},
 	})
 	m.recalculateLayout()

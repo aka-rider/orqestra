@@ -370,7 +370,7 @@ func (m Model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.pipelineScreen.Start(i.Prompt)
 			m.state = StatePipeline
 			m.recalculateLayout()
-			pipelineCmd := m.startPipeline(i.Prompt, i.SkipGateway)
+			pipelineCmd := m.startPipeline(i.Prompt)
 			return m, pipelineCmd
 		case NavigateToRunsListIntent:
 			m.navigateToRunsList()
@@ -495,13 +495,12 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 }
 
 // startPipeline launches the orchestrator and returns a command to start listening.
-func (m *Model) startPipeline(prompt string, skipGateway bool) tea.Cmd {
+func (m *Model) startPipeline(prompt string) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 
 	channels := m.engine.Start(ctx, orchestrator.Input{
-		Prompt:      prompt,
-		SkipGateway: skipGateway,
+		Prompt: prompt,
 	})
 	m.events = channels.Events
 	m.decisions = channels.Decisions

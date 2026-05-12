@@ -1231,7 +1231,7 @@ func (s PipelineScreen) viewHelp() string {
 	return ` Orqestra Keybindings
 ─────────────────────────────────
  [Enter]       Submit prompt / confirm
- [Ctrl+S]      Skip gateway / save edits
+ [Ctrl+S]      Save edits
  [PgUp/PgDn]   Scroll content
  [Ctrl+A]      Accept plan / abort merge
  [Ctrl+E]      Edit plan (in-TUI)

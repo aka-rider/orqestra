@@ -40,6 +40,3 @@ sandbox:
   extra_env:
     DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1"
     CLAUDE_CODE_ATTRIBUTION_HEADER: "0"
-
-gateway:
-  mcp_servers: []

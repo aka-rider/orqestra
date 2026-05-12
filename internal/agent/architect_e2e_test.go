@@ -38,7 +38,7 @@ func TestArchitectSessionContinuation(t *testing.T) {
 ## Recommendation
 Add a /health endpoint that returns 200 OK with a JSON body.`
 
-	plan, _, sessionID, err := architect.RefineStreaming(ctx, "build a feature", PromptBrief{Task: "build feature"}, simpleResearchDraft, &buf)
+	plan, _, sessionID, err := architect.RefineStreaming(ctx, "build a feature", simpleResearchDraft, &buf)
 	if err != nil {
 		t.Fatalf("RefineStreaming failed: %v", err)
 	}

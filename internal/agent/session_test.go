@@ -24,8 +24,8 @@ func setupTestSessions(t *testing.T) string {
 
 	// Write artifacts for sess1
 	os.WriteFile(filepath.Join(sess1, "prompt.md"), []byte("Add feature X"), 0o644)
-	writeMeta(t, sess1, "gateway_meta.json", StepMeta{
-		AgentID:   "gateway",
+	writeMeta(t, sess1, "researcher_meta.json", StepMeta{
+		AgentID:   "researcher",
 		StartTime: time.Date(2026, 5, 9, 10, 0, 0, 0, time.UTC),
 		EndTime:   time.Date(2026, 5, 9, 10, 0, 30, 0, time.UTC),
 		Status:    "done",
@@ -44,8 +44,8 @@ func setupTestSessions(t *testing.T) string {
 	os.WriteFile(filepath.Join(sess1, "worker_validation.txt"), []byte("✅ pass"), 0o644)
 
 	// Write artifacts for sess2 (minimal — no prompt.md to test graceful handling)
-	writeMeta(t, sess2, "gateway_meta.json", StepMeta{
-		AgentID:   "gateway",
+	writeMeta(t, sess2, "researcher_meta.json", StepMeta{
+		AgentID:   "researcher",
 		StartTime: time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
 		EndTime:   time.Date(2026, 5, 10, 12, 0, 10, 0, time.UTC),
 		Status:    "failed",
@@ -153,8 +153,8 @@ func TestLoadRunDetail_AllFields(t *testing.T) {
 	if len(detail.Steps) != 2 {
 		t.Fatalf("expected 2 steps, got %d", len(detail.Steps))
 	}
-	if detail.Steps[0].AgentID != "gateway" {
-		t.Errorf("step 0 agent = %q, want 'gateway'", detail.Steps[0].AgentID)
+	if detail.Steps[0].AgentID != "researcher" {
+		t.Errorf("step 0 agent = %q, want 'researcher'", detail.Steps[0].AgentID)
 	}
 	if detail.Steps[1].AgentID != "worker" {
 		t.Errorf("step 1 agent = %q, want 'worker'", detail.Steps[1].AgentID)
@@ -173,7 +173,7 @@ func TestLoadRunDetail_Duration(t *testing.T) {
 		t.Fatalf("LoadRunDetail: %v", err)
 	}
 
-	// Duration should span gateway start (10:00:00) to worker end (10:05:00) = 5 min
+	// Duration should span researcher start (10:00:00) to worker end (10:05:00) = 5 min
 	if detail.Duration != 5*time.Minute {
 		t.Errorf("duration = %v, want 5m", detail.Duration)
 	}

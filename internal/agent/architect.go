@@ -25,9 +25,9 @@ func NewArchitect(runner harness.CLIRunner, cfg config.ArchitectConfig) *Archite
 }
 
 // Refine takes a researcher's draft markdown and produces the final plan.
-func (a *Architect) Refine(ctx context.Context, userPrompt string, brief PromptBrief, researcherFacts string) (RawPlan, harness.TokenUsage, string, error) {
-	prompt := fmt.Sprintf("<user_request>\n%s\n</user_request>\n\n<gateway_brief>\nTask: %s\nEnd state: %s\nScope: %s\nNon-scope: %s\nDesign questions: %s\n</gateway_brief>\n\n<codebase_research>\n%s\n</codebase_research>\n\nUsing the codebase research above, produce an implementation plan for the user's request.",
-		userPrompt, brief.Task, brief.EndState, strings.Join(brief.Scope, ", "), strings.Join(brief.NonScope, ", "), strings.Join(brief.DesignQuestions, ", "), researcherFacts)
+func (a *Architect) Refine(ctx context.Context, userPrompt string, researcherFacts string) (RawPlan, harness.TokenUsage, string, error) {
+	prompt := fmt.Sprintf("<user_request>\n%s\n</user_request>\n\n<codebase_research>\n%s\n</codebase_research>\n\nUsing the codebase research above, produce an implementation plan for the user's request.",
+		userPrompt, researcherFacts)
 	result, err := a.runner.RunPrint(ctx, prompt, a.cfg.SystemPrompt)
 	if err != nil {
 		return RawPlan{}, harness.TokenUsage{}, "", fmt.Errorf("architect refine: %w", err)
@@ -36,9 +36,9 @@ func (a *Architect) Refine(ctx context.Context, userPrompt string, brief PromptB
 }
 
 // RefineStreaming is like Refine but streams output.
-func (a *Architect) RefineStreaming(ctx context.Context, userPrompt string, brief PromptBrief, researcherFacts string, stdout io.Writer) (RawPlan, harness.TokenUsage, string, error) {
-	prompt := fmt.Sprintf("<user_request>\n%s\n</user_request>\n\n<gateway_brief>\nTask: %s\nEnd state: %s\nScope: %s\nNon-scope: %s\nDesign questions: %s\n</gateway_brief>\n\n<codebase_research>\n%s\n</codebase_research>\n\nUsing the codebase research above, produce an implementation plan for the user's request.",
-		userPrompt, brief.Task, brief.EndState, strings.Join(brief.Scope, ", "), strings.Join(brief.NonScope, ", "), strings.Join(brief.DesignQuestions, ", "), researcherFacts)
+func (a *Architect) RefineStreaming(ctx context.Context, userPrompt string, researcherFacts string, stdout io.Writer) (RawPlan, harness.TokenUsage, string, error) {
+	prompt := fmt.Sprintf("<user_request>\n%s\n</user_request>\n\n<codebase_research>\n%s\n</codebase_research>\n\nUsing the codebase research above, produce an implementation plan for the user's request.",
+		userPrompt, researcherFacts)
 	result, err := a.runner.RunStreaming(ctx, prompt, a.cfg.SystemPrompt, stdout)
 	if err != nil {
 		return RawPlan{}, harness.TokenUsage{}, "", fmt.Errorf("architect refine streaming: %w", err)
@@ -126,4 +126,66 @@ func (a *Architect) extractArchitectPlan(result harness.RunResult) (RawPlan, har
 	warnings := CheckPlanHealth(content)
 
 	return RawPlan{Markdown: content, Warnings: warnings}, result.Usage, result.SessionID, nil
+}
+
+// criticContinueTemplate is the prompt used when resuming the architect session
+// with a critic's report. Uses <critic_report> tag to distinguish from human
+// reviewer <reviewer_message> feedback.
+const criticContinueTemplate = `A Plan Critic agent reviewed your plan and produced the report below.
+The Critic had read-only tool access and spot-checked your claims
+against the codebase.
+
+<critic_report>
+%s
+</critic_report>
+
+<current_plan>
+%s
+</current_plan>
+
+Review every finding. For each:
+- If you can verify the issue is real and you know the fix: apply it to
+  the plan.
+- If you cannot determine whether the issue is valid, or the fix requires
+  a judgment call you cannot make: surface it inline in the relevant
+  section of the plan, clearly marked with ⚠️ CRITIC FLAG, so the human
+  reviewer can decide.
+
+Do NOT discard findings silently. Every finding must be either fixed or
+flagged.
+
+Output the COMPLETE updated plan starting with "# Plan". Even if you
+judge all findings to be non-issues, re-output the plan with inline
+notes explaining why.`
+
+// ContinueWithCriticReport resumes the architect's session with a critic report.
+// The architect reviews the critic's findings and either fixes issues in the plan
+// or surfaces uncertain ones inline with ⚠️ CRITIC FLAG markers.
+// Returns chat response text, the revised plan (nil if unchanged), token usage, and error.
+func (a *Architect) ContinueWithCriticReport(ctx context.Context, sessionID, currentPlan, criticReport string, stdout io.Writer) (string, *RawPlan, harness.TokenUsage, error) {
+	cr, ok := a.runner.(harness.ContinuableRunner)
+	if !ok {
+		return "", nil, harness.TokenUsage{}, fmt.Errorf("architect runner does not support session continuation")
+	}
+
+	prompt := fmt.Sprintf(criticContinueTemplate, criticReport, currentPlan)
+	result, err := cr.RunContinue(ctx, sessionID, prompt, stdout)
+	if err != nil {
+		return "", nil, harness.TokenUsage{}, fmt.Errorf("architect continue with critic report: %w", err)
+	}
+
+	// Read the plan file to detect whether the architect revised it.
+	planContent, readErr := ReadPlanFromRun(result)
+	if readErr != nil {
+		slog.Debug("could not read plan file after critic review", "session_id", sessionID, "err", readErr)
+		return result.Output, nil, result.Usage, nil
+	}
+
+	if planContent != strings.TrimSpace(currentPlan) {
+		warnings := CheckPlanHealth(planContent)
+		plan := RawPlan{Markdown: planContent, Warnings: warnings}
+		return result.Output, &plan, result.Usage, nil
+	}
+
+	return result.Output, nil, result.Usage, nil
 }

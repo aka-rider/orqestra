@@ -157,12 +157,12 @@ func LoadRunDetail(runPath string) (RunDetail, error) {
 	}
 
 	// Load step metas in pipeline order
-	agentOrder := []string{"gateway", "researcher", "architect", "worker", "validator"}
+	agentOrder := []string{"researcher", "architect", "worker", "validator"}
 	for _, agentID := range agentOrder {
 		metaFile := agentID + "_meta.json"
 		data, err := os.ReadFile(filepath.Join(runPath, metaFile))
 		if err != nil {
-			continue // step may not exist (e.g., gateway skipped)
+			continue // step may not exist
 		}
 		var meta StepMeta
 		if err := json.Unmarshal(data, &meta); err != nil {

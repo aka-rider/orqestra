@@ -132,9 +132,9 @@ const (
 	EventGateRequest
 	EventComplete
 	EventError
-	EventRunDirReady  // emitted once after session dir is created
-	EventChatResponse // emitted when architect answers without revising the plan
-	EventUserQuestion // emitted when an agent asks the user a question via MCP
+	EventRunDirReady   // emitted once after session dir is created
+	EventChatResponse  // emitted when architect answers without revising the plan
+	EventUserQuestion  // emitted when an agent asks the user a question via MCP
 	EventMergeConflict // emitted when the post-run merge has conflicts
 )
 
@@ -142,9 +142,9 @@ const (
 type Phase string
 
 const (
-	PhaseGateway        Phase = "gateway"
 	PhaseResearching    Phase = "researching"
 	PhasePlanning       Phase = "planning"
+	PhaseCritiquing     Phase = "critiquing"
 	PhaseExecuting      Phase = "executing"
 	PhaseSelfValidating Phase = "self-validating"
 	PhaseDone           Phase = "done"
@@ -154,18 +154,17 @@ const (
 type GateType int
 
 const (
-	GateGatewayCoach GateType = iota
-	GatePlanApproval
+	GatePlanApproval GateType = iota
 )
 
 // GateRequest is emitted when the pipeline needs user input.
 type GateRequest struct {
 	Type              GateType
-	GatewayResult     agent.GatewayResult
 	FinalPlanMarkdown string // for GatePlanApproval
 	PlanFilePath      string // absolute path to plan.md on disk (for external editor)
 	PlanDiff          string // unified diff from git micro-repo (empty if no history)
 	PlanWarnings      []string
+	CriticReport      string // critic's review report, shown alongside the plan at gate
 }
 
 // DecisionType classifies user decisions at gates.
@@ -176,8 +175,8 @@ const (
 	DecisionEdit
 	DecisionSkip
 	DecisionCancel
-	DecisionComment      // comment-only refinement at plan gate
-	DecisionMergeAbort   // abort the post-run merge, keep the worktree branch
+	DecisionComment    // comment-only refinement at plan gate
+	DecisionMergeAbort // abort the post-run merge, keep the worktree branch
 )
 
 // MergeConflictInfo is carried by EventMergeConflict.
@@ -229,7 +228,6 @@ type Event struct {
 type Input struct {
 	Prompt      string
 	AutoApprove bool
-	SkipGateway bool
 	PlanFile    string // pre-loaded plan markdown (--plan flag)
 	NoExecute   bool   // stop after plan gate
 }
@@ -255,18 +253,18 @@ type RunDirFactory func(slug string) (agent.SessionDir, error)
 
 // Runners holds all CLIRunners for each agent role.
 type Runners struct {
-	Gateway    harness.CLIRunner
 	Researcher harness.CLIRunner
 	Architect  harness.CLIRunner
+	Critic     harness.CLIRunner
 	Worker     harness.ContinuableRunner
 }
 
 // Engine is the hardcoded Go orchestrator that runs the full pipeline.
 type Engine struct {
-	Config                *config.Config
-	Runners               Runners
-	RunDirFactory         RunDirFactory
-	QuestionBridge        *harness.QuestionBridge
+	Config         *config.Config
+	Runners        Runners
+	RunDirFactory  RunDirFactory
+	QuestionBridge *harness.QuestionBridge
 	// WorktreeRunnerFactory, when set, is called just before the worker phase to
 	// create a ContinuableRunner scoped to the worktree at the given path.
 	// If nil, the default Runners.Worker is used with repo write access.
@@ -375,56 +373,11 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		}
 	}
 
-	// --- Gateway Evaluation ---
-	var researcherInput string
-	var gwBrief agent.PromptBrief
-
-	if input.SkipGateway {
-		researcherInput = input.Prompt
-		gwBrief = agent.PromptBrief{Task: "User request (gateway skipped)"}
-	} else if e.Runners.Gateway != nil {
-		emit(Event{Type: EventPhaseChange, Phase: PhaseGateway})
-		emit(Event{Type: EventAgentStarted, AgentID: "gateway"})
-		stream.SetAgent("gateway")
-
-		gw := agent.NewGateway(e.Runners.Gateway, e.Config.Gateway)
-		gwStart := time.Now()
-
-		// Single gateway call — questions are resolved via MCP AskUserQuestion tool
-		// during RunStreaming, not via coaching loop.
-		gwResult, gwUsage, gwSessionID, err := gw.Evaluate(ctx, input.Prompt, &streamWriter{buf: stream})
-		if err != nil {
-			writeArtifactJSON(session, "gateway_meta.json", stepMeta{
-				AgentID: "gateway", ModelRef: e.Config.Gateway.Model, StartTime: gwStart, EndTime: time.Now(),
-				ClaudeSessionID: gwSessionID, Status: "failed", Error: err.Error(),
-			})
-			emit(Event{Type: EventAgentFailed, AgentID: "gateway", Err: err})
-			emit(Event{Type: EventError, Err: err})
-			return
-		}
-
-		// Treat "coach" verdict as "accept" — questions were already resolved via MCP.
-		if gwResult.Verdict == agent.GatewayVerdictCoach {
-			slog.Warn("gateway returned 'coach' verdict, treating as 'accept' — questions should use AskUserQuestion MCP tool")
-		}
-
-		writeArtifactJSON(session, "gateway_meta.json", stepMeta{
-			AgentID: "gateway", ModelRef: e.Config.Gateway.Model, StartTime: gwStart, EndTime: time.Now(),
-			ClaudeSessionID: gwSessionID, Status: "done",
-			InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens,
-		})
-		emit(Event{Type: EventAgentDone, AgentID: "gateway",
-			InputTokens: gwUsage.InputTokens, OutputTokens: gwUsage.OutputTokens})
-
-		gwBrief = gwResult.Brief
-		researcherInput = buildResearcherInput(input.Prompt, gwResult.Brief)
-	} else {
-		researcherInput = input.Prompt
-		gwBrief = agent.PromptBrief{Task: "User request (gateway not configured)"}
-	}
-
+	// --- Research ---
+	researcherInput := input.Prompt
 	var finalPlanMarkdown string
 	var finalPlanWarnings []string
+	var criticReportMarkdown string
 	var planSessionID string // function scope — survives across gate loop iterations
 	architect := agent.NewArchitect(e.Runners.Architect, e.Config.Architect)
 
@@ -514,7 +467,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		var planErr error
 		for attempt := 1; attempt <= architectAttempts; attempt++ {
 			var sid string
-			planResult, planUsage, sid, planErr = architect.RefineStreaming(ctx, input.Prompt, gwBrief, draft.Markdown, &streamWriter{buf: stream})
+			planResult, planUsage, sid, planErr = architect.RefineStreaming(ctx, input.Prompt, draft.Markdown, &streamWriter{buf: stream})
 			if planErr == nil {
 				planSessionID = sid
 				break
@@ -551,6 +504,95 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		}
 	}
 
+	// --- Critic Review ---
+	if e.Runners.Critic != nil {
+		emit(Event{Type: EventPhaseChange, Phase: PhaseCritiquing})
+		emit(Event{Type: EventAgentStarted, AgentID: "critic"})
+		stream.SetAgent("critic")
+
+		critic := agent.NewCritic(e.Runners.Critic, e.Config.Critic)
+		criticStart := time.Now()
+
+		criticAttempts := e.Config.Retry.CriticAttempts
+		if criticAttempts < 1 {
+			criticAttempts = 1
+		}
+
+		var criticResult agent.CriticReport
+		var criticUsage harness.TokenUsage
+		var criticSessionID string
+		var criticErr error
+		for attempt := 1; attempt <= criticAttempts; attempt++ {
+			criticResult, criticUsage, criticSessionID, criticErr = critic.ReviewStreaming(ctx, input.Prompt, finalPlanMarkdown, &streamWriter{buf: stream})
+			if criticErr == nil {
+				break
+			}
+			if attempt < criticAttempts {
+				slog.Warn("critic attempt failed, retrying", "attempt", attempt, "err", criticErr)
+				stream.SetAgent("critic")
+			}
+		}
+		if criticErr != nil {
+			writeArtifactJSON(session, "critic_meta.json", stepMeta{
+				AgentID: "critic", ModelRef: e.Config.Critic.Model, StartTime: criticStart, EndTime: time.Now(),
+				ClaudeSessionID: criticSessionID, Status: "failed", Error: criticErr.Error(),
+			})
+			emit(Event{Type: EventAgentFailed, AgentID: "critic", Err: criticErr})
+			emit(Event{Type: EventError, Err: fmt.Errorf("critic review: %w", criticErr)})
+			return
+		}
+
+		writeArtifact(session, "critic_report.md", criticResult.Markdown)
+		writeArtifactJSON(session, "critic_meta.json", stepMeta{
+			AgentID: "critic", ModelRef: e.Config.Critic.Model, StartTime: criticStart, EndTime: time.Now(),
+			ClaudeSessionID: criticSessionID, Status: "done",
+			InputTokens: criticUsage.InputTokens, OutputTokens: criticUsage.OutputTokens,
+		})
+		emit(Event{Type: EventAgentDone, AgentID: "critic",
+			InputTokens: criticUsage.InputTokens, OutputTokens: criticUsage.OutputTokens})
+
+		criticReportMarkdown = criticResult.Markdown
+
+		// --- Architect Second Pass (critic feedback) ---
+		emit(Event{Type: EventAgentStarted, AgentID: "architect"})
+		stream.SetAgent("architect")
+		revStart := time.Now()
+
+		chatResponse, revisedPlan, revisedUsage, revErr := architect.ContinueWithCriticReport(
+			ctx, planSessionID, finalPlanMarkdown, criticResult.Markdown, &streamWriter{buf: stream})
+		_ = chatResponse // architect may include reasoning alongside plan revision
+
+		if revErr != nil {
+			writeArtifactJSON(session, "architect_critic_revision_meta.json", stepMeta{
+				AgentID: "architect", ModelRef: e.Config.Architect.Model,
+				StartTime: revStart, EndTime: time.Now(),
+				ClaudeSessionID: planSessionID, Status: "failed", Error: revErr.Error(),
+			})
+			emit(Event{Type: EventAgentFailed, AgentID: "architect", Err: revErr})
+			emit(Event{Type: EventError, Err: fmt.Errorf("architect critic revision: %w", revErr)})
+			return
+		}
+
+		writeArtifactJSON(session, "architect_critic_revision_meta.json", stepMeta{
+			AgentID: "architect", ModelRef: e.Config.Architect.Model,
+			StartTime: revStart, EndTime: time.Now(),
+			ClaudeSessionID: planSessionID, Status: "done",
+			InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens,
+		})
+		emit(Event{Type: EventAgentDone, AgentID: "architect",
+			InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens})
+
+		if revisedPlan != nil {
+			finalPlanMarkdown = revisedPlan.Markdown
+			finalPlanWarnings = revisedPlan.Warnings
+			if planRepo != nil {
+				if commitErr := planRepo.Commit(finalPlanMarkdown, "revision: critic feedback"); commitErr != nil {
+					slog.Warn("plan commit failed", "err", commitErr)
+				}
+			}
+		}
+	}
+
 planGate:
 	// --- Plan Approval Gate ---
 	emit(Event{Type: EventPlanReady, FinalPlan: finalPlanMarkdown})
@@ -572,6 +614,7 @@ planGate:
 				PlanFilePath:      session.ArtifactPath("final_plan.md"),
 				PlanDiff:          planDiff,
 				PlanWarnings:      finalPlanWarnings,
+				CriticReport:      criticReportMarkdown,
 			}})
 
 			select {
@@ -847,26 +890,6 @@ planGate:
 		Status:           status,
 		RunDir:           session.Path,
 	})
-}
-
-// buildResearcherInput constructs the researcher prompt from the raw user prompt and
-// gateway brief.
-func buildResearcherInput(rawPrompt string, brief agent.PromptBrief) string {
-	var b strings.Builder
-	b.WriteString(rawPrompt)
-	if brief.EndState != "" {
-		b.WriteString("\n\nExpected outcome: ")
-		b.WriteString(brief.EndState)
-	}
-	if len(brief.Scope) > 0 {
-		b.WriteString("\nScope: ")
-		b.WriteString(strings.Join(brief.Scope, ", "))
-	}
-	if len(brief.NonScope) > 0 {
-		b.WriteString("\nOut of scope: ")
-		b.WriteString(strings.Join(brief.NonScope, ", "))
-	}
-	return b.String()
 }
 
 // commitMsg builds a git commit message from a prefix and a comment.

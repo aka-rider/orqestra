@@ -46,7 +46,7 @@ func TestArchitect_Refine_Success(t *testing.T) {
 	}
 
 	p := NewArchitect(mock, cfg)
-	plan, _, sid, err := p.Refine(context.Background(), "user prompt", PromptBrief{Task: "test"}, "some researcher draft")
+	plan, _, sid, err := p.Refine(context.Background(), "user prompt", "some researcher draft")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestArchitect_Refine_EmptyPlan(t *testing.T) {
 	mock := &architectMockCLIRunner{response: "done", sessionID: sessionID}
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
-	_, _, _, err := p.Refine(context.Background(), "prompt", PromptBrief{}, "draft")
+	_, _, _, err := p.Refine(context.Background(), "prompt", "draft")
 	if err == nil {
 		t.Fatal("expected error for empty plan file")
 	}
@@ -76,7 +76,7 @@ func TestArchitect_Refine_CLIError(t *testing.T) {
 
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
-	_, _, _, err := p.Refine(context.Background(), "prompt", PromptBrief{}, "draft")
+	_, _, _, err := p.Refine(context.Background(), "prompt", "draft")
 	if err == nil {
 		t.Fatal("expected error propagation from CLI")
 	}
@@ -104,7 +104,7 @@ func TestArchitect_ErrorWithoutSessionID(t *testing.T) {
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
 
-	_, _, _, err := p.Refine(context.Background(), "prompt", PromptBrief{}, "draft")
+	_, _, _, err := p.Refine(context.Background(), "prompt", "draft")
 	if err == nil {
 		t.Fatal("expected error when no session ID is present")
 	}
@@ -124,7 +124,7 @@ func TestArchitect_ErrorWithMissingJSONL(t *testing.T) {
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
 
-	_, _, _, err := p.Refine(context.Background(), "prompt", PromptBrief{}, "draft")
+	_, _, _, err := p.Refine(context.Background(), "prompt", "draft")
 	if err == nil {
 		t.Fatal("expected error when JSONL is missing")
 	}
@@ -143,7 +143,7 @@ func TestArchitect_PlanFileExtraction(t *testing.T) {
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
 
-	plan, _, sid, err := p.Refine(context.Background(), "prompt", PromptBrief{}, "draft")
+	plan, _, sid, err := p.Refine(context.Background(), "prompt", "draft")
 	if err != nil {
 		t.Fatalf("expected plan file extraction to succeed, got: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestArchitect_RejectsOutOfBoundsPath(t *testing.T) {
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
 
-	_, _, _, err := p.Refine(context.Background(), "prompt", PromptBrief{}, "draft")
+	_, _, _, err := p.Refine(context.Background(), "prompt", "draft")
 	if err == nil {
 		t.Fatal("expected error for out-of-bounds plan file path")
 	}

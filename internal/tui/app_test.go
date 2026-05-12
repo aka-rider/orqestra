@@ -36,7 +36,6 @@ func testModel() Model {
 	engine := &orchestrator.Engine{
 		Config: testConfig(),
 		Runners: orchestrator.Runners{
-			Gateway:    &noopRunner{},
 			Researcher: &noopRunner{},
 			Architect:  &noopRunner{},
 			Worker:     &noopRunner{},
@@ -51,7 +50,6 @@ func testModel() Model {
 
 func testConfig() *config.Config {
 	return &config.Config{
-		Gateway:    config.GatewayConfig{SystemPrompt: "test"},
 		Researcher: config.ResearcherConfig{},
 		Architect:  config.ArchitectConfig{},
 		Worker:     config.WorkerConfig{},
@@ -119,35 +117,6 @@ func TestTUI_PromptSubmit(t *testing.T) {
 		t.Error("expected non-nil cmd from startPipeline")
 	}
 	// Clean up: cancel the pipeline
-	model.cancel()
-}
-
-func TestTUI_PromptSkipGateway(t *testing.T) {
-	m := testModel()
-	m.promptScreen.SetValue("add a feature")
-
-	result, cmd := sendCtrl(m, 's')
-	model := result.(Model)
-
-	if model.state != StatePipeline {
-		t.Errorf("expected StatePipeline, got %d", model.state)
-	}
-	if model.pipelineScreen.goal != "add a feature" {
-		t.Errorf("expected goal 'add a feature', got %q", model.pipelineScreen.goal)
-	}
-	// Same evaluation-order regression guard as TestTUI_PromptSubmit.
-	if model.events == nil {
-		t.Error("model.events is nil after skip-gateway submit")
-	}
-	if model.pipelineScreen.streamBuf == nil {
-		t.Error("model.pipelineScreen.streamBuf is nil after skip-gateway submit")
-	}
-	if model.cancel == nil {
-		t.Error("model.cancel is nil after skip-gateway submit")
-	}
-	if cmd == nil {
-		t.Error("expected non-nil cmd from startPipeline")
-	}
 	model.cancel()
 }
 
@@ -305,11 +274,10 @@ func TestTUI_AgentNavigation(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
 	m.pipelineScreen.agents = []AgentRow{
-		{ID: "gateway", State: "done"},
 		{ID: "architect", State: "running"},
 	}
 
-	// Press Alt+1 to view gateway history
+	// Press Alt+1 to view architect history
 	result, _ := sendAlt(m, '1')
 	model := result.(Model)
 
@@ -326,7 +294,7 @@ func TestTUI_AgentNavBack(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentAgentHistory
 	m.pipelineScreen.focusedAgent = 1
-	m.pipelineScreen.agents = []AgentRow{{ID: "gateway", State: "done"}}
+	m.pipelineScreen.agents = []AgentRow{{ID: "architect", State: "done"}}
 
 	// Press Esc to go back
 	result, _ := sendKey(m, tea.KeyEscape)
@@ -390,7 +358,7 @@ func TestTUI_SidebarUpdates(t *testing.T) {
 	// AgentStarted
 	m.pipelineScreen.ApplyEvent(orchestrator.Event{
 		Type:    orchestrator.EventAgentStarted,
-		AgentID: "gateway",
+		AgentID: "researcher",
 	}, m.width)
 
 	if len(m.pipelineScreen.agents) != 1 || m.pipelineScreen.agents[0].State != "running" {
@@ -400,7 +368,7 @@ func TestTUI_SidebarUpdates(t *testing.T) {
 	// AgentDone
 	m.pipelineScreen.ApplyEvent(orchestrator.Event{
 		Type:    orchestrator.EventAgentDone,
-		AgentID: "gateway",
+		AgentID: "researcher",
 	}, m.width)
 
 	if m.pipelineScreen.agents[0].State != "done" {
@@ -413,7 +381,6 @@ func TestTUI_FullDashboard(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
 	m.pipelineScreen.agents = []AgentRow{
-		{ID: "gateway", State: "done"},
 		{ID: "architect", State: "running"},
 	}
 
@@ -427,7 +394,7 @@ func TestTUI_FullDashboard(t *testing.T) {
 
 	// View should contain dashboard content
 	view := viewString(model)
-	if !strings.Contains(view, "gateway") || !strings.Contains(view, "architect") {
+	if !strings.Contains(view, "architect") {
 		t.Error("expected dashboard to show agent names")
 	}
 
@@ -563,7 +530,7 @@ func TestTUI_SidebarTokens(t *testing.T) {
 	m.width = 120
 	m.height = 40
 	m.pipelineScreen.agents = []AgentRow{
-		{ID: "gateway", State: "done", Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402},
+		{ID: "researcher", State: "done", Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402},
 		{ID: "architect", State: "running", StartedAt: time.Now().Add(-24 * time.Second), InputTokens: 0, OutputTokens: 0},
 	}
 	m.recalculateLayout()
@@ -572,7 +539,7 @@ func TestTUI_SidebarTokens(t *testing.T) {
 	view := viewString(m)
 
 	if !strings.Contains(view, "1.6k") {
-		t.Error("expected sidebar to show formatted token count '1.6k' for gateway")
+		t.Error("expected sidebar to show formatted token count '1.6k' for researcher")
 	}
 	if !strings.Contains(view, "total:") {
 		t.Error("expected sidebar to show totals row")
@@ -587,7 +554,7 @@ func TestTUI_DashboardTokens(t *testing.T) {
 	m.width = 120
 	m.height = 40
 	m.pipelineScreen.agents = []AgentRow{
-		{ID: "gateway", State: "done", Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402},
+		{ID: "researcher", State: "done", Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402},
 	}
 	m.recalculateLayout()
 	m.pipelineScreen.SyncViewports()
@@ -664,7 +631,7 @@ func TestTUI_StreamingOutput(t *testing.T) {
 	m.pipelineScreen.streamBuf = stream
 
 	// Simulate agent start + streaming output via the shared buffer
-	stream.SetAgent("gateway")
+	stream.SetAgent("researcher")
 	stream.Append("Analyzing prompt...\nProcessing request...")
 
 	m.recalculateLayout()
@@ -678,7 +645,7 @@ func TestTUI_StreamingOutput(t *testing.T) {
 	if !strings.Contains(view, "Processing request") {
 		t.Error("expected second line of streaming output in view")
 	}
-	if !strings.Contains(view, "gateway") {
+	if !strings.Contains(view, "researcher") {
 		t.Error("expected agent name in streaming view")
 	}
 }
@@ -687,15 +654,15 @@ func TestTUI_StreamingOutputReset(t *testing.T) {
 	stream := orchestrator.NewStreamBuffer(200)
 
 	// Simulate first agent
-	stream.SetAgent("gateway")
-	stream.Append("gateway output line")
+	stream.SetAgent("researcher")
+	stream.Append("researcher output line")
 
 	agentID, lines, _ := stream.Snapshot()
-	if agentID != "gateway" {
-		t.Errorf("expected agent 'gateway', got %q", agentID)
+	if agentID != "researcher" {
+		t.Errorf("expected agent 'researcher', got %q", agentID)
 	}
 	if len(lines) == 0 {
-		t.Fatal("expected stream lines from gateway")
+		t.Fatal("expected stream lines from researcher")
 	}
 
 	// Simulate second agent — buffer should reset
@@ -712,7 +679,7 @@ func TestTUI_StreamingOutputReset(t *testing.T) {
 
 func TestStreamBuffer_TokenAccumulation(t *testing.T) {
 	stream := orchestrator.NewStreamBuffer(200)
-	stream.SetAgent("gateway")
+	stream.SetAgent("researcher")
 
 	// Simulate token-level writes (each content_block_delta is a few chars)
 	stream.Append("I")
@@ -752,7 +719,7 @@ func TestTUI_NewRunClearsStaleState(t *testing.T) {
 
 	// Simulate stale state from a previous run
 	m.pipelineScreen.agents = []AgentRow{
-		{ID: "gateway", State: "done"},
+		{ID: "researcher", State: "done"},
 		{ID: "architect", State: "failed"},
 	}
 	m.pipelineScreen.lastErr = fmt.Errorf("planner failed")
@@ -800,7 +767,7 @@ func TestTUI_RestartClearsErrorAndAgents(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentCompletion
 	m.pipelineScreen.goal = "task"
-	m.pipelineScreen.agents = []AgentRow{{ID: "gateway", State: "done"}}
+	m.pipelineScreen.agents = []AgentRow{{ID: "researcher", State: "done"}}
 	m.pipelineScreen.lastErr = fmt.Errorf("old error")
 
 	// Press Ctrl+N, then submit new prompt via Enter

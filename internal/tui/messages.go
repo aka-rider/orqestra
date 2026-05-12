@@ -32,8 +32,7 @@ type intent interface {
 
 // StartPipelineIntent requests the orchestrator to begin a new pipeline run.
 type StartPipelineIntent struct {
-	Prompt      string
-	SkipGateway bool
+	Prompt string
 }
 
 func (StartPipelineIntent) isIntent() {}

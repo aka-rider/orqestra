@@ -63,13 +63,6 @@ func (s PromptScreen) Update(msg tea.Msg) (PromptScreen, tea.Cmd) {
 
 	// Ctrl combos first (no named constants in v2)
 	switch keyMsg.String() {
-	case "ctrl+s":
-		prompt := strings.TrimSpace(s.textarea.Value())
-		if prompt == "" {
-			return s, nil
-		}
-		s.PendingIntent = StartPipelineIntent{Prompt: prompt, SkipGateway: true}
-		return s, nil
 	case "ctrl+r":
 		s.PendingIntent = NavigateToRunsListIntent{}
 		return s, nil
@@ -86,7 +79,7 @@ func (s PromptScreen) Update(msg tea.Msg) (PromptScreen, tea.Cmd) {
 		if prompt == "" {
 			return s, nil
 		}
-		s.PendingIntent = StartPipelineIntent{Prompt: prompt, SkipGateway: false}
+		s.PendingIntent = StartPipelineIntent{Prompt: prompt}
 		return s, nil
 	default:
 		var cmd tea.Cmd
@@ -114,7 +107,7 @@ func (s PromptScreen) View(width, height int) string {
 
 	// Footer (2 lines)
 	footer := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
-		keyStyle.Render(" [Enter] submit | [Shift+Enter] newline | [^S] skip gateway | [^R] runs  [^C] quit")
+		keyStyle.Render(" [Enter] submit | [Shift+Enter] newline | [^R] runs  [^C] quit")
 
 	// Input zone (divider + instruction + textarea + newline)
 	input := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
@@ -158,8 +151,7 @@ func (s PromptScreen) View(width, height int) string {
 		var sidebarBuf strings.Builder
 		sidebarBuf.WriteString(" Agents\n")
 		sidebarBuf.WriteString(strings.Repeat("─", max(1, sidebarWidth-1)) + "\n")
-		sidebarBuf.WriteString(" ● gateway     gate\n")
-		sidebarBuf.WriteString("   awaiting input\n")
+		sidebarBuf.WriteString(" ○ researcher     -\n")
 		sidebarBuf.WriteString("\n")
 		sidebarBuf.WriteString(" ○ architect      -\n")
 		sidebarBuf.WriteString(" ○ workers        -\n")

@@ -16,17 +16,26 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Architect.Model != "large" {
 		t.Errorf("architect model = %q, want %q", cfg.Architect.Model, "large")
 	}
+	if cfg.Critic.Model != "medium" {
+		t.Errorf("critic model = %q, want %q", cfg.Critic.Model, "medium")
+	}
 	if cfg.Worker.Model != "medium" {
 		t.Errorf("worker model = %q, want %q", cfg.Worker.Model, "medium")
-	}
-	if cfg.Gateway.Model != "small" {
-		t.Errorf("gateway model = %q, want %q", cfg.Gateway.Model, "small")
 	}
 	if cfg.Retry.ResearcherAttempts < 1 {
 		t.Error("researcher attempts should be at least 1")
 	}
 	if cfg.Retry.ArchitectAttempts < 1 {
 		t.Error("architect attempts should be at least 1")
+	}
+	if cfg.Retry.CriticAttempts < 1 {
+		t.Error("critic attempts should be at least 1")
+	}
+	if cfg.Critic.SystemPrompt == "" {
+		t.Error("critic system prompt should be set from embedded pipeline.yaml")
+	}
+	if cfg.Critic.PermissionMode != "plan" {
+		t.Errorf("critic permission_mode = %q, want %q", cfg.Critic.PermissionMode, "plan")
 	}
 }
 

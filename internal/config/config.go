@@ -52,10 +52,10 @@ type Config struct {
 	Pipeline       PipelineConfig            `yaml:"pipeline"`
 	Researcher     ResearcherConfig          `yaml:"researcher"`
 	Architect      ArchitectConfig           `yaml:"architect"`
+	Critic         CriticConfig              `yaml:"critic"`
 	Worker         WorkerConfig              `yaml:"worker"`
 	Retry          RetryConfig               `yaml:"retry"`
 	ExecutionGraph ExecutionGraphConfig      `yaml:"execution_graph"`
-	Gateway        GatewayConfig             `yaml:"gateway"`
 	Sandbox        SandboxConfig             `yaml:"sandbox"`
 }
 
@@ -78,6 +78,16 @@ type ArchitectConfig struct {
 	PermissionMode  string    `yaml:"permission_mode"`
 }
 
+// CriticConfig is used for the plan critic that reviews the architect's plan.
+type CriticConfig struct {
+	Model           string    `yaml:"model"`
+	SystemPrompt    string    `yaml:"system_prompt"`
+	AllowedTools    []string  `yaml:"allowed_tools"`
+	DisallowedTools []string  `yaml:"disallowed_tools"`
+	MCPServers      *[]string `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
+	PermissionMode  string    `yaml:"permission_mode"`
+}
+
 type WorkerConfig struct {
 	Model           string   `yaml:"model"`
 	AllowedTools    []string `yaml:"allowed_tools"`
@@ -91,6 +101,7 @@ type WorkerConfig struct {
 type RetryConfig struct {
 	ResearcherAttempts      int `yaml:"researcher_attempts"`
 	ArchitectAttempts       int `yaml:"architect_attempts"`
+	CriticAttempts          int `yaml:"critic_attempts"`
 	WorkerValidationRetries int `yaml:"worker_validation_retries"`
 }
 
@@ -141,16 +152,6 @@ type PipelineConfig struct {
 	TokenBudget       int64  `yaml:"token_budget"`       // total token budget for a run
 	RunDir            string `yaml:"run_dir"`            // base directory for run artifacts
 	WorkerConcurrency int    `yaml:"worker_concurrency"` // max concurrent workers
-}
-
-// GatewayConfig configures the gateway evaluation layer.
-type GatewayConfig struct {
-	Model           string    `yaml:"model"`
-	SystemPrompt    string    `yaml:"system_prompt"`
-	AllowedTools    []string  `yaml:"allowed_tools"`
-	DisallowedTools []string  `yaml:"disallowed_tools"`
-	MCPServers      *[]string `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
-	PermissionMode  string    `yaml:"permission_mode"`
 }
 
 // SandboxConfig configures macOS-native sandbox (sandbox-exec) agent sandboxing.
@@ -230,6 +231,7 @@ func checkForbiddenKeys(data []byte) error {
 		"validator":       "The 'validator' role has been replaced by 'architect'. Rename 'validator:' to 'architect:' and update model/prompt.",
 		"qa":              "The 'qa' role has been removed. Worker self-validates via session continuation. Remove the 'qa:' section.",
 		"project_manager": "The 'project_manager' role has been removed. The architect structures work packages for the worker. Remove the 'project_manager:' section.",
+		"gateway":         "The 'gateway' role has been removed. Remove the 'gateway:' section from your config.",
 	}
 	for key, msg := range forbidden {
 		if _, ok := raw[key]; ok {
@@ -281,11 +283,15 @@ func (c *Config) validate() error {
 	if c.Worker.Model == "" {
 		return fmt.Errorf("missing mandatory worker.model parameter")
 	}
+	if c.Critic.Model == "" {
+		return fmt.Errorf("missing mandatory critic.model parameter")
+	}
 
 	// Verify pipeline model refs resolve to defined model entries.
 	for _, ref := range []struct{ role, ref string }{
 		{"researcher", c.Researcher.Model},
 		{"architect", c.Architect.Model},
+		{"critic", c.Critic.Model},
 		{"worker", c.Worker.Model},
 		{"small", "small"},
 	} {
@@ -303,12 +309,6 @@ func (c *Config) validate() error {
 			}
 		}
 	}
-	if c.Gateway.Model != "" {
-		if _, ok := c.Models[c.Gateway.Model]; !ok {
-			return fmt.Errorf("gateway.model %q not found in models (define model %q in your provider config)", c.Gateway.Model, c.Gateway.Model)
-		}
-	}
-
 	for name, m := range c.Models {
 		if _, ok := c.Providers[m.Provider]; !ok {
 			return fmt.Errorf("model %q references unknown provider %q", name, m.Provider)
