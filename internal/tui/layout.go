@@ -9,12 +9,9 @@ import (
 
 // Layout constants — design constraints, not magic numbers.
 const (
-	splitRatio = 0.75
-
 	minWidth  = 60 // below this, layout is physically impossible
 	minHeight = 10 // below this, show a "terminal too small" message
 
-	constHeaderHeight = 2 // title + divider
 	constFooterHeight = 2 // divider + key hints
 
 	// Pipeline mode: divider + status line (the separator "\n" between body
@@ -35,6 +32,9 @@ const (
 
 	// Default context window size for the dashboard progress bar.
 	constDefaultContextWindow = 200_000
+
+	// Bottom sidebar height (agent list strip below the input zone).
+	constSidebarHeight = 6
 )
 
 // layoutBounds holds the computed bounding rectangles for each zone.
@@ -69,19 +69,4 @@ func renderPrefixedText(style lipgloss.Style, prefix, text string, maxW int) str
 		b.WriteString("\n")
 	}
 	return b.String()
-}
-
-// joinSplitView composes left and right panes with a border separator.
-func joinSplitView(left, right string, leftWidth, rightWidth, height int) string {
-	l := lipgloss.Place(leftWidth, height, lipgloss.Left, lipgloss.Top, left)
-
-	sidebarStyle := lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder(), false, false, false, true).
-		BorderForeground(lipgloss.Color("238")).
-		Width(rightWidth).
-		Height(height)
-
-	r := sidebarStyle.Render(right)
-
-	return lipgloss.JoinHorizontal(lipgloss.Top, l, r)
 }

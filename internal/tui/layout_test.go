@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 
 	"charm.land/bubbles/v2/textarea"
@@ -100,18 +99,20 @@ func TestLayout_HeightInvariant_SmallTerminal(t *testing.T) {
 func TestLayout_RecalculateConstants(t *testing.T) {
 	m := layoutTestModel(120, 40, StatePipeline)
 
-	contentWidth := int(float64(120) * splitRatio)
-	sidebarWidth := 120 - contentWidth - 1
-	contentHeight := 40 - constHeaderHeight - constPipelineInputHeight - constFooterHeight
+	// New geometry: full-width content, constSidebarHeight-tall sidebar
+	contentHeight := 40 - constPipelineInputHeight - constFooterHeight - constSidebarHeight
 
-	if m.pipelineScreen.contentVP.Width() != contentWidth {
-		t.Errorf("contentVP.Width = %d, want %d", m.pipelineScreen.contentVP.Width(), contentWidth)
+	if m.pipelineScreen.contentVP.Width() != 120 {
+		t.Errorf("contentVP.Width = %d, want 120", m.pipelineScreen.contentVP.Width())
 	}
 	if m.pipelineScreen.contentVP.Height() != contentHeight {
 		t.Errorf("contentVP.Height = %d, want %d", m.pipelineScreen.contentVP.Height(), contentHeight)
 	}
-	if m.pipelineScreen.sidebarVP.Width() != sidebarWidth {
-		t.Errorf("sidebarVP.Width = %d, want %d", m.pipelineScreen.sidebarVP.Width(), sidebarWidth)
+	if m.pipelineScreen.sidebarVP.Width() != 120 {
+		t.Errorf("sidebarVP.Width = %d, want 120", m.pipelineScreen.sidebarVP.Width())
+	}
+	if m.pipelineScreen.sidebarVP.Height() != constSidebarHeight {
+		t.Errorf("sidebarVP.Height = %d, want %d", m.pipelineScreen.sidebarVP.Height(), constSidebarHeight)
 	}
 	if m.pipelineScreen.dashboardVP.Width() != 120 {
 		t.Errorf("dashboardVP.Width = %d, want 120", m.pipelineScreen.dashboardVP.Width())
@@ -121,7 +122,7 @@ func TestLayout_RecalculateConstants(t *testing.T) {
 func TestLayout_RecalculatePromptMode(t *testing.T) {
 	m := layoutTestModel(120, 40, StatePrompt)
 
-	contentHeight := 40 - constHeaderHeight - constPromptInputHeight - constFooterHeight
+	contentHeight := 40 - constPromptInputHeight - constFooterHeight - constSidebarHeight
 
 	if m.pipelineScreen.contentVP.Height() != contentHeight {
 		t.Errorf("contentVP.Height = %d, want %d (prompt mode)", m.pipelineScreen.contentVP.Height(), contentHeight)
@@ -140,26 +141,15 @@ func TestLayout_BelowMinimumNoOp(t *testing.T) {
 	}
 }
 
-func TestLayout_JoinSplitView(t *testing.T) {
-	left := "left\ncontent"
-	right := "right\nside"
-	result := joinSplitView(left, right, 20, 10, 5)
-
-	lines := strings.Split(result, "\n")
-	if len(lines) < 5 {
-		t.Errorf("joinSplitView produced %d lines, want at least 5", len(lines))
-	}
-}
-
-func TestLayout_SplitRatioDerivation(t *testing.T) {
+func TestLayout_SidebarGeometry(t *testing.T) {
 	widths := []int{60, 80, 120, 200}
 	for _, w := range widths {
-		contentW := int(float64(w) * splitRatio)
-		sidebarW := w - contentW - 1
-		total := contentW + 1 + sidebarW // content + separator + sidebar
-		if total != w {
-			t.Errorf("width=%d: content(%d) + sep(1) + sidebar(%d) = %d, want %d",
-				w, contentW, sidebarW, total, w)
+		m := layoutTestModel(w, 40, StatePipeline)
+		if m.pipelineScreen.sidebarVP.Width() != w {
+			t.Errorf("width=%d: sidebarVP.Width=%d, want %d", w, m.pipelineScreen.sidebarVP.Width(), w)
+		}
+		if m.pipelineScreen.sidebarVP.Height() != constSidebarHeight {
+			t.Errorf("width=%d: sidebarVP.Height=%d, want %d", w, m.pipelineScreen.sidebarVP.Height(), constSidebarHeight)
 		}
 	}
 }

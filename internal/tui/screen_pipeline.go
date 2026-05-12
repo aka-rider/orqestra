@@ -43,10 +43,6 @@ type PipelineScreen struct {
 	// Streaming output — shared buffer polled on tick
 	streamBuf *orchestrator.StreamBuffer
 
-	// Plan edit state
-	planEditor    textarea.Model
-	hasPlanEditor bool
-
 	// Plan review state
 	planComment    textarea.Model
 	hasPlanComment bool
@@ -131,7 +127,6 @@ func (s *PipelineScreen) Reset() {
 	s.workerValidation = ""
 	s.hasValidation = false
 	s.streamBuf = nil
-	s.hasPlanEditor = false
 	s.hasPlanComment = false
 	s.editorRunning = false
 	s.awaitingPlanDecision = false
@@ -171,11 +166,9 @@ func (s *PipelineScreen) SetStreamBuf(buf *orchestrator.StreamBuffer) {
 // SyncViewports updates pipeline viewport content from current screen state.
 func (s *PipelineScreen) SyncViewports() {
 	w := s.effectiveWidth()
-	contentWidth := max(0, int(float64(w)*splitRatio))
-	sidebarWidth := max(0, w-contentWidth-1)
 
 	// Keep diff viewport dimensions in sync
-	s.diffViewport.SetWidth(contentWidth)
+	s.diffViewport.SetWidth(w)
 	s.diffViewport.SetHeight(max(1, s.contentVP.Height()-3))
 
 	if s.showDashboard {
@@ -185,33 +178,30 @@ func (s *PipelineScreen) SyncViewports() {
 		if s.showHelp {
 			contentView = s.viewHelp()
 		} else {
-			contentView = s.viewContent(contentWidth)
+			contentView = s.viewContent(w)
 		}
 		atBottom := s.contentVP.AtBottom()
 		s.contentVP.SetContent(contentView)
 		if atBottom && s.content == ContentStreaming {
 			s.contentVP.GotoBottom()
 		}
-		s.sidebarVP.SetContent(s.viewSidebar(sidebarWidth))
+		s.sidebarVP.SetContent(s.viewSidebar(w))
 	}
 }
 
 func (s PipelineScreen) effectiveWidth() int {
-	if s.contentVP.Width()+s.sidebarVP.Width()+1 >= minWidth {
-		return s.contentVP.Width() + s.sidebarVP.Width() + 1
+	if s.contentVP.Width() >= minWidth {
+		return s.contentVP.Width()
 	}
 	return minWidth
 }
 
 // RecalculateLayout updates viewport dimensions from parent-computed values.
 func (s *PipelineScreen) RecalculateLayout(width, contentHeight int) {
-	contentWidth := max(0, int(float64(width)*splitRatio))
-	sidebarWidth := max(0, width-contentWidth-1)
-
-	s.contentVP.SetWidth(contentWidth)
+	s.contentVP.SetWidth(width)
 	s.contentVP.SetHeight(contentHeight)
-	s.sidebarVP.SetWidth(sidebarWidth)
-	s.sidebarVP.SetHeight(contentHeight)
+	s.sidebarVP.SetWidth(width)
+	s.sidebarVP.SetHeight(constSidebarHeight)
 	s.dashboardVP.SetWidth(width)
 	s.dashboardVP.SetHeight(contentHeight)
 }
@@ -275,7 +265,7 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 			s.finalPlan = event.Gate.FinalPlanMarkdown
 			s.hasPlan = true
 			s.planFilePath = event.Gate.PlanFilePath
-			contentWidth := max(1, int(float64(width)*splitRatio))
+			contentWidth := max(1, width)
 			s.planComment = textarea.New()
 			s.planComment.Placeholder = "Ask a question or request changes..."
 			s.planComment.SetWidth(max(1, contentWidth-4))
@@ -296,7 +286,7 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 		s.chatHistory = append(s.chatHistory, ChatEntry{Role: "architect", Text: event.ChatText})
 		s.content = ContentPlanReview
 		s.awaitingPlanDecision = true
-		contentWidth := max(1, int(float64(width)*splitRatio))
+		contentWidth := max(1, width)
 		s.planComment = textarea.New()
 		s.planComment.Placeholder = "Ask a question or request changes..."
 		s.planComment.SetWidth(max(1, contentWidth-4))
@@ -318,10 +308,9 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 		s.contentVP.GotoTop()
 		if len(event.UserQuestion.Options) == 0 {
 			// Freeform mode
-			contentWidth := max(1, int(float64(width)*splitRatio))
 			ta := textarea.New()
 			ta.Placeholder = "Type your answer..."
-			ta.SetWidth(max(1, contentWidth-4))
+			ta.SetWidth(max(1, width-4))
 			ta.SetHeight(3)
 			ta.CharLimit = 1024
 			ta.Focus()
@@ -356,7 +345,7 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		s.SyncViewports()
 		return s, nil
 	case "ctrl+d":
-		if s.content != ContentPlanEdit && s.content != ContentPlanReview && s.content != ContentPlanDiff && s.content != ContentUserQuestion {
+		if s.content != ContentPlanReview && s.content != ContentPlanDiff && s.content != ContentUserQuestion {
 			s.showDashboard = !s.showDashboard
 			s.SyncViewports()
 			return s, nil
@@ -396,7 +385,7 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		"alt+1": 1, "alt+2": 2, "alt+3": 3, "alt+4": 4, "alt+5": 5,
 		"alt+6": 6, "alt+7": 7, "alt+8": 8, "alt+9": 9,
 	}
-	if idx, ok := altKeys[msg.String()]; ok && s.content != ContentPlanEdit && s.content != ContentPlanReview && s.content != ContentUserQuestion {
+	if idx, ok := altKeys[msg.String()]; ok && s.content != ContentPlanReview && s.content != ContentUserQuestion {
 		if idx <= len(s.agents) {
 			s.focusedAgent = idx
 			s.content = ContentAgentHistory
@@ -411,8 +400,6 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		return s.handleUserQuestionKey(msg)
 	case ContentPlanReview:
 		return s.handlePlanReviewKey(msg)
-	case ContentPlanEdit:
-		return s.handlePlanEditKey(msg)
 	case ContentPlanDiff:
 		return s.handlePlanDiffKey(msg)
 	case ContentAgentHistory:
@@ -452,11 +439,6 @@ func (s PipelineScreen) UpdateSubModel(msg tea.Msg) (PipelineScreen, tea.Cmd) {
 	if s.content == ContentUserQuestion && s.hasQuestionTA {
 		var cmd tea.Cmd
 		s.questionTextarea, cmd = s.questionTextarea.Update(msg)
-		return s, cmd
-	}
-	if s.content == ContentPlanEdit && s.hasPlanEditor {
-		var cmd tea.Cmd
-		s.planEditor, cmd = s.planEditor.Update(msg)
 		return s, cmd
 	}
 	return s, nil
@@ -554,10 +536,9 @@ func (s PipelineScreen) handleUserQuestionKey(msg tea.KeyPressMsg) (PipelineScre
 		return s, nil
 	case tea.KeyTab:
 		// Expand inline custom text input for highlighted option
-		contentWidth := max(1, int(float64(s.contentVP.Width()+s.sidebarVP.Width()+1)*splitRatio))
 		ta := textarea.New()
 		ta.Placeholder = "Add context..."
-		ta.SetWidth(max(1, contentWidth-6))
+		ta.SetWidth(max(1, s.contentVP.Width()-6))
 		ta.SetHeight(1)
 		ta.CharLimit = 512
 		// Restore any previously entered custom text
@@ -657,7 +638,7 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 	}
 
 	switch msg.String() {
-	case "ctrl+shift+e":
+	case "ctrl+e", "ctrl+shift+e":
 		if s.planFilePath != "" {
 			s.editorRunning = true
 			s.PendingIntent = OpenExternalEditorIntent{FilePath: s.planFilePath}
@@ -670,24 +651,6 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 		s.content = ContentStreaming
 		s.SyncViewports()
 		s.PendingIntent = ApprovePlanIntent{}
-		return s, nil
-	case "ctrl+e":
-		s.awaitingPlanDecision = false
-		contentWidth := max(1, int(float64(s.contentVP.Width()+s.sidebarVP.Width()+1)*splitRatio))
-		contentHeight := max(4, s.contentVP.Height())
-		ta := textarea.New()
-		ta.SetWidth(max(1, contentWidth-2))
-		ta.SetHeight(max(1, contentHeight-2))
-		ta.CharLimit = 65536
-		if s.hasPlan {
-			ta.SetValue(s.finalPlan)
-		}
-		ta.Focus()
-		s.planEditor = ta
-		s.hasPlanEditor = true
-		s.hasPlanComment = false
-		s.content = ContentPlanEdit
-		s.SyncViewports()
 		return s, nil
 	case "ctrl+d":
 		if s.planDiff != "" {
@@ -702,28 +665,6 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 	return s, nil
 }
 
-func (s PipelineScreen) handlePlanEditKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
-	if msg.String() == "ctrl+s" {
-		edited := s.planEditor.Value()
-		s.content = ContentStreaming
-		s.SyncViewports()
-		s.PendingIntent = EditPlanIntent{ModifiedMarkdown: edited}
-		return s, nil
-	}
-	switch msg.Code {
-	case tea.KeyEscape:
-		s.content = ContentPlanReview
-		s.SyncViewports()
-		return s, nil
-	}
-	if s.hasPlanEditor {
-		var cmd tea.Cmd
-		s.planEditor, cmd = s.planEditor.Update(msg)
-		return s, cmd
-	}
-	return s, nil
-}
-
 // HandleCtrlCCancel handles the first Ctrl+C press by emitting the appropriate
 // cancel intent based on current content mode.
 func (s PipelineScreen) HandleCtrlCCancel() PipelineScreen {
@@ -734,10 +675,6 @@ func (s PipelineScreen) HandleCtrlCCancel() PipelineScreen {
 		s.PendingIntent = CancelPlanIntent{}
 	case ContentStreaming, ContentAgentHistory:
 		s.PendingIntent = CancelPipelineIntent{}
-	case ContentPlanEdit:
-		// Cancel edit and return to review — don't cancel the whole pipeline
-		s.content = ContentPlanReview
-		s.SyncViewports()
 	case ContentUserQuestion:
 		s.content = ContentStreaming
 		s.SyncViewports()
@@ -752,10 +689,9 @@ func (s PipelineScreen) handlePlanDiffKey(msg tea.KeyPressMsg) (PipelineScreen, 
 	if msg.Code == tea.KeyEscape || msg.String() == "ctrl+d" {
 		s.content = ContentPlanReview
 		s.contentVP.GotoTop()
-		contentWidth := max(1, int(float64(s.contentVP.Width()+s.sidebarVP.Width()+1)*splitRatio))
 		s.planComment = textarea.New()
 		s.planComment.Placeholder = "Ask a question or request changes..."
-		s.planComment.SetWidth(max(1, contentWidth-4))
+		s.planComment.SetWidth(max(1, s.contentVP.Width()-4))
 		s.planComment.SetHeight(2)
 		s.planComment.CharLimit = 1024
 		s.planComment.Focus()
@@ -822,52 +758,31 @@ func (s PipelineScreen) View(width, height int) string {
 		return " Terminal too small. Please resize."
 	}
 
-	// Header (2 lines)
-	elapsed := time.Since(s.startTime).Truncate(time.Second)
-	title := headerStyle.Render(" Orqestra")
-	phase := phaseStyle.Render(fmt.Sprintf("▶ %s", s.phase))
-	timeStr := elapsedStyle.Render(elapsed.String())
-	var runInfo string
-	if s.configName != "" {
-		runInfo = dimStyle.Render(fmt.Sprintf(" [%s]", s.configName))
-	}
-	header := fmt.Sprintf("%s%s  %s  %s\n", title, runInfo, phase, timeStr) +
-		dividerStyle.Render(strings.Repeat("─", w)) + "\n"
-
 	// Footer (2 lines)
 	footer := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
 		s.viewFooter()
 
-	// Input zone height depends on content mode
-	inputHeight := constPipelineInputHeight
-	if s.content == ContentPlanReview && s.hasPlanComment {
-		inputHeight = constPlanReviewInputHeight
-	}
-
+	// Input zone
 	input := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
 		s.viewInputZone() + "\n"
 
-	// Content zone dimensions. The "\n" separator between body and input
-	// consumes one terminal line, so subtract it from available content height.
-	contentHeight := max(0, height-constHeaderHeight-inputHeight-constFooterHeight)
-	contentWidth := max(0, int(float64(w)*splitRatio))
-	sidebarWidth := max(0, w-contentWidth-1)
+	// Sidebar strip (full-width agent list below input)
+	sidebar := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
+		s.sidebarVP.View()
 
-	// Render body — viewports already synced in Update()
+	// Content zone — viewports already synced in Update()
+	contentHeight := max(0, s.contentVP.Height())
 	var body string
 	if s.showDashboard {
 		body = s.dashboardVP.View()
 	} else {
-		body = joinSplitView(s.contentVP.View(), s.sidebarVP.View(), contentWidth, sidebarWidth, contentHeight)
+		body = s.contentVP.View()
 	}
-	// Clamp body to contentHeight. lipgloss.Place does not truncate when content
-	// exceeds the requested height, so if viewport heights are stale after a
-	// content-mode transition the body can overflow and push the footer off-screen.
 	if contentHeight > 0 {
 		body = lipgloss.NewStyle().MaxHeight(contentHeight).Render(body)
 	}
 
-	return header + body + "\n" + input + footer
+	return body + "\n" + input + sidebar + footer
 }
 
 func (s PipelineScreen) viewInputZone() string {
@@ -900,9 +815,7 @@ func (s PipelineScreen) viewInputZone() string {
 			return s.planComment.View() + "\n" +
 				keyStyle.Render(" [Enter] send | [Shift+Enter] newline | [Esc] cancel")
 		}
-		return keyStyle.Render(" [^A] accept | [^E] edit | [^⇧E] editor | [Enter] comment | [^D] diff")
-	case ContentPlanEdit:
-		return keyStyle.Render(" [Ctrl+S] save edits | [Esc] discard")
+		return keyStyle.Render(" [^A] accept | [^E] edit in editor | [Enter] comment | [^D] diff")
 	case ContentMergeConflict:
 		return keyStyle.Render(" [^A] abort merge and keep worktree branch | [Esc] back to stream")
 	case ContentAgentHistory:
@@ -928,8 +841,6 @@ func (s PipelineScreen) viewContent(width int) string {
 		return s.viewUserQuestion(width)
 	case ContentPlanReview:
 		return s.viewPlanReview(width)
-	case ContentPlanEdit:
-		return s.viewPlanEdit(width)
 	case ContentPlanDiff:
 		return s.viewPlanDiff(width)
 	case ContentAgentHistory:
@@ -1135,15 +1046,6 @@ func (s PipelineScreen) viewCompletion(width int) string {
 	return b.String()
 }
 
-func (s PipelineScreen) viewPlanEdit(_ int) string {
-	var b strings.Builder
-	b.WriteString(" Editing plan (Ctrl+S to save, Esc to discard):\n\n")
-	if s.hasPlanEditor {
-		b.WriteString(s.planEditor.View())
-	}
-	return b.String()
-}
-
 func (s PipelineScreen) viewAgentHistory(width int) string {
 	var b strings.Builder
 	if s.focusedAgent > 0 && s.focusedAgent <= len(s.agents) {
@@ -1231,11 +1133,9 @@ func (s PipelineScreen) viewHelp() string {
 	return ` Orqestra Keybindings
 ─────────────────────────────────
  [Enter]       Submit prompt / confirm
- [Ctrl+S]      Save edits
  [PgUp/PgDn]   Scroll content
  [Ctrl+A]      Accept plan / abort merge
- [Ctrl+E]      Edit plan (in-TUI)
- [Ctrl+⇧E]     Open external editor
+ [Ctrl+E]      Edit plan in external editor
  [Ctrl+D]      Toggle dashboard / diff
  [Ctrl+N]      New run
  [Ctrl+R]      Historical runs
@@ -1323,7 +1223,7 @@ func (s PipelineScreen) viewFooter() string {
 		}
 		return keyStyle.Render(" [↑↓] navigate | [Enter] select | [Esc] skip            [^H] help  ") + ctrlCHint
 	case ContentPlanReview:
-		footer := " [^A] accept | [^E] edit | [^⇧E] editor | [Enter] comment | [Shift+Enter] newline"
+		footer := " [^A] accept | [^E] edit in editor | [Enter] comment | [Shift+Enter] newline"
 		if s.planDiff != "" {
 			footer += " | [^D] diff"
 		}
@@ -1334,8 +1234,6 @@ func (s PipelineScreen) viewFooter() string {
 		return keyStyle.Render(footer)
 	case ContentPlanDiff:
 		return keyStyle.Render(" [Esc] return to plan | [^D] return to plan              [^H] help  ") + ctrlCHint
-	case ContentPlanEdit:
-		return keyStyle.Render(" [Ctrl+S] save edits | [Esc] discard                     [^H] help  ") + ctrlCHint
 	case ContentMergeConflict:
 		return keyStyle.Render(" [^A] abort merge | [Esc] continue                       [^H] help  ") + ctrlCHint
 	case ContentAgentHistory:

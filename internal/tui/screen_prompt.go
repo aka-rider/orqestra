@@ -101,10 +101,6 @@ func (s PromptScreen) View(width, height int) string {
 		return " Terminal too small. Please resize."
 	}
 
-	// Header (2 lines)
-	header := headerStyle.Render(" Orqestra") + "\n" +
-		dividerStyle.Render(strings.Repeat("─", w)) + "\n"
-
 	// Footer (2 lines)
 	footer := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
 		keyStyle.Render(" [Enter] submit | [Shift+Enter] newline | [^R] runs  [^C] quit")
@@ -114,14 +110,12 @@ func (s PromptScreen) View(width, height int) string {
 		" Enter a task description. Be specific about the end state.\n" +
 		s.textarea.View() + "\n"
 
-	// Content zone dimensions — derived from constants
-	contentHeight := max(0, height-constHeaderHeight-constPromptInputHeight-constFooterHeight)
-	contentWidth := max(0, int(float64(w)*splitRatio))
-	sidebarWidth := max(0, w-contentWidth-1)
+	// Content zone dimensions — no header, no sidebar in prompt view
+	contentHeight := max(0, height-constPromptInputHeight-constFooterHeight)
 
 	// If content zone too small, skip split view — just render chrome
 	if contentHeight < 2 {
-		return header + input + footer
+		return input + footer
 	}
 
 	var body string
@@ -129,8 +123,8 @@ func (s PromptScreen) View(width, height int) string {
 		pickerStr := s.fp.view(s.fpQuery)
 		body = lipgloss.Place(w, contentHeight, lipgloss.Left, lipgloss.Bottom, pickerStr)
 	} else {
-		// Content: mascot art centered vertically
-		mascot := renderMascot(contentWidth-2, contentHeight)
+		// Content: mascot art centered vertically, full-width
+		mascot := renderMascot(w-2, contentHeight)
 		mascotLines := strings.Split(mascot, "\n")
 		padTop := 0
 		if len(mascotLines) < contentHeight {
@@ -146,21 +140,10 @@ func (s PromptScreen) View(width, height int) string {
 				contentBuf.WriteString("\n")
 			}
 		}
-
-		// Sidebar: static agent list
-		var sidebarBuf strings.Builder
-		sidebarBuf.WriteString(" Agents\n")
-		sidebarBuf.WriteString(strings.Repeat("─", max(1, sidebarWidth-1)) + "\n")
-		sidebarBuf.WriteString(" ○ researcher     -\n")
-		sidebarBuf.WriteString("\n")
-		sidebarBuf.WriteString(" ○ architect      -\n")
-		sidebarBuf.WriteString(" ○ workers        -\n")
-		sidebarBuf.WriteString(" ○ qa             -")
-
-		body = joinSplitView(contentBuf.String(), sidebarBuf.String(), contentWidth, sidebarWidth, contentHeight)
+		body = contentBuf.String()
 	}
 
-	return header + body + "\n" + input + footer
+	return body + "\n" + input + footer
 }
 
 // handleFilePickerKey processes key events while the file picker overlay is active.
@@ -237,8 +220,8 @@ func (s PromptScreen) activateFilePicker(pendingCmd tea.Cmd) (PromptScreen, tea.
 	if err != nil {
 		return s, pendingCmd
 	}
-	contentWidth := max(1, int(float64(s.width)*splitRatio))
-	contentHeight := max(1, s.height-constHeaderHeight-constPromptInputHeight-constFooterHeight)
+	contentWidth := max(1, s.width)
+	contentHeight := max(1, s.height-constPromptInputHeight-constFooterHeight)
 	s.fp = newFilePicker(cwd, contentWidth, contentHeight)
 	s.fpActive = true
 	s.fpAtStart = len(s.textarea.Value()) - 1
