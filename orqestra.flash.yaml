@@ -26,7 +26,7 @@ models:
 researcher:
   model: medium
 
-planner:
+architect:
   model: large
 
 worker:
@@ -38,5 +38,5 @@ sandbox:
 
 retry:
   researcher_attempts: 1
-  planner_attempts: 1
+  architect_attempts: 1
   worker_validation_retries: 1

@@ -27,7 +27,7 @@ researcher:
   mcp_servers:
     - MCP_DOCKER
 
-planner:
+architect:
   model: large
 
 worker:

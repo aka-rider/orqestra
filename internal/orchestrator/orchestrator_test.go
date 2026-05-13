@@ -74,7 +74,7 @@ func setupTestPlanFile(t *testing.T, sessionID, planContent string) {
 	}
 }
 
-func testEngineWithPlanFiles(t *testing.T, researcherOutput, plannerOutput, workerOutput, validationOutput string) *Engine {
+func testEngineWithPlanFiles(t *testing.T, researcherOutput, architectOutput, workerOutput, validationOutput string) *Engine {
 	t.Helper()
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -83,7 +83,7 @@ func testEngineWithPlanFiles(t *testing.T, researcherOutput, plannerOutput, work
 	architectSID := "test-architect-sid"
 
 	setupTestPlanFile(t, researcherSID, researcherOutput)
-	setupTestPlanFile(t, architectSID, plannerOutput)
+	setupTestPlanFile(t, architectSID, architectOutput)
 
 	cfg := config.DefaultConfig()
 	return &Engine{

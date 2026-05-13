@@ -50,7 +50,7 @@ func TestStore_RecordAndQuery(t *testing.T) {
 	}
 	// Ordered by tokens_used DESC
 	if agents[0].AgentID != "architect" || agents[0].TokensUsed != 1500 {
-		t.Errorf("agents[0] = %+v, want planner/1500", agents[0])
+		t.Errorf("agents[0] = %+v, want architect/1500", agents[0])
 	}
 	if agents[1].AgentID != "reviewer" || agents[1].TokensUsed != 200 {
 		t.Errorf("agents[1] = %+v, want reviewer/200", agents[1])

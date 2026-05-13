@@ -126,10 +126,10 @@ func TestResume_ChatOnlyResponse(t *testing.T) {
 	var buf bytes.Buffer
 
 	// First call: produce a plan
-	plannerSystemPrompt := "You are a Principal Engineer. Produce a short implementation plan starting with '# Plan' and containing '## Work Packages'. Keep it brief — 2 work packages max."
+	architectSystemPrompt := "You are a Principal Engineer. Produce a short implementation plan starting with '# Plan' and containing '## Work Packages'. Keep it brief — 2 work packages max."
 	trivialPrompt := "Create a plan for adding a /health endpoint to a Go HTTP server."
 
-	result1, err := runner.RunStreaming(ctx, trivialPrompt, plannerSystemPrompt, &buf)
+	result1, err := runner.RunStreaming(ctx, trivialPrompt, architectSystemPrompt, &buf)
 	if err != nil {
 		t.Fatalf("first RunStreaming failed: %v", err)
 	}
@@ -190,10 +190,10 @@ func TestResume_PlanRevisionResponse(t *testing.T) {
 	var buf bytes.Buffer
 
 	// First call: produce a plan
-	plannerSystemPrompt := "You are a Principal Engineer. Produce a short implementation plan starting with '# Plan' and containing '## Work Packages'. Keep it brief — 2 work packages max."
+	architectSystemPrompt := "You are a Principal Engineer. Produce a short implementation plan starting with '# Plan' and containing '## Work Packages'. Keep it brief — 2 work packages max."
 	trivialPrompt := "Create a plan for adding a /health endpoint and a /ready endpoint to a Go HTTP server."
 
-	result1, err := runner.RunStreaming(ctx, trivialPrompt, plannerSystemPrompt, &buf)
+	result1, err := runner.RunStreaming(ctx, trivialPrompt, architectSystemPrompt, &buf)
 	if err != nil {
 		t.Fatalf("first RunStreaming failed: %v", err)
 	}
@@ -251,10 +251,10 @@ func TestContinuePrompt_Variants(t *testing.T) {
 	var buf bytes.Buffer
 
 	// First call: produce a plan
-	plannerSystemPrompt := "You are a Principal Engineer. Produce a short implementation plan starting with '# Plan' and containing '## Work Packages'. Include exactly 3 work packages."
+	architectSystemPrompt := "You are a Principal Engineer. Produce a short implementation plan starting with '# Plan' and containing '## Work Packages'. Include exactly 3 work packages."
 	trivialPrompt := "Create a plan for building a CLI tool with three subcommands: init, run, and status."
 
-	result1, err := runner.RunStreaming(ctx, trivialPrompt, plannerSystemPrompt, &buf)
+	result1, err := runner.RunStreaming(ctx, trivialPrompt, architectSystemPrompt, &buf)
 	if err != nil {
 		t.Fatalf("initial plan failed: %v", err)
 	}

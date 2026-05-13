@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -64,7 +63,7 @@ models:
     model: test-large
 researcher:
   model: medium
-planner:
+architect:
   model: large
 worker:
   model: medium
@@ -210,7 +209,7 @@ models:
     model: x
 researcher:
   model: medium
-planner:
+architect:
   model: medium
 worker:
   model: medium
@@ -243,7 +242,7 @@ models:
     model: small
 researcher:
   model: medium
-planner:
+architect:
   model: medium
 worker:
   model: medium
@@ -318,7 +317,7 @@ models:
     model: small
 researcher:
   model: medium
-planner:
+architect:
   model: medium
 worker:
   model: medium
@@ -391,7 +390,7 @@ func TestResolvedTokenLimits(t *testing.T) {
 		Models: map[string]ModelConfig{
 			"fast":      {Provider: "local", Model: "qwen36", TokenLimit: "1M"},
 			"worker":    {Provider: "local", Model: "qwen36", TokenLimit: "1M"},
-			"planner":   {Provider: "local", Model: "opus", TokenLimit: "300K"},
+			"architect": {Provider: "local", Model: "opus", TokenLimit: "300K"},
 			"unlimited": {Provider: "local", Model: "cheap", TokenLimit: "unlimited"},
 			"nobudget":  {Provider: "local", Model: "other"},
 		},
@@ -451,7 +450,7 @@ models:
     token_limit: "garbage"
 researcher:
   model: medium
-planner:
+architect:
   model: medium
 worker:
   model: medium
@@ -466,55 +465,6 @@ worker:
 	_, err = Load(f.Name())
 	if err == nil {
 		t.Fatal("expected validation error for invalid token_limit")
-	}
-}
-
-func TestLoad_ForbiddenKeys(t *testing.T) {
-	tests := []struct {
-		name string
-		key  string
-	}{
-		{"validator", "validator:\n  model: small"},
-		{"qa", "qa:\n  model: small"},
-		{"project_manager", "project_manager:\n  model: small"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			content := `
-providers:
-  local:
-    base_url: http://localhost
-    type: openai
-models:
-  medium:
-    provider: local
-    model: big
-  small:
-    provider: local
-    model: small
-researcher:
-  model: medium
-planner:
-  model: medium
-worker:
-  model: medium
-` + tt.key + "\n"
-			f, err := os.CreateTemp(t.TempDir(), "*.yaml")
-			if err != nil {
-				t.Fatal(err)
-			}
-			f.WriteString(content)
-			f.Close()
-
-			_, err = Load(f.Name())
-			if err == nil {
-				t.Fatalf("expected error for forbidden key %q", tt.name)
-			}
-			if !strings.Contains(err.Error(), "forbidden config key") {
-				t.Errorf("expected forbidden key error, got: %v", err)
-			}
-		})
 	}
 }
 
@@ -536,7 +486,7 @@ models:
     token_limit: 50K
 researcher:
   model: medium
-planner:
+architect:
   model: medium
 worker:
   model: medium
@@ -602,7 +552,7 @@ models:
     token_limit: 50K
 researcher:
   model: medium
-planner:
+architect:
   model: medium
 worker:
   model: medium
@@ -647,7 +597,7 @@ models:
     token_limit: 50K
 researcher:
   model: medium
-planner:
+architect:
   model: medium
 worker:
   model: medium

@@ -38,8 +38,8 @@ type Specification struct {
 	Risks       []string `json:"risks,omitempty"`
 }
 
-// PlanOutput is the full planner response: spec + pipeline metadata.
-// The planner LLM produces validation commands and artifact expectations,
+// PlanOutput is the full architect response: spec + pipeline metadata.
+// The architect LLM produces validation commands and artifact expectations,
 // but those are not part of the spec contract — they're aids for the QA gate.
 type PlanOutput struct {
 	Spec Specification
@@ -98,7 +98,7 @@ func (s *Specification) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// UnmarshalJSON parses the full planner LLM output into spec + pipeline metadata.
+// UnmarshalJSON parses the full architect LLM output into spec + pipeline metadata.
 func (p *PlanOutput) UnmarshalJSON(data []byte) error {
 	// Parse spec fields first.
 	if err := json.Unmarshal(data, &p.Spec); err != nil {

@@ -61,7 +61,7 @@ These are concrete code patterns that violate the core principles. Reject them i
 - Wrap errors with operation and resource context: `fmt.Errorf("resolve worker model %q: %w", ref, err)`.
 - Use table-driven tests for validation matrices and state transitions. Name cases after the behavior, not the implementation detail.
 - Prefer channels, `sync.WaitGroup`, contexts, or deterministic test hooks for goroutine coordination.
-- Keep package boundaries honest: `agent` owns all agent types (Specification, ValidationReport, ProjectPlan) and implementations (Planner, PlanValidator, Gate, ProjectManager, Recognizer), `plan` handles markdown persistence, `config` resolves config, `harness` runs harnesses, `sandbox` owns isolation, `scheduler` orchestrates execution graphs.
+- Keep package boundaries honest: `agent` owns all agent types (Specification, ValidationReport, ProjectPlan) and implementations (Architect, PlanValidator, Gate, ProjectManager, Recognizer), `plan` handles markdown persistence, `config` resolves config, `harness` runs harnesses, `sandbox` owns isolation, `scheduler` orchestrates execution graphs.
 - Treat LLM text, file paths, command args, JSON, YAML, and streamed events as hostile until parsed and validated.
 
 ### DON'T
@@ -118,6 +118,7 @@ When an orchestrator run hangs, produces no output, or errors silently, the **gr
 3. **Check for connection errors** — if the assistant response contains `ConnectionRefused`, `timeout`, or `rate_limit`, the issue is infrastructure (proxy down, API key invalid, quota exhausted), not Orqestra code.
 
 4. **Cross-reference with the session metadata** — match the `sessionId` from the JSONL filename to `~/.claude/sessions/<pid>.json` to confirm which process owns it:
+
    ```sh
    cat ~/.claude/sessions/*.json | python3 -m json.tool
    ```

@@ -639,7 +639,7 @@ func TestTUI_StreamingOutputReset(t *testing.T) {
 
 	agentID2, lines2, _ := stream.Snapshot()
 	if agentID2 != "architect" {
-		t.Errorf("expected agent 'planner', got %q", agentID2)
+		t.Errorf("expected agent 'architect', got %q", agentID2)
 	}
 	if len(lines2) != 0 {
 		t.Errorf("expected stream buffer cleared on new agent, got %d lines", len(lines2))
@@ -691,7 +691,7 @@ func TestTUI_NewRunClearsStaleState(t *testing.T) {
 		{ID: "researcher", State: "done"},
 		{ID: "architect", State: "failed"},
 	}
-	m.pipelineScreen.lastErr = fmt.Errorf("planner failed")
+	m.pipelineScreen.lastErr = fmt.Errorf("architect failed")
 	m.pipelineScreen.finalPlan = "# Old Plan"
 	m.pipelineScreen.hasPlan = true
 	m.pipelineScreen.workerValidation = "old validation"
@@ -944,7 +944,7 @@ func TestTUI_EditorReturn(t *testing.T) {
 }
 
 // TestTUI_DrainLoopPlanGate exercises the full Update drain loop:
-// events for planner-done → plan-ready → gate-request arrive in a burst
+// events for architect-done → plan-ready → gate-request arrive in a burst
 // and must all be consumed, leaving the model in ContentPlanReview.
 func TestTUI_DrainLoopPlanGate(t *testing.T) {
 	m := testModel()

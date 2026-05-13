@@ -3,7 +3,6 @@ package config
 import (
 	_ "embed"
 	"fmt"
-	"log/slog"
 	"math"
 	"os"
 	"regexp"
@@ -205,71 +204,12 @@ func Load(path string) (*Config, error) {
 		return nil, formatYAMLError(path, err)
 	}
 
-	// Backward compat: migrate legacy "planner:" key to "architect:"
-	migratePlannerKey(data, cfg)
-
-	// Check for forbidden legacy keys.
-	if err := checkForbiddenKeys(data); err != nil {
-		return nil, fmt.Errorf("config %q: %w", path, err)
-	}
-
 	// Validate: every model's provider key must exist
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 
 	return cfg, nil
-}
-
-// checkForbiddenKeys rejects legacy config keys that have been removed.
-func checkForbiddenKeys(data []byte) error {
-	var raw map[string]yaml.Node
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil // validation will catch parse errors
-	}
-	forbidden := map[string]string{
-		"validator":       "The 'validator' role has been replaced by 'architect'. Rename 'validator:' to 'architect:' and update model/prompt.",
-		"qa":              "The 'qa' role has been removed. Worker self-validates via session continuation. Remove the 'qa:' section.",
-		"project_manager": "The 'project_manager' role has been removed. The architect structures work packages for the worker. Remove the 'project_manager:' section.",
-		"gateway":         "The 'gateway' role has been removed. Remove the 'gateway:' section from your config.",
-	}
-	for key, msg := range forbidden {
-		if _, ok := raw[key]; ok {
-			return fmt.Errorf("forbidden config key %q: %s", key, msg)
-		}
-	}
-	return nil
-}
-
-// migratePlannerKey handles backward compat: if user config has "planner:" but no
-// "architect:", unmarshal the planner section into Architect and log a deprecation warning.
-func migratePlannerKey(data []byte, cfg *Config) {
-	var raw map[string]yaml.Node
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return
-	}
-	_, hasArchitect := raw["architect"]
-	plannerNode, hasPlanner := raw["planner"]
-	if hasPlanner && !hasArchitect {
-		slog.Warn("deprecated config key 'planner:' — use 'architect:'")
-		var legacy ArchitectConfig
-		if err := plannerNode.Decode(&legacy); err == nil {
-			cfg.Architect = legacy
-		}
-	}
-	// Also migrate retry.planner_attempts -> retry.architect_attempts
-	if retryNode, ok := raw["retry"]; ok {
-		var retryRaw map[string]yaml.Node
-		if err := retryNode.Decode(&retryRaw); err == nil {
-			if pa, hasPa := retryRaw["planner_attempts"]; hasPa {
-				var val int
-				if pa.Decode(&val) == nil && cfg.Retry.ArchitectAttempts == 0 {
-					slog.Warn("deprecated config key 'planner_attempts' — use 'architect_attempts'")
-					cfg.Retry.ArchitectAttempts = val
-				}
-			}
-		}
-	}
 }
 
 // validate checks that all model references point to existing providers.

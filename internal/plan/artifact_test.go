@@ -79,7 +79,7 @@ func TestValidateChain_BrokenChain(t *testing.T) {
 
 func TestMarshalArtifact_RoundTrip(t *testing.T) {
 	parent := []byte("input data")
-	meta := NewArtifactMeta("planner", "sess-2", parent)
+	meta := NewArtifactMeta("architect", "sess-2", parent)
 	body := []byte("## Plan\n\n1. Do stuff\n")
 
 	raw, err := MarshalArtifact(meta, body)
@@ -92,8 +92,8 @@ func TestMarshalArtifact_RoundTrip(t *testing.T) {
 		t.Fatalf("ParseArtifact error: %v", err)
 	}
 
-	if parsedMeta.Agent != "planner" {
-		t.Errorf("expected agent 'planner', got %q", parsedMeta.Agent)
+	if parsedMeta.Agent != "architect" {
+		t.Errorf("expected agent 'architect', got %q", parsedMeta.Agent)
 	}
 	if parsedMeta.Session != "sess-2" {
 		t.Errorf("expected session 'sess-2', got %q", parsedMeta.Session)
