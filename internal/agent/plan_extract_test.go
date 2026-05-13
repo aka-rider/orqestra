@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/xiii/orqestra/internal/harness"
@@ -167,6 +168,52 @@ func TestReadPlanFromRun_UsesStreamPlanFilePath(t *testing.T) {
 	}
 	if content != planMD {
 		t.Errorf("content mismatch:\ngot:  %s\nwant: %s", content, planMD)
+	}
+}
+
+func TestReadPlanFromRun_PlanFileNeverWritten(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	sessionID := "test-never-written"
+
+	// Create the plans directory but do NOT create the plan file.
+	plansDir := filepath.Join(tmp, ".claude", "plans")
+	if err := os.MkdirAll(plansDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ghostPlan := filepath.Join(plansDir, "ghost-plan.md")
+
+	// Create session JSONL with a plan_mode attachment pointing to the missing file.
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projDir := filepath.Join(tmp, ".claude", "projects", harness.CwdToDash(resolved))
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
+	jsonlContent := fmt.Sprintf(`{"type":"attachment","attachment":{"type":"plan_mode","planFilePath":%q}}`, ghostPlan)
+	if err := os.WriteFile(jsonlPath, []byte(jsonlContent+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := harness.RunResult{SessionID: sessionID}
+	_, err = ReadPlanFromRun(result)
+	if err == nil {
+		t.Fatal("expected error for plan file that was never written")
+	}
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "did not write a plan file") {
+		t.Errorf("expected diagnostic about missing plan file, got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, sessionID) {
+		t.Errorf("expected session ID in error, got: %s", errMsg)
 	}
 }
 

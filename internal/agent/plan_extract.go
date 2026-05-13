@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -54,6 +55,10 @@ func ReadPlanFromRun(result harness.RunResult) (string, error) {
 
 	content, err := readSecurePlanFile(planFilePath)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("model session %s completed but did not write a plan file (%s); "+
+				"the model may have exhausted its context window during exploration", result.SessionID, planFilePath)
+		}
 		return "", fmt.Errorf("read plan file for session %s: %w", result.SessionID, err)
 	}
 	return strings.TrimSpace(content), nil
