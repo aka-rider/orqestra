@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -35,6 +36,33 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.Critic.PermissionMode != "plan" {
 		t.Errorf("critic permission_mode = %q, want %q", cfg.Critic.PermissionMode, "plan")
+	}
+}
+
+// Contract: config.go validate() — every agent role must have a non-empty model reference
+func TestValidate_MissingRoleModels(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{"missing researcher model", func(c *Config) { c.Researcher.Model = "" }, "researcher"},
+		{"missing architect model", func(c *Config) { c.Architect.Model = "" }, "architect"},
+		{"missing worker model", func(c *Config) { c.Worker.Model = "" }, "worker"},
+		{"missing critic model", func(c *Config) { c.Critic.Model = "" }, "critic"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			tt.mutate(cfg)
+			err := cfg.validate()
+			if err == nil {
+				t.Fatalf("validate() returned nil, want error containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("validate() error = %q, want it to contain %q", err.Error(), tt.wantErr)
+			}
+		})
 	}
 }
 

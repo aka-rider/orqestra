@@ -2,8 +2,6 @@ package orchestrator
 
 import (
 	"context"
-	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,93 +9,33 @@ import (
 
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
-	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/testutil"
+	"github.com/xiii/orqestra/internal/tokenlimit"
 )
 
-// mockRunner is a test double for harness.CLIRunner.
-type mockRunner struct {
-	output    string
-	sessionID string
-	err       error
-}
-
-func (m *mockRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
-	return harness.RunResult{Output: m.output, SessionID: m.sessionID}, m.err
-}
-
-func (m *mockRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
-	return harness.RunResult{Output: m.output, SessionID: m.sessionID}, m.err
-}
-
-func (m *mockRunner) RunContinue(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
-	return harness.RunResult{Output: m.output, SessionID: m.sessionID}, m.err
-}
-
-func validPlanMarkdown() string {
-	return "# Plan\n\n## Goal\nAdd feature X.\n\n## Work Packages\n\n### 1. Add X\n\n**Steps:**\n1. Create pkg/x.go\n\n**Done when:**\n- go test ./pkg passes"
-}
-
-// setupTestPlanFile creates a fake Claude CLI plan file and session JSONL in a temp HOME directory.
-// Must be called after t.Setenv("HOME", ...) or it sets HOME itself. Returns the session ID used.
-func setupTestPlanFile(t *testing.T, sessionID, planContent string) {
+func testEngineWithPlanFiles(t *testing.T, researcherOutput, architectOutput, workerOutput, _ string) *Engine {
 	t.Helper()
-	home := os.Getenv("HOME")
-	if home == "" || !filepath.IsAbs(home) {
-		t.Fatal("HOME must be set to a temp dir before calling setupTestPlanFile")
-	}
-
-	plansDir := filepath.Join(home, ".claude", "plans")
-	if err := os.MkdirAll(plansDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	planFile := filepath.Join(plansDir, sessionID+"-plan.md")
-	if err := os.WriteFile(planFile, []byte(planContent), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	resolved, err := filepath.EvalSymlinks(cwd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	projDir := filepath.Join(home, ".claude", "projects", harness.CwdToDash(resolved))
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
-	jsonlContent := fmt.Sprintf(`{"type":"attachment","attachment":{"type":"plan_mode","planFilePath":%q}}`, planFile)
-	if err := os.WriteFile(jsonlPath, []byte(jsonlContent+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func testEngineWithPlanFiles(t *testing.T, researcherOutput, architectOutput, workerOutput, validationOutput string) *Engine {
-	t.Helper()
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	testutil.MustTempHome(t)
 
 	researcherSID := "test-researcher-sid"
 	architectSID := "test-architect-sid"
 
-	setupTestPlanFile(t, researcherSID, researcherOutput)
-	setupTestPlanFile(t, architectSID, architectOutput)
+	testutil.SetupPlanFile(t, researcherSID, researcherOutput)
+	testutil.SetupPlanFile(t, architectSID, architectOutput)
 
 	cfg := config.DefaultConfig()
 	return &Engine{
 		Config: cfg,
 		Runners: Runners{
-			Researcher: &mockRunner{output: "saved", sessionID: researcherSID},
-			Architect:  &mockRunner{output: "saved", sessionID: architectSID},
-			Worker:     &mockRunner{output: workerOutput, sessionID: "sess-123"},
+			Researcher: &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "saved", SessionID: researcherSID}}},
+			Architect:  &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "saved", SessionID: architectSID}}},
+			Worker:     &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: workerOutput, SessionID: "sess-123"}}},
 		},
 	}
 }
 
 func TestEngine_PlanApprovalGate(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
@@ -124,7 +62,7 @@ func TestEngine_PlanApprovalGate(t *testing.T) {
 }
 
 func TestEngine_CancelAtGate(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
@@ -146,7 +84,7 @@ func TestEngine_CancelAtGate(t *testing.T) {
 }
 
 func TestEngine_SkipGateway(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
@@ -157,7 +95,7 @@ func TestEngine_SkipGateway(t *testing.T) {
 }
 
 func TestEngine_HeadlessAutoApprove(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
@@ -181,7 +119,7 @@ func TestEngine_HeadlessAutoApprove(t *testing.T) {
 }
 
 func TestEngine_PhaseOrder(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
@@ -205,7 +143,7 @@ func TestEngine_PhaseOrder(t *testing.T) {
 }
 
 func TestEngine_NoExecute(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true, NoExecute: true})
@@ -229,7 +167,7 @@ func TestEngine_NoExecute(t *testing.T) {
 }
 
 func TestEngine_ValidationFailureDetection(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", validPlanMarkdown(), "done", "❌ test failed — expected 200 got 404")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "❌ test failed — expected 200 got 404")
 
 	ctx := context.Background()
 	result, err := engine.Run(ctx, Input{Prompt: "Add feature X", AutoApprove: true}, nil)
@@ -237,57 +175,6 @@ func TestEngine_ValidationFailureDetection(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	_ = result // status detection is internal to run()
-}
-
-// blockingMockRunner blocks until context is cancelled.
-type blockingMockRunner struct{}
-
-func (b *blockingMockRunner) RunPrint(ctx context.Context, _, _ string) (harness.RunResult, error) {
-	<-ctx.Done()
-	return harness.RunResult{}, ctx.Err()
-}
-
-func (b *blockingMockRunner) RunStreaming(ctx context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
-	<-ctx.Done()
-	return harness.RunResult{}, ctx.Err()
-}
-
-func (b *blockingMockRunner) RunContinue(ctx context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
-	<-ctx.Done()
-	return harness.RunResult{}, ctx.Err()
-}
-
-// switchingMockRunner returns different outputs on sequential calls.
-type switchingMockRunner struct {
-	outputs []string
-	counter *int
-}
-
-func (s *switchingMockRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
-	idx := *s.counter
-	if idx >= len(s.outputs) {
-		idx = len(s.outputs) - 1
-	}
-	*s.counter++
-	return harness.RunResult{Output: s.outputs[idx]}, nil
-}
-
-func (s *switchingMockRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
-	idx := *s.counter
-	if idx >= len(s.outputs) {
-		idx = len(s.outputs) - 1
-	}
-	*s.counter++
-	return harness.RunResult{Output: s.outputs[idx]}, nil
-}
-
-func (s *switchingMockRunner) RunContinue(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
-	idx := *s.counter
-	if idx >= len(s.outputs) {
-		idx = len(s.outputs) - 1
-	}
-	*s.counter++
-	return harness.RunResult{Output: s.outputs[idx]}, nil
 }
 
 func TestStreamBuffer_AppendActivity(t *testing.T) {
@@ -355,7 +242,7 @@ func TestStreamWriter_ImplementsActivitySink(t *testing.T) {
 }
 
 func TestEngine_PlanFileBeforeGate(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", validPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
 
 	// Set up a RunDirFactory that creates a temp directory
 	tmpDir := t.TempDir()
@@ -388,13 +275,100 @@ func TestEngine_PlanFileBeforeGate(t *testing.T) {
 					t.Fatalf("plan file should exist before gate: %v", err)
 				}
 				content := string(data)
-				if content != validPlanMarkdown() {
-					t.Errorf("plan file content mismatch:\ngot:  %q\nwant: %q", content, validPlanMarkdown())
+				if content != testutil.ValidPlanMarkdown() {
+					t.Errorf("plan file content mismatch:\ngot:  %q\nwant: %q", content, testutil.ValidPlanMarkdown())
 				}
 				channels.Decisions <- Decision{Type: DecisionApprove}
 			}
 		case <-timeout:
 			t.Fatal("timeout waiting for plan gate")
 		}
+	}
+}
+
+// Contract: README "Pipeline State Machine" — Researcher → Architect → Critic → Gate → Worker → SelfValidation
+func TestEngine_PhaseOrder_WithCritic(t *testing.T) {
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
+
+	criticReport := "## Critic Report\n\n### Blockers Found\n\nNone found.\n\n### Summary\n- Total blockers: 0 (0 high, 0 medium, 0 low)\n- Overall assessment: Plan is ready for execution."
+	engine.Runners.Critic = &testutil.FakeRunner{
+		Calls: []testutil.FakeCall{{Output: criticReport}},
+	}
+
+	ctx := context.Background()
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
+
+	var phases []Phase
+	for event := range channels.Events {
+		if event.Type == EventPhaseChange {
+			phases = append(phases, event.Phase)
+		}
+	}
+
+	expected := []Phase{PhaseResearching, PhasePlanning, PhaseCritiquing, PhaseExecuting, PhaseSelfValidating, PhaseDone}
+	if len(phases) != len(expected) {
+		t.Fatalf("phases = %v, want %v", phases, expected)
+	}
+	for i, p := range phases {
+		if p != expected[i] {
+			t.Errorf("phase[%d] = %q, want %q", i, p, expected[i])
+		}
+	}
+}
+
+// Contract: README "Human Gate" — operator may edit plan inline; gate re-presents with updated content
+func TestEngine_DecisionEdit(t *testing.T) {
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
+
+	ctx := context.Background()
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
+
+	timeout := time.After(10 * time.Second)
+	gateCount := 0
+	for {
+		select {
+		case event, ok := <-channels.Events:
+			if !ok {
+				if gateCount < 2 {
+					t.Fatalf("expected at least 2 gate requests (edit + approve), got %d", gateCount)
+				}
+				return
+			}
+			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+				gateCount++
+				if gateCount == 1 {
+					channels.Decisions <- Decision{
+						Type:          DecisionEdit,
+						EditedContent: "# Plan\n\n## Goal\nEdited.\n\n## Work Packages\n\n### 1. Do it\n\n**Steps:**\n1. Edit foo.go\n\n**Done when:**\n- Tests pass",
+					}
+				} else {
+					channels.Decisions <- Decision{Type: DecisionApprove}
+				}
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for gate cycle")
+		}
+	}
+}
+
+// Contract: agent-instructions.md "Token Breaking" — ErrBudgetExhausted causes EventError and clean shutdown
+func TestEngine_BudgetExhausted(t *testing.T) {
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
+	engine.Runners.Researcher = &testutil.FakeRunner{
+		Calls: []testutil.FakeCall{{
+			Err: &tokenlimit.ErrBudgetExhausted{Model: "test", Used: 100, Limit: 50},
+		}},
+	}
+
+	ctx := context.Background()
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
+	var gotError bool
+	for event := range channels.Events {
+		if event.Type == EventError {
+			gotError = true
+		}
+	}
+	if !gotError {
+		t.Error("expected EventError when researcher budget is exhausted")
 	}
 }
