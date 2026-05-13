@@ -760,11 +760,11 @@ func (s PipelineScreen) View(width, height int) string {
 
 	// Footer (2 lines)
 	footer := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
-		s.viewFooter()
+		lipgloss.NewStyle().MaxWidth(w).Render(s.viewFooter())
 
 	// Input zone
 	input := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
-		s.viewInputZone() + "\n"
+		lipgloss.NewStyle().MaxWidth(w).Render(s.viewInputZone()) + "\n"
 
 	// Sidebar strip (full-width agent list below input)
 	sidebar := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
@@ -780,9 +780,10 @@ func (s PipelineScreen) View(width, height int) string {
 	}
 	if contentHeight > 0 {
 		body = lipgloss.NewStyle().MaxHeight(contentHeight).Render(body)
+		return body + "\n" + input + sidebar + footer
 	}
 
-	return body + "\n" + input + sidebar + footer
+	return input + sidebar + footer
 }
 
 func (s PipelineScreen) viewInputZone() string {

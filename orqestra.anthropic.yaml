@@ -7,8 +7,6 @@
 
 providers:
   anthropic-native:
-    base_url: ""
-    api_key: ""
     type: native
 
 models:
