@@ -760,14 +760,22 @@ func (s PipelineScreen) View(width, height int) string {
 
 	// Footer (2 lines)
 	footer := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
-		lipgloss.NewStyle().MaxWidth(w).Render(s.viewFooter())
+		s.viewFooter()
 
 	// Input zone
 	input := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
-		lipgloss.NewStyle().MaxWidth(w).Render(s.viewInputZone()) + "\n"
+		s.viewInputZone() + "\n"
 
 	// Sidebar strip (full-width agent list below input)
-	sidebar := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
+	var sidebarDiv string
+	if s.configName != "" {
+		title := " " + s.configName + " "
+		repeat := max(0, w-len(title))
+		sidebarDiv = dividerStyle.Render(title + strings.Repeat("─", repeat))
+	} else {
+		sidebarDiv = dividerStyle.Render(strings.Repeat("─", w))
+	}
+	sidebar := sidebarDiv + "\n" +
 		s.sidebarVP.View()
 
 	// Content zone — viewports already synced in Update()
@@ -783,6 +791,7 @@ func (s PipelineScreen) View(width, height int) string {
 		return body + "\n" + input + sidebar + footer
 	}
 
+	// No body zone — omit the body line terminator to preserve height invariant.
 	return input + sidebar + footer
 }
 
