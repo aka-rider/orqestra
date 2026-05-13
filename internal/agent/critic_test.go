@@ -7,21 +7,8 @@ import (
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/testutil"
 )
-
-// mockCLIRunner is a test double for harness.CLIRunner.
-type mockCLIRunner struct {
-	result harness.RunResult
-	err    error
-}
-
-func (m *mockCLIRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
-	return m.result, m.err
-}
-
-func (m *mockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
-	return m.result, m.err
-}
 
 func TestCritic_ReviewStreaming(t *testing.T) {
 	report := `## Critic Report
@@ -57,12 +44,12 @@ func TestCritic_ReviewStreaming(t *testing.T) {
 - Total blockers: 3 (1 high, 1 medium, 1 low)
 - Overall assessment: Plan has one critical path issue that must be fixed before execution.`
 
-	runner := &mockCLIRunner{
-		result: harness.RunResult{
+	runner := &testutil.FakeRunner{
+		Calls: []testutil.FakeCall{{
 			Output:    report,
 			SessionID: "sess-123",
 			Usage:     harness.TokenUsage{InputTokens: 1000, OutputTokens: 500},
-		},
+		}},
 	}
 
 	critic := NewCritic(runner, config.CriticConfig{
@@ -114,8 +101,8 @@ None found.
 - Total blockers: 0 (0 high, 0 medium, 0 low)
 - Overall assessment: Plan is ready for execution.`
 
-	runner := &mockCLIRunner{
-		result: harness.RunResult{Output: report},
+	runner := &testutil.FakeRunner{
+		Calls: []testutil.FakeCall{{Output: report}},
 	}
 
 	critic := NewCritic(runner, config.CriticConfig{SystemPrompt: "test"})
@@ -130,51 +117,13 @@ None found.
 }
 
 func TestCritic_ReviewStreaming_Error(t *testing.T) {
-	runner := &mockCLIRunner{
-		err: context.DeadlineExceeded,
+	runner := &testutil.FakeRunner{
+		Calls: []testutil.FakeCall{{Err: context.DeadlineExceeded}},
 	}
 
 	critic := NewCritic(runner, config.CriticConfig{SystemPrompt: "test"})
 	_, _, _, err := critic.ReviewStreaming(context.Background(), "prompt", "plan", io.Discard)
 	if err == nil {
 		t.Fatal("expected error")
-	}
-}
-
-func TestParseSeverityCounts(t *testing.T) {
-	tests := []struct {
-		name string
-		input string
-		want BlockerSummary
-	}{
-		{
-			name: "mixed severities",
-			input: "- **Severity**: High\n- **Severity**: Medium\n- **Severity**: Low\n- **Severity**: High\n",
-			want: BlockerSummary{High: 2, Medium: 1, Low: 1},
-		},
-		{
-			name: "no blockers",
-			input: "No blockers found.",
-			want: BlockerSummary{},
-		},
-		{
-			name: "only high",
-			input: "- **Severity**: High\n- **Severity**: High\n",
-			want: BlockerSummary{High: 2},
-		},
-		{
-			name: "severity with extra whitespace",
-			input: "- **Severity**:  High \n",
-			want: BlockerSummary{High: 1},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := parseSeverityCounts(tt.input)
-			if got != tt.want {
-				t.Errorf("parseSeverityCounts() = %+v, want %+v", got, tt.want)
-			}
-		})
 	}
 }

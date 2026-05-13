@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,35 +10,15 @@ import (
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/testutil"
 )
-
-// architectMockCLIRunner is a test double for the CLIRunner interface.
-type architectMockCLIRunner struct {
-	response  string
-	sessionID string
-	err       error
-}
-
-func (m *architectMockCLIRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
-	if m.err != nil {
-		return harness.RunResult{}, m.err
-	}
-	return harness.RunResult{Output: m.response, SessionID: m.sessionID}, nil
-}
-
-func (m *architectMockCLIRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
-	if m.err != nil {
-		return harness.RunResult{}, m.err
-	}
-	return harness.RunResult{Output: m.response, SessionID: m.sessionID}, nil
-}
 
 func TestArchitect_Refine_Success(t *testing.T) {
 	planMD := "# Plan\n\n## Goal\nBuild a thing.\n\n## Work Packages\n\n### 1. Do stuff\n\n**Steps:**\n1. Edit foo.go\n\n**Done when:**\n- Tests pass"
 	sessionID := "test-refine-success"
 	setupPlanFile(t, sessionID, planMD)
 
-	mock := &architectMockCLIRunner{response: "plan saved", sessionID: sessionID}
+	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "plan saved", SessionID: sessionID}}}
 	cfg := config.ArchitectConfig{
 		Model:        "test-model",
 		SystemPrompt: "You are the architect.",
@@ -62,7 +41,7 @@ func TestArchitect_Refine_EmptyPlan(t *testing.T) {
 	sessionID := "test-empty-plan"
 	setupPlanFile(t, sessionID, "   \n  \t  ")
 
-	mock := &architectMockCLIRunner{response: "done", sessionID: sessionID}
+	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "done", SessionID: sessionID}}}
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
 	_, _, _, err := p.Refine(context.Background(), "prompt", "draft")
@@ -72,7 +51,7 @@ func TestArchitect_Refine_EmptyPlan(t *testing.T) {
 }
 
 func TestArchitect_Refine_CLIError(t *testing.T) {
-	mock := &architectMockCLIRunner{err: fmt.Errorf("connection refused")}
+	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Err: fmt.Errorf("connection refused")}}}
 
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
@@ -87,7 +66,7 @@ func TestArchitect_RefineWithComments(t *testing.T) {
 	sessionID := "test-refine-comments"
 	setupPlanFile(t, sessionID, planMD)
 
-	mock := &architectMockCLIRunner{response: "revised", sessionID: sessionID}
+	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "revised", SessionID: sessionID}}}
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
 	plan, _, _, err := p.RefineWithComments(context.Background(), "old plan", "please fix step 2")
@@ -100,7 +79,7 @@ func TestArchitect_RefineWithComments(t *testing.T) {
 }
 
 func TestArchitect_ErrorWithoutSessionID(t *testing.T) {
-	mock := &architectMockCLIRunner{response: "no plan header here"}
+	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "no plan header here"}}}
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
 
@@ -117,10 +96,7 @@ func TestArchitect_ErrorWithMissingJSONL(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
-	mock := &architectMockCLIRunner{
-		response:  "no plan header here",
-		sessionID: "nonexistent-session-id-12345",
-	}
+	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "no plan header here", SessionID: "nonexistent-session-id-12345"}}}
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
 
@@ -136,10 +112,7 @@ func TestArchitect_PlanFileExtraction(t *testing.T) {
 	setupPlanFile(t, sessionID, planMD)
 
 	// Mock runner returns irrelevant stdout but with session ID.
-	mock := &architectMockCLIRunner{
-		response:  "The plan has been saved to the plan file.",
-		sessionID: sessionID,
-	}
+	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "The plan has been saved to the plan file.", SessionID: sessionID}}}
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
 
@@ -166,10 +139,7 @@ func TestArchitect_RejectsOutOfBoundsPath(t *testing.T) {
 	evilFile := setupOutOfBoundsPlanFile(t, tmp, sessionID)
 	_ = evilFile
 
-	mock := &architectMockCLIRunner{
-		response:  "no plan here",
-		sessionID: sessionID,
-	}
+	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "no plan here", SessionID: sessionID}}}
 	cfg := config.ArchitectConfig{Model: "test"}
 	p := NewArchitect(mock, cfg)
 
