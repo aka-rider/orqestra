@@ -20,6 +20,22 @@ func CheckPlanHealth(md string) []string {
 		warnings = append(warnings, "Plan is suspiciously short (<100 characters)")
 	}
 
+	// Structural format checks: detect wrong-shaped output.
+	if !strings.HasPrefix(stripped, "# Plan") {
+		warnings = append(warnings, "Plan does not start with '# Plan' header")
+	}
+	if strings.HasPrefix(stripped, "# Critic Report") || strings.HasPrefix(stripped, "## Critic Report") {
+		warnings = append(warnings, "Plan is critic-shaped (starts with Critic Report header)")
+	}
+	if !strings.Contains(md, "## Work Packages") && !strings.Contains(md, "## Work packages") {
+		warnings = append(warnings, "Plan is missing '## Work Packages' section")
+	}
+	if strings.Contains(md, "**Done when:**") || strings.Contains(md, "**Done When:**") {
+		// has done-when, good
+	} else if strings.Contains(md, "## Work Packages") || strings.Contains(md, "## Work packages") {
+		warnings = append(warnings, "Work Packages lack '**Done when:**' criteria")
+	}
+
 	reader := text.NewReader([]byte(md))
 	parser := goldmark.DefaultParser()
 	doc := parser.Parse(reader)
@@ -56,13 +72,23 @@ func CheckPlanHealth(md string) []string {
 		warnings = append(warnings, "Plan contains an unclosed code fence")
 	}
 
-	// Truncation check: last alphanumeric character
+	// Truncation check: if the last line ends mid-word it's likely truncated.
+	// Skip list items (lines starting with - or *) since they commonly end
+	// in bare words without punctuation.
 	if len(stripped) > 0 {
 		lastChar := stripped[len(stripped)-1]
 		if lastChar != '.' && lastChar != '!' && lastChar != '?' && lastChar != '`' && lastChar != '>' && lastChar != '*' && lastChar != '_' {
-			// Check if it ends mid-sentence
 			if lastChar >= 'a' && lastChar <= 'z' || lastChar >= 'A' && lastChar <= 'Z' {
-				warnings = append(warnings, "Plan appears to end abruptly mid-sentence (truncation)")
+				// Find the last line and check if it's a list item.
+				lastNewline := strings.LastIndex(stripped, "\n")
+				lastLine := stripped
+				if lastNewline >= 0 {
+					lastLine = stripped[lastNewline+1:]
+				}
+				trimmedLine := strings.TrimSpace(lastLine)
+				if !strings.HasPrefix(trimmedLine, "- ") && !strings.HasPrefix(trimmedLine, "* ") {
+					warnings = append(warnings, "Plan appears to end abruptly mid-sentence (truncation)")
+				}
 			}
 		}
 	}
