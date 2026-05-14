@@ -14,15 +14,11 @@ run: build
 
 # Test tiers:
 #   make test             — unit tests (no external deps, fast, run on every commit)
-#   make test-unit        — alias for test
 #   make test-integration — integration tests (requires git + go build, run pre-merge)
 #   make test-sandbox     — macOS sandbox tests (requires sandbox-exec, darwin only)
 #   make e2e              — end-to-end tests (requires real claude CLI + API)
 
 test:
-	go test -race -coverprofile=coverage.out -covermode=atomic ./...
-
-test-unit:
 	go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
 # Requires: git in PATH, go build access. Runs worktree lifecycle and CLI smoke tests.
@@ -33,11 +29,15 @@ test-integration:
 test-sandbox:
 	go test -tags 'darwin integration' -race -v ./internal/sandbox/...
 
+test-e2e:
+	go test -tags e2e ./internal/harness/ -v -count=1 -run TestE2E -timeout 120s
+
 lint:
 	go vet ./...
+
+test-all: test test-integration test-sandbox test-e2e lint
+
 
 clean:
 	rm -f $(BINARY)
 
-e2e:
-	go test -tags e2e ./internal/harness/ -v -count=1 -run TestE2E -timeout 120s

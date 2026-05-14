@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Orqestra Pipeline Benchmark — 30 Evaluation Prompts
-# Runs each prompt headless with --auto-approve against the local config (qwen3.6).
+# Runs each prompt headless with --auto-reject (plan-only, no worker execution)
+# against the local config (qwen3.6).
 #
 # Usage:
 #   ./scripts/benchmark-prompts.sh                  # run all 30
@@ -10,8 +11,9 @@ set -euo pipefail
 #
 # Results are written to .orqestra/benchmark/<run_timestamp>/
 # Each prompt produces:
-#   <NN>-<label>.exit — exit code
-#   <NN>-<label>.log  — combined stdout+stderr
+#   <NN>-<label>.plan.md — the generated plan (stdout)
+#   <NN>-<label>.log     — stderr (debug logs, errors)
+#   <NN>-<label>.exit    — exit code
 #   <NN>-<label>.session — symlink to the orqestra session dir
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,7 +33,7 @@ for arg in "$@"; do
       ;;
     -h|--help)
       echo "Usage: $0 [--resume-from=N]"
-      echo "  Runs 30 benchmark prompts against orqestra --config local --auto-approve"
+      echo "  Runs 30 benchmark prompts against orqestra --config orqestra.local.yaml --auto-reject"
       echo "  --resume-from=N  Skip prompts 1..N-1, start at prompt N (1-indexed)"
       exit 0
       ;;
@@ -190,7 +192,8 @@ echo ""
 echo "=== Orqestra Pipeline Benchmark ==="
 echo "Total prompts: $TOTAL"
 echo "Resume from:   $RESUME_FROM"
-echo "Config:        local (qwen3.6)"
+echo "Mode:          plan-only (--auto-reject)"
+  echo "Config:        orqestra.local.yaml (qwen3.6)"
 echo "Results dir:   $RESULTS_DIR"
 echo ""
 
@@ -207,15 +210,16 @@ for ((i = RESUME_FROM - 1; i < TOTAL; i++)); do
   echo "--- [$padded/$TOTAL] $label ---"
 
   log_file="$RESULTS_DIR/${padded}-${label}.log"
+  plan_file="$RESULTS_DIR/${padded}-${label}.plan.md"
   exit_file="$RESULTS_DIR/${padded}-${label}.exit"
   start_ts=$(date +%s)
 
   set +e
   "$BINARY" \
-    --config local \
+    --config orqestra.local.yaml \
     --prompt "$prompt" \
-    --auto-approve \
-    >"$log_file" 2>&1
+    --auto-reject \
+    >"$plan_file" 2>"$log_file"
   rc=$?
   set -e
 
@@ -257,7 +261,7 @@ echo "Results: $RESULTS_DIR"
 cat > "$RESULTS_DIR/summary.txt" <<EOF
 Orqestra Pipeline Benchmark
 Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-Config: local (qwen3.6 all roles)
+Config: orqestra.local.yaml (qwen3.6 all roles)
 Resume from: $RESUME_FROM
 Passed: $passed
 Failed: $failed
