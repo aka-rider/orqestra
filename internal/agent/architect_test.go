@@ -183,103 +183,204 @@ func setupOutOfBoundsPlanFile(t *testing.T, home, sessionID string) string {
 	return evilFile
 }
 
-func TestArchitect_ContinueSession_UserEditPreserved(t *testing.T) {
-	// Bug scenario: user edits plan via ^E (currentPlan has edits), but the plan
-	// file in ~/.claude/plans/ still has the original content. The architect gives
-	// a chat-only response (doesn't update its plan file). Previously, the stale
-	// plan file was returned as a "revision," silently overwriting user edits.
-	// With the baseline fix, the plan file is compared against its pre-run state
-	// (unchanged), so no false revision is detected.
+// ---------------------------------------------------------------------------
+// Contract: ContinueSession revision detection
+//
+// Spec: revisedPlan != nil ⟺ the architect produced content the user doesn't
+// already have. Specifically, two conditions must hold:
+//   1. The plan file changed from its pre-run baseline (architect wrote).
+//   2. The new content differs from currentPlan (not echoing user edits).
+// ---------------------------------------------------------------------------
 
-	originalPlan := "# Plan\n\n## Goal\nOriginal.\n\n## Work Packages\n\n### 1. Do stuff\n\n**Steps:**\n1. Edit foo.go\n\n**Done when:**\n- Tests pass"
-	userEditedPlan := "# Plan\n\n## Goal\nUser's improved version.\n\n## Work Packages\n\n### 1. Do stuff better\n\n**Steps:**\n1. Edit foo.go and bar.go\n\n**Done when:**\n- Tests pass"
+func TestArchitect_ContinueSession_RevisionDetection(t *testing.T) {
+	const (
+		planA = "# Plan\n\n## Goal\nOriginal.\n\n## Work Packages\n\n### 1. Do stuff\n\n**Steps:**\n1. Edit foo.go\n\n**Done when:**\n- Tests pass"
+		planB = "# Plan\n\n## Goal\nUser improved.\n\n## Work Packages\n\n### 1. Better stuff\n\n**Steps:**\n1. Edit foo.go and bar.go\n\n**Done when:**\n- Tests pass"
+		planC = "# Plan\n\n## Goal\nArchitect revision.\n\n## Work Packages\n\n### 1. New approach\n\n**Steps:**\n1. Rewrite baz.go\n\n**Done when:**\n- All tests pass"
+		planD = "# Plan\n\n## Goal\nBuilds on user edit.\n\n## Work Packages\n\n### 1. Extended stuff\n\n**Steps:**\n1. Edit foo.go, bar.go, baz.go\n\n**Done when:**\n- Integration tests pass"
+	)
 
-	sessionID := "test-continue-user-edit"
-	setupPlanFile(t, sessionID, originalPlan)
-
-	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{
-		// ContinueSession calls RunContinue; architect gives a chat-only response
-		{Output: "Looks good, I see your changes.", SessionID: sessionID},
-	}}
-	cfg := config.ArchitectConfig{Model: "test"}
-	arch := NewArchitect(mock, cfg)
-
-	chatResp, revisedPlan, _, err := arch.ContinueSession(
-		context.Background(), sessionID, userEditedPlan, "please review the updated plan", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	tests := []struct {
+		name        string
+		planFile    string // content written to ~/.claude/plans/ before the run
+		currentPlan string // what the user/TUI considers the current plan
+		postRunFile string // content the architect writes during the run ("" = unchanged)
+		wantRevised bool   // whether revisedPlan should be non-nil
+		wantContent string // if wantRevised, the expected markdown content
+	}{
+		{
+			name:        "chat-only response, plan file unchanged",
+			planFile:    planA,
+			currentPlan: planA,
+			postRunFile: "",    // architect didn't touch the plan file
+			wantRevised: false,
+		},
+		{
+			name:        "user edited via ^E, architect gives chat-only response",
+			planFile:    planA,
+			currentPlan: planB, // user edited, but plan file still has A
+			postRunFile: "",    // architect didn't touch the plan file
+			wantRevised: false, // plan file unchanged from baseline → no revision
+		},
+		{
+			name:        "echo suppression: architect copies user edits into plan file",
+			planFile:    planA,
+			currentPlan: planB,
+			postRunFile: planB, // architect wrote B, but user already has B
+			wantRevised: false, // echo: new content == currentPlan → suppressed
+		},
+		{
+			name:        "real revision: architect writes new content",
+			planFile:    planA,
+			currentPlan: planA,
+			postRunFile: planC, // genuinely new content
+			wantRevised: true,
+			wantContent: strings.TrimSpace(planC),
+		},
+		{
+			name:        "revision after user edit: architect builds on user changes",
+			planFile:    planA,
+			currentPlan: planB,
+			postRunFile: planD, // different from both baseline A and user's B
+			wantRevised: true,
+			wantContent: strings.TrimSpace(planD),
+		},
 	}
-	if revisedPlan != nil {
-		t.Fatalf("expected no revision (user edits should be preserved), got plan: %s", revisedPlan.Markdown)
-	}
-	if chatResp == "" {
-		t.Error("expected non-empty chat response")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sessionID := "test-continue-" + strings.ReplaceAll(tt.name, " ", "-")
+			setupPlanFile(t, sessionID, tt.planFile)
+
+			call := testutil.FakeCall{
+				Output:    "Architect response.",
+				SessionID: sessionID,
+			}
+
+			// If the architect writes new content, create a separate plan file
+			// and point RunResult.PlanFilePath at it (simulates plan file update).
+			if tt.postRunFile != "" {
+				home := os.Getenv("HOME")
+				revised := filepath.Join(home, ".claude", "plans", sessionID+"-revised.md")
+				if err := os.WriteFile(revised, []byte(tt.postRunFile), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				call.PlanFilePath = revised
+			}
+
+			mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{call}}
+			arch := NewArchitect(mock, config.ArchitectConfig{Model: "test"})
+
+			chatResp, revisedPlan, _, err := arch.ContinueSession(
+				context.Background(), sessionID, tt.currentPlan, "review", nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if chatResp == "" {
+				t.Error("expected non-empty chat response")
+			}
+
+			if tt.wantRevised {
+				if revisedPlan == nil {
+					t.Fatal("expected a revised plan, got nil")
+				}
+				if revisedPlan.Markdown != tt.wantContent {
+					t.Errorf("revised plan content mismatch:\ngot:  %s\nwant: %s", revisedPlan.Markdown, tt.wantContent)
+				}
+			} else {
+				if revisedPlan != nil {
+					t.Fatalf("expected no revision, got plan:\n%s", revisedPlan.Markdown)
+				}
+			}
+		})
 	}
 }
 
-func TestArchitect_ContinueSession_ArchitectActuallyRevised(t *testing.T) {
-	// The architect genuinely revises the plan during continuation.
-	// The post-run plan file differs from the pre-run baseline, so
-	// the revision should be detected and returned.
+// ---------------------------------------------------------------------------
+// Contract: ContinueWithCriticReport revision detection
+//
+// Same two-condition spec as ContinueSession. The critic prompt differs,
+// but the revision detection contract is identical.
+// ---------------------------------------------------------------------------
 
-	originalPlan := "# Plan\n\n## Goal\nOriginal.\n\n## Work Packages\n\n### 1. Do stuff"
-	revisedPlanContent := "# Plan\n\n## Goal\nRevised by architect.\n\n## Work Packages\n\n### 1. Do stuff better\n\n**Steps:**\n1. Edit foo.go\n\n**Done when:**\n- Tests pass"
+func TestArchitect_ContinueWithCriticReport_RevisionDetection(t *testing.T) {
+	const (
+		planA = "# Plan\n\n## Goal\nOriginal.\n\n## Work Packages\n\n### 1. Do stuff\n\n**Steps:**\n1. Edit foo.go\n\n**Done when:**\n- Tests pass"
+		planB = "# Plan\n\n## Goal\nUser edited.\n\n## Work Packages\n\n### 1. Edited stuff"
+		planC = "# Plan\n\n## Goal\nCritic-revised.\n\n## Work Packages\n\n### 1. Fixed per critic\n\n**Steps:**\n1. Fix foo.go\n\n**Done when:**\n- Critic satisfied"
+	)
 
-	sessionID := "test-continue-real-revision"
-	// Set up the original plan file (this is the baseline).
-	planFile := setupPlanFile(t, sessionID, originalPlan)
-
-	// Create a second plan file that the post-run result will point to,
-	// simulating the architect writing a new version during the run.
-	home := os.Getenv("HOME")
-	revisedFile := filepath.Join(home, ".claude", "plans", sessionID+"-revised-plan.md")
-	if err := os.WriteFile(revisedFile, []byte(revisedPlanContent), 0o644); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name        string
+		planFile    string
+		currentPlan string
+		postRunFile string
+		wantRevised bool
+		wantContent string
+	}{
+		{
+			name:        "critic: chat-only, plan file unchanged",
+			planFile:    planA,
+			currentPlan: planA,
+			postRunFile: "",
+			wantRevised: false,
+		},
+		{
+			name:        "critic: user edited, plan file unchanged",
+			planFile:    planA,
+			currentPlan: planB,
+			postRunFile: "",
+			wantRevised: false,
+		},
+		{
+			name:        "critic: architect revises plan based on critic findings",
+			planFile:    planA,
+			currentPlan: planA,
+			postRunFile: planC,
+			wantRevised: true,
+			wantContent: strings.TrimSpace(planC),
+		},
 	}
-	_ = planFile
 
-	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{
-		// RunContinue result points to the revised plan file via PlanFilePath.
-		// Baseline read resolves via JSONL → original file.
-		// Post-run read uses PlanFilePath → revised file.
-		{Output: "I've updated the plan.", SessionID: sessionID, PlanFilePath: revisedFile},
-	}}
-	cfg := config.ArchitectConfig{Model: "test"}
-	arch := NewArchitect(mock, cfg)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sessionID := "test-critic-" + strings.ReplaceAll(tt.name, " ", "-")
+			setupPlanFile(t, sessionID, tt.planFile)
 
-	_, revisedPlan, _, err := arch.ContinueSession(
-		context.Background(), sessionID, originalPlan, "please add error handling", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if revisedPlan == nil {
-		t.Fatal("expected a revised plan, got nil")
-	}
-	if revisedPlan.Markdown != strings.TrimSpace(revisedPlanContent) {
-		t.Errorf("revised plan content mismatch:\ngot:  %s\nwant: %s", revisedPlan.Markdown, revisedPlanContent)
-	}
-}
+			call := testutil.FakeCall{
+				Output:    "Addressed critic findings.",
+				SessionID: sessionID,
+			}
+			if tt.postRunFile != "" {
+				home := os.Getenv("HOME")
+				revised := filepath.Join(home, ".claude", "plans", sessionID+"-revised.md")
+				if err := os.WriteFile(revised, []byte(tt.postRunFile), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				call.PlanFilePath = revised
+			}
 
-func TestArchitect_ContinueWithCriticReport_BaselineComparison(t *testing.T) {
-	// Same baseline comparison applies to critic continuation.
-	originalPlan := "# Plan\n\n## Goal\nOriginal.\n\n## Work Packages\n\n### 1. Do stuff"
-	sessionID := "test-critic-continue-baseline"
-	setupPlanFile(t, sessionID, originalPlan)
+			mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{call}}
+			arch := NewArchitect(mock, config.ArchitectConfig{Model: "test"})
 
-	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{
-		{Output: "All findings addressed.", SessionID: sessionID},
-	}}
-	cfg := config.ArchitectConfig{Model: "test"}
-	arch := NewArchitect(mock, cfg)
+			_, revisedPlan, _, err := arch.ContinueWithCriticReport(
+				context.Background(), sessionID, tt.currentPlan, "## Critic Report\n\nFindings here.", nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 
-	// Pass a user-edited currentPlan that differs from the plan file.
-	userEditedPlan := "# Plan\n\n## Goal\nUser edited.\n\n## Work Packages\n\n### 1. Edited"
-	_, revisedPlan, _, err := arch.ContinueWithCriticReport(
-		context.Background(), sessionID, userEditedPlan, "## Critic Report\n\nNo blockers.", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if revisedPlan != nil {
-		t.Fatalf("expected no revision (plan file unchanged), got: %s", revisedPlan.Markdown)
+			if tt.wantRevised {
+				if revisedPlan == nil {
+					t.Fatal("expected a revised plan, got nil")
+				}
+				if revisedPlan.Markdown != tt.wantContent {
+					t.Errorf("revised plan content mismatch:\ngot:  %s\nwant: %s", revisedPlan.Markdown, tt.wantContent)
+				}
+			} else {
+				if revisedPlan != nil {
+					t.Fatalf("expected no revision, got plan:\n%s", revisedPlan.Markdown)
+				}
+			}
+		})
 	}
 }

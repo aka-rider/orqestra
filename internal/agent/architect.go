@@ -85,9 +85,10 @@ If the reviewer requests changes, revise the plan.`
 
 // ContinueSession resumes the architect's session to handle a reviewer comment.
 // It uses RunContinue (--resume) to maintain the full conversation context.
-// After the run, it reads the plan file from ~/.claude/plans/ and compares
-// against a pre-run baseline to detect actual revisions. This avoids treating
-// a stale plan file as a "revision" when the user edited the plan externally.
+// Revision detection requires two conditions:
+//  1. The plan file changed from its pre-run baseline (the architect wrote something).
+//  2. The new content differs from currentPlan (it's not just echoing user edits).
+//
 // Returns chat response text, the revised plan (nil if unchanged), token usage, and error.
 func (a *Architect) ContinueSession(ctx context.Context, sessionID, currentPlan, comment string, stdout io.Writer) (string, *RawPlan, harness.TokenUsage, error) {
 	cr, ok := a.runner.(harness.ContinuableRunner)
@@ -95,11 +96,7 @@ func (a *Architect) ContinueSession(ctx context.Context, sessionID, currentPlan,
 		return "", nil, harness.TokenUsage{}, fmt.Errorf("architect runner does not support session continuation")
 	}
 
-	// Snapshot the plan file before the continuation to detect real changes.
-	// The plan file in ~/.claude/plans/ may differ from currentPlan if the
-	// user edited the plan externally (^E edits go to session dir, not here).
-	// Comparing post-run against this baseline — not currentPlan — avoids
-	// treating the stale plan file as a "revision" that overwrites user edits.
+	// Snapshot plan file before continuation to detect real changes.
 	baseline, baselineErr := ReadPlanFromRun(harness.RunResult{SessionID: sessionID})
 	if baselineErr != nil {
 		slog.Debug("could not snapshot plan file baseline, will compare against currentPlan",
@@ -112,29 +109,8 @@ func (a *Architect) ContinueSession(ctx context.Context, sessionID, currentPlan,
 		return "", nil, harness.TokenUsage{}, fmt.Errorf("architect continue session: %w", err)
 	}
 
-	// Read the plan file to detect whether the architect revised it.
-	planContent, readErr := ReadPlanFromRun(result)
-	if readErr != nil {
-		slog.Debug("could not read plan file after continue", "session_id", sessionID, "err", readErr)
-		return result.Output, nil, result.Usage, nil
-	}
-
-	// Compare against the baseline (plan file before continuation), not
-	// currentPlan. If the user edited the plan via ^E, currentPlan has
-	// those edits but the plan file doesn't — comparing against currentPlan
-	// would falsely detect a "revision" with stale content.
-	compareTo := strings.TrimSpace(currentPlan)
-	if baselineErr == nil {
-		compareTo = strings.TrimSpace(baseline)
-	}
-
-	if planContent != compareTo {
-		warnings := CheckPlanHealth(planContent)
-		plan := RawPlan{Markdown: planContent, Warnings: warnings}
-		return result.Output, &plan, result.Usage, nil
-	}
-
-	return result.Output, nil, result.Usage, nil
+	plan := detectPlanRevision(result, baseline, baselineErr, currentPlan)
+	return result.Output, plan, result.Usage, nil
 }
 
 // extractArchitectPlan reads the plan from the Claude CLI plan file and validates
@@ -148,6 +124,39 @@ func (a *Architect) extractArchitectPlan(result harness.RunResult) (RawPlan, har
 	warnings := CheckPlanHealth(content)
 
 	return RawPlan{Markdown: content, Warnings: warnings}, result.Usage, result.SessionID, nil
+}
+
+// detectPlanRevision checks whether the architect produced a meaningful plan
+// revision during a continuation. A revision is meaningful when both:
+//  1. The plan file changed from its pre-run baseline (the architect wrote something).
+//  2. The new content differs from currentPlan (it's not just echoing user edits).
+//
+// Returns nil if the plan file is unreadable, unchanged from baseline, or
+// identical to what the user already has (echo suppression).
+func detectPlanRevision(result harness.RunResult, baseline string, baselineErr error, currentPlan string) *RawPlan {
+	planContent, readErr := ReadPlanFromRun(result)
+	if readErr != nil {
+		return nil
+	}
+
+	// Condition 1: did the plan file change from its pre-run state?
+	compareTo := strings.TrimSpace(currentPlan)
+	if baselineErr == nil {
+		compareTo = strings.TrimSpace(baseline)
+	}
+	if planContent == compareTo {
+		return nil // plan file unchanged
+	}
+
+	// Condition 2: is the new content actually different from what the user has?
+	// Without this check, the architect echoing user's ^E edits into its plan
+	// file would be presented as a "revision" — the user's own work shown back.
+	if planContent == strings.TrimSpace(currentPlan) {
+		return nil // echo suppression: architect accepted user's edits, not a new revision
+	}
+
+	warnings := CheckPlanHealth(planContent)
+	return &RawPlan{Markdown: planContent, Warnings: warnings}
 }
 
 // criticContinueTemplate is the prompt used when resuming the architect session
@@ -183,7 +192,7 @@ notes explaining why.`
 // ContinueWithCriticReport resumes the architect's session with a critic report.
 // The architect reviews the critic's findings and either fixes issues in the plan
 // or surfaces uncertain ones inline with ⚠ CRITIC FLAG markers.
-// Uses baseline comparison (same as ContinueSession) to detect real plan changes.
+// Uses the same revision detection as ContinueSession (baseline + echo suppression).
 // Returns chat response text, the revised plan (nil if unchanged), token usage, and error.
 func (a *Architect) ContinueWithCriticReport(ctx context.Context, sessionID, currentPlan, criticReport string, stdout io.Writer) (string, *RawPlan, harness.TokenUsage, error) {
 	cr, ok := a.runner.(harness.ContinuableRunner)
@@ -204,23 +213,6 @@ func (a *Architect) ContinueWithCriticReport(ctx context.Context, sessionID, cur
 		return "", nil, harness.TokenUsage{}, fmt.Errorf("architect continue with critic report: %w", err)
 	}
 
-	// Read the plan file to detect whether the architect revised it.
-	planContent, readErr := ReadPlanFromRun(result)
-	if readErr != nil {
-		slog.Debug("could not read plan file after critic review", "session_id", sessionID, "err", readErr)
-		return result.Output, nil, result.Usage, nil
-	}
-
-	compareTo := strings.TrimSpace(currentPlan)
-	if baselineErr == nil {
-		compareTo = strings.TrimSpace(baseline)
-	}
-
-	if planContent != compareTo {
-		warnings := CheckPlanHealth(planContent)
-		plan := RawPlan{Markdown: planContent, Warnings: warnings}
-		return result.Output, &plan, result.Usage, nil
-	}
-
-	return result.Output, nil, result.Usage, nil
+	plan := detectPlanRevision(result, baseline, baselineErr, currentPlan)
+	return result.Output, plan, result.Usage, nil
 }
