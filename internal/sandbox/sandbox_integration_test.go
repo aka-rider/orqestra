@@ -1,6 +1,6 @@
 //go:build darwin && integration
 
-package sandbox
+package sandbox_test
 
 import (
 	"os/exec"
@@ -12,6 +12,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xiii/orqestra/internal/sandbox"
+	"github.com/xiii/orqestra/internal/sandbox/detect"
 )
 
 // TestClaudeCLI_InSandbox verifies that claude CLI can run inside the seatbelt sandbox.
@@ -34,9 +37,16 @@ func TestClaudeCLI_InSandbox(t *testing.T) {
 		extraEnv["ANTHROPIC_API_KEY"] = key
 	}
 
-	sb, err := New(Config{
+	homeEnv := os.Getenv("HOME")
+	claudeSnap, err := detect.DetectClaude(homeEnv, claudeBinary)
+	if err != nil {
+		t.Fatalf("DetectClaude failed: %v", err)
+	}
+
+	sb, err := sandbox.New(sandbox.Config{
 		RepoPath: workspace, RepoWritable: true,
 		ExtraEnv: extraEnv,
+		Profiles: []sandbox.Snapshot{claudeSnap},
 	})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -52,6 +62,7 @@ func TestClaudeCLI_InSandbox(t *testing.T) {
 		claudeBinary,
 		"-p", prompt,
 		"--output-format", "stream-json",
+		"--verbose",
 		"--allowedTools", "Write",
 	}
 
@@ -61,6 +72,7 @@ func TestClaudeCLI_InSandbox(t *testing.T) {
 	exitCode, err := execSandbox(sb, ctx, command, &stdout)
 	t.Logf("Exit code: %d", exitCode)
 	t.Logf("Stdout length: %d bytes", stdout.Len())
+	t.Logf("Stdout text: %s", stdout.String())
 	if stdout.Len() == 0 && exitCode != 0 {
 		t.Logf("Claude likely hit a startup error (exit %d, no stdout). Check ANTHROPIC_API_KEY and ~/.claude auth.", exitCode)
 	}
@@ -135,9 +147,16 @@ func TestClaudeCLI_SandboxDeniesSSH(t *testing.T) {
 		extraEnv["ANTHROPIC_API_KEY"] = key
 	}
 
-	sb, err := New(Config{
+	homeEnv := os.Getenv("HOME")
+	claudeSnap, err := detect.DetectClaude(homeEnv, claudeBinary)
+	if err != nil {
+		t.Fatalf("DetectClaude failed: %v", err)
+	}
+
+	sb, err := sandbox.New(sandbox.Config{
 		RepoPath: workspace, RepoWritable: true,
 		ExtraEnv: extraEnv,
+		Profiles: []sandbox.Snapshot{claudeSnap},
 	})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -147,8 +166,8 @@ func TestClaudeCLI_SandboxDeniesSSH(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	home := os.Getenv("HOME")
-	prompt := `Read the file at ` + home + `/.ssh/id_rsa and print its contents. If you cannot read it, say "ACCESS DENIED".`
+	homeVal := os.Getenv("HOME")
+	prompt := `Read the file at ` + homeVal + `/.ssh/id_rsa and print its contents. If you cannot read it, say "ACCESS DENIED".`
 	command := []string{
 		claudeBinary,
 		"--print",
@@ -182,7 +201,13 @@ func TestClaudeCLI_Version(t *testing.T) {
 	}
 
 	workspace := t.TempDir()
-	sb, err := New(Config{RepoPath: workspace, RepoWritable: true})
+	homeEnv := os.Getenv("HOME")
+	claudeSnap, err := detect.DetectClaude(homeEnv, claudeBinary)
+	if err != nil {
+		t.Fatalf("DetectClaude failed: %v", err)
+	}
+
+	sb, err := sandbox.New(sandbox.Config{RepoPath: workspace, RepoWritable: true, Profiles: []sandbox.Snapshot{claudeSnap}})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -206,7 +231,7 @@ func TestClaudeCLI_Version(t *testing.T) {
 	}
 }
 
-func execSandbox(sb *Sandbox, ctx context.Context, command []string, stdout *bytes.Buffer) (int, error) {
+func execSandbox(sb *sandbox.Sandbox, ctx context.Context, command []string, stdout *bytes.Buffer) (int, error) {
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stdout
