@@ -7,9 +7,10 @@ import (
 	"log/slog"
 	"os"
 	"strings"
-	"github.com/xiii/orqestra/internal/icons"
 	"sync"
 	"time"
+
+	"github.com/xiii/orqestra/internal/icons"
 
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"

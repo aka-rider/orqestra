@@ -636,14 +636,31 @@ func TestAllow_WriteInWorkspace(t *testing.T) {
 func TestAllow_LocalhostNetwork(t *testing.T) {
 	workspace := t.TempDir()
 
-	// python3 on macOS goes through xcrun which needs CLT access
-	home := os.Getenv("HOME")
-	p := NewToolProfile("clt", home)
-	p.AllowOptional("/Library/Developer/CommandLineTools", Exec)
+	// Write a tiny Go program to test localhost connectivity directly without python/ruby
+	src := filepath.Join(workspace, "main.go")
+	if err := os.WriteFile(src, []byte(`package main
+import ("fmt"; "net")
+func main() {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil { panic(err) }
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+	c, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil { panic(err) }
+	defer c.Close()
+	fmt.Println("LOCALHOST_OK")
+}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := filepath.Join(workspace, "nettest")
+	buildCmd := exec.Command("go", "build", "-o", bin, src)
+	if err := buildCmd.Run(); err != nil {
+		t.Fatalf("go build failed: %v", err)
+	}
 
 	sb, err := New(Config{
 		RepoPath: workspace, RepoWritable: true,
-		Profiles: []Snapshot{p.Snapshot()},
 	})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -653,22 +670,9 @@ func TestAllow_LocalhostNetwork(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Use python3 to test localhost connectivity (bind + connect)
-	script := `python3 -c "
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.bind(('127.0.0.1', 0))
-port = s.getsockname()[1]
-s.listen(1)
-c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-c.connect(('127.0.0.1', port))
-c.close()
-s.close()
-print('LOCALHOST_OK')
-"`
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
+	cmd := exec.CommandContext(ctx, bin)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 

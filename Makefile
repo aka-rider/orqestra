@@ -10,7 +10,7 @@ build:
 	CGO_ENABLED=0 go build -ldflags "-s -w" -o $(BINARY) ./cmd/orqestra
 
 run: build
-	./$(BINARY) $(ARGS)
+	$(BINARY) $(ARGS)
 
 # Test tiers:
 #   make test             — unit tests (no external deps, fast, run on every commit)
