@@ -1,4 +1,4 @@
-package icons
+package tui
 
 import "strings"
 
@@ -14,8 +14,8 @@ const (
 	Unknown = "·"
 )
 
-// ForAction maps a tool or action name to an aesthetic icon symbol.
-func ForAction(toolName string) string {
+// IconForAction maps a tool or action name to an aesthetic icon symbol.
+func IconForAction(toolName string) string {
 	switch toolName {
 	case "Read", "TodoRead":
 		return Read

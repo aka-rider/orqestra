@@ -146,10 +146,10 @@ architect:
     ...
 
     ## Verification
-    Commands the worker runs after ALL packages complete:
-    - `go test ./...`
-    - `go build ./cmd/orqestra`
-    - `go vet ./...`
+    Commands the worker runs after ALL packages complete to confirm
+    correctness. Derive these from the project's actual build system,
+    test runner, and linter (found in the fact report or via spot-checks).
+    Must be concrete commands, not placeholders.
 
     ## Assumptions
     Things the prompt didn't specify that you assumed. The human reviewer

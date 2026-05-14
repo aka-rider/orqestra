@@ -10,8 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xiii/orqestra/internal/icons"
-
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
@@ -875,10 +873,11 @@ planGate:
 		}
 	}
 
+	// Parse validation output into structured result
+	valParsed := agent.ParseValidationOutput(validationOutput)
 	writeArtifact(session, "worker_validation.txt", validationOutput)
 
 	// --- Commit message generation ---
-	// Ask the worker to summarise what it did. Non-fatal: any failure falls
 	// back to a generic message. Only attempted when there is a worktree to
 	// commit and a session to continue.
 	semanticMsg := ""
@@ -906,9 +905,9 @@ planGate:
 		return msg + "\n\nrun: " + runID + " by Orqestra"
 	}
 
-	// Check for failures in validation output
+	// Derive run status from parsed validation verdict
 	status := StatusSuccess
-	if strings.Contains(validationOutput, icons.Fail) {
+	if valParsed.Verdict == agent.VerdictFail {
 		status = StatusFailed
 	}
 

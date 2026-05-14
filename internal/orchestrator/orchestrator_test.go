@@ -13,7 +13,7 @@ import (
 	"github.com/xiii/orqestra/internal/tokenlimit"
 )
 
-func testEngineWithPlanFiles(t *testing.T, researcherOutput, architectOutput, workerOutput, _ string) *Engine {
+func testEngineWithPlanFiles(t *testing.T, researcherOutput, architectOutput, workerOutput, validationOutput string) *Engine {
 	t.Helper()
 	testutil.MustTempHome(t)
 
@@ -23,13 +23,25 @@ func testEngineWithPlanFiles(t *testing.T, researcherOutput, architectOutput, wo
 	testutil.SetupPlanFile(t, researcherSID, researcherOutput)
 	testutil.SetupPlanFile(t, architectSID, architectOutput)
 
+	workerCalls := []testutil.FakeCall{
+		{Output: workerOutput, SessionID: "sess-123"},
+	}
+	if validationOutput != "" {
+		workerCalls = append(workerCalls,
+			// validation continuation
+			testutil.FakeCall{Output: validationOutput, SessionID: "sess-123"},
+			// commit message continuation
+			testutil.FakeCall{Output: "feat: test changes", SessionID: "sess-123"},
+		)
+	}
+
 	cfg := config.DefaultConfig()
 	return &Engine{
 		Config: cfg,
 		Runners: Runners{
 			Researcher: &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "saved", SessionID: researcherSID}}},
 			Architect:  &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "saved", SessionID: architectSID}}},
-			Worker:     &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: workerOutput, SessionID: "sess-123"}}},
+			Worker:     &testutil.FakeRunner{Calls: workerCalls},
 		},
 	}
 }
@@ -167,14 +179,31 @@ func TestEngine_NoExecute(t *testing.T) {
 }
 
 func TestEngine_ValidationFailureDetection(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✕ test failed — expected 200 got 404")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done",
+		agent.MarkerFail+" tests — expected 200 got 404\n"+agent.MarkerPass+" build ok")
 
 	ctx := context.Background()
 	result, err := engine.Run(ctx, Input{Prompt: "Add feature X", AutoApprove: true}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	_ = result // status detection is internal to run()
+	if result.Status != StatusFailed {
+		t.Errorf("status = %q, want %q", result.Status, StatusFailed)
+	}
+}
+
+func TestEngine_ValidationSuccessDetection(t *testing.T) {
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done",
+		agent.MarkerPass+" tests pass\n"+agent.MarkerPass+" build ok")
+
+	ctx := context.Background()
+	result, err := engine.Run(ctx, Input{Prompt: "Add feature X", AutoApprove: true}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != StatusSuccess {
+		t.Errorf("status = %q, want %q", result.Status, StatusSuccess)
+	}
 }
 
 func TestStreamBuffer_AppendActivity(t *testing.T) {

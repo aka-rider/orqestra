@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"github.com/xiii/orqestra/internal/icons"
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
@@ -1344,7 +1343,7 @@ func renderActivityLog(activities []orchestrator.Activity, width int, cwd string
 	var b strings.Builder
 	for _, act := range recent {
 		toolName := act.Tool
-		icon := icons.ForAction(toolName)
+		icon := IconForAction(toolName)
 
 		toolLabel := activityToolStyle.Render(fmt.Sprintf(" %s %-10s", icon, toolName))
 		detail := act.Detail
