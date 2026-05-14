@@ -767,8 +767,9 @@ planGate:
 	var wtErr error
 	workerRunner := e.Runners.Worker
 
+	runID := ""
 	if session.Path != "" && targetBranch != "" && e.WorktreeRunnerFactory != nil {
-		runID := fmt.Sprintf("%d", workerStart.UnixMilli())
+		runID = fmt.Sprintf("%d", workerStart.UnixMilli())
 		wt, wtErr = worktree.Create(ctx, repoPath, session.Path, runID)
 		if wtErr != nil {
 			slog.Warn("worktree creation failed — falling back to writable repo", "err", wtErr)
@@ -806,6 +807,10 @@ planGate:
 	emit(Event{Type: EventAgentDone, AgentID: "worker", WorkOutput: workResult.Output,
 		InputTokens: workResult.Usage.InputTokens, OutputTokens: workResult.Usage.OutputTokens})
 
+	// lastSessionID tracks the most recent session continuation — used for
+	// commit message generation after validation completes.
+	lastSessionID := workResult.SessionID
+
 	// --- Worker Self-Validation via Session Continuation ---
 	emit(Event{Type: EventPhaseChange, Phase: PhaseSelfValidating})
 	emit(Event{Type: EventAgentStarted, AgentID: "validator"})
@@ -832,6 +837,9 @@ planGate:
 			// Non-fatal: proceed with whatever output we have
 		} else {
 			validationOutput = valResult.Output
+			if valResult.SessionID != "" {
+				lastSessionID = valResult.SessionID
+			}
 			writeArtifactJSON(session, "validator_meta.json", stepMeta{
 				AgentID: "validator", ModelRef: e.Config.Worker.Model, StartTime: valStart, EndTime: time.Now(),
 				ClaudeSessionID: valResult.SessionID, Status: "done",
@@ -853,6 +861,9 @@ planGate:
 			emit(Event{Type: EventAgentFailed, AgentID: "validator", Err: valErr})
 		} else {
 			validationOutput = valResult.Output
+			if valResult.SessionID != "" {
+				lastSessionID = valResult.SessionID
+			}
 			writeArtifactJSON(session, "validator_meta.json", stepMeta{
 				AgentID: "validator", ModelRef: e.Config.Worker.Model, StartTime: valStart, EndTime: time.Now(),
 				ClaudeSessionID: valResult.SessionID, Status: "done",
@@ -865,6 +876,35 @@ planGate:
 
 	writeArtifact(session, "worker_validation.txt", validationOutput)
 
+	// --- Commit message generation ---
+	// Ask the worker to summarise what it did. Non-fatal: any failure falls
+	// back to a generic message. Only attempted when there is a worktree to
+	// commit and a session to continue.
+	semanticMsg := ""
+	if wt.Path != "" && lastSessionID != "" {
+		msgResult, msgErr := workerRunner.RunContinue(ctx, lastSessionID, agent.CommitMessagePrompt(), nil)
+		if msgErr != nil {
+			slog.Warn("commit message generation failed — using fallback", "err", msgErr)
+		} else {
+			parsed, parseErr := agent.ParseCommitMessage(msgResult.Output)
+			if parseErr != nil {
+				slog.Warn("commit message parse failed — using fallback", "err", parseErr)
+			} else {
+				semanticMsg = parsed
+			}
+		}
+	}
+
+	// buildCommitMsg returns the full commit message: the semantic summary (or a
+	// generic fallback) followed by a compact run-ID trailer on its own paragraph.
+	buildCommitMsg := func(fallbackPrefix string) string {
+		msg := semanticMsg
+		if msg == "" {
+			msg = fallbackPrefix + ": Orqestra automated run"
+		}
+		return msg + "\n\nrun: " + runID + " by Orqestra"
+	}
+
 	// Check for failures in validation output
 	status := StatusSuccess
 	if strings.Contains(validationOutput, icons.Fail) {
@@ -873,7 +913,7 @@ planGate:
 
 	// --- Post-run worktree commit + merge ---
 	if wt.Path != "" {
-		commitMsg := fmt.Sprintf("feat: Orqestra automated run (%s)", wt.Branch)
+		commitMsg := buildCommitMsg("feat")
 		committed, commitErr := wt.CommitAll(ctx, commitMsg)
 		if commitErr != nil {
 			slog.Warn("worktree commit failed — skipping merge", "err", commitErr)
@@ -882,7 +922,7 @@ planGate:
 		}
 
 		if committed && commitErr == nil {
-			mergeResult, mergeErr := wt.MergeInto(ctx, targetBranch)
+			mergeResult, mergeErr := wt.MergeInto(ctx, targetBranch, buildCommitMsg("merge"))
 			if mergeErr != nil {
 				slog.Warn("worktree merge failed", "err", mergeErr)
 				// Non-fatal: leave worktree branch intact for manual resolution
