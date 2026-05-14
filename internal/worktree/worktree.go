@@ -102,7 +102,7 @@ type MergeResult struct {
 // user was on when the run started, typically "main" or current HEAD).
 // If a merge conflict occurs, it aborts the merge (leaving the repo clean) and
 // returns a MergeResult with Merged=false and the conflicting files.
-func (w Worktree) MergeInto(ctx context.Context, targetBranch string) (MergeResult, error) {
+func (w Worktree) MergeInto(ctx context.Context, targetBranch, mergeMsg string) (MergeResult, error) {
 	// Switch main repo to target branch
 	checkoutCmd := exec.CommandContext(ctx, "git", "checkout", targetBranch)
 	checkoutCmd.Dir = w.RepoPath
@@ -111,8 +111,7 @@ func (w Worktree) MergeInto(ctx context.Context, targetBranch string) (MergeResu
 	}
 
 	// Attempt the merge
-	mergeCmd := exec.CommandContext(ctx, "git", "merge", "--no-ff", "-m",
-		fmt.Sprintf("merge: Orqestra automated run (%s)", w.Branch), w.Branch)
+	mergeCmd := exec.CommandContext(ctx, "git", "merge", "--no-ff", "-m", mergeMsg, w.Branch)
 	mergeCmd.Dir = w.RepoPath
 	mergeOut, mergeErr := mergeCmd.CombinedOutput()
 	if mergeErr == nil {

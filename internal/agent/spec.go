@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -265,4 +266,54 @@ Report your results:
 
 Do not claim a command passed unless you observed exit code 0.
 If failures remain after retries, report them plainly. Do not hide or minimize.`, retryBudget)
+}
+
+// CommitMessagePrompt returns the continuation prompt asking the worker to
+// produce a semantic git commit message based on what it completed.
+func CommitMessagePrompt() string {
+	return `Review the work you completed and the validation results in this session.
+
+Write a git commit message for the changes:
+- First line: subject ≤ 72 characters, imperative mood, no trailing period
+- Describe what changed and why (problem → solution or feature → specs)
+- Omit words like "Orqestra", "automated", "AI-generated"
+- Optional: blank line then a short body paragraph if the change is complex
+
+Output ONLY the commit message text. No explanation, no markdown, no code fences.`
+}
+
+// ParseCommitMessage extracts a clean git commit message from raw LLM output.
+// It strips surrounding code fences, trims whitespace, and truncates the
+// subject line to 72 characters. Returns an error if the result is empty.
+func ParseCommitMessage(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", errors.New("commit message: empty response")
+	}
+
+	// Strip a single outermost markdown code fence if present.
+	if strings.HasPrefix(s, "```") {
+		nl := strings.Index(s, "\n")
+		if nl != -1 {
+			inner := s[nl+1:]
+			if close := strings.LastIndex(inner, "```"); close != -1 {
+				s = strings.TrimSpace(inner[:close])
+			}
+		}
+	}
+
+	if s == "" {
+		return "", errors.New("commit message: empty after stripping code fence")
+	}
+
+	// Truncate subject line to 72 characters, trimming at a word boundary.
+	lines := strings.SplitN(s, "\n", 2)
+	if len(lines[0]) > 72 {
+		subject := lines[0][:72]
+		if i := strings.LastIndex(subject, " "); i > 0 {
+			subject = subject[:i]
+		}
+		lines[0] = subject
+	}
+	return strings.Join(lines, "\n"), nil
 }

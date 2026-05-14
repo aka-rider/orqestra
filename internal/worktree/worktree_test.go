@@ -116,7 +116,7 @@ func TestWorktree_MergeInto_Clean(t *testing.T) {
 		t.Fatalf("CommitAll() error: %v", err)
 	}
 
-	result, err := wt.MergeInto(ctx, "main")
+	result, err := wt.MergeInto(ctx, "main", "test: clean merge")
 	if err != nil {
 		t.Fatalf("MergeInto() error: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestWorktree_MergeInto_Conflict(t *testing.T) {
 		t.Fatalf("git commit: %v (output: %s)", err, out)
 	}
 
-	result, err := wt.MergeInto(ctx, "main")
+	result, err := wt.MergeInto(ctx, "main", "test: conflict merge")
 	if err != nil {
 		t.Fatalf("MergeInto() error: %v", err)
 	}
