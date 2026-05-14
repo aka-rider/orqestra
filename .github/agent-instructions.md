@@ -45,3 +45,5 @@ The PM (`agent.ProjectManager`) parses specifications (`agent.Specification`) in
 - **Artifact Frontmatter**: Specifications passed over session networks MUST contain verifiable YAML frontmatter `ArtifactMeta` to cryptographically prove input hash alignments.
 - **Type ownership**: All agent domain types (`Specification`, `ValidationReport`, `ProjectPlan`, `WorkPackage`, `GatewayResult`) live in `internal/agent/`. The `plan/` package is a markdown persistence adapter that imports `agent.Specification` for conversion.
 </validation_boundaries>
+
+Architect <-> Human turns on the plan in a git micro-repo (`sessionPath/plan-history/`).

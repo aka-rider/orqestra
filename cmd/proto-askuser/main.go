@@ -154,17 +154,17 @@ func main() {
 		results = append(results, r)
 
 		if r.bridgeError != "" {
-			fmt.Printf("  ❌ Bridge error: %s\n", r.bridgeError)
+			fmt.Printf("  ✕ Bridge error: %s\n", r.bridgeError)
 		} else if !r.toolCalled {
-			fmt.Printf("  ⚠️  Model did NOT call AskUserQuestion tool\n")
+			fmt.Printf("  ⚠  Model did NOT call AskUserQuestion tool\n")
 		} else {
-			fmt.Printf("  ✅ Model called AskUserQuestion\n")
+			fmt.Printf("  ✓ Model called AskUserQuestion\n")
 		}
 
 		if r.judgePass {
-			fmt.Printf("  ✅ Judge: %s\n", r.judgeReason)
+			fmt.Printf("  ✓ Judge: %s\n", r.judgeReason)
 		} else {
-			fmt.Printf("  ❌ Judge: %s\n", r.judgeReason)
+			fmt.Printf("  ✕ Judge: %s\n", r.judgeReason)
 		}
 
 		fmt.Printf("  ⏱  Duration: %s | Tokens: %d in, %d out\n",
@@ -187,9 +187,9 @@ func main() {
 	fmt.Printf("Tool called:     %d/%d\n", toolCalls, len(results))
 	fmt.Printf("Judge passed:    %d/%d\n", passed, len(results))
 	if toolCalls == len(results) && passed == len(results) {
-		fmt.Println("Result:          ✅ ALL PASSED")
+		fmt.Println("Result:          ✓ ALL PASSED")
 	} else {
-		fmt.Println("Result:          ❌ SOME FAILED")
+		fmt.Println("Result:          ✕ SOME FAILED")
 		os.Exit(1)
 	}
 }

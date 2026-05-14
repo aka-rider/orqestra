@@ -88,7 +88,6 @@ func TestReadPlanFromRun_MissingJSONL(t *testing.T) {
 	}
 }
 
-
 func TestReadPlanFromRun_SecurityGate(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -216,4 +215,3 @@ func TestReadPlanFromRun_PlanFileNeverWritten(t *testing.T) {
 		t.Errorf("expected session ID in error, got: %s", errMsg)
 	}
 }
-

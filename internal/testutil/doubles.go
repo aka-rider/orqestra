@@ -14,10 +14,11 @@ import (
 
 // FakeCall defines the response for one FakeRunner invocation.
 type FakeCall struct {
-	Output    string
-	SessionID string
-	Usage     harness.TokenUsage
-	Err       error
+	Output       string
+	SessionID    string
+	PlanFilePath string
+	Usage        harness.TokenUsage
+	Err          error
 }
 
 // FakeRunner is a test double for harness.CLIRunner and harness.ContinuableRunner.
@@ -45,17 +46,17 @@ func (f *FakeRunner) next() FakeCall {
 
 func (f *FakeRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
 	out := f.next()
-	return harness.RunResult{Output: out.Output, SessionID: out.SessionID, Usage: out.Usage}, out.Err
+	return harness.RunResult{Output: out.Output, SessionID: out.SessionID, PlanFilePath: out.PlanFilePath, Usage: out.Usage}, out.Err
 }
 
 func (f *FakeRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
 	out := f.next()
-	return harness.RunResult{Output: out.Output, SessionID: out.SessionID, Usage: out.Usage}, out.Err
+	return harness.RunResult{Output: out.Output, SessionID: out.SessionID, PlanFilePath: out.PlanFilePath, Usage: out.Usage}, out.Err
 }
 
 func (f *FakeRunner) RunContinue(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
 	out := f.next()
-	return harness.RunResult{Output: out.Output, SessionID: out.SessionID, Usage: out.Usage}, out.Err
+	return harness.RunResult{Output: out.Output, SessionID: out.SessionID, PlanFilePath: out.PlanFilePath, Usage: out.Usage}, out.Err
 }
 
 // MustTempHome sets HOME to a fresh temp dir for the duration of the test.

@@ -36,7 +36,7 @@ func TestClaudeCLI_InSandbox(t *testing.T) {
 
 	sb, err := New(Config{
 		RepoPath: workspace, RepoWritable: true,
-		ExtraEnv:  extraEnv,
+		ExtraEnv: extraEnv,
 	})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -137,7 +137,7 @@ func TestClaudeCLI_SandboxDeniesSSH(t *testing.T) {
 
 	sb, err := New(Config{
 		RepoPath: workspace, RepoWritable: true,
-		ExtraEnv:  extraEnv,
+		ExtraEnv: extraEnv,
 	})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -207,17 +207,17 @@ func TestClaudeCLI_Version(t *testing.T) {
 }
 
 func execSandbox(sb *Sandbox, ctx context.Context, command []string, stdout *bytes.Buffer) (int, error) {
-    cmd := exec.CommandContext(ctx, command[0], command[1:]...)
-    cmd.Stdout = stdout
-    cmd.Stderr = stdout
-    if err := sb.Wrap(cmd); err != nil {
-        return -1, err
-    }
-    if err := cmd.Run(); err != nil {
-        if exitErr, ok := err.(*exec.ExitError); ok {
-            return exitErr.ExitCode(), err
-        }
-        return -1, err
-    }
-    return 0, nil
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stdout
+	if err := sb.Wrap(cmd); err != nil {
+		return -1, err
+	}
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode(), err
+		}
+		return -1, err
+	}
+	return 0, nil
 }

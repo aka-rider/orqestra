@@ -13,7 +13,8 @@ import (
 // subprocesses and routes them to the orchestrator via channels.
 //
 // Flow: MCP server (subprocess) → Unix socket → QuestionBridge → channel → orchestrator → TUI
-//       TUI answer → orchestrator → SendAnswer() → channel → QuestionBridge → socket → MCP server
+//
+//	TUI answer → orchestrator → SendAnswer() → channel → QuestionBridge → socket → MCP server
 type QuestionBridge struct {
 	socketPath    string
 	listener      net.Listener

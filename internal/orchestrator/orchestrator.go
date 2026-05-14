@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"github.com/xiii/orqestra/internal/icons"
 	"sync"
 	"time"
 
@@ -42,11 +43,12 @@ const maxActivities = 20
 // (writer) and the TUI (reader). The TUI polls it on tick to avoid channel
 // backpressure that would block the subprocess.
 type StreamBuffer struct {
-	mu         sync.Mutex
-	lines      []string
-	agentID    string
-	maxLines   int
-	activities []Activity
+	mu             sync.Mutex
+	lines          []string
+	agentID        string
+	maxLines       int
+	activities     []Activity
+	agentSnapshots map[string][]Activity
 }
 
 // NewStreamBuffer creates a StreamBuffer with the given line capacity.
@@ -54,16 +56,46 @@ func NewStreamBuffer(maxLines int) *StreamBuffer {
 	if maxLines <= 0 {
 		maxLines = 200
 	}
-	return &StreamBuffer{maxLines: maxLines}
+	return &StreamBuffer{
+		maxLines:       maxLines,
+		agentSnapshots: make(map[string][]Activity),
+	}
 }
 
 // SetAgent resets the buffer for a new active agent.
 func (sb *StreamBuffer) SetAgent(id string) {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
+
+	if sb.agentID != "" && len(sb.activities) > 0 {
+		snapshot := make([]Activity, len(sb.activities))
+		copy(snapshot, sb.activities)
+		sb.agentSnapshots[sb.agentID] = snapshot
+	}
+
 	sb.agentID = id
 	sb.lines = nil
 	sb.activities = nil
+}
+
+// AgentActivities returns a copy of the recorded activities for the given agent.
+func (sb *StreamBuffer) AgentActivities(id string) []Activity {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+
+	if sb.agentID == id {
+		out := make([]Activity, len(sb.activities))
+		copy(out, sb.activities)
+		return out
+	}
+
+	activities, ok := sb.agentSnapshots[id]
+	if !ok {
+		return nil
+	}
+	out := make([]Activity, len(activities))
+	copy(out, activities)
+	return out
 }
 
 // Append adds text to the buffer, accumulating into the current line
@@ -395,7 +427,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 	if input.PlanFile != "" {
 		finalPlanMarkdown = input.PlanFile
 		if planRepo != nil {
-			if err := planRepo.Commit(finalPlanMarkdown, "plan loaded from file"); err != nil {
+			if err := planRepo.Commit(finalPlanMarkdown, "user: plan loaded from file"); err != nil {
 				slog.Warn("plan commit failed", "err", err)
 			}
 		}
@@ -498,7 +530,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		finalPlanWarnings = planResult.Warnings
 		finalPlanMarkdown = planResult.Markdown
 		if planRepo != nil {
-			if err := planRepo.Commit(finalPlanMarkdown, "initial plan from architect"); err != nil {
+			if err := planRepo.Commit(finalPlanMarkdown, "architect: initial plan"); err != nil {
 				slog.Warn("plan commit failed", "err", err)
 			}
 		}
@@ -586,7 +618,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			finalPlanMarkdown = revisedPlan.Markdown
 			finalPlanWarnings = revisedPlan.Warnings
 			if planRepo != nil {
-				if commitErr := planRepo.Commit(finalPlanMarkdown, "revision: critic feedback"); commitErr != nil {
+				if commitErr := planRepo.Commit(finalPlanMarkdown, "architect: Re: critic feedback"); commitErr != nil {
 					slog.Warn("plan commit failed", "err", commitErr)
 				}
 			}
@@ -628,7 +660,7 @@ planGate:
 					finalPlanMarkdown = edited
 					finalPlanWarnings = agent.CheckPlanHealth(edited)
 					if planRepo != nil {
-						if err := planRepo.Commit(edited, "manual edit"); err != nil {
+						if err := planRepo.Commit(edited, "user: manual edit"); err != nil {
 							slog.Warn("plan commit failed", "err", err)
 						}
 					}
@@ -683,7 +715,7 @@ planGate:
 						finalPlanMarkdown = revisedPlan.Markdown
 						finalPlanWarnings = revisedPlan.Warnings
 						if planRepo != nil {
-							msg := commitMsg("revision", decision.Comment)
+							msg := commitMsg("architect: Re", decision.Comment)
 							if commitErr := planRepo.Commit(finalPlanMarkdown, msg); commitErr != nil {
 								slog.Warn("plan commit failed", "err", commitErr)
 							}
@@ -835,7 +867,7 @@ planGate:
 
 	// Check for failures in validation output
 	status := StatusSuccess
-	if strings.Contains(validationOutput, "❌") {
+	if strings.Contains(validationOutput, icons.Fail) {
 		status = StatusFailed
 	}
 

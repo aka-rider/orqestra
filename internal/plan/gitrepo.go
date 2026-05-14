@@ -84,6 +84,17 @@ func (r *GitRepo) Log() (string, error) {
 	return string(out), nil
 }
 
+// Head returns the content of plan.md in the working tree.
+// The working tree is always clean after Commit, so this reflects HEAD.
+// Returns an error if no commits have been made yet.
+func (r *GitRepo) Head() (string, error) {
+	data, err := os.ReadFile(filepath.Join(r.dir, "plan.md"))
+	if err != nil {
+		return "", fmt.Errorf("read plan.md at HEAD: %w", err)
+	}
+	return string(data), nil
+}
+
 // PlanPath returns the absolute path to the tracked plan.md file.
 func (r *GitRepo) PlanPath() string {
 	return filepath.Join(r.dir, "plan.md")

@@ -283,7 +283,7 @@ func TestErrBudgetExhausted_ErrorFormat(t *testing.T) {
 
 func TestLimiter_StatusAll(t *testing.T) {
 	limiter := newTestLimiter(t, map[string]int64{
-		"large":   10000,
+		"large":  10000,
 		"sonnet": 5000,
 	})
 	ctx := context.Background()

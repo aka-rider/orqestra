@@ -31,7 +31,7 @@ type SandboxCLIRunnerConfig struct {
 	Cfg          config.SandboxConfig
 	Profiles     []sandbox.Snapshot
 	RepoPath     string
-	WorktreePath string // optional worktree path; when set repo is read-only and worktree is read-write
+	WorktreePath string   // optional worktree path; when set repo is read-only and worktree is read-write
 	Env          []string // harness env (model routing)
 	Writable     bool     // true for workers
 }

@@ -135,6 +135,7 @@ Merge
 ```
 
 The **prompt** and the **plan** are the shared contract. Researcher, Architect, Critic, and Worker each operate against it independently.
+Each turn of the review is revisioned (git micro-repo in `'.orqestra/sessions/<run>/plan-history'`).
 
 ## Quick Start
 

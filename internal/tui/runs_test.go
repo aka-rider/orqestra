@@ -49,7 +49,7 @@ func testRunDetail() agent.RunDetail {
 		},
 		PlanMarkdown: "# Plan\n\n## Goal\nFix auth bug.\n\n## Work Packages\n\n### 1. Fix\nDo the fix.",
 		WorkerOutput: "done",
-		Validation:   "✅ pass",
+		Validation:   "✓ pass",
 	}
 }
 

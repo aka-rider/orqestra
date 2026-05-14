@@ -28,7 +28,7 @@ func (n *noopRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (
 }
 
 func (n *noopRunner) RunContinue(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
-	return harness.RunResult{Output: "✅ all pass"}, nil
+	return harness.RunResult{Output: "✓ all pass"}, nil
 }
 
 // testModel creates a Model suitable for testing with a minimal mock engine.
@@ -440,7 +440,7 @@ func TestTUI_CompletionValidation(t *testing.T) {
 
 	event := orchestrator.Event{
 		Type:             orchestrator.EventComplete,
-		WorkerValidation: "✅ tests pass\n✅ build succeeds",
+		WorkerValidation: "✓ tests pass\n✓ build succeeds",
 	}
 
 	m.pipelineScreen.ApplyEvent(event, m.width)

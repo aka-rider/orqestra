@@ -259,9 +259,9 @@ For each "Done when" criterion in every work package:
 Then run the final Verification commands from the plan.
 
 Report your results:
-- ✅ <criterion> — <evidence: command exited 0 / file content verified>
-- ❌ <criterion> — <evidence: command output showing failure>
-- ⚠️ <criterion> — cannot verify (explain why)
+- ✓ <criterion> — <evidence: command exited 0 / file content verified>
+- ✕ <criterion> — <evidence: command output showing failure>
+- ⚠ <criterion> — cannot verify (explain why)
 
 Do not claim a command passed unless you observed exit code 0.
 If failures remain after retries, report them plainly. Do not hide or minimize.`, retryBudget)

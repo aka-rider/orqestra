@@ -35,7 +35,7 @@ func testEngineWithPlanFiles(t *testing.T, researcherOutput, architectOutput, wo
 }
 
 func TestEngine_PlanApprovalGate(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
@@ -62,7 +62,7 @@ func TestEngine_PlanApprovalGate(t *testing.T) {
 }
 
 func TestEngine_CancelAtGate(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
@@ -84,7 +84,7 @@ func TestEngine_CancelAtGate(t *testing.T) {
 }
 
 func TestEngine_SkipGateway(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
@@ -95,7 +95,7 @@ func TestEngine_SkipGateway(t *testing.T) {
 }
 
 func TestEngine_HeadlessAutoApprove(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
@@ -119,7 +119,7 @@ func TestEngine_HeadlessAutoApprove(t *testing.T) {
 }
 
 func TestEngine_PhaseOrder(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
@@ -143,7 +143,7 @@ func TestEngine_PhaseOrder(t *testing.T) {
 }
 
 func TestEngine_NoExecute(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true, NoExecute: true})
@@ -167,7 +167,7 @@ func TestEngine_NoExecute(t *testing.T) {
 }
 
 func TestEngine_ValidationFailureDetection(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "❌ test failed — expected 200 got 404")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✕ test failed — expected 200 got 404")
 
 	ctx := context.Background()
 	result, err := engine.Run(ctx, Input{Prompt: "Add feature X", AutoApprove: true}, nil)
@@ -242,7 +242,7 @@ func TestStreamWriter_ImplementsActivitySink(t *testing.T) {
 }
 
 func TestEngine_PlanFileBeforeGate(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 
 	// Set up a RunDirFactory that creates a temp directory
 	tmpDir := t.TempDir()
@@ -288,7 +288,7 @@ func TestEngine_PlanFileBeforeGate(t *testing.T) {
 
 // Contract: README "Pipeline State Machine" — Researcher → Architect → Critic → Gate → Worker → SelfValidation
 func TestEngine_PhaseOrder_WithCritic(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 
 	criticReport := "## Critic Report\n\n### Blockers Found\n\nNone found.\n\n### Summary\n- Total blockers: 0 (0 high, 0 medium, 0 low)\n- Overall assessment: Plan is ready for execution."
 	engine.Runners.Critic = &testutil.FakeRunner{
@@ -318,7 +318,7 @@ func TestEngine_PhaseOrder_WithCritic(t *testing.T) {
 
 // Contract: README "Human Gate" — operator may edit plan inline; gate re-presents with updated content
 func TestEngine_DecisionEdit(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 
 	ctx := context.Background()
 	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
@@ -353,7 +353,7 @@ func TestEngine_DecisionEdit(t *testing.T) {
 
 // Contract: agent-instructions.md "Token Breaking" — ErrBudgetExhausted causes EventError and clean shutdown
 func TestEngine_BudgetExhausted(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✅ pass")
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 	engine.Runners.Researcher = &testutil.FakeRunner{
 		Calls: []testutil.FakeCall{{
 			Err: &tokenlimit.ErrBudgetExhausted{Model: "test", Used: 100, Limit: 50},
@@ -370,5 +370,32 @@ func TestEngine_BudgetExhausted(t *testing.T) {
 	}
 	if !gotError {
 		t.Error("expected EventError when researcher budget is exhausted")
+	}
+}
+
+func TestStreamBuffer_AgentSnapshots(t *testing.T) {
+	sb := NewStreamBuffer(10)
+
+	// Test nonexistent
+	if acts := sb.AgentActivities("nonexistent"); acts != nil {
+		t.Errorf("expected nil for nonexistent agent, got %v", acts)
+	}
+
+	sb.SetAgent("researcher")
+	sb.AppendActivity("Read", "file1.txt")
+	sb.AppendActivity("Read", "file2.txt")
+
+	// Test current agent activities
+	if acts := sb.AgentActivities("researcher"); len(acts) != 2 {
+		t.Errorf("expected 2 activities for current agent, got %d", len(acts))
+	}
+
+	sb.SetAgent("architect")
+	if acts := sb.AgentActivities("researcher"); len(acts) != 2 {
+		t.Errorf("expected 2 activities for saved agent snapshot, got %d", len(acts))
+	}
+
+	if acts := sb.AgentActivities("architect"); len(acts) != 0 {
+		t.Errorf("expected 0 activities for new agent, got %d", len(acts))
 	}
 }

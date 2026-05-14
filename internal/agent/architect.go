@@ -85,12 +85,25 @@ If the reviewer requests changes, revise the plan.`
 
 // ContinueSession resumes the architect's session to handle a reviewer comment.
 // It uses RunContinue (--resume) to maintain the full conversation context.
-// After the run, it reads the plan file from ~/.claude/plans/ to detect revisions.
+// After the run, it reads the plan file from ~/.claude/plans/ and compares
+// against a pre-run baseline to detect actual revisions. This avoids treating
+// a stale plan file as a "revision" when the user edited the plan externally.
 // Returns chat response text, the revised plan (nil if unchanged), token usage, and error.
 func (a *Architect) ContinueSession(ctx context.Context, sessionID, currentPlan, comment string, stdout io.Writer) (string, *RawPlan, harness.TokenUsage, error) {
 	cr, ok := a.runner.(harness.ContinuableRunner)
 	if !ok {
 		return "", nil, harness.TokenUsage{}, fmt.Errorf("architect runner does not support session continuation")
+	}
+
+	// Snapshot the plan file before the continuation to detect real changes.
+	// The plan file in ~/.claude/plans/ may differ from currentPlan if the
+	// user edited the plan externally (^E edits go to session dir, not here).
+	// Comparing post-run against this baseline — not currentPlan — avoids
+	// treating the stale plan file as a "revision" that overwrites user edits.
+	baseline, baselineErr := ReadPlanFromRun(harness.RunResult{SessionID: sessionID})
+	if baselineErr != nil {
+		slog.Debug("could not snapshot plan file baseline, will compare against currentPlan",
+			"session_id", sessionID, "err", baselineErr)
 	}
 
 	prompt := fmt.Sprintf(continuePromptTemplate, currentPlan, comment)
@@ -106,7 +119,16 @@ func (a *Architect) ContinueSession(ctx context.Context, sessionID, currentPlan,
 		return result.Output, nil, result.Usage, nil
 	}
 
-	if planContent != strings.TrimSpace(currentPlan) {
+	// Compare against the baseline (plan file before continuation), not
+	// currentPlan. If the user edited the plan via ^E, currentPlan has
+	// those edits but the plan file doesn't — comparing against currentPlan
+	// would falsely detect a "revision" with stale content.
+	compareTo := strings.TrimSpace(currentPlan)
+	if baselineErr == nil {
+		compareTo = strings.TrimSpace(baseline)
+	}
+
+	if planContent != compareTo {
 		warnings := CheckPlanHealth(planContent)
 		plan := RawPlan{Markdown: planContent, Warnings: warnings}
 		return result.Output, &plan, result.Usage, nil
@@ -148,7 +170,7 @@ Review every finding. For each:
   the plan.
 - If you cannot determine whether the issue is valid, or the fix requires
   a judgment call you cannot make: surface it inline in the relevant
-  section of the plan, clearly marked with ⚠️ CRITIC FLAG, so the human
+  section of the plan, clearly marked with ⚠ CRITIC FLAG, so the human
   reviewer can decide.
 
 Do NOT discard findings silently. Every finding must be either fixed or
@@ -160,12 +182,20 @@ notes explaining why.`
 
 // ContinueWithCriticReport resumes the architect's session with a critic report.
 // The architect reviews the critic's findings and either fixes issues in the plan
-// or surfaces uncertain ones inline with ⚠️ CRITIC FLAG markers.
+// or surfaces uncertain ones inline with ⚠ CRITIC FLAG markers.
+// Uses baseline comparison (same as ContinueSession) to detect real plan changes.
 // Returns chat response text, the revised plan (nil if unchanged), token usage, and error.
 func (a *Architect) ContinueWithCriticReport(ctx context.Context, sessionID, currentPlan, criticReport string, stdout io.Writer) (string, *RawPlan, harness.TokenUsage, error) {
 	cr, ok := a.runner.(harness.ContinuableRunner)
 	if !ok {
 		return "", nil, harness.TokenUsage{}, fmt.Errorf("architect runner does not support session continuation")
+	}
+
+	// Snapshot plan file baseline before continuation (see ContinueSession).
+	baseline, baselineErr := ReadPlanFromRun(harness.RunResult{SessionID: sessionID})
+	if baselineErr != nil {
+		slog.Debug("could not snapshot plan file baseline for critic review, will compare against currentPlan",
+			"session_id", sessionID, "err", baselineErr)
 	}
 
 	prompt := fmt.Sprintf(criticContinueTemplate, criticReport, currentPlan)
@@ -181,7 +211,12 @@ func (a *Architect) ContinueWithCriticReport(ctx context.Context, sessionID, cur
 		return result.Output, nil, result.Usage, nil
 	}
 
-	if planContent != strings.TrimSpace(currentPlan) {
+	compareTo := strings.TrimSpace(currentPlan)
+	if baselineErr == nil {
+		compareTo = strings.TrimSpace(baseline)
+	}
+
+	if planContent != compareTo {
 		warnings := CheckPlanHealth(planContent)
 		plan := RawPlan{Markdown: planContent, Warnings: warnings}
 		return result.Output, &plan, result.Usage, nil

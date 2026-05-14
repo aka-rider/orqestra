@@ -98,6 +98,43 @@ func TestGitRepo_Log(t *testing.T) {
 	}
 }
 
+func TestGitRepo_Head(t *testing.T) {
+	repo, err := NewGitRepo(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewGitRepo: %v", err)
+	}
+
+	// Head before any commit should fail.
+	_, err = repo.Head()
+	if err == nil {
+		t.Error("Head should fail before any commits")
+	}
+
+	err = repo.Commit("# Plan\n\n## Goal\nFirst version.\n", "architect: initial plan")
+	if err != nil {
+		t.Fatalf("first commit: %v", err)
+	}
+	content, err := repo.Head()
+	if err != nil {
+		t.Fatalf("Head after first commit: %v", err)
+	}
+	if !strings.Contains(content, "First version.") {
+		t.Errorf("Head content = %q, want to contain 'First version.'", content)
+	}
+
+	err = repo.Commit("# Plan\n\n## Goal\nSecond version.\n", "user: manual edit")
+	if err != nil {
+		t.Fatalf("second commit: %v", err)
+	}
+	content, err = repo.Head()
+	if err != nil {
+		t.Fatalf("Head after second commit: %v", err)
+	}
+	if !strings.Contains(content, "Second version.") {
+		t.Errorf("Head content = %q, want to contain 'Second version.'", content)
+	}
+}
+
 func TestGitRepo_PlanPath(t *testing.T) {
 	tmp := t.TempDir()
 	repo, err := NewGitRepo(tmp)

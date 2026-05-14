@@ -41,7 +41,7 @@ func setupTestSessions(t *testing.T) string {
 	})
 	os.WriteFile(filepath.Join(sess1, "final_plan.md"), []byte("# Plan\n\nDo stuff"), 0o644)
 	os.WriteFile(filepath.Join(sess1, "worker_output.txt"), []byte("done"), 0o644)
-	os.WriteFile(filepath.Join(sess1, "worker_validation.txt"), []byte("✅ pass"), 0o644)
+	os.WriteFile(filepath.Join(sess1, "worker_validation.txt"), []byte("✓ pass"), 0o644)
 
 	// Write artifacts for sess2 (minimal — no prompt.md to test graceful handling)
 	writeMeta(t, sess2, "researcher_meta.json", StepMeta{
@@ -147,7 +147,7 @@ func TestLoadRunDetail_AllFields(t *testing.T) {
 	if detail.WorkerOutput != "done" {
 		t.Errorf("worker output = %q", detail.WorkerOutput)
 	}
-	if detail.Validation != "✅ pass" {
+	if detail.Validation != "✓ pass" {
 		t.Errorf("validation = %q", detail.Validation)
 	}
 	if len(detail.Steps) != 2 {

@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"image"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
+	"github.com/xiii/orqestra/internal/icons"
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
@@ -61,6 +63,7 @@ type PipelineScreen struct {
 	// Run directory and plan file
 	runDir       string
 	planFilePath string
+	cwd          string
 
 	awaitingPlanDecision bool
 
@@ -114,6 +117,9 @@ func (s *PipelineScreen) Start(goal string) {
 	s.Reset()
 	s.goal = goal
 	s.startTime = time.Now()
+	if wd, err := os.Getwd(); err == nil {
+		s.cwd = wd
+	}
 	s.content = ContentStreaming
 	s.active = true
 }
@@ -880,20 +886,27 @@ func (s PipelineScreen) viewStreaming(width int) string {
 	if streamAgent != "" {
 		b.WriteString(fmt.Sprintf("  (%s)", streamAgent))
 	}
-	b.WriteString("\n")
+	b.WriteString("\n\n")
 
 	if len(activities) > 0 {
-		b.WriteString(renderActivityLog(activities, width))
+		b.WriteString(renderActivityLog(activities, width, s.cwd, 20))
 	}
 
 	if len(streamLines) > 0 {
-		b.WriteString(dividerStyle.Render(strings.Repeat("─", max(1, width-constContentInset))))
 		b.WriteString("\n")
+		b.WriteString(streamStyle.Render(" Stream"))
+		b.WriteString("\n")
+
+		start := 0
+		if len(streamLines) > streamPreviewLines {
+			start = len(streamLines) - streamPreviewLines
+		}
+
 		maxLineWidth := width - constContentInset
 		if maxLineWidth < 1 {
 			maxLineWidth = 1
 		}
-		for _, line := range streamLines {
+		for _, line := range streamLines[start:] {
 			for len(line) > maxLineWidth {
 				b.WriteString(" ")
 				b.WriteString(streamStyle.Render(line[:maxLineWidth]))
@@ -1053,6 +1066,45 @@ func (s PipelineScreen) viewCompletion(width int) string {
 		b.WriteString(fmt.Sprintf(" Tokens: %s in, %s out (%s total)\n",
 			formatTokens(totalIn), formatTokens(totalOut), formatTokens(totalIn+totalOut)))
 	}
+
+	b.WriteString("\n Run Summary\n")
+	b.WriteString(dividerStyle.Render(strings.Repeat("─", max(1, width-constContentInset))))
+	b.WriteString("\n")
+
+	for _, a := range s.agents {
+		agentElapsed := "-"
+		if a.Elapsed > 0 {
+			agentElapsed = a.Elapsed.Round(time.Second).String()
+		} else if !a.StartedAt.IsZero() {
+			agentElapsed = time.Since(a.StartedAt).Round(time.Second).String()
+		}
+
+		tokens := "-"
+		if a.InputTokens > 0 || a.OutputTokens > 0 {
+			tokens = fmt.Sprintf("↓%s ↑%s", formatTokens(a.InputTokens), formatTokens(a.OutputTokens))
+		}
+
+		b.WriteString(fmt.Sprintf(" Agent: %s (%s)  ⏱ %s  Tokens: %s\n", goalStyle.Render(a.ID), a.State, agentElapsed, tokens))
+
+		if s.streamBuf != nil {
+			activities := s.streamBuf.AgentActivities(a.ID)
+			var fileActivities []orchestrator.Activity
+			for _, act := range activities {
+				if isFilePathTool(act.Tool) {
+					fileActivities = append(fileActivities, act)
+				}
+			}
+			if len(fileActivities) > 0 {
+				b.WriteString(renderActivityLog(fileActivities, width, s.cwd, 3))
+			} else {
+				b.WriteString("   (no file activities)\n")
+			}
+		} else {
+			b.WriteString("   (no file activities)\n")
+		}
+		b.WriteString("\n")
+	}
+
 	return b.String()
 }
 
@@ -1060,10 +1112,34 @@ func (s PipelineScreen) viewAgentHistory(width int) string {
 	var b strings.Builder
 	if s.focusedAgent > 0 && s.focusedAgent <= len(s.agents) {
 		a := s.agents[s.focusedAgent-1]
-		b.WriteString(fmt.Sprintf(" Agent: %s (%s)\n", goalStyle.Render(a.ID), a.State))
+		tokens := "Tokens: -"
+		if a.InputTokens > 0 || a.OutputTokens > 0 {
+			tokens = fmt.Sprintf("Tokens: ↓%s ↑%s", formatTokens(a.InputTokens), formatTokens(a.OutputTokens))
+		}
+
+		var elapsed string
+		if a.Elapsed > 0 {
+			elapsed = a.Elapsed.Round(time.Second).String()
+		} else if !a.StartedAt.IsZero() {
+			elapsed = time.Since(a.StartedAt).Round(time.Second).String()
+		} else {
+			elapsed = "-"
+		}
+
+		b.WriteString(fmt.Sprintf(" Agent: %s (%s)  %s  ⏱ %s\n", goalStyle.Render(a.ID), a.State, tokens, elapsed))
 		b.WriteString(dividerStyle.Render(strings.Repeat("─", max(1, width-constContentInset))))
 		b.WriteString("\n")
-		b.WriteString(" (output history not captured in this mode)\n")
+
+		if s.streamBuf != nil {
+			activities := s.streamBuf.AgentActivities(a.ID)
+			if len(activities) > 0 {
+				b.WriteString(renderActivityLog(activities, width, s.cwd, len(activities)))
+			} else {
+				b.WriteString(fmt.Sprintf(" No activity recorded for %s\n", a.ID))
+			}
+		} else {
+			b.WriteString(fmt.Sprintf(" No activity recorded for %s\n", a.ID))
+		}
 	} else {
 		b.WriteString(" No agent selected\n")
 	}
@@ -1258,8 +1334,7 @@ func (s PipelineScreen) viewFooter() string {
 // --- Shared helper functions ---
 
 // renderActivityLog renders recent tool activities as a multi-line vertical log.
-func renderActivityLog(activities []orchestrator.Activity, width int) string {
-	const maxShow = 8
+func renderActivityLog(activities []orchestrator.Activity, width int, cwd string, maxShow int) string {
 	start := 0
 	if len(activities) > maxShow {
 		start = len(activities) - maxShow
@@ -1268,10 +1343,13 @@ func renderActivityLog(activities []orchestrator.Activity, width int) string {
 
 	var b strings.Builder
 	for _, act := range recent {
-		toolLabel := activityToolStyle.Render(fmt.Sprintf(" %-10s", act.Tool))
+		toolName := act.Tool
+		icon := icons.ForAction(toolName)
+
+		toolLabel := activityToolStyle.Render(fmt.Sprintf(" %s %-10s", icon, toolName))
 		detail := act.Detail
 		if isFilePathTool(act.Tool) && detail != "" {
-			detail = fileHyperlink(detail)
+			detail = fileHyperlink(detail, cwd)
 			b.WriteString(toolLabel + " " + activityPathStyle.Render(detail))
 		} else {
 			b.WriteString(toolLabel + " " + activityDetailStyle.Render(detail))
@@ -1329,11 +1407,12 @@ func isFilePathTool(tool string) bool {
 }
 
 // fileHyperlink wraps a file path in an OSC 8 terminal hyperlink sequence.
-func fileHyperlink(path string) string {
+func fileHyperlink(path string, cwd string) string {
+	absPath := path
 	if !strings.HasPrefix(path, "/") {
-		return path
+		absPath = filepath.Join(cwd, path)
 	}
-	return fmt.Sprintf("\033]8;;file://%s\033\\%s\033]8;;\033\\", path, filepath.Base(path))
+	return fmt.Sprintf("\033]8;;file://%s\033\\%s\033]8;;\033\\", absPath, path)
 }
 
 // formatTokens renders a token count in compact form (e.g., 1.2k, 12.4k, 128k).

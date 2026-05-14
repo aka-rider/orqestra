@@ -9,7 +9,7 @@ func TestCheckPlanHealth(t *testing.T) {
 	tests := []struct {
 		name     string
 		markdown string
-		wantWarn []string 
+		wantWarn []string
 	}{
 		{
 			name: "healthy plan",

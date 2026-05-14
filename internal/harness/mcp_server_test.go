@@ -65,7 +65,7 @@ func TestHandleMCPRequest_ToolsList(t *testing.T) {
 
 	// Verify schema has 'question' as required
 	var schema struct {
-		Required []string `json:"required"`
+		Required   []string       `json:"required"`
 		Properties map[string]any `json:"properties"`
 	}
 	if err := json.Unmarshal(result.Tools[0].InputSchema, &schema); err != nil {

@@ -31,7 +31,7 @@ func CheckPlanHealth(md string) []string {
 		if !entering {
 			return ast.WalkContinue, nil
 		}
-		
+
 		switch n.Kind() {
 		case ast.KindHeading:
 			hasHeading = true
@@ -44,9 +44,9 @@ func CheckPlanHealth(md string) []string {
 	if !hasHeading && len(stripped) > 0 {
 		warnings = append(warnings, "Plan has zero headings (expected structured markdown)")
 	}
-	
-	// Unclosed code fences are hard to reliably detect purely through Goldmark's AST 
-	// because goldmark often parses broken blocks as text/paragraphs. 
+
+	// Unclosed code fences are hard to reliably detect purely through Goldmark's AST
+	// because goldmark often parses broken blocks as text/paragraphs.
 	// As a fast structural heuristic, we can count the number of code fence markers.
 	fences := strings.Count(md, "```")
 	if fences%2 != 0 {
@@ -56,11 +56,11 @@ func CheckPlanHealth(md string) []string {
 		warnings = append(warnings, "Plan contains an unclosed code fence")
 	}
 
-	// Truncation check: last alphanumeric character 
+	// Truncation check: last alphanumeric character
 	if len(stripped) > 0 {
 		lastChar := stripped[len(stripped)-1]
 		if lastChar != '.' && lastChar != '!' && lastChar != '?' && lastChar != '`' && lastChar != '>' && lastChar != '*' && lastChar != '_' {
-			// Check if it ends mid-sentence 
+			// Check if it ends mid-sentence
 			if lastChar >= 'a' && lastChar <= 'z' || lastChar >= 'A' && lastChar <= 'Z' {
 				warnings = append(warnings, "Plan appears to end abruptly mid-sentence (truncation)")
 			}
