@@ -88,6 +88,32 @@ func (s *RunDetailScreen) LoadStepLog() {
 		return
 	}
 
+	// Prefer local copy in session directory.
+	if step.ClaudeSessionLogPath != "" {
+		if _, statErr := os.Stat(step.ClaudeSessionLogPath); statErr == nil {
+			entries, err := harness.ParseSessionLog(step.ClaudeSessionLogPath, 200)
+			if err != nil || len(entries) == 0 {
+				s.logLines = []string{dimStyle.Render("  (empty log)")}
+				s.logVP.SetContent(strings.Join(s.logLines, "\n"))
+				return
+			}
+			s.logLines = make([]string, 0, len(entries))
+			for _, entry := range entries {
+				switch entry.Kind {
+				case harness.LogEntryToolUse:
+					line := "  " + activityToolStyle.Render(entry.ToolName) + " " + activityPathStyle.Render(entry.Detail)
+					s.logLines = append(s.logLines, line)
+				case harness.LogEntryText:
+					line := "  ╶ " + dimStyle.Render(entry.Detail)
+					s.logLines = append(s.logLines, line)
+				}
+			}
+			s.logVP.SetContent(strings.Join(s.logLines, "\n"))
+			s.logVP.GotoBottom()
+			return
+		}
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		s.logLines = []string{dimStyle.Render("  (cannot determine cwd)")}
@@ -132,6 +158,17 @@ func (s RunDetailScreen) openStepLog() (RunDetailScreen, tea.Cmd) {
 	step := s.detail.Steps[s.stepCursor]
 	if step.ClaudeSessionID == "" {
 		return s, nil
+	}
+
+	// Prefer local copy.
+	if step.ClaudeSessionLogPath != "" {
+		if _, statErr := os.Stat(step.ClaudeSessionLogPath); statErr == nil {
+			cmd := exec.Command("open", step.ClaudeSessionLogPath)
+			if err := cmd.Start(); err != nil {
+				_ = err // fire-and-forget: opening external editor for log file
+			}
+			return s, nil
+		}
 	}
 
 	cwd, err := os.Getwd()
