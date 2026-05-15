@@ -2,6 +2,7 @@ package harness
 
 import (
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 
@@ -238,6 +239,105 @@ func TestBuildFinalArgs_InlineWithStrict_KeepsStrict(t *testing.T) {
 			}
 			break
 		}
+	}
+}
+
+// mockSink captures tool-use notifications for test assertions.
+type mockSink struct {
+	buf   strings.Builder
+	tools []string
+}
+
+func (m *mockSink) Write(p []byte) (int, error) {
+	return m.buf.Write(p)
+}
+
+func (m *mockSink) OnToolUse(name, detail string) {
+	m.tools = append(m.tools, name+":"+detail)
+}
+
+func TestDispatchStreamEvent(t *testing.T) {
+	cases := []struct {
+		name       string
+		eventJSON  string
+		nilDisplay bool
+		wantText   string
+		wantTools  []string
+	}{
+		{
+			name:      "content_block_delta writes text",
+			eventJSON: `{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}`,
+			wantText:  "hello",
+		},
+		{
+			name:      "assistant text is written",
+			eventJSON: `{"type":"assistant","message":{"content":[{"type":"text","text":"thinking..."}]}}`,
+			wantText:  "thinking...",
+		},
+		{
+			name:      "assistant tool_use fires OnToolUse",
+			eventJSON: `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"main.go"}}]}}`,
+			wantTools: []string{"Read:main.go"},
+		},
+		{
+			name:      "content_block_start fires OnToolUse",
+			eventJSON: `{"type":"content_block_start","content_block":{"type":"tool_use","name":"Bash","input":{"command":"go test ./..."}}}`,
+			wantTools: []string{"Bash:go test ./..."},
+		},
+		{
+			name:      "stream_event wrapping content_block_delta writes text",
+			eventJSON: `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"streamed"}}}`,
+			wantText:  "streamed",
+		},
+		{
+			name:      "unknown event type is a no-op",
+			eventJSON: `{"type":"ping"}`,
+			wantText:  "",
+		},
+		{
+			name:       "nil display does not panic",
+			eventJSON:  `{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}`,
+			nilDisplay: true,
+			wantText:   "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var event streamEvent
+			if err := json.Unmarshal([]byte(tc.eventJSON), &event); err != nil {
+				t.Fatalf("unmarshal event: %v", err)
+			}
+
+			var sink *mockSink
+			var display io.Writer
+			if tc.nilDisplay {
+				display = nil
+			} else {
+				sink = &mockSink{}
+				display = sink
+			}
+
+			dispatchStreamEvent(event, display) // must not panic
+
+			if sink == nil {
+				return // nil display case; just verifying no panic
+			}
+			if got := sink.buf.String(); got != tc.wantText {
+				t.Errorf("text: got %q, want %q", got, tc.wantText)
+			}
+			if len(tc.wantTools) == 0 && len(sink.tools) != 0 {
+				t.Errorf("unexpected tool calls: %v", sink.tools)
+			}
+			for i, want := range tc.wantTools {
+				if i >= len(sink.tools) {
+					t.Errorf("missing tool call[%d]: want %q", i, want)
+					continue
+				}
+				if sink.tools[i] != want {
+					t.Errorf("tool[%d]: got %q, want %q", i, sink.tools[i], want)
+				}
+			}
+		})
 	}
 }
 

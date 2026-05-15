@@ -274,46 +274,8 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 			sessionID = event.SessionID
 		}
 
+		dispatchStreamEvent(event, stdout)
 		switch event.Type {
-		case "assistant":
-			if text := event.extractAssistantText(); text != "" {
-				stdout.Write([]byte(text))
-			}
-			if sink, ok := stdout.(ActivitySink); ok {
-				for _, tu := range event.extractAssistantToolUses() {
-					sink.OnToolUse(tu.Name, ToolDetail(tu.Name, tu.Input))
-				}
-			}
-		case "content_block_delta":
-			if event.Delta.Text != "" {
-				stdout.Write([]byte(event.Delta.Text))
-			}
-		case "content_block_start":
-			if sink, ok := stdout.(ActivitySink); ok {
-				if name, args := event.extractToolUse(); name != "" {
-					sink.OnToolUse(name, ToolDetail(name, args))
-				}
-			}
-		case "stream_event":
-			if event.Event == nil {
-				continue
-			}
-			var inner streamEvent
-			if err := json.Unmarshal(event.Event, &inner); err != nil {
-				continue
-			}
-			switch inner.Type {
-			case "content_block_start":
-				if sink, ok := stdout.(ActivitySink); ok {
-					if name, args := inner.extractToolUse(); name != "" {
-						sink.OnToolUse(name, ToolDetail(name, args))
-					}
-				}
-			case "content_block_delta":
-				if inner.Delta.Text != "" {
-					stdout.Write([]byte(inner.Delta.Text))
-				}
-			}
 		case "result":
 			result = event.Result
 			resultIsError = event.IsError
@@ -398,46 +360,8 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 		if event.SessionID != "" {
 			newSessionID = event.SessionID
 		}
+		dispatchStreamEvent(event, stdout)
 		switch event.Type {
-		case "assistant":
-			if text := event.extractAssistantText(); text != "" && stdout != nil {
-				stdout.Write([]byte(text))
-			}
-			if sink, ok := stdout.(ActivitySink); ok {
-				for _, tu := range event.extractAssistantToolUses() {
-					sink.OnToolUse(tu.Name, ToolDetail(tu.Name, tu.Input))
-				}
-			}
-		case "content_block_delta":
-			if event.Delta.Text != "" && stdout != nil {
-				stdout.Write([]byte(event.Delta.Text))
-			}
-		case "content_block_start":
-			if sink, ok := stdout.(ActivitySink); ok {
-				if name, args := event.extractToolUse(); name != "" {
-					sink.OnToolUse(name, ToolDetail(name, args))
-				}
-			}
-		case "stream_event":
-			if event.Event == nil {
-				continue
-			}
-			var inner streamEvent
-			if err := json.Unmarshal(event.Event, &inner); err != nil {
-				continue
-			}
-			switch inner.Type {
-			case "content_block_start":
-				if sink, ok := stdout.(ActivitySink); ok {
-					if name, args := inner.extractToolUse(); name != "" {
-						sink.OnToolUse(name, ToolDetail(name, args))
-					}
-				}
-			case "content_block_delta":
-				if inner.Delta.Text != "" {
-					stdout.Write([]byte(inner.Delta.Text))
-				}
-			}
 		case "result":
 			result = event.Result
 			resultIsError = event.IsError
@@ -564,6 +488,57 @@ func (e *streamEvent) extractToolUse() (name string, args json.RawMessage) {
 		return block.Name, block.Input
 	}
 	return "", nil
+}
+
+// dispatchStreamEvent writes the human-readable content of a single stream-json
+// event to display, and fires OnToolUse on display if it implements ActivitySink.
+// Used by both ClaudeCLI and SandboxCLIRunner to avoid duplicating the switch logic.
+// display may be nil (e.g. orchestrator commit-message RunContinue(..., nil)).
+func dispatchStreamEvent(event streamEvent, display io.Writer) {
+	if display == nil {
+		return
+	}
+	switch event.Type {
+	case "assistant":
+		if text := event.extractAssistantText(); text != "" {
+			display.Write([]byte(text)) // nolint:errcheck — best-effort stream display
+		}
+		if sink, ok := display.(ActivitySink); ok {
+			for _, tu := range event.extractAssistantToolUses() {
+				sink.OnToolUse(tu.Name, ToolDetail(tu.Name, tu.Input))
+			}
+		}
+	case "content_block_delta":
+		if event.Delta.Text != "" {
+			display.Write([]byte(event.Delta.Text)) // nolint:errcheck
+		}
+	case "content_block_start":
+		if sink, ok := display.(ActivitySink); ok {
+			if name, args := event.extractToolUse(); name != "" {
+				sink.OnToolUse(name, ToolDetail(name, args))
+			}
+		}
+	case "stream_event":
+		if event.Event == nil {
+			return
+		}
+		var inner streamEvent
+		if err := json.Unmarshal(event.Event, &inner); err != nil {
+			return
+		}
+		switch inner.Type {
+		case "content_block_start":
+			if sink, ok := display.(ActivitySink); ok {
+				if name, args := inner.extractToolUse(); name != "" {
+					sink.OnToolUse(name, ToolDetail(name, args))
+				}
+			}
+		case "content_block_delta":
+			if inner.Delta.Text != "" {
+				display.Write([]byte(inner.Delta.Text)) // nolint:errcheck
+			}
+		}
+	}
 }
 
 // BuildModelEnv returns the environment variables needed to route the claude binary
