@@ -3,13 +3,16 @@
 package harness
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os/exec"
 	"strings"
+	"syscall"
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/sandbox"
@@ -69,7 +72,7 @@ func (r *SandboxCLIRunner) RunPrint(ctx context.Context, prompt, systemPrompt st
 // RunStreaming runs the claude CLI with streaming output under seatbelt.
 func (r *SandboxCLIRunner) RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (RunResult, error) {
 	args := r.buildCommand(prompt, systemPrompt, true)
-	output, err := r.run(ctx, args, stdout)
+	output, err := r.runParsed(ctx, args, stdout)
 	if err != nil {
 		return RunResult{Output: output}, err
 	}
@@ -79,7 +82,7 @@ func (r *SandboxCLIRunner) RunStreaming(ctx context.Context, prompt, systemPromp
 // RunContinue resumes a previous session under seatbelt.
 func (r *SandboxCLIRunner) RunContinue(ctx context.Context, sessionID, prompt string, stdout io.Writer) (RunResult, error) {
 	args := []string{"claude", "--resume", sessionID, "--dangerously-skip-permissions", "-p", prompt, "--output-format", "stream-json", "--verbose"}
-	output, err := r.run(ctx, args, stdout)
+	output, err := r.runParsed(ctx, args, stdout)
 	if err != nil {
 		return RunResult{Output: output}, err
 	}
@@ -115,9 +118,6 @@ func (r *SandboxCLIRunner) run(ctx context.Context, args []string, stdout io.Wri
 	defer sb.Close()
 
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	if err := sb.Wrap(cmd); err != nil {
-		return "", fmt.Errorf("sandbox cli runner wrap: %w", err)
-	}
 
 	var outBuf bytes.Buffer
 	if stdout != nil {
@@ -133,6 +133,89 @@ func (r *SandboxCLIRunner) run(ctx context.Context, args []string, stdout io.Wri
 	}
 
 	return outBuf.String(), nil
+}
+
+// runParsed executes the sandboxed command, parses each stream-json line,
+// writes human-readable text and tool activities to display, and returns
+// the full raw NDJSON output for post-processing (usage + session ID extraction).
+// display may be nil; dispatchStreamEvent handles nil safely.
+func (r *SandboxCLIRunner) runParsed(ctx context.Context, args []string, display io.Writer) (string, error) {
+	sb, err := sandbox.New(sandbox.Config{
+		RepoPath:     r.repoPath,
+		RepoWritable: r.writable,
+		WorktreePath: r.worktreePath,
+		Profiles:     r.profiles,
+		HarnessEnv:   r.env,
+		ProxyEnv:     r.cfg.ProxyEnv,
+		ExtraEnv:     r.cfg.ExtraEnv,
+	})
+	if err != nil {
+		return "", fmt.Errorf("sandbox cli runner: %w", err)
+	}
+	defer sb.Close()
+
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	// Wrap applies sandbox-exec trampoline, env, Setpgid=true, and working dir.
+	// StdoutPipe must be called after Wrap (Wrap does not touch cmd.Stdout).
+	if err := sb.Wrap(cmd); err != nil {
+		return "", fmt.Errorf("sandbox cli runner wrap: %w", err)
+	}
+
+	cmdStdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("sandbox cli runner stdout pipe: %w", err)
+	}
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("sandbox cli runner start: %w", err)
+	}
+
+	// Kill the process group on context cancellation.
+	// Wrap sets Setpgid=true, so -cmd.Process.Pid kills all children.
+	// The done channel prevents a goroutine leak when the process finishes normally.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			if cmd.Process != nil {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // fire-and-forget: best-effort cleanup after caller cancellation
+			}
+		case <-done:
+		}
+	}()
+
+	var rawBuf bytes.Buffer
+	scanner := bufio.NewScanner(cmdStdout)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		rawBuf.Write(line)
+		rawBuf.WriteByte('\n')
+		if len(line) == 0 {
+			continue
+		}
+		var event streamEvent
+		if err := json.Unmarshal(line, &event); err != nil {
+			slog.Debug("non-JSON stream line from sandbox cli", "line_len", len(line))
+			if display != nil {
+				display.Write(line)         // nolint:errcheck
+				display.Write([]byte("\n")) // nolint:errcheck
+			}
+			continue
+		}
+		dispatchStreamEvent(event, display) // nil-safe: dispatchStreamEvent guards display == nil
+	}
+	if err := scanner.Err(); err != nil {
+		return rawBuf.String(), fmt.Errorf("sandbox cli runner scan: %w", err)
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return rawBuf.String(), fmt.Errorf("sandbox cli runner exec: %w (stderr: %s)", err, errBuf.String())
+	}
+	return rawBuf.String(), nil
 }
 
 // extractJSONUsage parses token usage from a claude --output-format json response.
