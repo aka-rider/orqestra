@@ -76,7 +76,7 @@ func (r *SandboxCLIRunner) RunStreaming(ctx context.Context, prompt, systemPromp
 	if err != nil {
 		return RunResult{Output: output}, err
 	}
-	return RunResult{Output: output, Usage: extractStreamUsage(output), SessionID: extractStreamSessionID(output)}, nil
+	return RunResult{Output: extractStreamResult(output), Usage: extractStreamUsage(output), SessionID: extractStreamSessionID(output)}, nil
 }
 
 // RunContinue resumes a previous session under seatbelt.
@@ -86,7 +86,7 @@ func (r *SandboxCLIRunner) RunContinue(ctx context.Context, sessionID, prompt st
 	if err != nil {
 		return RunResult{Output: output}, err
 	}
-	return RunResult{Output: output, Usage: extractStreamUsage(output), SessionID: extractStreamSessionID(output)}, nil
+	return RunResult{Output: extractStreamResult(output), Usage: extractStreamUsage(output), SessionID: extractStreamSessionID(output)}, nil
 }
 
 func (r *SandboxCLIRunner) buildCommand(prompt, systemPrompt string, streaming bool) []string {
@@ -275,6 +275,28 @@ func extractStreamSessionID(raw string) string {
 		}
 		if event.SessionID != "" {
 			return event.SessionID
+		}
+	}
+	return ""
+}
+
+// extractStreamResult scans stream-json lines for the result event and returns
+// the model's text output. Returns an empty string if no result event is found.
+func extractStreamResult(raw string) string {
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var event struct {
+			Type   string `json:"type"`
+			Result string `json:"result"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+		if event.Type == "result" && event.Result != "" {
+			return event.Result
 		}
 	}
 	return ""
