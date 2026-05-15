@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -16,19 +17,6 @@ import (
 	"github.com/xiii/orqestra/internal/plan"
 	"github.com/xiii/orqestra/internal/worktree"
 )
-
-// stepMeta is the per-agent metadata persisted as JSON in the session directory.
-type stepMeta struct {
-	AgentID         string    `json:"agent_id"`
-	ModelRef        string    `json:"model_ref,omitempty"`
-	StartTime       time.Time `json:"start_time"`
-	EndTime         time.Time `json:"end_time"`
-	ClaudeSessionID string    `json:"claude_session_id,omitempty"`
-	Status          string    `json:"status"` // "done" or "failed"
-	Error           string    `json:"error,omitempty"`
-	InputTokens     int64     `json:"input_tokens"`
-	OutputTokens    int64     `json:"output_tokens"`
-}
 
 // Activity records a single tool invocation observed in the agent stream.
 type Activity struct {
@@ -382,6 +370,11 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		writeArtifact(session, "prompt.md", input.Prompt)
 	}
 
+	cwd := ""
+	if session.Path != "" {
+		cwd = filepath.Dir(filepath.Dir(filepath.Dir(session.Path)))
+	}
+
 	// --- Question Bridge ---
 	if e.QuestionBridge != nil {
 		if err := e.QuestionBridge.Start(ctx); err != nil {
@@ -462,20 +455,32 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			}
 		}
 		if err != nil {
-			writeArtifactJSON(session, "researcher_meta.json", stepMeta{
+			researchLogCopy, cpErr := agent.CopySessionLog(session, cwd, researchSessionID, "researcher_session.jsonl")
+			if cpErr != nil {
+				slog.Warn("copy session log", "agent", "researcher", "err", cpErr)
+			}
+			writeArtifactJSON(session, "researcher_meta.json", agent.StepMeta{
 				AgentID: "researcher", ModelRef: e.Config.Researcher.Model, StartTime: researchStart, EndTime: time.Now(),
 				ClaudeSessionID: researchSessionID, Status: "failed", Error: err.Error(),
+				ClaudeProjectPath:    claudeProjectPath(session),
+				ClaudeSessionLogPath: researchLogCopy,
 			})
 			emit(Event{Type: EventAgentFailed, AgentID: "researcher", Err: err})
 			emit(Event{Type: EventError, Err: fmt.Errorf("research: %w", err)})
 			return
 		}
 
+		researchLogCopy, cpErr := agent.CopySessionLog(session, cwd, researchSessionID, "researcher_session.jsonl")
+		if cpErr != nil {
+			slog.Warn("copy session log", "agent", "researcher", "err", cpErr)
+		}
 		writeArtifact(session, "researcher_draft.md", draft.Markdown)
-		writeArtifactJSON(session, "researcher_meta.json", stepMeta{
+		writeArtifactJSON(session, "researcher_meta.json", agent.StepMeta{
 			AgentID: "researcher", ModelRef: e.Config.Researcher.Model, StartTime: researchStart, EndTime: time.Now(),
 			ClaudeSessionID: researchSessionID, Status: "done",
 			InputTokens: draftUsage.InputTokens, OutputTokens: draftUsage.OutputTokens,
+			ClaudeProjectPath:    claudeProjectPath(session),
+			ClaudeSessionLogPath: researchLogCopy,
 		})
 		emit(Event{Type: EventAgentDone, AgentID: "researcher",
 			InputTokens: draftUsage.InputTokens, OutputTokens: draftUsage.OutputTokens,
@@ -509,19 +514,41 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			}
 		}
 		if planErr != nil {
-			writeArtifactJSON(session, "architect_meta.json", stepMeta{
+			archLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_session.jsonl")
+			if cpErr != nil {
+				slog.Warn("copy session log", "agent", "architect", "err", cpErr)
+			}
+			archPlanFilePath := ""
+			if archLogCopy != "" {
+				archPlanFilePath, _ = harness.ExtractPlanFilePath(archLogCopy) // best-effort
+			}
+			writeArtifactJSON(session, "architect_meta.json", agent.StepMeta{
 				AgentID: "architect", ModelRef: e.Config.Architect.Model, StartTime: planStart, EndTime: time.Now(),
 				ClaudeSessionID: planSessionID, Status: "failed", Error: planErr.Error(),
+				ClaudeProjectPath:    claudeProjectPath(session),
+				ClaudeSessionLogPath: archLogCopy,
+				ClaudePlanFilePath:   archPlanFilePath,
 			})
 			emit(Event{Type: EventAgentFailed, AgentID: "architect", Err: planErr})
 			emit(Event{Type: EventError, Err: fmt.Errorf("planning: %w", planErr)})
 			return
 		}
 
-		writeArtifactJSON(session, "architect_meta.json", stepMeta{
+		archLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_session.jsonl")
+		if cpErr != nil {
+			slog.Warn("copy session log", "agent", "architect", "err", cpErr)
+		}
+		archPlanFilePath := ""
+		if archLogCopy != "" {
+			archPlanFilePath, _ = harness.ExtractPlanFilePath(archLogCopy) // best-effort
+		}
+		writeArtifactJSON(session, "architect_meta.json", agent.StepMeta{
 			AgentID: "architect", ModelRef: e.Config.Architect.Model, StartTime: planStart, EndTime: time.Now(),
 			ClaudeSessionID: planSessionID, Status: "done",
 			InputTokens: planUsage.InputTokens, OutputTokens: planUsage.OutputTokens,
+			ClaudeProjectPath:    claudeProjectPath(session),
+			ClaudeSessionLogPath: archLogCopy,
+			ClaudePlanFilePath:   archPlanFilePath,
 		})
 		emit(Event{Type: EventAgentDone, AgentID: "architect",
 			InputTokens: planUsage.InputTokens, OutputTokens: planUsage.OutputTokens})
@@ -564,20 +591,32 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			}
 		}
 		if criticErr != nil {
-			writeArtifactJSON(session, "critic_meta.json", stepMeta{
+			criticLogCopy, cpErr := agent.CopySessionLog(session, cwd, criticSessionID, "critic_session.jsonl")
+			if cpErr != nil {
+				slog.Warn("copy session log", "agent", "critic", "err", cpErr)
+			}
+			writeArtifactJSON(session, "critic_meta.json", agent.StepMeta{
 				AgentID: "critic", ModelRef: e.Config.Critic.Model, StartTime: criticStart, EndTime: time.Now(),
 				ClaudeSessionID: criticSessionID, Status: "failed", Error: criticErr.Error(),
+				ClaudeProjectPath:    claudeProjectPath(session),
+				ClaudeSessionLogPath: criticLogCopy,
 			})
 			emit(Event{Type: EventAgentFailed, AgentID: "critic", Err: criticErr})
 			emit(Event{Type: EventError, Err: fmt.Errorf("critic review: %w", criticErr)})
 			return
 		}
 
+		criticLogCopy, cpErr := agent.CopySessionLog(session, cwd, criticSessionID, "critic_session.jsonl")
+		if cpErr != nil {
+			slog.Warn("copy session log", "agent", "critic", "err", cpErr)
+		}
 		writeArtifact(session, "critic_report.md", criticResult.Markdown)
-		writeArtifactJSON(session, "critic_meta.json", stepMeta{
+		writeArtifactJSON(session, "critic_meta.json", agent.StepMeta{
 			AgentID: "critic", ModelRef: e.Config.Critic.Model, StartTime: criticStart, EndTime: time.Now(),
 			ClaudeSessionID: criticSessionID, Status: "done",
 			InputTokens: criticUsage.InputTokens, OutputTokens: criticUsage.OutputTokens,
+			ClaudeProjectPath:    claudeProjectPath(session),
+			ClaudeSessionLogPath: criticLogCopy,
 		})
 		emit(Event{Type: EventAgentDone, AgentID: "critic",
 			InputTokens: criticUsage.InputTokens, OutputTokens: criticUsage.OutputTokens})
@@ -594,21 +633,43 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		_ = chatResponse // architect may include reasoning alongside plan revision
 
 		if revErr != nil {
-			writeArtifactJSON(session, "architect_critic_revision_meta.json", stepMeta{
+			archCritRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_critic_revision_session.jsonl")
+			if cpErr != nil {
+				slog.Warn("copy session log", "agent", "architect", "err", cpErr)
+			}
+			archCritRevPlanFilePath := ""
+			if archCritRevLogCopy != "" {
+				archCritRevPlanFilePath, _ = harness.ExtractPlanFilePath(archCritRevLogCopy) // best-effort
+			}
+			writeArtifactJSON(session, "architect_critic_revision_meta.json", agent.StepMeta{
 				AgentID: "architect", ModelRef: e.Config.Architect.Model,
 				StartTime: revStart, EndTime: time.Now(),
 				ClaudeSessionID: planSessionID, Status: "failed", Error: revErr.Error(),
+				ClaudeProjectPath:    claudeProjectPath(session),
+				ClaudeSessionLogPath: archCritRevLogCopy,
+				ClaudePlanFilePath:   archCritRevPlanFilePath,
 			})
 			emit(Event{Type: EventAgentFailed, AgentID: "architect", Err: revErr})
 			emit(Event{Type: EventError, Err: fmt.Errorf("architect critic revision: %w", revErr)})
 			return
 		}
 
-		writeArtifactJSON(session, "architect_critic_revision_meta.json", stepMeta{
+		archCritRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_critic_revision_session.jsonl")
+		if cpErr != nil {
+			slog.Warn("copy session log", "agent", "architect", "err", cpErr)
+		}
+		archCritRevPlanFilePath := ""
+		if archCritRevLogCopy != "" {
+			archCritRevPlanFilePath, _ = harness.ExtractPlanFilePath(archCritRevLogCopy) // best-effort
+		}
+		writeArtifactJSON(session, "architect_critic_revision_meta.json", agent.StepMeta{
 			AgentID: "architect", ModelRef: e.Config.Architect.Model,
 			StartTime: revStart, EndTime: time.Now(),
 			ClaudeSessionID: planSessionID, Status: "done",
 			InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens,
+			ClaudeProjectPath:    claudeProjectPath(session),
+			ClaudeSessionLogPath: archCritRevLogCopy,
+			ClaudePlanFilePath:   archCritRevPlanFilePath,
 		})
 		emit(Event{Type: EventAgentDone, AgentID: "architect",
 			InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens})
@@ -691,21 +752,43 @@ planGate:
 					}
 
 					if err != nil {
-						writeArtifactJSON(session, "architect_revision_meta.json", stepMeta{
+						archRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_revision_session.jsonl")
+						if cpErr != nil {
+							slog.Warn("copy session log", "agent", "architect", "err", cpErr)
+						}
+						archRevPlanFilePath := ""
+						if archRevLogCopy != "" {
+							archRevPlanFilePath, _ = harness.ExtractPlanFilePath(archRevLogCopy) // best-effort
+						}
+						writeArtifactJSON(session, "architect_revision_meta.json", agent.StepMeta{
 							AgentID: "architect", ModelRef: e.Config.Architect.Model,
 							StartTime: revStart, EndTime: time.Now(),
 							ClaudeSessionID: planSessionID, Status: "failed", Error: err.Error(),
+							ClaudeProjectPath:    claudeProjectPath(session),
+							ClaudeSessionLogPath: archRevLogCopy,
+							ClaudePlanFilePath:   archRevPlanFilePath,
 						})
 						emit(Event{Type: EventAgentFailed, AgentID: "architect", Err: err})
 						emit(Event{Type: EventError, Err: fmt.Errorf("architect revision: %w", err)})
 						return
 					}
 
-					writeArtifactJSON(session, "architect_revision_meta.json", stepMeta{
+					archRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_revision_session.jsonl")
+					if cpErr != nil {
+						slog.Warn("copy session log", "agent", "architect", "err", cpErr)
+					}
+					archRevPlanFilePath := ""
+					if archRevLogCopy != "" {
+						archRevPlanFilePath, _ = harness.ExtractPlanFilePath(archRevLogCopy) // best-effort
+					}
+					writeArtifactJSON(session, "architect_revision_meta.json", agent.StepMeta{
 						AgentID: "architect", ModelRef: e.Config.Architect.Model,
 						StartTime: revStart, EndTime: time.Now(),
 						ClaudeSessionID: planSessionID, Status: "done",
 						InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens,
+						ClaudeProjectPath:    claudeProjectPath(session),
+						ClaudeSessionLogPath: archRevLogCopy,
+						ClaudePlanFilePath:   archRevPlanFilePath,
 					})
 					emit(Event{Type: EventAgentDone, AgentID: "architect",
 						InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens})
@@ -788,20 +871,27 @@ planGate:
 				slog.Warn("worktree cleanup failed", "err", rmErr)
 			}
 		}
-		writeArtifactJSON(session, "worker_meta.json", stepMeta{
+		writeArtifactJSON(session, "worker_meta.json", agent.StepMeta{
 			AgentID: "worker", ModelRef: e.Config.Worker.Model, StartTime: workerStart, EndTime: time.Now(),
 			Status: "failed", Error: execErr.Error(),
+			ClaudeProjectPath: claudeProjectPath(session),
 		})
 		emit(Event{Type: EventAgentFailed, AgentID: "worker", Err: execErr})
 		emit(Event{Type: EventError, Err: execErr})
 		return
 	}
 
+	workerLogCopy, cpErr := agent.CopySessionLog(session, cwd, workResult.SessionID, "worker_session.jsonl")
+	if cpErr != nil {
+		slog.Warn("copy session log", "agent", "worker", "err", cpErr)
+	}
 	writeArtifact(session, "worker_output.txt", workResult.Output)
-	writeArtifactJSON(session, "worker_meta.json", stepMeta{
+	writeArtifactJSON(session, "worker_meta.json", agent.StepMeta{
 		AgentID: "worker", ModelRef: e.Config.Worker.Model, StartTime: workerStart, EndTime: time.Now(),
 		ClaudeSessionID: workResult.SessionID, Status: "done",
 		InputTokens: workResult.Usage.InputTokens, OutputTokens: workResult.Usage.OutputTokens,
+		ClaudeProjectPath:    claudeProjectPath(session),
+		ClaudeSessionLogPath: workerLogCopy,
 	})
 	emit(Event{Type: EventAgentDone, AgentID: "worker", WorkOutput: workResult.Output,
 		InputTokens: workResult.Usage.InputTokens, OutputTokens: workResult.Usage.OutputTokens})
@@ -828,9 +918,15 @@ planGate:
 		valResult, valErr := workerRunner.RunContinue(ctx, workResult.SessionID, validationPrompt, &streamWriter{buf: stream})
 		if valErr != nil {
 			slog.Warn("worker self-validation failed", "err", valErr)
-			writeArtifactJSON(session, "validator_meta.json", stepMeta{
+			valLogCopy, cpErr := agent.CopySessionLog(session, cwd, workResult.SessionID, "validator_session.jsonl")
+			if cpErr != nil {
+				slog.Warn("copy session log", "agent", "validator", "err", cpErr)
+			}
+			writeArtifactJSON(session, "validator_meta.json", agent.StepMeta{
 				AgentID: "validator", ModelRef: e.Config.Worker.Model, StartTime: valStart, EndTime: time.Now(),
 				ClaudeSessionID: workResult.SessionID, Status: "failed", Error: valErr.Error(),
+				ClaudeProjectPath:    claudeProjectPath(session),
+				ClaudeSessionLogPath: valLogCopy,
 			})
 			emit(Event{Type: EventAgentFailed, AgentID: "validator", Err: valErr})
 			// Non-fatal: proceed with whatever output we have
@@ -839,10 +935,16 @@ planGate:
 			if valResult.SessionID != "" {
 				lastSessionID = valResult.SessionID
 			}
-			writeArtifactJSON(session, "validator_meta.json", stepMeta{
+			valLogCopy, cpErr := agent.CopySessionLog(session, cwd, valResult.SessionID, "validator_session.jsonl")
+			if cpErr != nil {
+				slog.Warn("copy session log", "agent", "validator", "err", cpErr)
+			}
+			writeArtifactJSON(session, "validator_meta.json", agent.StepMeta{
 				AgentID: "validator", ModelRef: e.Config.Worker.Model, StartTime: valStart, EndTime: time.Now(),
 				ClaudeSessionID: valResult.SessionID, Status: "done",
 				InputTokens: valResult.Usage.InputTokens, OutputTokens: valResult.Usage.OutputTokens,
+				ClaudeProjectPath:    claudeProjectPath(session),
+				ClaudeSessionLogPath: valLogCopy,
 			})
 			emit(Event{Type: EventAgentDone, AgentID: "validator",
 				InputTokens: valResult.Usage.InputTokens, OutputTokens: valResult.Usage.OutputTokens})
@@ -853,9 +955,10 @@ planGate:
 		valResult, valErr := workerRunner.RunStreaming(ctx, validationPrompt, "", &streamWriter{buf: stream})
 		if valErr != nil {
 			slog.Warn("disconnected validation failed", "err", valErr)
-			writeArtifactJSON(session, "validator_meta.json", stepMeta{
+			writeArtifactJSON(session, "validator_meta.json", agent.StepMeta{
 				AgentID: "validator", ModelRef: e.Config.Worker.Model, StartTime: valStart, EndTime: time.Now(),
 				Status: "failed", Error: valErr.Error(),
+				ClaudeProjectPath: claudeProjectPath(session),
 			})
 			emit(Event{Type: EventAgentFailed, AgentID: "validator", Err: valErr})
 		} else {
@@ -863,10 +966,16 @@ planGate:
 			if valResult.SessionID != "" {
 				lastSessionID = valResult.SessionID
 			}
-			writeArtifactJSON(session, "validator_meta.json", stepMeta{
+			discValLogCopy, cpErr := agent.CopySessionLog(session, cwd, valResult.SessionID, "validator_session.jsonl")
+			if cpErr != nil {
+				slog.Warn("copy session log", "agent", "validator", "err", cpErr)
+			}
+			writeArtifactJSON(session, "validator_meta.json", agent.StepMeta{
 				AgentID: "validator", ModelRef: e.Config.Worker.Model, StartTime: valStart, EndTime: time.Now(),
 				ClaudeSessionID: valResult.SessionID, Status: "done",
 				InputTokens: valResult.Usage.InputTokens, OutputTokens: valResult.Usage.OutputTokens,
+				ClaudeProjectPath:    claudeProjectPath(session),
+				ClaudeSessionLogPath: discValLogCopy,
 			})
 			emit(Event{Type: EventAgentDone, AgentID: "validator",
 				InputTokens: valResult.Usage.InputTokens, OutputTokens: valResult.Usage.OutputTokens})
@@ -998,6 +1107,24 @@ func writeArtifactJSON(session agent.SessionDir, name string, v any) {
 	if err := session.WriteArtifact(name, data); err != nil {
 		slog.Error("write artifact", "path", session.ArtifactPath(name), "err", err)
 	}
+}
+
+// claudeProjectPath returns the Claude project directory for the session's repo.
+// session.Path must be at <repoPath>/.orqestra/sessions/<name>/.
+func claudeProjectPath(session agent.SessionDir) string {
+	if session.Path == "" {
+		return ""
+	}
+	repoPath := filepath.Dir(filepath.Dir(filepath.Dir(session.Path)))
+	resolved, err := filepath.EvalSymlinks(repoPath)
+	if err != nil {
+		resolved = repoPath
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "projects", harness.CwdToDash(resolved))
 }
 
 // DefaultRunDirFactory returns a RunDirFactory that creates session directories

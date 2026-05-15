@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/xiii/orqestra/internal/harness"
 )
 
 // SessionDir manages the host-side session directory where pipeline artifacts accumulate.
@@ -60,8 +62,11 @@ type StepMeta struct {
 	ModelRef        string    `json:"model_ref,omitempty"`
 	StartTime       time.Time `json:"start_time"`
 	EndTime         time.Time `json:"end_time"`
-	ClaudeSessionID string    `json:"claude_session_id,omitempty"`
-	Status          string    `json:"status"` // "done" or "failed"
+	ClaudeSessionID     string    `json:"claude_session_id,omitempty"`
+	ClaudeProjectPath   string    `json:"claude_project_path,omitempty"`
+	ClaudeSessionLogPath string   `json:"claude_session_log_path,omitempty"`
+	ClaudePlanFilePath  string    `json:"claude_plan_file_path,omitempty"`
+	Status              string    `json:"status"` // "done" or "failed"
 	Error           string    `json:"error,omitempty"`
 	InputTokens     int64     `json:"input_tokens"`
 	OutputTokens    int64     `json:"output_tokens"`
@@ -198,6 +203,29 @@ func readStringArtifact(dir, name string) string {
 		return ""
 	}
 	return string(data)
+}
+
+// CopySessionLog copies the Claude CLI session JSONL for sessionID into this session
+// directory as destName (e.g., "researcher_session.jsonl").
+// repoPath is the repository root used to locate the source JSONL.
+// Returns ("", nil) if sessionID is empty or if the session dir is unset.
+// Returns ("", err) on IO failure — callers should slog.Warn and continue.
+func CopySessionLog(s SessionDir, repoPath, sessionID, destName string) (string, error) {
+	if sessionID == "" || s.Path == "" {
+		return "", nil
+	}
+	src, err := harness.ResolveSessionLogPath(repoPath, sessionID)
+	if err != nil {
+		return "", fmt.Errorf("copy session log: resolve %s: %w", sessionID, err)
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return "", fmt.Errorf("copy session log: read %s: %w", src, err)
+	}
+	if err := s.WriteArtifact(destName, data); err != nil {
+		return "", fmt.Errorf("copy session log: write %s: %w", destName, err)
+	}
+	return s.ArtifactPath(destName), nil
 }
 
 // lastStepStatus reads all *_meta.json in a directory and returns the status

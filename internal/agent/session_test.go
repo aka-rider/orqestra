@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/xiii/orqestra/internal/testutil"
 )
 
 func setupTestSessions(t *testing.T) string {
@@ -31,13 +33,14 @@ func setupTestSessions(t *testing.T) string {
 		Status:    "done",
 	})
 	writeMeta(t, sess1, "worker_meta.json", StepMeta{
-		AgentID:         "worker",
-		StartTime:       time.Date(2026, 5, 9, 10, 1, 0, 0, time.UTC),
-		EndTime:         time.Date(2026, 5, 9, 10, 5, 0, 0, time.UTC),
-		ClaudeSessionID: "sess-abc",
-		Status:          "done",
-		InputTokens:     1000,
-		OutputTokens:    500,
+		AgentID:              "worker",
+		StartTime:            time.Date(2026, 5, 9, 10, 1, 0, 0, time.UTC),
+		EndTime:              time.Date(2026, 5, 9, 10, 5, 0, 0, time.UTC),
+		ClaudeSessionID:      "sess-abc",
+		ClaudeSessionLogPath: "sessions/worker_session.jsonl",
+		Status:               "done",
+		InputTokens:          1000,
+		OutputTokens:         500,
 	})
 	os.WriteFile(filepath.Join(sess1, "final_plan.md"), []byte("# Plan\n\nDo stuff"), 0o644)
 	os.WriteFile(filepath.Join(sess1, "worker_output.txt"), []byte("done"), 0o644)
@@ -162,6 +165,9 @@ func TestLoadRunDetail_AllFields(t *testing.T) {
 	if detail.Steps[1].ClaudeSessionID != "sess-abc" {
 		t.Errorf("step 1 session ID = %q, want 'sess-abc'", detail.Steps[1].ClaudeSessionID)
 	}
+	if detail.Steps[1].ClaudeSessionLogPath != "sessions/worker_session.jsonl" {
+		t.Errorf("step 1 session log path = %q, want 'sessions/worker_session.jsonl'", detail.Steps[1].ClaudeSessionLogPath)
+	}
 }
 
 func TestLoadRunDetail_Duration(t *testing.T) {
@@ -202,5 +208,73 @@ func TestParseSessionDirName(t *testing.T) {
 		if slug != tt.wantSlug {
 			t.Errorf("parseSessionDirName(%q) slug = %q, want %q", tt.name, slug, tt.wantSlug)
 		}
+	}
+}
+
+func TestCopySessionLog_EmptySessionID(t *testing.T) {
+	tmp := t.TempDir()
+	sess, err := NewSessionDir(tmp, "test-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest, err := CopySessionLog(sess, tmp, "", "test.jsonl")
+	if err != nil {
+		t.Fatalf("expected nil error for empty sessionID, got: %v", err)
+	}
+	if dest != "" {
+		t.Fatalf("expected empty dest, got %q", dest)
+	}
+}
+
+func TestCopySessionLog_NotFound(t *testing.T) {
+	testutil.MustTempHome(t)
+	tmp := t.TempDir()
+	sess, err := NewSessionDir(tmp, "test-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest, err := CopySessionLog(sess, cwd, "nonexistent-session-id", "test.jsonl")
+	if err == nil {
+		t.Fatal("expected error for nonexistent session ID, got nil")
+	}
+	if dest != "" {
+		t.Fatalf("expected empty dest on error, got %q", dest)
+	}
+}
+
+func TestCopySessionLog_Success(t *testing.T) {
+	testutil.MustTempHome(t)
+	sessionID := "copy-test-session"
+	testutil.SetupPlanFile(t, sessionID, "# Plan\n\nTest")
+
+	tmp := t.TempDir()
+	sess, err := NewSessionDir(tmp, "test-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dest, err := CopySessionLog(sess, cwd, sessionID, "researcher_session.jsonl")
+	if err != nil {
+		t.Fatalf("CopySessionLog: %v", err)
+	}
+	if dest == "" {
+		t.Fatal("expected non-empty dest path")
+	}
+
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("reading copy: %v", err)
+	}
+	if len(data) == 0 {
+		t.Error("copied file is empty")
 	}
 }
