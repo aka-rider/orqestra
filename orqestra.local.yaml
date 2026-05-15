@@ -7,7 +7,6 @@
 providers:
   llama-cpp:
     base_url: http://192.168.50.212:11434
-    type: openai
 
 models:
   large:
@@ -25,15 +24,22 @@ models:
 researcher:
   model: medium
   mcp_servers:
-    - MCP_DOCKER
+    - mcp_docker
+    - orqestra
 
 architect:
   model: large
+  mcp_servers:
+    - mcp_docker
+    - orqestra
 
 worker:
   model: medium
   timeout: 30m
   parallelism: 0
+  mcp_servers:
+    - mcp_docker
+    - orqestra
 
 sandbox:
   max_lifetime: 35m
