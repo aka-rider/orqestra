@@ -47,11 +47,12 @@ type ContinuableRunner interface {
 
 // ClaudeCLI executes the `claude` binary as a subprocess.
 type ClaudeCLI struct {
-	resolved         config.ResolvedModel
-	small            *config.ResolvedModel // optional small/fast model
-	extraArgs        []string
-	binary           string                  // path to claude binary, defaults to "claude"
-	inlineMCPServers map[string]inlineMCPDef // MCP servers injected at runtime
+	resolved           config.ResolvedModel
+	small              *config.ResolvedModel // optional small/fast model
+	extraArgs          []string
+	binary             string                  // path to claude binary, defaults to "claude"
+	inlineMCPServers   map[string]inlineMCPDef // MCP servers injected at runtime
+	appendSystemPrompt string                  // text appended to default system prompt via --append-system-prompt
 }
 
 // inlineMCPDef defines an MCP server to inject into --mcp-config.
@@ -141,13 +142,23 @@ func WithMCPServers(names []string) ClaudeCLIOption {
 // WithAllowedTools restricts the CLI to only the specified tools.
 // Tool names support patterns (e.g. "mcp__context7__*", "Read", "Grep").
 func WithAllowedTools(tools []string) ClaudeCLIOption {
-	return WithExtraArgs("--allowed-tools", strings.Join(tools, ","))
+	return WithExtraArgs("--allowedTools", strings.Join(tools, ","))
 }
 
 // WithDisallowedTools blocks the specified tools from the CLI.
 // Tool names support patterns (e.g. "mcp__MCP_DOCKER__*", "Bash").
 func WithDisallowedTools(tools []string) ClaudeCLIOption {
-	return WithExtraArgs("--disallowed-tools", strings.Join(tools, ","))
+	return WithExtraArgs("--disallowedTools", strings.Join(tools, ","))
+}
+
+// WithAppendSystemPrompt appends text to the default system prompt via
+// --append-system-prompt. Unlike --system-prompt (which replaces), this
+// preserves Claude Code's default identity, tool guidance, and safety
+// instructions while adding extra rules.
+func WithAppendSystemPrompt(text string) ClaudeCLIOption {
+	return func(c *ClaudeCLI) {
+		c.appendSystemPrompt = text
+	}
 }
 
 // WithPermissionMode sets the --permission-mode flag (e.g. "plan", "default").
@@ -192,6 +203,9 @@ func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
 	}
+	if c.appendSystemPrompt != "" {
+		args = append(args, "--append-system-prompt", c.appendSystemPrompt)
+	}
 	args = append(args, c.buildFinalArgs()...)
 
 	cmd := exec.CommandContext(ctx, c.binary, args...)
@@ -230,6 +244,9 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
 	}
+	if c.appendSystemPrompt != "" {
+		args = append(args, "--append-system-prompt", c.appendSystemPrompt)
+	}
 	args = append(args, c.buildFinalArgs()...)
 
 	cmd := exec.CommandContext(ctx, c.binary, args...)
@@ -252,48 +269,7 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 	var usage TokenUsage
 	var sessionID string
 	var planFilePath string
-	scanner := bufio.NewScanner(cmdStdout)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large lines
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		var event streamEvent
-		if err := json.Unmarshal(line, &event); err != nil {
-			// Not valid JSON — write raw to stdout and log for diagnostics
-			slog.Debug("non-JSON stream line from claude CLI", "err", err, "line_len", len(line))
-			stdout.Write(line)
-			stdout.Write([]byte("\n"))
-			continue
-		}
-
-		// Capture session ID from any event that includes it
-		if event.SessionID != "" {
-			sessionID = event.SessionID
-		}
-
-		dispatchStreamEvent(event, stdout)
-		switch event.Type {
-		case "result":
-			result = event.Result
-			resultIsError = event.IsError
-			if event.SessionID != "" {
-				sessionID = event.SessionID
-			}
-			if event.PlanFilePath != "" {
-				planFilePath = event.PlanFilePath
-			}
-			if event.Usage != nil {
-				usage = TokenUsage{
-					InputTokens:  event.Usage.InputTokens,
-					OutputTokens: event.Usage.OutputTokens,
-					TotalTokens:  event.Usage.InputTokens + event.Usage.OutputTokens,
-				}
-			}
-		}
-	}
+	result, resultIsError, usage, sessionID, planFilePath = parseStream(cmdStdout, stdout)
 
 	cmdErr := cmd.Wait()
 	if cmdErr != nil {
@@ -342,44 +318,7 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 	var usage TokenUsage
 	var newSessionID string
 	var planFilePath string
-	scanner := bufio.NewScanner(cmdStdout)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var event streamEvent
-		if err := json.Unmarshal(line, &event); err != nil {
-			if stdout != nil {
-				stdout.Write(line)
-				stdout.Write([]byte("\n"))
-			}
-			continue
-		}
-		if event.SessionID != "" {
-			newSessionID = event.SessionID
-		}
-		dispatchStreamEvent(event, stdout)
-		switch event.Type {
-		case "result":
-			result = event.Result
-			resultIsError = event.IsError
-			if event.SessionID != "" {
-				newSessionID = event.SessionID
-			}
-			if event.PlanFilePath != "" {
-				planFilePath = event.PlanFilePath
-			}
-			if event.Usage != nil {
-				usage = TokenUsage{
-					InputTokens:  event.Usage.InputTokens,
-					OutputTokens: event.Usage.OutputTokens,
-					TotalTokens:  event.Usage.InputTokens + event.Usage.OutputTokens,
-				}
-			}
-		}
-	}
+	result, resultIsError, usage, newSessionID, planFilePath = parseStream(cmdStdout, stdout)
 
 	cmdErr := cmd.Wait()
 	if cmdErr != nil {
@@ -394,6 +333,56 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 	}
 
 	return RunResult{Output: result, Usage: usage, SessionID: newSessionID, PlanFilePath: planFilePath}, nil
+}
+
+// parseStream scans stream-json lines from r, dispatches display events to
+// display (nil-safe), and accumulates the result, error state, usage, session
+// ID, and plan file path from the result event. This is the single source of
+// truth for Claude CLI stream parsing — used by RunStreaming and RunContinue.
+func parseStream(r io.Reader, display io.Writer) (result string, isError bool, usage TokenUsage, sessionID, planFilePath string) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large JSON lines
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var event streamEvent
+		if err := json.Unmarshal(line, &event); err != nil {
+			slog.Debug("non-JSON stream line from claude CLI", "err", err, "line_len", len(line))
+			if display != nil {
+				display.Write(line)         // nolint:errcheck — best-effort stream display
+				display.Write([]byte("\n")) // nolint:errcheck
+			}
+			continue
+		}
+
+		if event.SessionID != "" {
+			sessionID = event.SessionID
+		}
+
+		dispatchStreamEvent(event, display)
+
+		if event.Type == "result" {
+			result = event.Result
+			isError = event.IsError
+			if event.SessionID != "" {
+				sessionID = event.SessionID
+			}
+			if event.PlanFilePath != "" {
+				planFilePath = event.PlanFilePath
+			}
+			if event.Usage != nil {
+				usage = TokenUsage{
+					InputTokens:  event.Usage.InputTokens,
+					OutputTokens: event.Usage.OutputTokens,
+					TotalTokens:  event.Usage.InputTokens + event.Usage.OutputTokens,
+				}
+			}
+		}
+	}
+	return
 }
 
 // streamEvent represents a parsed event from Claude CLI's stream-json output.

@@ -350,11 +350,55 @@ func TestBuildFinalArgs_NoAutoDisallowAskUserQuestion(t *testing.T) {
 	args := cli.buildFinalArgs()
 
 	for i, arg := range args {
-		if arg == "--disallowed-tools" && i+1 < len(args) {
+		if arg == "--disallowedTools" && i+1 < len(args) {
 			if strings.Contains(args[i+1], "AskUserQuestion") {
 				t.Error("buildFinalArgs should NOT auto-disallow AskUserQuestion")
 			}
 			break
 		}
 	}
+}
+
+func TestWithAppendSystemPrompt(t *testing.T) {
+	cli := NewClaudeCLI(config.ResolvedModel{Type: "anthropic"},
+		WithAppendSystemPrompt("Use the MCP tool for questions."),
+	)
+
+	if cli.appendSystemPrompt != "Use the MCP tool for questions." {
+		t.Errorf("appendSystemPrompt = %q, want %q", cli.appendSystemPrompt, "Use the MCP tool for questions.")
+	}
+}
+
+func TestWithAllowedTools_FlagName(t *testing.T) {
+	cli := NewClaudeCLI(config.ResolvedModel{Type: "anthropic"},
+		WithAllowedTools([]string{"Read", "mcp__orqestra__AskUserQuestion"}),
+	)
+
+	args := cli.buildFinalArgs()
+	for i, arg := range args {
+		if arg == "--allowedTools" && i+1 < len(args) {
+			if args[i+1] != "Read,mcp__orqestra__AskUserQuestion" {
+				t.Errorf("--allowedTools value = %q, want %q", args[i+1], "Read,mcp__orqestra__AskUserQuestion")
+			}
+			return
+		}
+	}
+	t.Error("expected --allowedTools in args")
+}
+
+func TestWithDisallowedTools_FlagName(t *testing.T) {
+	cli := NewClaudeCLI(config.ResolvedModel{Type: "anthropic"},
+		WithDisallowedTools([]string{"AskUserQuestion", "ExitPlanMode"}),
+	)
+
+	args := cli.buildFinalArgs()
+	for i, arg := range args {
+		if arg == "--disallowedTools" && i+1 < len(args) {
+			if args[i+1] != "AskUserQuestion,ExitPlanMode" {
+				t.Errorf("--disallowedTools value = %q, want %q", args[i+1], "AskUserQuestion,ExitPlanMode")
+			}
+			return
+		}
+	}
+	t.Error("expected --disallowedTools in args")
 }
