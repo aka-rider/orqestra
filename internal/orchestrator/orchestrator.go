@@ -185,6 +185,14 @@ type GateRequest struct {
 	PlanDiff          string // unified diff from git micro-repo (empty if no history)
 	PlanWarnings      []string
 	CriticReport      string // critic's review report, shown alongside the plan at gate
+
+	// PlanHistoryDir is the absolute path to the plan-history/ git micro-repo
+	// for this run, empty when no plan repo was created. Used by the TUI plan
+	// history viewer (Ctrl+Y) to browse and revert plan revisions.
+	PlanHistoryDir string
+	// PlanHistoryHeadSHA is the SHA of the current HEAD of plan-history. Empty
+	// when planRepo was nil or rev-parse failed.
+	PlanHistoryHeadSHA string
 }
 
 // DecisionType classifies user decisions at gates.
@@ -762,13 +770,24 @@ planGate:
 				planDiff = diff
 			}
 			writeArtifact(session, "final_plan.md", finalPlanMarkdown)
+			var historyDir, historyHeadSHA string
+			if planRepo != nil {
+				historyDir = planRepo.Dir()
+				if sha, headErr := planRepo.HeadCommitHash(); headErr == nil {
+					historyHeadSHA = sha
+				} else {
+					logger.Warn("plan head sha lookup failed", "err", headErr)
+				}
+			}
 			emit(Event{Type: EventGateRequest, Gate: GateRequest{
-				Type:              GatePlanApproval,
-				FinalPlanMarkdown: finalPlanMarkdown,
-				PlanFilePath:      session.ArtifactPath("final_plan.md"),
-				PlanDiff:          planDiff,
-				PlanWarnings:      finalPlanWarnings,
-				CriticReport:      criticReportMarkdown,
+				Type:               GatePlanApproval,
+				FinalPlanMarkdown:  finalPlanMarkdown,
+				PlanFilePath:       session.ArtifactPath("final_plan.md"),
+				PlanDiff:           planDiff,
+				PlanWarnings:       finalPlanWarnings,
+				CriticReport:       criticReportMarkdown,
+				PlanHistoryDir:     historyDir,
+				PlanHistoryHeadSHA: historyHeadSHA,
 			}})
 
 			select {
@@ -777,6 +796,13 @@ planGate:
 				case DecisionCancel:
 					emit(Event{Type: EventComplete, Phase: PhaseDone})
 					return
+				// NOTE: Revert flow (TUI plan-history viewer, Ctrl+Y) reuses this
+				// branch with Comment == "" and an EditedContent payload taken from
+				// a historical commit. The Comment-empty guard below MUST keep
+				// skipping architect re-engagement for revert to remain
+				// non-destructive (the architect would otherwise overwrite the
+				// user's chosen revision on the next iteration). Tests:
+				// TestGate_DecisionEditEmptyComment_NoArchitect.
 				case DecisionEdit:
 					edited := strings.TrimSpace(decision.EditedContent)
 					finalPlanMarkdown = edited
@@ -789,6 +815,7 @@ planGate:
 					}
 					// If user provided a comment via the confirmation dialog,
 					// send edit + diff + comment to architect in one shot.
+					// Empty comment is the revert path: skip architect re-engagement.
 					if decision.Comment != "" && planSessionID != "" {
 						var diff string
 						if planRepo != nil && lastArchitectHash != "" {

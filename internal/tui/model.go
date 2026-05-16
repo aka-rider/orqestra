@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"os"
@@ -17,10 +18,11 @@ import (
 type AppState int
 
 const (
-	StatePrompt    AppState = iota // full-screen prompt entry
-	StatePipeline                  // 3-zone split layout (pipeline running/done)
-	StateRunsList                  // historical runs list
-	StateRunDetail                 // detail view for a single historical run
+	StatePrompt            AppState = iota // full-screen prompt entry
+	StatePipeline                          // 3-zone split layout (pipeline running/done)
+	StateRunsList                          // historical runs list
+	StateRunDetail                         // detail view for a single historical run
+	StatePlanHistoryDetail                 // plan history viewer launched from Run Detail (read-only)
 )
 
 // ContentMode represents what the content zone shows during pipeline execution.
@@ -35,6 +37,7 @@ const (
 	ContentPlanDiff                         // line diff of last plan revision
 	ContentMergeConflict                    // post-run merge conflict resolution
 	ContentEditConfirm                      // Ctrl+E edit confirmation prompt
+	ContentPlanHistory                      // Ctrl+Y plan history viewer (live gate)
 )
 
 // AgentRow tracks a single agent's status in the sidebar.
@@ -62,10 +65,11 @@ type Model struct {
 	engine *orchestrator.Engine
 
 	// Per-screen sub-models
-	promptScreen    PromptScreen
-	pipelineScreen  PipelineScreen
-	runsListScreen  RunsListScreen
-	runDetailScreen RunDetailScreen
+	promptScreen      PromptScreen
+	pipelineScreen    PipelineScreen
+	runsListScreen    RunsListScreen
+	runDetailScreen   RunDetailScreen
+	planHistoryScreen PlanHistoryScreen
 
 	// Global UI state
 	ctrlCPending  bool
@@ -76,12 +80,13 @@ type Model struct {
 // NewModel creates the initial TUI model.
 func NewModel(engine *orchestrator.Engine, configName string) Model {
 	return Model{
-		state:           StatePrompt,
-		promptScreen:    NewPromptScreen(),
-		pipelineScreen:  NewPipelineScreen(configName),
-		engine:          engine,
-		runsListScreen:  NewRunsListScreen(),
-		runDetailScreen: NewRunDetailScreen(),
+		state:             StatePrompt,
+		promptScreen:      NewPromptScreen(),
+		pipelineScreen:    NewPipelineScreen(configName),
+		engine:            engine,
+		runsListScreen:    NewRunsListScreen(),
+		runDetailScreen:   NewRunDetailScreen(),
+		planHistoryScreen: NewPlanHistoryScreen(),
 	}
 }
 
@@ -114,6 +119,15 @@ func waitForEvent(events <-chan orchestrator.Event) tea.Cmd {
 
 // pipelineClosedMsg signals the events channel was closed.
 type pipelineClosedMsg struct{}
+
+// planHistoryVisible reports whether the plan-history viewer should receive
+// key/mouse events instead of the underlying pipeline / run-detail screen.
+func (m Model) planHistoryVisible() bool {
+	if m.state == StatePlanHistoryDetail {
+		return true
+	}
+	return m.state == StatePipeline && m.pipelineScreen.content == ContentPlanHistory
+}
 
 // Update handles messages and returns the updated model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -181,7 +195,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		if m.state == StatePipeline {
-			m.pipelineScreen.SyncViewports()
+			// Skip pipeline sync while the plan-history viewer is overlaid: its
+			// rendering is owned by planHistoryScreen, and timer ticks must not
+			// rebuild unrelated viewport content (tui-instructions.md §async).
+			if !m.planHistoryVisible() {
+				m.pipelineScreen.SyncViewports()
+			}
 			return m, tickCmd()
 		}
 		return m, nil
@@ -221,6 +240,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case planRevisionsLoadedMsg, planRevisionDetailLoadedMsg:
+		var cmd tea.Cmd
+		m.planHistoryScreen, cmd = m.planHistoryScreen.Update(msg)
+		if intent := m.planHistoryScreen.PendingIntent; intent != nil {
+			m.planHistoryScreen.PendingIntent = nil
+			return m.processIntent(intent, cmd)
+		}
+		return m, cmd
+
 	case pipelineClosedMsg:
 		prevContent := m.pipelineScreen.content
 		prevComment := m.pipelineScreen.hasPlanComment
@@ -253,6 +281,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleMouse routes mouse events to the active screen.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.planHistoryVisible() {
+		var cmd tea.Cmd
+		m.planHistoryScreen, cmd = m.planHistoryScreen.HandleMouse(msg)
+		if intent := m.planHistoryScreen.PendingIntent; intent != nil {
+			m.planHistoryScreen.PendingIntent = nil
+			return m.processIntent(intent, cmd)
+		}
+		return m, cmd
+	}
 	if m.state != StatePipeline {
 		return m, nil
 	}
@@ -296,6 +333,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, timeoutCmd
 	}
 
+	if m.planHistoryVisible() {
+		return m.handlePlanHistoryKey(msg)
+	}
+
 	switch m.state {
 	case StatePrompt:
 		return m.handlePromptKey(msg)
@@ -307,6 +348,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleRunDetailKey(msg)
 	}
 	return m, nil
+}
+
+// handlePlanHistoryKey delegates to PlanHistoryScreen and drains its intent.
+func (m Model) handlePlanHistoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.planHistoryScreen, cmd = m.planHistoryScreen.Update(msg)
+	if intent := m.planHistoryScreen.PendingIntent; intent != nil {
+		m.planHistoryScreen.PendingIntent = nil
+		return m.processIntent(intent, cmd)
+	}
+	return m, cmd
 }
 
 // handleRunsListKey delegates to RunsListScreen and handles intents.
@@ -352,6 +404,8 @@ func (m Model) handleRunDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.recalculateLayout()
 			m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width())
 			return m, nil
+		case OpenPlanHistoryIntent:
+			return m.processIntent(intent, cmd)
 		}
 	}
 	return m, cmd
@@ -500,6 +554,45 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionMergeAbort}
 		}
 		return m, batch(nil)
+	case OpenPlanHistoryIntent:
+		if i.HistoryDir == "" {
+			m.lastErr = errors.New("plan history unavailable for this run")
+			return m, batch(nil)
+		}
+		cmd := m.planHistoryScreen.Open(i.HistoryDir, i.ReadOnly, i.HeadSHA)
+		if i.ReadOnly {
+			m.state = StatePlanHistoryDetail
+		} else {
+			m.pipelineScreen.content = ContentPlanHistory
+		}
+		m.recalculateLayout()
+		return m, batch(cmd)
+	case ClosePlanHistoryIntent:
+		if m.state == StatePlanHistoryDetail {
+			m.state = StateRunDetail
+			m.recalculateLayout()
+			m.runDetailScreen.SyncViewports()
+		} else {
+			m.pipelineScreen.content = ContentPlanReview
+			m.recalculateLayout()
+			m.pipelineScreen.SyncViewports()
+		}
+		return m, batch(nil)
+	case RevertPlanIntent:
+		// Comment intentionally empty: avoids architect re-engagement at
+		// orchestrator.go:792. Audit trail = the git commit "user: manual edit"
+		// written by orchestrator.go.
+		if m.decisions != nil {
+			m.decisions <- orchestrator.Decision{
+				Type:          orchestrator.DecisionEdit,
+				EditedContent: i.Content,
+			}
+		}
+		m.pipelineScreen.content = ContentStreaming
+		m.pipelineScreen.awaitingPlanDecision = false
+		m.recalculateLayout()
+		m.pipelineScreen.SyncViewports()
+		return m, batch(waitForEvent(m.events))
 	}
 	return m, batch(nil)
 }
@@ -522,16 +615,22 @@ func (m *Model) startPipeline(prompt string) tea.Cmd {
 // View renders the current screen.
 func (m Model) View() tea.View {
 	var content string
-	switch m.state {
-	case StatePrompt:
-		content = m.promptScreen.View(m.effectiveWidth(), m.height)
-	case StatePipeline:
-		m.pipelineScreen.ctrlCPending = m.ctrlCPending
-		content = m.pipelineScreen.View(m.effectiveWidth(), m.height)
-	case StateRunsList:
-		content = m.runsListScreen.View(m.effectiveWidth(), m.height)
-	case StateRunDetail:
-		content = m.runDetailScreen.View(m.effectiveWidth(), m.height)
+	if m.planHistoryVisible() {
+		content = m.planHistoryScreen.View(m.effectiveWidth(), m.height)
+	} else {
+		switch m.state {
+		case StatePrompt:
+			content = m.promptScreen.View(m.effectiveWidth(), m.height)
+		case StatePipeline:
+			m.pipelineScreen.ctrlCPending = m.ctrlCPending
+			content = m.pipelineScreen.View(m.effectiveWidth(), m.height)
+		case StateRunsList:
+			content = m.runsListScreen.View(m.effectiveWidth(), m.height)
+		case StateRunDetail:
+			content = m.runDetailScreen.View(m.effectiveWidth(), m.height)
+		case StatePlanHistoryDetail:
+			content = m.planHistoryScreen.View(m.effectiveWidth(), m.height)
+		}
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true
@@ -606,5 +705,9 @@ func (m *Model) recalculateLayout() {
 		m.promptScreen.SetWidth(max(1, m.width-4))
 		m.promptScreen.width = m.width
 		m.promptScreen.height = m.height
+	}
+
+	if m.planHistoryVisible() {
+		m.planHistoryScreen.RecalculateLayout(m.width, contentHeight)
 	}
 }
