@@ -23,23 +23,17 @@ models:
 
 researcher:
   model: medium
-  mcp_servers:
-    - mcp_docker
-    - orqestra
+  mcp_servers: [MCP_DOCKER]
 
 architect:
   model: large
-  mcp_servers:
-    - mcp_docker
-    - orqestra
+  mcp_servers: [MCP_DOCKER]
 
 worker:
   model: medium
   timeout: 30m
   parallelism: 0
-  mcp_servers:
-    - mcp_docker
-    - orqestra
+  mcp_servers: [MCP_DOCKER]
 
 sandbox:
   max_lifetime: 35m

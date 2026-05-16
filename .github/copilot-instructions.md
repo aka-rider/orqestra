@@ -212,10 +212,6 @@ When an orchestrator run hangs, produces no output, or errors opaquely, inspect 
 
 Use active MCP tools when they are available instead of inventing raw integrations.
 
-- `context7`
-- `markitdown`
-- `mcp_docker`
-- `microsoft_mar`
-- `microsoft_pla`
+- `MCP_DOCKER`
 
 </mcp_servers>
