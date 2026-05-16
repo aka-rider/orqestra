@@ -238,6 +238,34 @@ func TestTUI_CancelAgent(t *testing.T) {
 	}
 }
 
+func TestTUI_UserQuestion_CtrlCSkipsWithDefault(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.active = true
+	m.pipelineScreen.content = ContentUserQuestion
+	m.pipelineScreen.userQuestion = harness.MCPToolCall{
+		Question: "Pick one",
+		Options:  []harness.MCPToolOption{{Label: "Yes"}, {Label: "No"}},
+	}
+	m.pipelineScreen.questionSelected = map[int]bool{}
+	m.pipelineScreen.questionCustom = map[int]string{}
+	m.pipelineScreen.questionCustomActive = -1
+
+	updated, _ := sendCtrl(m, 'c')
+	mm := updated.(Model)
+
+	if mm.pipelineScreen.content != ContentStreaming {
+		t.Fatalf("expected ContentStreaming after Ctrl+C, got %v", mm.pipelineScreen.content)
+	}
+	if !mm.ctrlCPending {
+		t.Fatalf("expected ctrlCPending after first Ctrl+C")
+	}
+	// testModel() does not wire QuestionBridge, so processIntent silently
+	// drops the SubmitQuestionAnswerIntent (model.go: bridge==nil branch).
+	// The bridge-receives-Skipped:true assertion lives in the direct
+	// HandleCtrlCCancel test in screen_pipeline_test.go.
+}
+
 func TestTUI_AgentNavigation(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
