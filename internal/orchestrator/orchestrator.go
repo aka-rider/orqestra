@@ -86,8 +86,57 @@ func (sb *StreamBuffer) AgentActivities(id string) []Activity {
 	return out
 }
 
+// knownStreamEventTypes enumerates Claude CLI stream-json event types that
+// must never reach the user-facing presentation surface as raw NDJSON.
+// Used by looksLikeStreamEventFrame as a defense-in-depth filter when a
+// streaming-path regression places raw frames into the TUI buffer.
+var knownStreamEventTypes = map[string]struct{}{
+	"system":              {},
+	"assistant":           {},
+	"user":                {},
+	"result":              {},
+	"rate_limit_event":    {},
+	"content_block_start": {},
+	"content_block_delta": {},
+	"stream_event":        {},
+	"tool_use":            {},
+	"tool_result":         {},
+}
+
+// looksLikeStreamEventFrame reports whether line is a complete Claude CLI
+// stream-json event frame that leaked past the harness parser. It returns
+// the event "type" and true only when the trimmed line begins with '{',
+// is valid JSON, decodes a non-empty "type" field, and that type is one of
+// knownStreamEventTypes. Anything else returns ("", false) so genuine text
+// content with stray braces is preserved.
+func looksLikeStreamEventFrame(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return "", false
+	}
+	if !json.Valid([]byte(trimmed)) {
+		return "", false
+	}
+	var probe struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &probe); err != nil {
+		return "", false
+	}
+	if probe.Type == "" {
+		return "", false
+	}
+	if _, ok := knownStreamEventTypes[probe.Type]; !ok {
+		return "", false
+	}
+	return probe.Type, true
+}
+
 // Append adds text to the buffer, accumulating into the current line
-// until a newline is encountered.
+// until a newline is encountered. Completed lines that decode as a known
+// Claude CLI stream-json event frame are dropped and logged via slog.Warn:
+// the harness is the single source of parsed text, and a raw frame at the
+// presentation boundary indicates a regression.
 func (sb *StreamBuffer) Append(text string) {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
@@ -103,10 +152,23 @@ func (sb *StreamBuffer) Append(text string) {
 			break
 		}
 		fragment := text[:nlIdx]
+		var completed string
 		if len(sb.lines) == 0 {
-			sb.lines = append(sb.lines, fragment)
+			completed = fragment
 		} else {
-			sb.lines[len(sb.lines)-1] += fragment
+			completed = sb.lines[len(sb.lines)-1] + fragment
+		}
+		if t, ok := looksLikeStreamEventFrame(completed); ok {
+			slog.Warn("stream buffer: dropping raw stream-event frame", "type", t, "len", len(completed))
+			if len(sb.lines) > 0 {
+				sb.lines = sb.lines[:len(sb.lines)-1]
+			}
+		} else {
+			if len(sb.lines) == 0 {
+				sb.lines = append(sb.lines, fragment)
+			} else {
+				sb.lines[len(sb.lines)-1] += fragment
+			}
 		}
 		sb.lines = append(sb.lines, "")
 		text = text[nlIdx+1:]
