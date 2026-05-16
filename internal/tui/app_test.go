@@ -948,8 +948,14 @@ func TestTUI_EditorReturn(t *testing.T) {
 	m.pipelineScreen.planFilePath = tmpFile.Name()
 
 	// Simulate editor return — should show confirmation prompt, NOT immediate DecisionEdit
-	result, _ := m.Update(editorReturnMsg{err: nil})
+	result, cmd := m.Update(editorReturnMsg{err: nil})
 	model := result.(Model)
+
+	if cmd != nil {
+		msg := cmd()
+		result, _ = model.Update(msg)
+		model = result.(Model)
+	}
 
 	if model.pipelineScreen.content != ContentEditConfirm {
 		t.Errorf("expected ContentEditConfirm after editor return with changes, got %d", model.pipelineScreen.content)

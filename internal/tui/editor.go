@@ -11,6 +11,11 @@ type editorReturnMsg struct {
 	err error
 }
 
+type editorPlanReadMsg struct {
+	content string
+	err     error
+}
+
 // openExternalEditor opens the given file in the user's preferred editor.
 func openExternalEditor(path string) tea.Cmd {
 	editor := os.Getenv("EDITOR")

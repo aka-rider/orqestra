@@ -153,23 +153,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.pipelineScreen.planFilePath != "" {
-			data, err := os.ReadFile(m.pipelineScreen.planFilePath)
-			if err != nil {
-				m.pipelineScreen.lastErr = fmt.Errorf("read plan after editor: %w", err)
-				return m, nil
+			return m, func() tea.Msg {
+				data, err := os.ReadFile(m.pipelineScreen.planFilePath)
+				if err != nil {
+					return editorPlanReadMsg{err: fmt.Errorf("read plan after editor: %w", err)}
+				}
+				return editorPlanReadMsg{content: string(data)}
 			}
-			edited := string(data)
-			if edited != m.pipelineScreen.finalPlan {
-				// Show confirmation prompt instead of immediate DecisionEdit
-				m.pipelineScreen.pendingEditContent = edited
-				m.pipelineScreen.editConfirmCursor = 0
-				m.pipelineScreen.hasEditComment = false
-				m.pipelineScreen.content = ContentEditConfirm
-				m.pipelineScreen.hasPlanComment = false
-				m.recalculateLayout()
-				m.pipelineScreen.SyncViewports()
-				return m, nil
-			}
+		}
+		return m, nil
+
+	case editorPlanReadMsg:
+		if msg.err != nil {
+			m.pipelineScreen.lastErr = msg.err
+			return m, nil
+		}
+		edited := msg.content
+		if edited != m.pipelineScreen.finalPlan {
+			// Show confirmation prompt instead of immediate DecisionEdit
+			m.pipelineScreen.pendingEditContent = edited
+			m.pipelineScreen.editConfirmCursor = 0
+			m.pipelineScreen.hasEditComment = false
+			m.pipelineScreen.content = ContentEditConfirm
+			m.pipelineScreen.hasPlanComment = false
+			m.recalculateLayout()
+			m.pipelineScreen.SyncViewports()
+			return m, nil
 		}
 		return m, nil
 
