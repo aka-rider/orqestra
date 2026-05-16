@@ -3,7 +3,9 @@ package orchestrator
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -426,5 +428,528 @@ func TestStreamBuffer_AgentSnapshots(t *testing.T) {
 
 	if acts := sb.AgentActivities("architect"); len(acts) != 0 {
 		t.Errorf("expected 0 activities for new agent, got %d", len(acts))
+	}
+}
+
+func TestEngine_DecisionComment_CommitsDialog(t *testing.T) {
+	testutil.MustTempHome(t)
+
+	architectSID := "test-architect-sid"
+	researcherSID := "test-researcher-sid"
+
+	testutil.SetupPlanFile(t, researcherSID, "## Draft")
+	testutil.SetupPlanFile(t, architectSID, testutil.ValidPlanMarkdown())
+
+	revisedPlan := "# Plan\n\n## Goal\nRevised goal.\n\n## Work Packages\n\n### 1. Updated\n\n**Steps:**\n1. Edit\n\n**Done when:**\n- Tests pass"
+
+	architectRunner := &testutil.FakeRunner{
+		Calls: []testutil.FakeCall{
+			{Output: "saved", SessionID: architectSID},
+			{Output: "revised the plan", SessionID: architectSID, OnCall: func(idx int) {
+				home := os.Getenv("HOME")
+				planPath := filepath.Join(home, ".claude", "plans", architectSID+"-plan.md")
+				os.WriteFile(planPath, []byte(revisedPlan), 0o644)
+			}},
+		},
+	}
+
+	cfg := config.DefaultConfig()
+	engine := &Engine{
+		Config: cfg,
+		Runners: Runners{
+			Researcher: &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "saved", SessionID: researcherSID}}},
+			Architect:  architectRunner,
+			Worker:     &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "done", SessionID: "sess-w"}}},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	engine.RunDirFactory = func(slug string) (agent.SessionDir, error) {
+		dir := filepath.Join(tmpDir, slug)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return agent.SessionDir{}, err
+		}
+		return agent.SessionDir{Path: dir}, nil
+	}
+
+	ctx := context.Background()
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
+
+	timeout := time.After(10 * time.Second)
+	gateCount := 0
+	for {
+		select {
+		case event, ok := <-channels.Events:
+			if !ok {
+				goto assertions1
+			}
+			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+				gateCount++
+				if gateCount == 1 {
+					channels.Decisions <- Decision{Type: DecisionComment, Comment: "fix WP1"}
+				} else {
+					channels.Decisions <- Decision{Type: DecisionApprove}
+				}
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for gate cycle")
+		}
+	}
+assertions1:
+	planHistoryDir := filepath.Join(tmpDir, "run", "plan-history")
+	dialogPath := filepath.Join(planHistoryDir, "dialog.md")
+	dialogBytes, err := os.ReadFile(dialogPath)
+	if err != nil {
+		t.Fatalf("read dialog.md: %v", err)
+	}
+	dialog := string(dialogBytes)
+	if !strings.Contains(dialog, "user") {
+		t.Error("dialog.md missing user entry")
+	}
+	if !strings.Contains(dialog, "fix WP1") {
+		t.Error("dialog.md missing comment text 'fix WP1'")
+	}
+	if !strings.Contains(dialog, "architect") {
+		t.Error("dialog.md missing architect entry")
+	}
+
+	planPath := filepath.Join(planHistoryDir, "plan.md")
+	planBytes, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatalf("read plan.md: %v", err)
+	}
+	if !strings.Contains(string(planBytes), "Revised goal") {
+		t.Error("plan.md does not contain revised plan content")
+	}
+
+	out, err := exec.Command("git", "-C", planHistoryDir, "log", "--oneline").Output()
+	if err != nil {
+		t.Fatalf("git log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) < 3 {
+		t.Errorf("expected at least 3 commits, got %d:\n%s", len(lines), string(out))
+	}
+}
+
+func TestEngine_DecisionComment_ChatOnly(t *testing.T) {
+	testutil.MustTempHome(t)
+
+	architectSID := "test-architect-sid"
+	researcherSID := "test-researcher-sid"
+
+	testutil.SetupPlanFile(t, researcherSID, "## Draft")
+	testutil.SetupPlanFile(t, architectSID, testutil.ValidPlanMarkdown())
+
+	architectRunner := &testutil.FakeRunner{
+		Calls: []testutil.FakeCall{
+			{Output: "saved", SessionID: architectSID},
+			{Output: "Because the binary wasn't rebuilt.", SessionID: architectSID},
+		},
+	}
+
+	cfg := config.DefaultConfig()
+	engine := &Engine{
+		Config: cfg,
+		Runners: Runners{
+			Researcher: &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "saved", SessionID: researcherSID}}},
+			Architect:  architectRunner,
+			Worker:     &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "done", SessionID: "sess-w"}}},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	engine.RunDirFactory = func(slug string) (agent.SessionDir, error) {
+		dir := filepath.Join(tmpDir, slug)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return agent.SessionDir{}, err
+		}
+		return agent.SessionDir{Path: dir}, nil
+	}
+
+	ctx := context.Background()
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
+
+	timeout := time.After(10 * time.Second)
+	gateCount := 0
+	var gotChatResponse bool
+	for {
+		select {
+		case event, ok := <-channels.Events:
+			if !ok {
+				goto assertions2
+			}
+			if event.Type == EventChatResponse {
+				gotChatResponse = true
+				if event.ChatText == "" {
+					t.Error("EventChatResponse has empty ChatText")
+				}
+			}
+			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+				gateCount++
+				if gateCount == 1 {
+					channels.Decisions <- Decision{Type: DecisionComment, Comment: "why?"}
+				} else {
+					channels.Decisions <- Decision{Type: DecisionApprove}
+				}
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for gate cycle")
+		}
+	}
+assertions2:
+	if !gotChatResponse {
+		t.Error("expected EventChatResponse for chat-only answer")
+	}
+
+	planHistoryDir := filepath.Join(tmpDir, "run", "plan-history")
+	dialogPath := filepath.Join(planHistoryDir, "dialog.md")
+	dialogBytes, err := os.ReadFile(dialogPath)
+	if err != nil {
+		t.Fatalf("read dialog.md: %v", err)
+	}
+	dialog := string(dialogBytes)
+	if !strings.Contains(dialog, "user") {
+		t.Error("dialog.md missing user entry")
+	}
+	if !strings.Contains(dialog, "why?") {
+		t.Error("dialog.md missing user comment 'why?'")
+	}
+	if !strings.Contains(dialog, "chat only") {
+		t.Error("dialog.md missing '(chat only)' marker")
+	}
+
+	planPath := filepath.Join(planHistoryDir, "plan.md")
+	planBytes, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatalf("read plan.md: %v", err)
+	}
+	if string(planBytes) != testutil.ValidPlanMarkdown() {
+		t.Error("plan.md should remain unchanged for chat-only response")
+	}
+}
+
+func TestEngine_CriticRevision_AlwaysCommitted(t *testing.T) {
+	testutil.MustTempHome(t)
+
+	architectSID := "test-architect-sid"
+	researcherSID := "test-researcher-sid"
+
+	testutil.SetupPlanFile(t, researcherSID, "## Draft")
+	testutil.SetupPlanFile(t, architectSID, testutil.ValidPlanMarkdown())
+
+	criticReport := "## Critic Report\n\n### Blockers Found\n\nNone found.\n\n### Summary\n- Total blockers: 0\n- Overall assessment: Plan is ready."
+
+	architectRunner := &testutil.FakeRunner{
+		Calls: []testutil.FakeCall{
+			{Output: "saved", SessionID: architectSID},
+			{Output: "acknowledged critic, no changes needed", SessionID: architectSID},
+		},
+	}
+
+	cfg := config.DefaultConfig()
+	engine := &Engine{
+		Config: cfg,
+		Runners: Runners{
+			Researcher: &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "saved", SessionID: researcherSID}}},
+			Architect:  architectRunner,
+			Critic:     &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: criticReport, SessionID: "critic-sid"}}},
+			Worker:     &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "done", SessionID: "sess-w"}}},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	engine.RunDirFactory = func(slug string) (agent.SessionDir, error) {
+		dir := filepath.Join(tmpDir, slug)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return agent.SessionDir{}, err
+		}
+		return agent.SessionDir{Path: dir}, nil
+	}
+
+	ctx := context.Background()
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true, NoExecute: true})
+
+	for range channels.Events {
+	}
+
+	planHistoryDir := filepath.Join(tmpDir, "run", "plan-history")
+	dialogPath := filepath.Join(planHistoryDir, "dialog.md")
+	dialogBytes, err := os.ReadFile(dialogPath)
+	if err != nil {
+		t.Fatalf("read dialog.md: %v", err)
+	}
+	dialog := string(dialogBytes)
+	if !strings.Contains(dialog, "critic") {
+		t.Error("dialog.md missing critic entry")
+	}
+	if !strings.Contains(dialog, "no changes") {
+		t.Error("dialog.md missing 'no changes' marker for architect response to critic")
+	}
+
+	out, err := exec.Command("git", "-C", planHistoryDir, "log", "--oneline").Output()
+	if err != nil {
+		t.Fatalf("git log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) < 3 {
+		t.Errorf("expected at least 3 commits (initial plan + critic + architect response), got %d:\n%s", len(lines), string(out))
+	}
+}
+
+func TestEngine_RunLog_Created(t *testing.T) {
+	testutil.MustTempHome(t)
+
+	researcherSID := "test-researcher-sid"
+	architectSID := "test-architect-sid"
+
+	testutil.SetupPlanFile(t, researcherSID, "## Draft")
+	testutil.SetupPlanFile(t, architectSID, testutil.ValidPlanMarkdown())
+
+	cfg := config.DefaultConfig()
+	engine := &Engine{
+		Config: cfg,
+		Runners: Runners{
+			Researcher: &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "saved", SessionID: researcherSID}}},
+			Architect:  &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "saved", SessionID: architectSID}}},
+			Worker:     &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "done", SessionID: "sess-w"}}},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	engine.RunDirFactory = func(slug string) (agent.SessionDir, error) {
+		dir := filepath.Join(tmpDir, slug)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return agent.SessionDir{}, err
+		}
+		return agent.SessionDir{Path: dir}, nil
+	}
+
+	ctx := context.Background()
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true, NoExecute: true})
+
+	for range channels.Events {
+	}
+
+	logPath := filepath.Join(tmpDir, "run", "run.log")
+	info, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("run.log should exist: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Error("run.log should not be empty")
+	}
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read run.log: %v", err)
+	}
+	if !strings.Contains(string(content), "run started") {
+		t.Error("run.log should contain 'run started'")
+	}
+}
+
+func TestEngine_FullConversation_Integrity(t *testing.T) {
+	testutil.MustTempHome(t)
+
+	architectSID := "test-architect-sid"
+	researcherSID := "test-researcher-sid"
+
+	testutil.SetupPlanFile(t, researcherSID, "## Draft")
+	testutil.SetupPlanFile(t, architectSID, testutil.ValidPlanMarkdown())
+
+	criticReport := "## Critic Report\n\n### Blockers Found\n\nNone.\n\n### Summary\n- Total blockers: 0"
+	revisedPlan := "# Plan\n\n## Goal\nRevised after comment 1.\n\n## Work Packages\n\n### 1. Updated\n\n**Steps:**\n1. Edit\n\n**Done when:**\n- Tests pass"
+
+	architectRunner := &testutil.FakeRunner{
+		Calls: []testutil.FakeCall{
+			// Call 0: initial plan (RunStreaming)
+			{Output: "saved", SessionID: architectSID},
+			// Call 1: critic continuation (no plan change)
+			{Output: "acknowledged critic", SessionID: architectSID},
+			// Call 2: comment 1 continuation (revises plan)
+			{Output: "revised per comment 1", SessionID: architectSID, OnCall: func(idx int) {
+				home := os.Getenv("HOME")
+				planPath := filepath.Join(home, ".claude", "plans", architectSID+"-plan.md")
+				os.WriteFile(planPath, []byte(revisedPlan), 0o644)
+			}},
+			// Call 3: comment 2 continuation (chat-only, no plan change)
+			{Output: "That's expected behavior.", SessionID: architectSID},
+		},
+	}
+
+	cfg := config.DefaultConfig()
+	engine := &Engine{
+		Config: cfg,
+		Runners: Runners{
+			Researcher: &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "saved", SessionID: researcherSID}}},
+			Architect:  architectRunner,
+			Critic:     &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: criticReport, SessionID: "critic-sid"}}},
+			Worker:     &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "done", SessionID: "sess-w"}}},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	engine.RunDirFactory = func(slug string) (agent.SessionDir, error) {
+		dir := filepath.Join(tmpDir, slug)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return agent.SessionDir{}, err
+		}
+		return agent.SessionDir{Path: dir}, nil
+	}
+
+	ctx := context.Background()
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
+
+	timeout := time.After(10 * time.Second)
+	gateCount := 0
+	for {
+		select {
+		case event, ok := <-channels.Events:
+			if !ok {
+				goto assertions5
+			}
+			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+				gateCount++
+				switch gateCount {
+				case 1:
+					channels.Decisions <- Decision{Type: DecisionComment, Comment: "please refactor WP1"}
+				case 2:
+					channels.Decisions <- Decision{Type: DecisionComment, Comment: "is that safe?"}
+				default:
+					channels.Decisions <- Decision{Type: DecisionApprove}
+				}
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for gate cycle")
+		}
+	}
+assertions5:
+	planHistoryDir := filepath.Join(tmpDir, "run", "plan-history")
+	dialogPath := filepath.Join(planHistoryDir, "dialog.md")
+	dialogBytes, err := os.ReadFile(dialogPath)
+	if err != nil {
+		t.Fatalf("read dialog.md: %v", err)
+	}
+	dialog := string(dialogBytes)
+
+	// Count entries by counting "---" separators (each entry starts with one)
+	entryCount := strings.Count(dialog, "---")
+	if entryCount < 6 {
+		t.Errorf("expected at least 6 dialog entries, got %d\n%s", entryCount, dialog)
+	}
+
+	// Verify key actors present
+	if !strings.Contains(dialog, "critic") {
+		t.Error("dialog.md missing critic entry")
+	}
+	if !strings.Contains(dialog, "user") {
+		t.Error("dialog.md missing user entry")
+	}
+	if !strings.Contains(dialog, "architect") {
+		t.Error("dialog.md missing architect entry")
+	}
+
+	// plan.md should reflect the last revision
+	planPath := filepath.Join(planHistoryDir, "plan.md")
+	planBytes, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatalf("read plan.md: %v", err)
+	}
+	if !strings.Contains(string(planBytes), "Revised after comment 1") {
+		t.Error("plan.md should contain the revised content from comment 1")
+	}
+
+	out, err := exec.Command("git", "-C", planHistoryDir, "log", "--oneline").Output()
+	if err != nil {
+		t.Fatalf("git log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	// initial plan + critic + architect-critic + user1 + architect-revision + user2 + architect-chat-only = at least 7
+	if len(lines) < 6 {
+		t.Errorf("expected at least 6 commits, got %d:\n%s", len(lines), string(out))
+	}
+}
+
+func TestEngine_DecisionEdit_CommitsDialog(t *testing.T) {
+	testutil.MustTempHome(t)
+
+	architectSID := "test-architect-sid"
+	researcherSID := "test-researcher-sid"
+
+	testutil.SetupPlanFile(t, researcherSID, "## Draft")
+	testutil.SetupPlanFile(t, architectSID, testutil.ValidPlanMarkdown())
+
+	cfg := config.DefaultConfig()
+	engine := &Engine{
+		Config: cfg,
+		Runners: Runners{
+			Researcher: &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "saved", SessionID: researcherSID}}},
+			Architect:  &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "saved", SessionID: architectSID}}},
+			Worker:     &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "done", SessionID: "sess-w"}}},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	engine.RunDirFactory = func(slug string) (agent.SessionDir, error) {
+		dir := filepath.Join(tmpDir, slug)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return agent.SessionDir{}, err
+		}
+		return agent.SessionDir{Path: dir}, nil
+	}
+
+	editedPlan := "# Plan\n\n## Goal\nEdited by user.\n\n## Work Packages\n\n### 1. Do it\n\n**Steps:**\n1. Edit foo.go\n\n**Done when:**\n- Tests pass"
+
+	ctx := context.Background()
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
+
+	timeout := time.After(10 * time.Second)
+	gateCount := 0
+	for {
+		select {
+		case event, ok := <-channels.Events:
+			if !ok {
+				goto assertions6
+			}
+			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+				gateCount++
+				if gateCount == 1 {
+					channels.Decisions <- Decision{Type: DecisionEdit, EditedContent: editedPlan}
+				} else {
+					channels.Decisions <- Decision{Type: DecisionApprove}
+				}
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for gate cycle")
+		}
+	}
+assertions6:
+	planHistoryDir := filepath.Join(tmpDir, "run", "plan-history")
+	dialogPath := filepath.Join(planHistoryDir, "dialog.md")
+	dialogBytes, err := os.ReadFile(dialogPath)
+	if err != nil {
+		t.Fatalf("read dialog.md: %v", err)
+	}
+	dialog := string(dialogBytes)
+	if !strings.Contains(dialog, "(see plan.md diff)") {
+		t.Error("dialog.md should contain '(see plan.md diff)' for edit decision")
+	}
+
+	planPath := filepath.Join(planHistoryDir, "plan.md")
+	planBytes, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatalf("read plan.md: %v", err)
+	}
+	if !strings.Contains(string(planBytes), "Edited by user") {
+		t.Error("plan.md should contain the edited plan content")
+	}
+
+	out, err := exec.Command("git", "-C", planHistoryDir, "log", "--oneline").Output()
+	if err != nil {
+		t.Fatalf("git log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) < 2 {
+		t.Errorf("expected at least 2 commits (initial + edit), got %d:\n%s", len(lines), string(out))
 	}
 }

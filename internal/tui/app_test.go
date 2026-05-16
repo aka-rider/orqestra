@@ -919,27 +919,23 @@ func TestTUI_EditorReturn(t *testing.T) {
 
 	m.pipelineScreen.planFilePath = tmpFile.Name()
 
-	// Simulate editor return
+	// Simulate editor return — should show confirmation prompt, NOT immediate DecisionEdit
 	result, _ := m.Update(editorReturnMsg{err: nil})
 	model := result.(Model)
 
-	if model.pipelineScreen.finalPlan != modifiedPlan {
-		t.Errorf("expected updated finalPlan, got %q", model.pipelineScreen.finalPlan)
+	if model.pipelineScreen.content != ContentEditConfirm {
+		t.Errorf("expected ContentEditConfirm after editor return with changes, got %d", model.pipelineScreen.content)
 	}
-	if model.pipelineScreen.content != ContentStreaming {
-		t.Errorf("expected ContentStreaming after editor return with changes, got %d", model.pipelineScreen.content)
+	if model.pipelineScreen.pendingEditContent != modifiedPlan {
+		t.Errorf("expected pendingEditContent = modified plan, got %q", model.pipelineScreen.pendingEditContent)
 	}
 
+	// No decision should be sent yet (confirmation is pending)
 	select {
 	case d := <-decisions:
-		if d.Type != orchestrator.DecisionEdit {
-			t.Errorf("expected DecisionEdit, got %d", d.Type)
-		}
-		if d.EditedContent != modifiedPlan {
-			t.Errorf("expected edited content to match modified plan")
-		}
+		t.Errorf("expected no decision before confirmation, got %d", d.Type)
 	default:
-		t.Error("expected edit decision to be sent")
+		// good — no premature decision
 	}
 }
 

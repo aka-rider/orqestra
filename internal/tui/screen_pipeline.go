@@ -49,6 +49,12 @@ type PipelineScreen struct {
 	hasPlanComment bool
 	editorRunning  bool
 
+	// Edit confirmation state
+	pendingEditContent string // holds edited plan until confirmed
+	editConfirmCursor  int    // 0 = Yes, 1 = No
+	editConfirmComment textarea.Model
+	hasEditComment     bool // true when Tab has opened the comment textarea
+
 	// Conversation state during plan review
 	chatHistory     []ChatEntry
 	planDiff        string         // unified diff from git micro-repo
@@ -155,6 +161,9 @@ func (s *PipelineScreen) Reset() {
 	s.questionCustomActive = -1
 	s.hasQuestionTA = false
 	s.mergeConflict = orchestrator.MergeConflictInfo{}
+	s.pendingEditContent = ""
+	s.editConfirmCursor = 0
+	s.hasEditComment = false
 	s.contentVP.SetContent("")
 	s.sidebarVP.SetContent("")
 	s.dashboardVP.SetContent("")
@@ -415,6 +424,8 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		return s.handleStreamingKey(msg)
 	case ContentMergeConflict:
 		return s.handleMergeConflictKey(msg)
+	case ContentEditConfirm:
+		return s.handleEditConfirmKey(msg)
 	}
 	return s, nil
 }
@@ -444,6 +455,11 @@ func (s PipelineScreen) UpdateSubModel(msg tea.Msg) (PipelineScreen, tea.Cmd) {
 	if s.content == ContentUserQuestion && s.hasQuestionTA {
 		var cmd tea.Cmd
 		s.questionTextarea, cmd = s.questionTextarea.Update(msg)
+		return s, cmd
+	}
+	if s.content == ContentEditConfirm && s.hasEditComment {
+		var cmd tea.Cmd
+		s.editConfirmComment, cmd = s.editConfirmComment.Update(msg)
 		return s, cmd
 	}
 	return s, nil
@@ -833,6 +849,11 @@ func (s PipelineScreen) viewInputZone() string {
 		return keyStyle.Render(" [^A] accept | [^E] edit in editor | [Enter] comment | [^D] diff")
 	case ContentMergeConflict:
 		return keyStyle.Render(" [^A] abort merge and keep worktree branch | [Esc] back to stream")
+	case ContentEditConfirm:
+		if s.hasEditComment {
+			return keyStyle.Render(" [Enter] confirm | [Shift+Enter] newline | [Tab] collapse | [Esc] cancel")
+		}
+		return keyStyle.Render(" [↑/↓] select | [Enter] confirm | [Tab] add context | [Esc] discard")
 	case ContentAgentHistory:
 		agentName := ""
 		if s.focusedAgent > 0 && s.focusedAgent <= len(s.agents) {
@@ -864,6 +885,8 @@ func (s PipelineScreen) viewContent(width int) string {
 		return s.viewCompletion(width)
 	case ContentMergeConflict:
 		return s.viewMergeConflict(width)
+	case ContentEditConfirm:
+		return s.viewEditConfirm(width)
 	}
 	return ""
 }
@@ -1394,6 +1417,160 @@ func (s PipelineScreen) viewMergeConflict(width int) string {
 	b.WriteString("\n")
 	b.WriteString(keyStyle.Render(" [^A] abort (keep branch for manual merge)   [Esc] continue"))
 	return b.String()
+}
+
+func (s PipelineScreen) handleEditConfirmKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
+	// If comment textarea is active, forward keys to it
+	if s.hasEditComment {
+		switch msg.Code {
+		case tea.KeyTab:
+			// Collapse comment textarea
+			s.hasEditComment = false
+			s.SyncViewports()
+			return s, nil
+		case tea.KeyEscape:
+			// Cancel comment, return to option selection
+			s.editConfirmComment.Reset()
+			s.hasEditComment = false
+			s.SyncViewports()
+			return s, nil
+		case tea.KeyEnter:
+			if msg.Mod.Contains(tea.ModShift) || msg.Mod.Contains(tea.ModAlt) {
+				s.editConfirmComment.InsertString("\n")
+				return s, nil
+			}
+			// Confirm with comment
+			comment := strings.TrimSpace(s.editConfirmComment.Value())
+			s.PendingIntent = ConfirmEditIntent{
+				EditedContent: s.pendingEditContent,
+				Comment:       comment,
+			}
+			s.pendingEditContent = ""
+			s.hasEditComment = false
+			s.awaitingPlanDecision = false
+			s.content = ContentStreaming
+			s.SyncViewports()
+			return s, nil
+		}
+		if !msg.Mod.Contains(tea.ModCtrl) && !msg.Mod.Contains(tea.ModAlt) && !msg.Mod.Contains(tea.ModMeta) {
+			var cmd tea.Cmd
+			s.editConfirmComment, cmd = s.editConfirmComment.Update(msg)
+			return s, cmd
+		}
+		return s, nil
+	}
+
+	// Option selection mode
+	switch msg.Code {
+	case tea.KeyUp:
+		if s.editConfirmCursor > 0 {
+			s.editConfirmCursor--
+		}
+		s.SyncViewports()
+		return s, nil
+	case tea.KeyDown:
+		if s.editConfirmCursor < 1 {
+			s.editConfirmCursor++
+		}
+		s.SyncViewports()
+		return s, nil
+	case tea.KeyTab:
+		if s.editConfirmCursor == 0 {
+			// Open comment textarea for "Yes"
+			ta := textarea.New()
+			ta.Placeholder = "Describe your changes..."
+			ta.SetWidth(max(1, s.contentVP.Width()-6))
+			ta.SetHeight(2)
+			ta.CharLimit = 1024
+			ta.Focus()
+			s.editConfirmComment = ta
+			s.hasEditComment = true
+			s.SyncViewports()
+			return s, nil
+		}
+		return s, nil
+	case tea.KeyEnter:
+		if s.editConfirmCursor == 0 {
+			// "Yes" — confirm edit
+			comment := ""
+			if s.hasEditComment {
+				comment = strings.TrimSpace(s.editConfirmComment.Value())
+			}
+			s.PendingIntent = ConfirmEditIntent{
+				EditedContent: s.pendingEditContent,
+				Comment:       comment,
+			}
+			s.pendingEditContent = ""
+			s.hasEditComment = false
+			s.awaitingPlanDecision = false
+			s.content = ContentStreaming
+			s.SyncViewports()
+			return s, nil
+		}
+		// "No" — discard edit, return to plan review
+		s.pendingEditContent = ""
+		s.hasEditComment = false
+		s.content = ContentPlanReview
+		s.awaitingPlanDecision = true
+		contentWidth := max(1, s.contentVP.Width()-4)
+		s.planComment = textarea.New()
+		s.planComment.Placeholder = "Ask a question or request changes..."
+		s.planComment.SetWidth(contentWidth)
+		s.planComment.SetHeight(2)
+		s.planComment.CharLimit = 1024
+		s.planComment.Focus()
+		s.hasPlanComment = true
+		s.SyncViewports()
+		return s, nil
+	case tea.KeyEscape:
+		// Same as "No"
+		s.pendingEditContent = ""
+		s.hasEditComment = false
+		s.content = ContentPlanReview
+		s.awaitingPlanDecision = true
+		contentWidth := max(1, s.contentVP.Width()-4)
+		s.planComment = textarea.New()
+		s.planComment.Placeholder = "Ask a question or request changes..."
+		s.planComment.SetWidth(contentWidth)
+		s.planComment.SetHeight(2)
+		s.planComment.CharLimit = 1024
+		s.planComment.Focus()
+		s.hasPlanComment = true
+		s.SyncViewports()
+		return s, nil
+	}
+	return s, nil
+}
+
+func (s PipelineScreen) viewEditConfirm(width int) string {
+	var b strings.Builder
+
+	b.WriteString(goalStyle.Render("  Plan was modified"))
+	b.WriteString("\n\n")
+	b.WriteString("  Apply these changes?\n\n")
+
+	options := []string{"Yes, apply changes", "No, discard changes"}
+	for i, opt := range options {
+		cursor := "  "
+		style := dimStyle
+		if i == s.editConfirmCursor {
+			cursor = "> "
+			style = phaseStyle.Bold(true)
+		}
+		b.WriteString(style.Render(cursor + opt))
+		if i == 0 && s.editConfirmCursor == 0 {
+			b.WriteString(dimStyle.Render("  [Tab: add context]"))
+		}
+		b.WriteString("\n")
+	}
+
+	if s.hasEditComment {
+		b.WriteString("\n")
+		b.WriteString(s.editConfirmComment.View())
+		b.WriteString("\n")
+	}
+
+	return lipgloss.NewStyle().Width(width).Render(b.String())
 }
 
 // isFilePathTool returns true if the tool's detail field is a file path.

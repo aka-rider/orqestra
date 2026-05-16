@@ -34,6 +34,7 @@ const (
 	ContentUserQuestion                     // MCP AskUserQuestion picker
 	ContentPlanDiff                         // line diff of last plan revision
 	ContentMergeConflict                    // post-run merge conflict resolution
+	ContentEditConfirm                      // Ctrl+E edit confirmation prompt
 )
 
 // AgentRow tracks a single agent's status in the sidebar.
@@ -145,17 +146,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			edited := string(data)
 			if edited != m.pipelineScreen.finalPlan {
-				m.pipelineScreen.finalPlan = edited
-				if m.decisions != nil {
-					m.decisions <- orchestrator.Decision{
-						Type:          orchestrator.DecisionEdit,
-						EditedContent: edited,
-					}
-				}
-				m.pipelineScreen.awaitingPlanDecision = false
-				m.pipelineScreen.content = ContentStreaming
+				// Show confirmation prompt instead of immediate DecisionEdit
+				m.pipelineScreen.pendingEditContent = edited
+				m.pipelineScreen.editConfirmCursor = 0
+				m.pipelineScreen.hasEditComment = false
+				m.pipelineScreen.content = ContentEditConfirm
+				m.pipelineScreen.hasPlanComment = false
+				m.recalculateLayout()
 				m.pipelineScreen.SyncViewports()
-				return m, waitForEvent(m.events)
+				return m, nil
 			}
 		}
 		return m, nil
@@ -433,6 +432,18 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionApprove}
 		}
 		return m, batch(nil)
+	case ConfirmEditIntent:
+		if m.decisions != nil {
+			m.decisions <- orchestrator.Decision{
+				Type:          orchestrator.DecisionEdit,
+				EditedContent: i.EditedContent,
+				Comment:       i.Comment,
+			}
+		}
+		m.pipelineScreen.awaitingPlanDecision = false
+		m.pipelineScreen.content = ContentStreaming
+		m.pipelineScreen.SyncViewports()
+		return m, batch(waitForEvent(m.events))
 	case EditPlanIntent:
 		if m.decisions != nil {
 			m.decisions <- orchestrator.Decision{

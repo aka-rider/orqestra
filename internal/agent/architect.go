@@ -83,6 +83,25 @@ const continuePromptTemplate = `The current implementation plan is below. The re
 If the reviewer asks a question, answer it using your knowledge of the codebase from this session.
 If the reviewer requests changes, revise the plan.`
 
+// continueWithDiffTemplate is used when the reviewer edited the plan directly
+// (Ctrl+E) and optionally added a comment. The diff shows exactly what changed.
+const continueWithDiffTemplate = `The reviewer edited the plan directly. Here are their changes:
+
+<plan_changes>
+%s
+</plan_changes>
+
+<current_plan>
+%s
+</current_plan>
+
+<reviewer_message>
+%s
+</reviewer_message>
+
+Focus on the reviewer's edits first. If the reviewer asks a question, answer it.
+If the reviewer requests further changes, revise the plan.`
+
 // ContinueSession resumes the architect's session to handle a reviewer comment.
 // It uses RunContinue (--resume) to maintain the full conversation context.
 // Revision detection requires two conditions:
@@ -113,6 +132,31 @@ func (a *Architect) ContinueSession(ctx context.Context, sessionID, currentPlan,
 	return result.Output, plan, result.Usage, nil
 }
 
+// ContinueSessionWithDiff resumes the architect's session with a plain diff
+// showing what the reviewer changed, the full current plan, and an optional comment.
+// Used when the reviewer edits via Ctrl+E and provides context.
+func (a *Architect) ContinueSessionWithDiff(ctx context.Context, sessionID, currentPlan, diff, comment string, stdout io.Writer) (string, *RawPlan, harness.TokenUsage, error) {
+	cr, ok := a.runner.(harness.ContinuableRunner)
+	if !ok {
+		return "", nil, harness.TokenUsage{}, fmt.Errorf("architect runner does not support session continuation")
+	}
+
+	baseline, baselineErr := ReadPlanFromRun(harness.RunResult{SessionID: sessionID})
+	if baselineErr != nil {
+		slog.Debug("could not snapshot plan file baseline for diff review",
+			"session_id", sessionID, "err", baselineErr)
+	}
+
+	prompt := fmt.Sprintf(continueWithDiffTemplate, diff, currentPlan, comment)
+	result, err := cr.RunContinue(ctx, sessionID, prompt, stdout)
+	if err != nil {
+		return "", nil, harness.TokenUsage{}, fmt.Errorf("architect continue with diff: %w", err)
+	}
+
+	plan := detectPlanRevision(result, baseline, baselineErr, currentPlan)
+	return result.Output, plan, result.Usage, nil
+}
+
 // extractArchitectPlan reads the plan from the Claude CLI plan file and validates
 // that it contains content. It also runs a structural health check.
 func (a *Architect) extractArchitectPlan(result harness.RunResult) (RawPlan, harness.TokenUsage, string, error) {
@@ -136,6 +180,7 @@ func (a *Architect) extractArchitectPlan(result harness.RunResult) (RawPlan, har
 func detectPlanRevision(result harness.RunResult, baseline string, baselineErr error, currentPlan string) *RawPlan {
 	planContent, readErr := ReadPlanFromRun(result)
 	if readErr != nil {
+		slog.Debug("revision detection: could not read plan file", "err", readErr)
 		return nil
 	}
 
@@ -145,16 +190,23 @@ func detectPlanRevision(result harness.RunResult, baseline string, baselineErr e
 		compareTo = strings.TrimSpace(baseline)
 	}
 	if planContent == compareTo {
-		return nil // plan file unchanged
+		slog.Debug("revision detection: plan unchanged from baseline",
+			"baseline_len", len(compareTo), "plan_len", len(planContent))
+		return nil
 	}
 
 	// Condition 2: is the new content actually different from what the user has?
 	// Without this check, the architect echoing user's ^E edits into its plan
 	// file would be presented as a "revision" — the user's own work shown back.
 	if planContent == strings.TrimSpace(currentPlan) {
-		return nil // echo suppression: architect accepted user's edits, not a new revision
+		slog.Debug("revision detection: echo suppressed — matches current plan",
+			"plan_len", len(planContent))
+		return nil
 	}
 
+	slog.Debug("revision detection: plan revised",
+		"baseline_len", len(compareTo), "current_len", len(strings.TrimSpace(currentPlan)),
+		"new_len", len(planContent))
 	warnings := CheckPlanHealth(planContent)
 	return &RawPlan{Markdown: planContent, Warnings: warnings}
 }

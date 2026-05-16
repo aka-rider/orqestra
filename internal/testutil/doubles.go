@@ -19,6 +19,7 @@ type FakeCall struct {
 	PlanFilePath string
 	Usage        harness.TokenUsage
 	Err          error
+	OnCall       func(callIndex int) // called with the 0-based call index before returning
 }
 
 // FakeRunner is a test double for harness.CLIRunner and harness.ContinuableRunner.
@@ -31,8 +32,9 @@ type FakeRunner struct {
 
 func (f *FakeRunner) next() FakeCall {
 	f.mu.Lock()
-	defer f.mu.Unlock()
+	var call FakeCall
 	if len(f.Calls) == 0 {
+		f.mu.Unlock()
 		return FakeCall{}
 	}
 	idx := f.n
@@ -41,7 +43,13 @@ func (f *FakeRunner) next() FakeCall {
 	} else {
 		f.n++
 	}
-	return f.Calls[idx]
+	call = f.Calls[idx]
+	f.mu.Unlock()
+
+	if call.OnCall != nil {
+		call.OnCall(idx)
+	}
+	return call
 }
 
 func (f *FakeRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {

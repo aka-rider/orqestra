@@ -119,5 +119,13 @@ type AbortMergeIntent struct{}
 
 func (AbortMergeIntent) isIntent() {}
 
+// ConfirmEditIntent confirms a user's manual plan edit with an optional comment.
+type ConfirmEditIntent struct {
+	EditedContent string
+	Comment       string // optional context describing the edit
+}
+
+func (ConfirmEditIntent) isIntent() {}
+
 // ctrlCTimeoutMsg resets the Ctrl+C pending-quit state after the time gate expires.
 type ctrlCTimeoutMsg struct{}

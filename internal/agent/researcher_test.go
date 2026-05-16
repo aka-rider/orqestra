@@ -37,10 +37,10 @@ func TestResearcher_Research_Success(t *testing.T) {
 	setupPlanFile(t, sessionID, draft)
 
 	mock := &researcherMockRunner{response: "saved", sessionID: sessionID}
-	cfg := config.ResearcherConfig{
+	cfg := config.ResearcherConfig{BaseAgentConfig: config.BaseAgentConfig{
 		Model:        "test-model",
 		SystemPrompt: "You are a researcher.",
-	}
+	}}
 
 	r := NewResearcher(mock, cfg)
 	plan, _, sid, err := r.Research(context.Background(), "build something")
@@ -59,7 +59,7 @@ func TestResearcher_Research_Success(t *testing.T) {
 func TestResearcher_Research_CLIError(t *testing.T) {
 	mock := &researcherMockRunner{err: fmt.Errorf("timeout")}
 
-	cfg := config.ResearcherConfig{Model: "test"}
+	cfg := config.ResearcherConfig{BaseAgentConfig: config.BaseAgentConfig{Model: "test"}}
 	r := NewResearcher(mock, cfg)
 	_, _, _, err := r.Research(context.Background(), "prompt")
 	if err == nil {
@@ -69,7 +69,7 @@ func TestResearcher_Research_CLIError(t *testing.T) {
 
 func TestResearcher_ErrorWithoutSessionID(t *testing.T) {
 	mock := &researcherMockRunner{response: "I saved the plan to a file."}
-	cfg := config.ResearcherConfig{Model: "test"}
+	cfg := config.ResearcherConfig{BaseAgentConfig: config.BaseAgentConfig{Model: "test"}}
 	r := NewResearcher(mock, cfg)
 
 	_, _, _, err := r.Research(context.Background(), "prompt")
@@ -90,7 +90,7 @@ func TestResearcher_PlanFileExtraction(t *testing.T) {
 		response:  "I have saved the plan to the plan file.",
 		sessionID: sessionID,
 	}
-	cfg := config.ResearcherConfig{Model: "test"}
+	cfg := config.ResearcherConfig{BaseAgentConfig: config.BaseAgentConfig{Model: "test"}}
 	r := NewResearcher(mock, cfg)
 
 	plan, _, sid, err := r.Research(context.Background(), "prompt")
@@ -114,7 +114,7 @@ func TestResearcher_ErrorWithMissingJSONL(t *testing.T) {
 		response:  "Saved the plan.",
 		sessionID: "nonexistent-session-12345",
 	}
-	cfg := config.ResearcherConfig{Model: "test"}
+	cfg := config.ResearcherConfig{BaseAgentConfig: config.BaseAgentConfig{Model: "test"}}
 	r := NewResearcher(mock, cfg)
 
 	_, _, _, err := r.Research(context.Background(), "prompt")

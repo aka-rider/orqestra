@@ -52,10 +52,10 @@ func TestCritic_ReviewStreaming(t *testing.T) {
 		}},
 	}
 
-	critic := NewCritic(runner, config.CriticConfig{
+	critic := NewCritic(runner, config.CriticConfig{BaseAgentConfig: config.BaseAgentConfig{
 		Model:        "medium",
 		SystemPrompt: "test system prompt",
-	})
+	}})
 
 	result, usage, sessionID, err := critic.ReviewStreaming(context.Background(), "user prompt", "# Plan\n...", io.Discard)
 	if err != nil {
@@ -105,7 +105,7 @@ None found.
 		Calls: []testutil.FakeCall{{Output: report}},
 	}
 
-	critic := NewCritic(runner, config.CriticConfig{SystemPrompt: "test"})
+	critic := NewCritic(runner, config.CriticConfig{BaseAgentConfig: config.BaseAgentConfig{SystemPrompt: "test"}})
 	result, _, _, err := critic.ReviewStreaming(context.Background(), "prompt", "plan", io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -121,7 +121,7 @@ func TestCritic_ReviewStreaming_Error(t *testing.T) {
 		Calls: []testutil.FakeCall{{Err: context.DeadlineExceeded}},
 	}
 
-	critic := NewCritic(runner, config.CriticConfig{SystemPrompt: "test"})
+	critic := NewCritic(runner, config.CriticConfig{BaseAgentConfig: config.BaseAgentConfig{SystemPrompt: "test"}})
 	_, _, _, err := critic.ReviewStreaming(context.Background(), "prompt", "plan", io.Discard)
 	if err == nil {
 		t.Fatal("expected error")

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
@@ -111,5 +112,121 @@ func TestViewCompletion_ShowsAgentSummary(t *testing.T) {
 
 	if !strings.Contains(out, "file1.txt") {
 		t.Errorf("expected file activity in completion summary, got %s", out)
+	}
+}
+
+func setupEditConfirmScreen() PipelineScreen {
+	s := NewPipelineScreen("test")
+	s.content = ContentEditConfirm
+	s.awaitingPlanDecision = true
+	s.hasPlan = true
+	s.finalPlan = "# Original Plan"
+	s.pendingEditContent = "# Modified Plan"
+	s.editConfirmCursor = 0
+	s.hasEditComment = false
+	s.contentVP.SetWidth(80)
+	s.contentVP.SetHeight(20)
+	return s
+}
+
+func TestEditConfirm_YesWithComment(t *testing.T) {
+	s := setupEditConfirmScreen()
+
+	// Press Tab to open comment textarea
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if !s.hasEditComment {
+		t.Fatal("expected hasEditComment to be true after Tab")
+	}
+
+	// Type comment
+	s.editConfirmComment.SetValue("Fixed imports")
+
+	// Press Enter to confirm
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	intent, ok := s.PendingIntent.(ConfirmEditIntent)
+	if !ok {
+		t.Fatalf("expected ConfirmEditIntent, got %T", s.PendingIntent)
+	}
+	if intent.EditedContent != "# Modified Plan" {
+		t.Errorf("expected EditedContent %q, got %q", "# Modified Plan", intent.EditedContent)
+	}
+	if intent.Comment != "Fixed imports" {
+		t.Errorf("expected Comment %q, got %q", "Fixed imports", intent.Comment)
+	}
+	if s.content != ContentStreaming {
+		t.Errorf("expected ContentStreaming, got %d", s.content)
+	}
+}
+
+func TestEditConfirm_YesNoComment(t *testing.T) {
+	s := setupEditConfirmScreen()
+
+	// Press Enter directly (cursor=0 means Yes)
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	intent, ok := s.PendingIntent.(ConfirmEditIntent)
+	if !ok {
+		t.Fatalf("expected ConfirmEditIntent, got %T", s.PendingIntent)
+	}
+	if intent.EditedContent != "# Modified Plan" {
+		t.Errorf("expected EditedContent %q, got %q", "# Modified Plan", intent.EditedContent)
+	}
+	if intent.Comment != "" {
+		t.Errorf("expected empty Comment, got %q", intent.Comment)
+	}
+	if s.content != ContentStreaming {
+		t.Errorf("expected ContentStreaming, got %d", s.content)
+	}
+	if s.pendingEditContent != "" {
+		t.Errorf("expected pendingEditContent cleared, got %q", s.pendingEditContent)
+	}
+}
+
+func TestEditConfirm_No(t *testing.T) {
+	s := setupEditConfirmScreen()
+
+	// Move cursor to No
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	// Press Enter
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if s.PendingIntent != nil {
+		t.Errorf("expected no PendingIntent, got %T", s.PendingIntent)
+	}
+	if s.content != ContentPlanReview {
+		t.Errorf("expected ContentPlanReview, got %d", s.content)
+	}
+	if s.pendingEditContent != "" {
+		t.Errorf("expected pendingEditContent cleared, got %q", s.pendingEditContent)
+	}
+	if s.finalPlan != "# Original Plan" {
+		t.Errorf("expected finalPlan unchanged, got %q", s.finalPlan)
+	}
+	if !s.hasPlanComment {
+		t.Error("expected hasPlanComment to be true after declining edit")
+	}
+}
+
+func TestEditConfirm_EscapeReturns(t *testing.T) {
+	s := setupEditConfirmScreen()
+
+	// Press Escape
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+
+	if s.PendingIntent != nil {
+		t.Errorf("expected no PendingIntent, got %T", s.PendingIntent)
+	}
+	if s.content != ContentPlanReview {
+		t.Errorf("expected ContentPlanReview, got %d", s.content)
+	}
+	if s.pendingEditContent != "" {
+		t.Errorf("expected pendingEditContent cleared, got %q", s.pendingEditContent)
+	}
+	if s.finalPlan != "# Original Plan" {
+		t.Errorf("expected finalPlan unchanged, got %q", s.finalPlan)
+	}
+	if !s.hasPlanComment {
+		t.Error("expected hasPlanComment to be true after escape")
 	}
 }

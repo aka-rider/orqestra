@@ -370,6 +370,24 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		writeArtifact(session, "prompt.md", input.Prompt)
 	}
 
+	// --- Run Log ---
+	logger := slog.Default() // fallback: global logger (usually io.Discard in TUI mode)
+	if session.Path != "" {
+		logPath := filepath.Join(session.Path, "run.log")
+		logFile, logErr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if logErr != nil {
+			slog.Warn("could not create run log", "err", logErr)
+		} else {
+			logger = slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			slog.SetDefault(logger)
+			defer func() {
+				slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+				logFile.Close()
+			}()
+		}
+	}
+	logger.Info("run started", "prompt_len", len(input.Prompt), "auto_approve", input.AutoApprove, "plan_file", input.PlanFile != "")
+
 	cwd := ""
 	if session.Path != "" {
 		cwd = filepath.Dir(filepath.Dir(filepath.Dir(session.Path)))
@@ -415,12 +433,16 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		}
 	}
 
+	var lastArchitectHash string // tracks HEAD after architect commits, for diff generation
+
 	// If a pre-loaded plan was provided, skip research and planning
 	if input.PlanFile != "" {
 		finalPlanMarkdown = input.PlanFile
 		if planRepo != nil {
-			if err := planRepo.Commit(finalPlanMarkdown, "user: plan loaded from file"); err != nil {
-				slog.Warn("plan commit failed", "err", err)
+			if err := planRepo.CommitPlanAndDialog(finalPlanMarkdown, plan.DialogEntry{
+				Timestamp: time.Now(), Role: "user", Message: "plan loaded from file",
+			}); err != nil {
+				logger.Warn("plan commit failed", "err", err)
 			}
 		}
 		goto planGate
@@ -556,8 +578,14 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		finalPlanWarnings = planResult.Warnings
 		finalPlanMarkdown = planResult.Markdown
 		if planRepo != nil {
-			if err := planRepo.Commit(finalPlanMarkdown, "architect: initial plan"); err != nil {
-				slog.Warn("plan commit failed", "err", err)
+			if err := planRepo.CommitPlanAndDialog(finalPlanMarkdown, plan.DialogEntry{
+				Timestamp: time.Now(), Role: "architect", Message: "initial plan",
+				OutputTokens: int(planUsage.OutputTokens),
+			}); err != nil {
+				logger.Warn("plan commit failed", "err", err)
+			}
+			if hash, hashErr := planRepo.HeadCommitHash(); hashErr == nil {
+				lastArchitectHash = hash
 			}
 		}
 	}
@@ -623,6 +651,23 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 
 		criticReportMarkdown = criticResult.Markdown
 
+		// Persist critic report in dialog
+		if planRepo != nil {
+			firstLine := criticResult.Markdown
+			if idx := strings.IndexByte(firstLine, '\n'); idx > 0 {
+				firstLine = firstLine[:idx]
+			}
+			if len(firstLine) > 50 {
+				firstLine = firstLine[:50]
+			}
+			if err := planRepo.CommitDialog(plan.DialogEntry{
+				Timestamp: time.Now(), Role: "critic", Message: firstLine,
+				OutputTokens: int(criticUsage.OutputTokens),
+			}); err != nil {
+				logger.Warn("critic dialog commit failed", "err", err)
+			}
+		}
+
 		// --- Architect Second Pass (critic feedback) ---
 		emit(Event{Type: EventAgentStarted, AgentID: "architect"})
 		stream.SetAgent("architect")
@@ -678,8 +723,24 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			finalPlanMarkdown = revisedPlan.Markdown
 			finalPlanWarnings = revisedPlan.Warnings
 			if planRepo != nil {
-				if commitErr := planRepo.Commit(finalPlanMarkdown, "architect: Re: critic feedback"); commitErr != nil {
-					slog.Warn("plan commit failed", "err", commitErr)
+				if commitErr := planRepo.CommitPlanAndDialog(finalPlanMarkdown, plan.DialogEntry{
+					Timestamp: time.Now(), Role: "architect", Message: "Re: critic feedback",
+					OutputTokens: int(revisedUsage.OutputTokens),
+				}); commitErr != nil {
+					logger.Warn("plan commit failed", "err", commitErr)
+				}
+				if hash, hashErr := planRepo.HeadCommitHash(); hashErr == nil {
+					lastArchitectHash = hash
+				}
+			}
+		} else {
+			// No plan change, but still log the dialog turn
+			if planRepo != nil {
+				if commitErr := planRepo.CommitDialog(plan.DialogEntry{
+					Timestamp: time.Now(), Role: "architect", Message: "Re: critic feedback (no changes)",
+					OutputTokens: int(revisedUsage.OutputTokens),
+				}); commitErr != nil {
+					logger.Warn("dialog commit failed", "err", commitErr)
 				}
 			}
 		}
@@ -719,16 +780,117 @@ planGate:
 					edited := strings.TrimSpace(decision.EditedContent)
 					finalPlanMarkdown = edited
 					finalPlanWarnings = agent.CheckPlanHealth(edited)
+					logger.Info("gate: user edit", "comment_len", len(decision.Comment))
 					if planRepo != nil {
-						if err := planRepo.Commit(edited, "user: manual edit"); err != nil {
-							slog.Warn("plan commit failed", "err", err)
+						if err := planRepo.CommitPlan(edited, "user: manual edit"); err != nil {
+							logger.Warn("plan commit failed", "err", err)
 						}
 					}
-					continue // re-show gate with edited plan
+					// If user provided a comment via the confirmation dialog,
+					// send edit + diff + comment to architect in one shot.
+					if decision.Comment != "" && planSessionID != "" {
+						var diff string
+						if planRepo != nil && lastArchitectHash != "" {
+							diff, _ = planRepo.DiffPlain(lastArchitectHash)
+						}
+						if planRepo != nil {
+							if err := planRepo.CommitDialog(plan.DialogEntry{
+								Timestamp: time.Now(), Role: "user", Message: decision.Comment,
+							}); err != nil {
+								logger.Warn("user comment dialog commit failed", "err", err)
+							}
+						}
+						emit(Event{Type: EventAgentStarted, AgentID: "architect"})
+						stream.SetAgent("architect")
+						revStart := time.Now()
+
+						chatResponse, revisedPlan, revisedUsage, err := architect.ContinueSessionWithDiff(
+							ctx, planSessionID, finalPlanMarkdown, diff, decision.Comment, &streamWriter{buf: stream})
+
+						if err != nil {
+							archRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_revision_session.jsonl")
+							if cpErr != nil {
+								logger.Warn("copy session log", "agent", "architect", "err", cpErr)
+							}
+							archRevPlanFilePath := ""
+							if archRevLogCopy != "" {
+								archRevPlanFilePath, _ = harness.ExtractPlanFilePath(archRevLogCopy)
+							}
+							writeArtifactJSON(session, "architect_revision_meta.json", agent.StepMeta{
+								AgentID: "architect", ModelRef: e.Config.Architect.Model,
+								StartTime: revStart, EndTime: time.Now(),
+								ClaudeSessionID: planSessionID, Status: "failed", Error: err.Error(),
+								ClaudeProjectPath:    claudeProjectPath(session),
+								ClaudeSessionLogPath: archRevLogCopy,
+								ClaudePlanFilePath:   archRevPlanFilePath,
+							})
+							emit(Event{Type: EventAgentFailed, AgentID: "architect", Err: err})
+							emit(Event{Type: EventError, Err: fmt.Errorf("architect revision: %w", err)})
+							return
+						}
+
+						archRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_revision_session.jsonl")
+						if cpErr != nil {
+							logger.Warn("copy session log", "agent", "architect", "err", cpErr)
+						}
+						archRevPlanFilePath := ""
+						if archRevLogCopy != "" {
+							archRevPlanFilePath, _ = harness.ExtractPlanFilePath(archRevLogCopy)
+						}
+						writeArtifactJSON(session, "architect_revision_meta.json", agent.StepMeta{
+							AgentID: "architect", ModelRef: e.Config.Architect.Model,
+							StartTime: revStart, EndTime: time.Now(),
+							ClaudeSessionID: planSessionID, Status: "done",
+							InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens,
+							ClaudeProjectPath:    claudeProjectPath(session),
+							ClaudeSessionLogPath: archRevLogCopy,
+							ClaudePlanFilePath:   archRevPlanFilePath,
+						})
+						emit(Event{Type: EventAgentDone, AgentID: "architect",
+							InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens})
+
+						if revisedPlan != nil {
+							finalPlanMarkdown = revisedPlan.Markdown
+							finalPlanWarnings = revisedPlan.Warnings
+							if planRepo != nil {
+								if commitErr := planRepo.CommitPlanAndDialog(finalPlanMarkdown, plan.DialogEntry{
+									Timestamp: time.Now(), Role: "architect", Message: "Re: " + truncateMsg(decision.Comment, 50),
+									OutputTokens: int(revisedUsage.OutputTokens),
+								}); commitErr != nil {
+									logger.Warn("plan commit failed", "err", commitErr)
+								}
+								if hash, hashErr := planRepo.HeadCommitHash(); hashErr == nil {
+									lastArchitectHash = hash
+								}
+							}
+						} else if chatResponse != "" {
+							if planRepo != nil {
+								if commitErr := planRepo.CommitDialog(plan.DialogEntry{
+									Timestamp: time.Now(), Role: "architect",
+									Message:      "Re: " + truncateMsg(decision.Comment, 50) + " (chat only)",
+									OutputTokens: int(revisedUsage.OutputTokens),
+								}); commitErr != nil {
+									logger.Warn("dialog commit failed", "err", commitErr)
+								}
+							}
+							emit(Event{Type: EventChatResponse, ChatText: chatResponse})
+						}
+					}
+					continue // re-show gate with (possibly revised) plan
 				case DecisionComment:
 					emit(Event{Type: EventAgentStarted, AgentID: "architect"})
 					stream.SetAgent("architect")
 					revStart := time.Now()
+					logger.Info("gate: user comment", "comment_len", len(decision.Comment))
+
+					// Persist user comment in dialog
+					if planRepo != nil {
+						if err := planRepo.CommitDialog(plan.DialogEntry{
+							Timestamp: time.Now(), Role: "user", Message: decision.Comment,
+						}); err != nil {
+							logger.Warn("user comment dialog commit failed", "err", err)
+						}
+					}
 
 					var chatResponse string
 					var revisedPlan *agent.RawPlan
@@ -797,17 +959,32 @@ planGate:
 						finalPlanMarkdown = revisedPlan.Markdown
 						finalPlanWarnings = revisedPlan.Warnings
 						if planRepo != nil {
-							msg := commitMsg("architect: Re", decision.Comment)
-							if commitErr := planRepo.Commit(finalPlanMarkdown, msg); commitErr != nil {
-								slog.Warn("plan commit failed", "err", commitErr)
+							if commitErr := planRepo.CommitPlanAndDialog(finalPlanMarkdown, plan.DialogEntry{
+								Timestamp: time.Now(), Role: "architect", Message: "Re: " + truncateMsg(decision.Comment, 50),
+								OutputTokens: int(revisedUsage.OutputTokens),
+							}); commitErr != nil {
+								logger.Warn("plan commit failed", "err", commitErr)
+							}
+							if hash, hashErr := planRepo.HeadCommitHash(); hashErr == nil {
+								lastArchitectHash = hash
 							}
 						}
 					} else if chatResponse != "" {
 						// Chat-only response — no plan change
+						if planRepo != nil {
+							if commitErr := planRepo.CommitDialog(plan.DialogEntry{
+								Timestamp: time.Now(), Role: "architect",
+								Message:      "Re: " + truncateMsg(decision.Comment, 50) + " (chat only)",
+								OutputTokens: int(revisedUsage.OutputTokens),
+							}); commitErr != nil {
+								logger.Warn("dialog commit failed", "err", commitErr)
+							}
+						}
 						emit(Event{Type: EventChatResponse, ChatText: chatResponse})
 					}
 					continue // re-show gate with (possibly revised) plan
 				case DecisionApprove:
+					logger.Info("gate: user approved plan")
 					// proceed
 				}
 			case <-ctx.Done():
@@ -1082,6 +1259,14 @@ func commitMsg(prefix, comment string) string {
 		return prefix + ": " + comment[:50]
 	}
 	return prefix + ": " + comment
+}
+
+// truncateMsg truncates s to maxLen characters.
+func truncateMsg(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen]
 }
 
 // writeArtifact writes a string artifact to the session directory.

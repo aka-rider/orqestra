@@ -19,10 +19,10 @@ func TestArchitect_Refine_Success(t *testing.T) {
 	setupPlanFile(t, sessionID, planMD)
 
 	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "plan saved", SessionID: sessionID}}}
-	cfg := config.ArchitectConfig{
+	cfg := config.ArchitectConfig{BaseAgentConfig: config.BaseAgentConfig{
 		Model:        "test-model",
 		SystemPrompt: "You are the architect.",
-	}
+	}}
 
 	p := NewArchitect(mock, cfg)
 	plan, _, sid, err := p.Refine(context.Background(), "user prompt", "some researcher draft")
@@ -42,7 +42,7 @@ func TestArchitect_Refine_EmptyPlan(t *testing.T) {
 	setupPlanFile(t, sessionID, "   \n  \t  ")
 
 	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "done", SessionID: sessionID}}}
-	cfg := config.ArchitectConfig{Model: "test"}
+	cfg := config.ArchitectConfig{BaseAgentConfig: config.BaseAgentConfig{Model: "test"}}
 	p := NewArchitect(mock, cfg)
 	_, _, _, err := p.Refine(context.Background(), "prompt", "draft")
 	if err == nil || !strings.Contains(err.Error(), "is empty") {
@@ -53,7 +53,7 @@ func TestArchitect_Refine_EmptyPlan(t *testing.T) {
 func TestArchitect_Refine_CLIError(t *testing.T) {
 	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Err: fmt.Errorf("connection refused")}}}
 
-	cfg := config.ArchitectConfig{Model: "test"}
+	cfg := config.ArchitectConfig{BaseAgentConfig: config.BaseAgentConfig{Model: "test"}}
 	p := NewArchitect(mock, cfg)
 	_, _, _, err := p.Refine(context.Background(), "prompt", "draft")
 	if err == nil || !strings.Contains(err.Error(), "connection refused") {
@@ -67,7 +67,7 @@ func TestArchitect_RefineWithComments(t *testing.T) {
 	setupPlanFile(t, sessionID, planMD)
 
 	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "revised", SessionID: sessionID}}}
-	cfg := config.ArchitectConfig{Model: "test"}
+	cfg := config.ArchitectConfig{BaseAgentConfig: config.BaseAgentConfig{Model: "test"}}
 	p := NewArchitect(mock, cfg)
 	plan, _, _, err := p.RefineWithComments(context.Background(), "old plan", "please fix step 2")
 	if err != nil {
@@ -80,7 +80,7 @@ func TestArchitect_RefineWithComments(t *testing.T) {
 
 func TestArchitect_ErrorWithoutSessionID(t *testing.T) {
 	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "no plan header here"}}}
-	cfg := config.ArchitectConfig{Model: "test"}
+	cfg := config.ArchitectConfig{BaseAgentConfig: config.BaseAgentConfig{Model: "test"}}
 	p := NewArchitect(mock, cfg)
 
 	_, _, _, err := p.Refine(context.Background(), "prompt", "draft")
@@ -97,7 +97,7 @@ func TestArchitect_ErrorWithMissingJSONL(t *testing.T) {
 	t.Setenv("HOME", tmp)
 
 	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "no plan header here", SessionID: "nonexistent-session-id-12345"}}}
-	cfg := config.ArchitectConfig{Model: "test"}
+	cfg := config.ArchitectConfig{BaseAgentConfig: config.BaseAgentConfig{Model: "test"}}
 	p := NewArchitect(mock, cfg)
 
 	_, _, _, err := p.Refine(context.Background(), "prompt", "draft")
@@ -113,7 +113,7 @@ func TestArchitect_PlanFileExtraction(t *testing.T) {
 
 	// Mock runner returns irrelevant stdout but with session ID.
 	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "The plan has been saved to the plan file.", SessionID: sessionID}}}
-	cfg := config.ArchitectConfig{Model: "test"}
+	cfg := config.ArchitectConfig{BaseAgentConfig: config.BaseAgentConfig{Model: "test"}}
 	p := NewArchitect(mock, cfg)
 
 	plan, _, sid, err := p.Refine(context.Background(), "prompt", "draft")
@@ -140,7 +140,7 @@ func TestArchitect_RejectsOutOfBoundsPath(t *testing.T) {
 	_ = evilFile
 
 	mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "no plan here", SessionID: sessionID}}}
-	cfg := config.ArchitectConfig{Model: "test"}
+	cfg := config.ArchitectConfig{BaseAgentConfig: config.BaseAgentConfig{Model: "test"}}
 	p := NewArchitect(mock, cfg)
 
 	_, _, _, err := p.Refine(context.Background(), "prompt", "draft")
@@ -212,7 +212,7 @@ func TestArchitect_ContinueSession_RevisionDetection(t *testing.T) {
 			name:        "chat-only response, plan file unchanged",
 			planFile:    planA,
 			currentPlan: planA,
-			postRunFile: "",    // architect didn't touch the plan file
+			postRunFile: "", // architect didn't touch the plan file
 			wantRevised: false,
 		},
 		{
@@ -269,7 +269,7 @@ func TestArchitect_ContinueSession_RevisionDetection(t *testing.T) {
 			}
 
 			mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{call}}
-			arch := NewArchitect(mock, config.ArchitectConfig{Model: "test"})
+			arch := NewArchitect(mock, config.ArchitectConfig{BaseAgentConfig: config.BaseAgentConfig{Model: "test"}})
 
 			chatResp, revisedPlan, _, err := arch.ContinueSession(
 				context.Background(), sessionID, tt.currentPlan, "review", nil)
@@ -361,7 +361,7 @@ func TestArchitect_ContinueWithCriticReport_RevisionDetection(t *testing.T) {
 			}
 
 			mock := &testutil.FakeRunner{Calls: []testutil.FakeCall{call}}
-			arch := NewArchitect(mock, config.ArchitectConfig{Model: "test"})
+			arch := NewArchitect(mock, config.ArchitectConfig{BaseAgentConfig: config.BaseAgentConfig{Model: "test"}})
 
 			_, revisedPlan, _, err := arch.ContinueWithCriticReport(
 				context.Background(), sessionID, tt.currentPlan, "## Critic Report\n\nFindings here.", nil)

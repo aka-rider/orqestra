@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // GitRepo is a single-file git repository for tracking plan versions.
@@ -35,6 +36,7 @@ func NewGitRepo(sessionPath string) (*GitRepo, error) {
 }
 
 // Commit writes the plan markdown to plan.md, stages, and commits.
+// Deprecated: use CommitPlan, CommitDialog, or CommitPlanAndDialog.
 func (r *GitRepo) Commit(markdown, message string) error {
 	planPath := filepath.Join(r.dir, "plan.md")
 	if err := os.WriteFile(planPath, []byte(markdown), 0o644); err != nil {
@@ -119,4 +121,122 @@ func gitRun(dir string, args ...string) error {
 		return err
 	}
 	return nil
+}
+
+// DialogEntry is one turn in the architect dialog log.
+type DialogEntry struct {
+	Timestamp    time.Time
+	Role         string // "architect", "user", "critic"
+	Message      string
+	OutputTokens int
+}
+
+func formatDialogEntry(e DialogEntry) string {
+	var sb strings.Builder
+	sb.WriteString("---\n")
+	sb.WriteString(fmt.Sprintf("## [%s] %s\n\n", e.Timestamp.Format("2006-01-02 15:04:05"), e.Role))
+	sb.WriteString(e.Message)
+	if e.OutputTokens > 0 {
+		sb.WriteString(fmt.Sprintf(" (%d output tokens)", e.OutputTokens))
+	}
+	sb.WriteString("\n\n")
+	return sb.String()
+}
+
+// CommitPlan writes plan.md, appends a "(see plan.md diff)" entry to dialog.md,
+// stages both files, and commits.
+func (r *GitRepo) CommitPlan(markdown, message string) error {
+	planPath := filepath.Join(r.dir, "plan.md")
+	if err := os.WriteFile(planPath, []byte(markdown), 0o644); err != nil {
+		return fmt.Errorf("write plan.md: %w", err)
+	}
+	entry := DialogEntry{
+		Timestamp: time.Now(),
+		Role:      "user",
+		Message:   "(see plan.md diff)",
+	}
+	if err := r.appendDialog(entry); err != nil {
+		return err
+	}
+	if err := gitRun(r.dir, "add", "plan.md", "dialog.md"); err != nil {
+		return fmt.Errorf("git add: %w", err)
+	}
+	if err := gitRun(r.dir, "commit", "--quiet", "-m", message, "--allow-empty"); err != nil {
+		return fmt.Errorf("git commit: %w", err)
+	}
+	return nil
+}
+
+// CommitDialog appends a dialog entry to dialog.md, stages, and commits.
+func (r *GitRepo) CommitDialog(entry DialogEntry) error {
+	if err := r.appendDialog(entry); err != nil {
+		return err
+	}
+	if err := gitRun(r.dir, "add", "dialog.md"); err != nil {
+		return fmt.Errorf("git add: %w", err)
+	}
+	msg := entry.Role + ": " + truncateMsg(entry.Message, 50)
+	if err := gitRun(r.dir, "commit", "--quiet", "-m", msg, "--allow-empty"); err != nil {
+		return fmt.Errorf("git commit: %w", err)
+	}
+	return nil
+}
+
+// CommitPlanAndDialog writes plan.md, appends entry to dialog.md, stages both, and commits.
+func (r *GitRepo) CommitPlanAndDialog(markdown string, entry DialogEntry) error {
+	planPath := filepath.Join(r.dir, "plan.md")
+	if err := os.WriteFile(planPath, []byte(markdown), 0o644); err != nil {
+		return fmt.Errorf("write plan.md: %w", err)
+	}
+	if err := r.appendDialog(entry); err != nil {
+		return err
+	}
+	if err := gitRun(r.dir, "add", "plan.md", "dialog.md"); err != nil {
+		return fmt.Errorf("git add: %w", err)
+	}
+	msg := entry.Role + ": " + truncateMsg(entry.Message, 50)
+	if err := gitRun(r.dir, "commit", "--quiet", "-m", msg, "--allow-empty"); err != nil {
+		return fmt.Errorf("git commit: %w", err)
+	}
+	return nil
+}
+
+// DiffPlain returns a plain unified diff of plan.md between sinceHash and HEAD.
+// Returns "" if there is no diff or an error occurs.
+func (r *GitRepo) DiffPlain(sinceHash string) (string, error) {
+	out, err := exec.Command("git", "-C", r.dir, "diff", "--no-color", sinceHash, "HEAD", "--", "plan.md").Output()
+	if err != nil {
+		return "", nil
+	}
+	return string(out), nil
+}
+
+// HeadCommitHash returns the SHA of the current HEAD commit.
+func (r *GitRepo) HeadCommitHash() (string, error) {
+	out, err := exec.Command("git", "-C", r.dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse HEAD: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (r *GitRepo) appendDialog(entry DialogEntry) error {
+	dialogPath := filepath.Join(r.dir, "dialog.md")
+	f, err := os.OpenFile(dialogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open dialog.md: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(formatDialogEntry(entry)); err != nil {
+		return fmt.Errorf("write dialog.md: %w", err)
+	}
+	return nil
+}
+
+func truncateMsg(s string, n int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }
