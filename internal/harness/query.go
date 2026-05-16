@@ -104,7 +104,7 @@ func (r *CLIQueryRunner) Query(ctx context.Context, cfg QueryConfig) (<-chan Str
 	args := []string{"--print", "-p", cfg.Prompt, "--output-format", "stream-json"}
 
 	if cfg.SystemPrompt != "" {
-		args = append(args, "--system-prompt", cfg.SystemPrompt)
+		args = append(args, "--append-system-prompt", cfg.SystemPrompt)
 	}
 	if cfg.SessionID != "" {
 		args = append(args, "--continue", cfg.SessionID)

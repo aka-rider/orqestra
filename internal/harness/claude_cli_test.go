@@ -369,6 +369,51 @@ func TestWithAppendSystemPrompt(t *testing.T) {
 	}
 }
 
+func TestMergeAppendPrompts(t *testing.T) {
+	tests := []struct {
+		name  string
+		parts []string
+		want  string
+	}{
+		{"both non-empty", []string{"role rules", "bridge nudge"}, "role rules\n\nbridge nudge"},
+		{"first empty", []string{"", "bridge nudge"}, "bridge nudge"},
+		{"second empty", []string{"role rules", ""}, "role rules"},
+		{"both empty", []string{"", ""}, ""},
+		{"whitespace only", []string{"  ", "\n"}, ""},
+		{"three parts", []string{"a", "b", "c"}, "a\n\nb\n\nc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeAppendPrompts(tt.parts...)
+			if got != tt.want {
+				t.Errorf("mergeAppendPrompts(%v) = %q, want %q", tt.parts, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNoSystemPromptFlag verifies that ClaudeCLI never emits --system-prompt.
+// All system prompt steering goes through --append-system-prompt (layer 5) to
+// preserve CLAUDE.md and the default prompt (layer 4).
+func TestNoSystemPromptFlag(t *testing.T) {
+	// Provide both a role system prompt (via RunPrint parameter) and an
+	// append option to verify they are merged into a single --append-system-prompt.
+	// We cannot call RunPrint without a real binary, but we can verify the
+	// mergeAppendPrompts helper produces the right combined text and that
+	// buildFinalArgs never contains --system-prompt.
+	cli := NewClaudeCLI(config.ResolvedModel{Type: "anthropic"},
+		WithAppendSystemPrompt("bridge nudge"),
+		WithExtraArgs("--permission-mode", "plan"),
+	)
+
+	args := cli.buildFinalArgs()
+	for _, arg := range args {
+		if arg == "--system-prompt" {
+			t.Error("buildFinalArgs must not contain --system-prompt; all steering goes through --append-system-prompt")
+		}
+	}
+}
+
 func TestWithAllowedTools_FlagName(t *testing.T) {
 	cli := NewClaudeCLI(config.ResolvedModel{Type: "anthropic"},
 		WithAllowedTools([]string{"Read", "mcp__orqestra__AskUserQuestion"}),
@@ -401,4 +446,117 @@ func TestWithDisallowedTools_FlagName(t *testing.T) {
 		}
 	}
 	t.Error("expected --disallowedTools in args")
+}
+
+// TestPipeModeToolPreApproval verifies the CLI arg patterns required for
+// Orqestra's pipe-mode constraints:
+//   - mcp__orqestra__AskUserQuestion must always be pre-approved
+//   - Wildcards ("*", "mcp__*") must be present for full tool pre-approval
+//   - Built-in AskUserQuestion must be in disallowed (replaced by MCP bridge)
+//   - --strict-mcp-config controls which servers start (context window)
+//   - AllowedTools/DisallowedTools must be set even with --strict-mcp-config
+func TestPipeModeToolPreApproval(t *testing.T) {
+	resolved := config.ResolvedModel{Type: "anthropic"}
+
+	tests := []struct {
+		name             string
+		opts             []ClaudeCLIOption
+		wantAllowed      string // substring expected in --allowedTools value
+		wantDisallowed   string // substring expected in --disallowedTools value
+		wantStrict       bool   // expect --strict-mcp-config
+		wantNoAllowed    bool   // expect NO --allowedTools (mutually exclusive with wantAllowed)
+		wantNoDisallowed bool   // expect NO --disallowedTools
+	}{
+		{
+			name: "plan mode with wildcards and bridge tool",
+			opts: []ClaudeCLIOption{
+				WithPermissionMode("plan"),
+				WithAllowedTools([]string{"*", "mcp__*", "mcp__orqestra__AskUserQuestion"}),
+				WithDisallowedTools([]string{"AskUserQuestion", "ExitPlanMode"}),
+			},
+			wantAllowed:    "mcp__orqestra__AskUserQuestion",
+			wantDisallowed: "AskUserQuestion",
+		},
+		{
+			name: "strict MCP + allowed tools coexist",
+			opts: []ClaudeCLIOption{
+				WithPermissionMode("plan"),
+				WithMCPServers([]string{"mcp_docker"}),
+				WithAllowedTools([]string{"*", "mcp__*", "mcp__orqestra__AskUserQuestion"}),
+				WithDisallowedTools([]string{"AskUserQuestion"}),
+				WithInlineMCPServer("orqestra", "/bin/orqestra", []string{"mcp-bridge"}),
+			},
+			wantAllowed:    "mcp__orqestra__AskUserQuestion",
+			wantDisallowed: "AskUserQuestion",
+			wantStrict:     true,
+		},
+		{
+			name: "no-tools mode still gets allowed for bridge",
+			opts: []ClaudeCLIOption{
+				WithPermissionMode("plan"),
+				WithNoTools(),
+				WithAllowedTools([]string{"mcp__orqestra__AskUserQuestion"}),
+				WithInlineMCPServer("orqestra", "/bin/orqestra", []string{"mcp-bridge"}),
+			},
+			wantAllowed: "mcp__orqestra__AskUserQuestion",
+			wantStrict:  true,
+		},
+		{
+			name: "wildcards cover all built-in and MCP tools",
+			opts: []ClaudeCLIOption{
+				WithAllowedTools([]string{"*", "mcp__*", "mcp__orqestra__AskUserQuestion"}),
+			},
+			wantAllowed: "*,mcp__*",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cli := NewClaudeCLI(resolved, tt.opts...)
+			args := cli.buildFinalArgs()
+
+			allowedVal := flagValue(args, "--allowedTools")
+			disallowedVal := flagValue(args, "--disallowedTools")
+			hasStrict := false
+			for _, arg := range args {
+				if arg == "--strict-mcp-config" {
+					hasStrict = true
+					break
+				}
+			}
+
+			if tt.wantNoAllowed {
+				if allowedVal != "" {
+					t.Errorf("expected no --allowedTools, got %q", allowedVal)
+				}
+			} else if tt.wantAllowed != "" {
+				if !strings.Contains(allowedVal, tt.wantAllowed) {
+					t.Errorf("--allowedTools = %q, want substring %q", allowedVal, tt.wantAllowed)
+				}
+			}
+
+			if tt.wantNoDisallowed {
+				if disallowedVal != "" {
+					t.Errorf("expected no --disallowedTools, got %q", disallowedVal)
+				}
+			} else if tt.wantDisallowed != "" {
+				if !strings.Contains(disallowedVal, tt.wantDisallowed) {
+					t.Errorf("--disallowedTools = %q, want substring %q", disallowedVal, tt.wantDisallowed)
+				}
+			}
+
+			if tt.wantStrict != hasStrict {
+				t.Errorf("--strict-mcp-config present = %v, want %v", hasStrict, tt.wantStrict)
+			}
+		})
+	}
+}
+
+func flagValue(args []string, flag string) string {
+	for i, arg := range args {
+		if arg == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }

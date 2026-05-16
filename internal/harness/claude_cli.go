@@ -151,14 +151,27 @@ func WithDisallowedTools(tools []string) ClaudeCLIOption {
 	return WithExtraArgs("--disallowedTools", strings.Join(tools, ","))
 }
 
-// WithAppendSystemPrompt appends text to the default system prompt via
-// --append-system-prompt. Unlike --system-prompt (which replaces), this
-// preserves Claude Code's default identity, tool guidance, and safety
-// instructions while adding extra rules.
+// WithAppendSystemPrompt adds text to the --append-system-prompt flag.
+// This preserves Claude Code's default identity, tool guidance, CLAUDE.md
+// rules, and safety instructions (layer 4) while adding extra rules (layer 5).
+// Multiple sources (role system prompt + this option) are merged at invocation.
 func WithAppendSystemPrompt(text string) ClaudeCLIOption {
 	return func(c *ClaudeCLI) {
 		c.appendSystemPrompt = text
 	}
+}
+
+// mergeAppendPrompts concatenates non-empty prompt fragments into a single
+// --append-system-prompt value. All system prompt steering now goes through
+// layer 5 (append) to preserve CLAUDE.md and the default prompt (layer 4).
+func mergeAppendPrompts(parts ...string) string {
+	var nonEmpty []string
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			nonEmpty = append(nonEmpty, s)
+		}
+	}
+	return strings.Join(nonEmpty, "\n\n")
 }
 
 // WithPermissionMode sets the --permission-mode flag (e.g. "plan", "default").
@@ -196,15 +209,12 @@ func WithInlineMCPServer(name, command string, args []string) ClaudeCLIOption {
 	}
 }
 
-// RunPrint runs `claude --print -p <prompt> --system-prompt <systemPrompt> --output-format json`
+// RunPrint runs `claude --print -p <prompt> --append-system-prompt <systemPrompt> --output-format json`
 // and returns the output.
 func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (RunResult, error) {
 	args := []string{"--print", "-p", prompt, "--output-format", "json"}
-	if systemPrompt != "" {
-		args = append(args, "--system-prompt", systemPrompt)
-	}
-	if c.appendSystemPrompt != "" {
-		args = append(args, "--append-system-prompt", c.appendSystemPrompt)
+	if merged := mergeAppendPrompts(systemPrompt, c.appendSystemPrompt); merged != "" {
+		args = append(args, "--append-system-prompt", merged)
 	}
 	args = append(args, c.buildFinalArgs()...)
 
@@ -237,15 +247,12 @@ func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (
 	return RunResult{Output: raw, Usage: usage}, nil
 }
 
-// RunStreaming runs `claude -p <prompt> --system-prompt <systemPrompt> --output-format stream-json --verbose`
+// RunStreaming runs `claude -p <prompt> --append-system-prompt <systemPrompt> --output-format stream-json --verbose`
 // and streams displayable content to stdout. Returns the final result text.
 func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (RunResult, error) {
 	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"}
-	if systemPrompt != "" {
-		args = append(args, "--system-prompt", systemPrompt)
-	}
-	if c.appendSystemPrompt != "" {
-		args = append(args, "--append-system-prompt", c.appendSystemPrompt)
+	if merged := mergeAppendPrompts(systemPrompt, c.appendSystemPrompt); merged != "" {
+		args = append(args, "--append-system-prompt", merged)
 	}
 	args = append(args, c.buildFinalArgs()...)
 
@@ -269,7 +276,8 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 	var usage TokenUsage
 	var sessionID string
 	var planFilePath string
-	result, resultIsError, usage, sessionID, planFilePath = parseStream(cmdStdout, stdout)
+	var parseErr error
+	result, resultIsError, usage, sessionID, planFilePath, parseErr = parseStream(cmdStdout, stdout)
 
 	cmdErr := cmd.Wait()
 	if cmdErr != nil {
@@ -278,6 +286,10 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 			return RunResult{}, fmt.Errorf("claude CLI error: %s", result)
 		}
 		return RunResult{}, fmt.Errorf("claude CLI error: %w (stderr: %s)", cmdErr, stderr.String())
+	}
+
+	if parseErr != nil {
+		return RunResult{}, fmt.Errorf("claude CLI stream parse error: %w", parseErr)
 	}
 
 	if resultIsError {
@@ -318,7 +330,8 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 	var usage TokenUsage
 	var newSessionID string
 	var planFilePath string
-	result, resultIsError, usage, newSessionID, planFilePath = parseStream(cmdStdout, stdout)
+	var parseErr error
+	result, resultIsError, usage, newSessionID, planFilePath, parseErr = parseStream(cmdStdout, stdout)
 
 	cmdErr := cmd.Wait()
 	if cmdErr != nil {
@@ -326,6 +339,10 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 			return RunResult{}, fmt.Errorf("claude CLI continue error: %s", result)
 		}
 		return RunResult{}, fmt.Errorf("claude CLI continue error: %w (stderr: %s)", cmdErr, stderr.String())
+	}
+
+	if parseErr != nil {
+		return RunResult{}, fmt.Errorf("claude CLI stream parse error: %w", parseErr)
 	}
 
 	if resultIsError {
@@ -339,7 +356,7 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 // display (nil-safe), and accumulates the result, error state, usage, session
 // ID, and plan file path from the result event. This is the single source of
 // truth for Claude CLI stream parsing — used by RunStreaming and RunContinue.
-func parseStream(r io.Reader, display io.Writer) (result string, isError bool, usage TokenUsage, sessionID, planFilePath string) {
+func parseStream(r io.Reader, display io.Writer) (result string, isError bool, usage TokenUsage, sessionID, planFilePath string, err error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large JSON lines
 	for scanner.Scan() {
@@ -382,6 +399,7 @@ func parseStream(r io.Reader, display io.Writer) (result string, isError bool, u
 			}
 		}
 	}
+	err = scanner.Err()
 	return
 }
 
@@ -614,6 +632,17 @@ func filterMCPConfig(names []string) string {
 		return `{"mcpServers":{}}`
 	}
 	return string(out)
+}
+
+// BuildTestArgs applies the given options to a fresh ClaudeCLI and returns the
+// resulting CLI arguments. Intended for tests in packages that compose
+// ClaudeCLIOption slices and need to verify the resulting argument list.
+func BuildTestArgs(opts ...ClaudeCLIOption) []string {
+	c := &ClaudeCLI{binary: "claude"}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c.buildFinalArgs()
 }
 
 // buildFinalArgs returns extraArgs with inline MCP servers merged in.
