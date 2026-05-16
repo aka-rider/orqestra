@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -381,7 +382,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			logger = slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug}))
 			slog.SetDefault(logger)
 			defer func() {
-				slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+				slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 				logFile.Close()
 			}()
 		}
@@ -1261,8 +1262,9 @@ func commitMsg(prefix, comment string) string {
 	return prefix + ": " + comment
 }
 
-// truncateMsg truncates s to maxLen characters.
+// truncateMsg truncates s to maxLen characters, collapsing newlines to spaces.
 func truncateMsg(s string, maxLen int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
 	if len(s) <= maxLen {
 		return s
 	}

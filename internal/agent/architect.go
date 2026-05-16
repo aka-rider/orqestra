@@ -147,7 +147,12 @@ func (a *Architect) ContinueSessionWithDiff(ctx context.Context, sessionID, curr
 			"session_id", sessionID, "err", baselineErr)
 	}
 
-	prompt := fmt.Sprintf(continueWithDiffTemplate, diff, currentPlan, comment)
+	var prompt string
+	if diff != "" {
+		prompt = fmt.Sprintf(continueWithDiffTemplate, diff, currentPlan, comment)
+	} else {
+		prompt = fmt.Sprintf(continuePromptTemplate, currentPlan, comment)
+	}
 	result, err := cr.RunContinue(ctx, sessionID, prompt, stdout)
 	if err != nil {
 		return "", nil, harness.TokenUsage{}, fmt.Errorf("architect continue with diff: %w", err)
