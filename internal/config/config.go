@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,54 @@ type ResolvedModel struct {
 // ModelRuntimeOptions captures non-connection settings for a model-backed CLI harness.
 type ModelRuntimeOptions struct {
 	Binary string
+}
+
+// ModelNotFoundError is returned when a model name cannot be resolved.
+type ModelNotFoundError struct {
+	Name      string
+	Available []string
+	Context   string
+}
+
+func (e *ModelNotFoundError) Error() string {
+	msg := fmt.Sprintf("model %q not found", e.Name)
+	if e.Context != "" {
+		msg = fmt.Sprintf("%s: %s", msg, e.Context)
+	}
+	if len(e.Available) > 0 {
+		msg = fmt.Sprintf("%s (available: %s)", msg, strings.Join(e.Available, ", "))
+	}
+	return msg
+}
+
+// Is matches ModelNotFoundError for errors.Is compatibility.
+func (e *ModelNotFoundError) Is(target error) bool {
+	_, ok := target.(*ModelNotFoundError)
+	return ok
+}
+
+// lookupModel returns the ModelConfig and its canonical key for the given name.
+// Lookup is case-insensitive. Returns (nil, "") if not found.
+func (c *Config) lookupModel(name string) (*ModelConfig, string) {
+	if mc, ok := c.Models[name]; ok {
+		return &mc, name
+	}
+	for k, v := range c.Models {
+		if strings.EqualFold(k, name) {
+			return &v, k
+		}
+	}
+	return nil, ""
+}
+
+// modelNames returns a sorted list of available model names.
+func (c *Config) modelNames() []string {
+	names := make([]string, 0, len(c.Models))
+	for k := range c.Models {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
 }
 
 type Config struct {
@@ -261,17 +310,11 @@ func (c *Config) validate() error {
 		{"worker", c.Worker.Model},
 		{"small", "small"},
 	} {
-		if _, ok := c.Models[ref.ref]; !ok {
-			// Case-insensitive lookup
-			found := false
-			for k := range c.Models {
-				if strings.EqualFold(k, ref.ref) {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return fmt.Errorf("%s.model %q not found in models (define model %q in your provider config)", ref.role, ref.ref, ref.ref)
+		if _, key := c.lookupModel(ref.ref); key == "" {
+			return &ModelNotFoundError{
+				Name:      ref.ref,
+				Available: c.modelNames(),
+				Context:   fmt.Sprintf("%s.model", ref.role),
 			}
 		}
 	}
@@ -294,18 +337,30 @@ func (c *Config) validate() error {
 			return fmt.Errorf("execution graph agent missing mandatory id or role parameter")
 		}
 		if node.ModelRef != "" {
-			if _, ok := c.Models[node.ModelRef]; !ok {
-				return fmt.Errorf("execution graph node %q references unknown model_ref %q", node.identity(), node.ModelRef)
+			if _, key := c.lookupModel(node.ModelRef); key == "" {
+				return &ModelNotFoundError{
+					Name:      node.ModelRef,
+					Available: c.modelNames(),
+					Context:   fmt.Sprintf("execution graph node %q model_ref", node.identity()),
+				}
 			}
 		}
 		if node.SmallModelRef != "" {
-			if _, ok := c.Models[node.SmallModelRef]; !ok {
-				return fmt.Errorf("execution graph node %q references unknown small_model_ref %q", node.identity(), node.SmallModelRef)
+			if _, key := c.lookupModel(node.SmallModelRef); key == "" {
+				return &ModelNotFoundError{
+					Name:      node.SmallModelRef,
+					Available: c.modelNames(),
+					Context:   fmt.Sprintf("execution graph node %q small_model_ref", node.identity()),
+				}
 			}
 		}
 		if node.Validator != nil && node.Validator.ModelRef != "" {
-			if _, ok := c.Models[node.Validator.ModelRef]; !ok {
-				return fmt.Errorf("execution graph validator %q references unknown model_ref %q", node.Validator.identity(), node.Validator.ModelRef)
+			if _, key := c.lookupModel(node.Validator.ModelRef); key == "" {
+				return &ModelNotFoundError{
+					Name:      node.Validator.ModelRef,
+					Available: c.modelNames(),
+					Context:   fmt.Sprintf("execution graph validator %q model_ref", node.Validator.identity()),
+				}
 			}
 		}
 	}
@@ -347,19 +402,12 @@ func interpolateEnv(s string) string {
 // ResolveModel resolves a model name from the models map into a ResolvedModel.
 // Lookup is case-insensitive.
 func (c *Config) ResolveModel(name string) (ResolvedModel, error) {
-	mc, ok := c.Models[name]
-	if !ok {
-		// Case-insensitive fallback
-		for k, v := range c.Models {
-			if strings.EqualFold(k, name) {
-				mc = v
-				ok = true
-				break
-			}
+	mc, _ := c.lookupModel(name)
+	if mc == nil {
+		return ResolvedModel{}, &ModelNotFoundError{
+			Name:      name,
+			Available: c.modelNames(),
 		}
-	}
-	if !ok {
-		return ResolvedModel{}, fmt.Errorf("model %q not found in config", name)
 	}
 
 	pc, ok := c.Providers[mc.Provider]
@@ -377,9 +425,12 @@ func (c *Config) ResolveModel(name string) (ResolvedModel, error) {
 
 // RuntimeOptions returns CLI harness options stored next to a named model.
 func (c *Config) RuntimeOptions(name string) (ModelRuntimeOptions, error) {
-	mc, ok := c.Models[name]
-	if !ok {
-		return ModelRuntimeOptions{}, fmt.Errorf("model %q not found in config", name)
+	mc, _ := c.lookupModel(name)
+	if mc == nil {
+		return ModelRuntimeOptions{}, &ModelNotFoundError{
+			Name:      name,
+			Available: c.modelNames(),
+		}
 	}
 
 	return ModelRuntimeOptions{

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -271,6 +272,113 @@ func TestResolveModel_MissingModel(t *testing.T) {
 	_, err := cfg.ResolveModel("nonexistent")
 	if err == nil {
 		t.Fatal("expected error for missing model")
+	}
+	var notFound *ModelNotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("expected *ModelNotFoundError, got %T", err)
+	}
+	if notFound.Name != "nonexistent" {
+		t.Errorf("Name = %q, want %q", notFound.Name, "nonexistent")
+	}
+	if notFound.Context != "" {
+		t.Errorf("Context = %q, want empty", notFound.Context)
+	}
+}
+
+func TestResolveModel_MissingModel_SuggestsAvailable(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]ProviderConfig{
+			"local": {BaseURL: "http://localhost", Type: "openai"},
+		},
+		Models: map[string]ModelConfig{
+			"Medium": {Provider: "local", Model: "claude-medium"},
+			"Small":  {Provider: "local", Model: "claude-small"},
+		},
+	}
+
+	_, err := cfg.ResolveModel("tiny")
+	if err == nil {
+		t.Fatal("expected error for missing model")
+	}
+	if !strings.Contains(err.Error(), "Medium") || !strings.Contains(err.Error(), "Small") {
+		t.Errorf("error should list available models, got: %s", err)
+	}
+}
+
+func TestModelNotFoundError_Is(t *testing.T) {
+	err := &ModelNotFoundError{Name: "foo"}
+	var target error = &ModelNotFoundError{}
+	if !errors.Is(err, target) {
+		t.Error("errors.Is should match ModelNotFoundError")
+	}
+}
+
+func TestModelNotFoundError_Error_Fields(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     *ModelNotFoundError
+		want    []string
+	}{
+		{
+			name: "basic",
+			err:  &ModelNotFoundError{Name: "foo"},
+			want: []string{`model "foo" not found`},
+		},
+		{
+			name: "with context",
+			err:  &ModelNotFoundError{Name: "foo", Context: "researcher.model"},
+			want: []string{`model "foo" not found: researcher.model`},
+		},
+		{
+			name:    "with available",
+			err:     &ModelNotFoundError{Name: "foo", Available: []string{"a", "b"}},
+			want:    []string{`(available: a, b)`},
+		},
+		{
+			name:    "all fields",
+			err:     &ModelNotFoundError{Name: "foo", Context: "researcher.model", Available: []string{"m", "s"}},
+			want:    []string{`model "foo" not found: researcher.model (available: m, s)`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.err.Error()
+			for _, w := range tt.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("error = %q, should contain %q", got, w)
+				}
+			}
+		})
+	}
+}
+
+func TestLookupModel_CaseInsensitive(t *testing.T) {
+	cfg := &Config{
+		Models: map[string]ModelConfig{
+			"Medium": {Provider: "prov", Model: "x"},
+		},
+	}
+	mc, key := cfg.lookupModel("medium")
+	if mc == nil {
+		t.Fatal("expected case-insensitive lookup to succeed")
+	}
+	if key != "Medium" {
+		t.Errorf("key = %q, want Medium", key)
+	}
+}
+
+func TestLookupModel_NotFound(t *testing.T) {
+	cfg := &Config{
+		Models: map[string]ModelConfig{
+			"foo": {Provider: "prov", Model: "x"},
+		},
+	}
+	mc, key := cfg.lookupModel("bar")
+	if mc != nil {
+		t.Errorf("mc = %+v, want nil", mc)
+	}
+	if key != "" {
+		t.Errorf("key = %q, want empty", key)
 	}
 }
 
