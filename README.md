@@ -1,28 +1,31 @@
 # Orqestra
 
-<p align="center"><img src="maestro.png" width="180" alt="Maestro"/></p>
+<p align="center"><img src="assets/maestro.webp" width="180" alt="Maestro"/></p>
 
 ## OMG, not another agent orchestrator
 
-**Not a toy** project — Orqestra is self-hosting (like a compiler) and has been developing itself since early on.
-
-### Core idea: instructive plan + so-so worker > bad plan with amazing worker
+**Not a toy** project — Orqestra is self-hosting (like a compiler) and has been developing itself, and other projects since early on.
 
 ## Motivation
 
-- Automate author's preferred AI-assisted workflow with low friction.
-- Decrease token consumption by pairing smaller models for execution and reserving larger models for reading and planning.
+ClaudeCode is like pair programming. Orqestra is like managing a feature team.
 
-You can run Orqestra end-to-end using `Qwen3.6-35B-A3B`. Agents would self-correct. It won't be amazing, but it works.
+* Orqestra works on medium to large features semi-independently using large (Opus-class) model driving medium (Sonnet/Haiku-class) workers or
+* It can significantly improve the quality of small models code generation by running multiple of them in a self-correcting pipeline
 
-(For Qwen3.6 you need at least Q4_K_M quantization for weights and at least q8_0 quantization for KV cache, at least 128K tokens to get decent code quality — 1xRTX3090 24G VRAM + 32G RAM should be enough).
+You can develop with Orqestra end-to-end on a single RTX3090 or a Mac with 36GB unified memory. The experience won't be amazing but it works.
 
-## Danger: Models are unpredictable
+Author's preferred use case is to combine frontier cloud models (Opus, Gemini) with local Qwen 3.6.
 
-Agentic loops create context window pressure and degrade performance.
-MoE models in particular suffer from routing failures under long context.
+<p align="center"><img src="assets/screenshot.webp" alt="screenshot"/></p>
+
+## Agentic loops are dangerous
+
+Models, talking to each other, fill context windows which leads to degraded reasoning quality.
+MoE models in particular suffer from routing failures under long context, they are unpredictable.
 
 > You are right, my implementation doesn't meet the quality standards 🙅‍♂️
+>
 > I will start from scratch: `cat /dev/null > /dev/sda`
 
 Terminal command whitelisting doesn't work. Period.
@@ -49,11 +52,15 @@ I don't believe you can solve LLM chaotic behaviour with more LLMs. **Hardcoded 
 
 ## Architecture
 
+To put it simply, Orqestra consists of a bunch of ClaudeCode instances running in their sandboxes, talking to each other.
+
+At the end of the pipeline, code changes are made in a separate git worktree and merged back to the main repo.
+
 ### Agent
 
 A **harness** influences the development process significantly. The same prompt with the same model behaves differently in VS Code Copilot, Codex, or Claude Code — because each harness brings its own MCP integrations, language servers, memory, reasoning loops, and prompt logic.
 
-So "agent" in Orqestra means headless Claude Code running in `--dangerously-skip-permissions` (yolo) mode inside a sandbox and separate git worktree. With all your pre-configured MCPs and settings.
+So "agent" in Orqestra means headless Claude Code running in `--dangerously-skip-permissions` (yolo) mode inside a sandbox and separate git worktree. Keeping all **your pre-configured** MCPs and settings.
 
 Roughly:
 
@@ -104,7 +111,7 @@ prompt
 | Human Gate | — | It doesn't magically work |
 | Worker | `S-M` | Executes the plan in a sandboxed worktree; self-validates via session continuation |
 
-### Workflow
+### The Pipeline
 
 ```text
 Prompt
@@ -139,10 +146,10 @@ Each turn of the review is revisioned (git micro-repo in `'.orqestra/sessions/<r
 
 ## Quick Start
 
-- Go 1.26.1
-- macOS (sandbox-exec / seatbelt required)
-- Claude Code CLI (`claude`)
-- Git
+* Go 1.26.1
+* macOS (sandbox-exec / seatbelt required)
+* Claude Code CLI (`claude`)
+* Git
 
 ```bash
 make build
@@ -267,8 +274,8 @@ sandbox:
 
 **Notes:**
 
-- Model names (`large`, `medium`, `small`) are arbitrary — only the keys referenced by role configs matter.
-- `binary:` in a model entry overrides the `claude` executable path; it is not a provider-type switch.
+* Model names (`large`, `medium`, `small`) are arbitrary — only the keys referenced by role configs matter.
+* `binary:` in a model entry overrides the `claude` executable path; it is not a provider-type switch.
 
 ## Usage
 
@@ -300,11 +307,11 @@ orqestra [flags] reset-usage [model]
 <details>
 <summary>Subcommands</summary>
 
-- **`plan`** — Researcher + Architect only; print plan to stdout
-- **`validate`** — Validate plan structure (no agent invoked)
-- **`exec`** — Execute a plan file directly, skip planning
-- **`usage`** — Show token usage (requires `token_limit` in config)
-- **`reset-usage`** — Reset token usage counters
+* **`plan`** — Researcher + Architect only; print plan to stdout
+* **`validate`** — Validate plan structure (no agent invoked)
+* **`exec`** — Execute a plan file directly, skip planning
+* **`usage`** — Show token usage (requires `token_limit` in config)
+* **`reset-usage`** — Reset token usage counters
 
 </details>
 
