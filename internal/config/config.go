@@ -48,6 +48,7 @@ type ModelRuntimeOptions struct {
 type Config struct {
 	Providers      map[string]ProviderConfig `yaml:"providers"`
 	Models         map[string]ModelConfig    `yaml:"models"`
+	Defaults       DefaultsConfig            `yaml:"defaults"`
 	Pipeline       PipelineConfig            `yaml:"pipeline"`
 	Researcher     ResearcherConfig          `yaml:"researcher"`
 	Architect      ArchitectConfig           `yaml:"architect"`
@@ -58,40 +59,40 @@ type Config struct {
 	Sandbox        SandboxConfig             `yaml:"sandbox"`
 }
 
+// DefaultsConfig provides baseline values merged into every agent config.
+// Agent-level fields take precedence (replacement semantics for slices).
+type DefaultsConfig struct {
+	DisallowedTools    []string `yaml:"disallowed_tools"`
+	AppendSystemPrompt string   `yaml:"append_system_prompt"`
+}
+
+// BaseAgentConfig holds fields shared by all agent roles.
+type BaseAgentConfig struct {
+	Model              string    `yaml:"model"`
+	SystemPrompt       string    `yaml:"system_prompt"`
+	AllowedTools       []string  `yaml:"allowed_tools"`
+	DisallowedTools    []string  `yaml:"disallowed_tools"`
+	MCPServers         *[]string `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
+	PermissionMode     string    `yaml:"permission_mode"`
+	AppendSystemPrompt string    `yaml:"append_system_prompt"`
+}
+
 type ResearcherConfig struct {
-	Model           string    `yaml:"model"`
-	SystemPrompt    string    `yaml:"system_prompt"`
-	AllowedTools    []string  `yaml:"allowed_tools"`
-	DisallowedTools []string  `yaml:"disallowed_tools"`
-	MCPServers      *[]string `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
-	PermissionMode  string    `yaml:"permission_mode"`
+	BaseAgentConfig `yaml:",inline"`
 }
 
 // ArchitectConfig is used for the senior architect.
 type ArchitectConfig struct {
-	Model           string    `yaml:"model"`
-	SystemPrompt    string    `yaml:"system_prompt"`
-	AllowedTools    []string  `yaml:"allowed_tools"`
-	DisallowedTools []string  `yaml:"disallowed_tools"`
-	MCPServers      *[]string `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
-	PermissionMode  string    `yaml:"permission_mode"`
+	BaseAgentConfig `yaml:",inline"`
 }
 
 // CriticConfig is used for the plan critic that reviews the architect's plan.
 type CriticConfig struct {
-	Model           string    `yaml:"model"`
-	SystemPrompt    string    `yaml:"system_prompt"`
-	AllowedTools    []string  `yaml:"allowed_tools"`
-	DisallowedTools []string  `yaml:"disallowed_tools"`
-	MCPServers      *[]string `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
-	PermissionMode  string    `yaml:"permission_mode"`
+	BaseAgentConfig `yaml:",inline"`
 }
 
 type WorkerConfig struct {
-	Model           string   `yaml:"model"`
-	AllowedTools    []string `yaml:"allowed_tools"`
-	DisallowedTools []string `yaml:"disallowed_tools"`
-	PermissionMode  string   `yaml:"permission_mode"`
+	BaseAgentConfig `yaml:",inline"`
 	Timeout         Duration `yaml:"timeout"`
 	MaxTurns        int      `yaml:"max_turns"`
 	Parallelism     int      `yaml:"parallelism"` // max concurrent workers per wave; 0 or 1 = sequential
@@ -182,6 +183,7 @@ func DefaultConfig() *Config {
 	if err := yaml.Unmarshal(embeddedPipeline, cfg); err != nil {
 		panic(fmt.Sprintf("embedded pipeline.yaml is invalid: %v", err))
 	}
+	cfg.applyDefaults()
 	return cfg
 }
 
@@ -204,12 +206,36 @@ func Load(path string) (*Config, error) {
 		return nil, formatYAMLError(path, err)
 	}
 
+	// Re-apply defaults after overlay so user-file agent configs
+	// that didn't set disallowed_tools still inherit defaults.
+	cfg.applyDefaults()
+
 	// Validate: every model's provider key must exist
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 
 	return cfg, nil
+}
+
+// applyDefaults merges DefaultsConfig into each agent's BaseAgentConfig.
+// Agent-level values take precedence: if an agent already has DisallowedTools
+// or AppendSystemPrompt set, the default is not applied (replacement semantics).
+func (c *Config) applyDefaults() {
+	agents := []*BaseAgentConfig{
+		&c.Researcher.BaseAgentConfig,
+		&c.Architect.BaseAgentConfig,
+		&c.Critic.BaseAgentConfig,
+		&c.Worker.BaseAgentConfig,
+	}
+	for _, a := range agents {
+		if len(a.DisallowedTools) == 0 && len(c.Defaults.DisallowedTools) > 0 {
+			a.DisallowedTools = append([]string(nil), c.Defaults.DisallowedTools...)
+		}
+		if a.AppendSystemPrompt == "" && c.Defaults.AppendSystemPrompt != "" {
+			a.AppendSystemPrompt = c.Defaults.AppendSystemPrompt
+		}
+	}
 }
 
 // validate checks that all model references point to existing providers.

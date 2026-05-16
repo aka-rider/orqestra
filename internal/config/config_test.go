@@ -39,6 +39,100 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestDefaultConfig_DefaultsMerged(t *testing.T) {
+	cfg := DefaultConfig()
+
+	// defaults.disallowed_tools should be set in pipeline.yaml
+	if len(cfg.Defaults.DisallowedTools) == 0 {
+		t.Fatal("defaults.disallowed_tools should be set from embedded pipeline.yaml")
+	}
+	found := false
+	for _, tool := range cfg.Defaults.DisallowedTools {
+		if tool == "AskUserQuestion" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("defaults.disallowed_tools = %v, want AskUserQuestion included", cfg.Defaults.DisallowedTools)
+	}
+
+	// defaults.append_system_prompt should be set
+	if cfg.Defaults.AppendSystemPrompt == "" {
+		t.Error("defaults.append_system_prompt should be set from embedded pipeline.yaml")
+	}
+
+	// Plan-mode agents override disallowed_tools (with ExitPlanMode added),
+	// so defaults should NOT overwrite their explicit lists.
+	for _, tool := range cfg.Researcher.DisallowedTools {
+		if tool == "ExitPlanMode" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("researcher.disallowed_tools = %v, want ExitPlanMode included", cfg.Researcher.DisallowedTools)
+	}
+
+	// Worker has no explicit disallowed_tools, so should inherit defaults.
+	found = false
+	for _, tool := range cfg.Worker.DisallowedTools {
+		if tool == "AskUserQuestion" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("worker.disallowed_tools = %v, want AskUserQuestion inherited from defaults", cfg.Worker.DisallowedTools)
+	}
+}
+
+func TestApplyDefaults_AgentOverridePrevails(t *testing.T) {
+	cfg := &Config{
+		Defaults: DefaultsConfig{
+			DisallowedTools:    []string{"AskUserQuestion"},
+			AppendSystemPrompt: "default nudge",
+		},
+		Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{
+			Model:           "medium",
+			DisallowedTools: []string{"AskUserQuestion", "ExitPlanMode"},
+		}},
+		Architect: ArchitectConfig{BaseAgentConfig: BaseAgentConfig{
+			Model:              "large",
+			AppendSystemPrompt: "custom architect nudge",
+		}},
+		Critic: CriticConfig{BaseAgentConfig: BaseAgentConfig{
+			Model: "medium",
+		}},
+		Worker: WorkerConfig{BaseAgentConfig: BaseAgentConfig{
+			Model: "medium",
+		}},
+	}
+	cfg.applyDefaults()
+
+	// Researcher has explicit disallowed_tools — should NOT be overwritten
+	if len(cfg.Researcher.DisallowedTools) != 2 {
+		t.Errorf("researcher.disallowed_tools = %v, want [AskUserQuestion, ExitPlanMode]", cfg.Researcher.DisallowedTools)
+	}
+	// Researcher has no append_system_prompt — should inherit default
+	if cfg.Researcher.AppendSystemPrompt != "default nudge" {
+		t.Errorf("researcher.append_system_prompt = %q, want %q", cfg.Researcher.AppendSystemPrompt, "default nudge")
+	}
+	// Architect has explicit append_system_prompt — should NOT be overwritten
+	if cfg.Architect.AppendSystemPrompt != "custom architect nudge" {
+		t.Errorf("architect.append_system_prompt = %q, want %q", cfg.Architect.AppendSystemPrompt, "custom architect nudge")
+	}
+	// Architect has no disallowed_tools — should inherit default
+	if len(cfg.Architect.DisallowedTools) != 1 || cfg.Architect.DisallowedTools[0] != "AskUserQuestion" {
+		t.Errorf("architect.disallowed_tools = %v, want [AskUserQuestion]", cfg.Architect.DisallowedTools)
+	}
+	// Critic has nothing — should inherit both
+	if cfg.Critic.AppendSystemPrompt != "default nudge" {
+		t.Errorf("critic.append_system_prompt = %q, want %q", cfg.Critic.AppendSystemPrompt, "default nudge")
+	}
+	if len(cfg.Critic.DisallowedTools) != 1 || cfg.Critic.DisallowedTools[0] != "AskUserQuestion" {
+		t.Errorf("critic.disallowed_tools = %v, want [AskUserQuestion]", cfg.Critic.DisallowedTools)
+	}
+}
+
 // Contract: config.go validate() — every agent role must have a non-empty model reference
 func TestValidate_MissingRoleModels(t *testing.T) {
 	tests := []struct {
