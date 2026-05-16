@@ -7,7 +7,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -292,25 +291,15 @@ func buildRunnerWithBridge(cfg *config.Config, selfBin, socketPath string) (harn
 		return nil, fmt.Errorf("resolve small model: %w", err)
 	}
 
-	// Build MCP config JSON with our bridge as the only MCP server
-	mcpConfig := map[string]any{
-		"mcpServers": map[string]any{
-			"orqestra": map[string]any{
-				"command": selfBin,
-				"args":    []string{"mcp-bridge", "--socket", socketPath},
-			},
-		},
-	}
-	mcpJSON, _ := json.Marshal(mcpConfig)
-
+	// Build options matching the main binary's bridgeToolOpts path exactly.
+	// This validates the full flag combination end-to-end.
 	runner := harness.NewClaudeCLI(resolved,
 		harness.WithPermissionMode("plan"),
-		harness.WithExtraArgs(
-			"--strict-mcp-config",
-			"--mcp-config", string(mcpJSON),
-			"--allowed-tools", "mcp__orqestra__AskUserQuestion",
-			"--disallowed-tools", "AskUserQuestion",
-		),
+		harness.WithExtraArgs("--strict-mcp-config"),
+		harness.WithInlineMCPServer("orqestra", selfBin, []string{"mcp-bridge", "--socket", socketPath}),
+		harness.WithAllowedTools([]string{"*", "mcp__*", "mcp__orqestra__AskUserQuestion"}),
+		harness.WithDisallowedTools([]string{"AskUserQuestion", "ExitPlanMode"}),
+		harness.WithSettings(`{"permissions":{"allow":["mcp__orqestra__*"]}}`),
 	)
 
 	return runner, nil

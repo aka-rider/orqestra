@@ -273,7 +273,7 @@ func walkEntries(ctx context.Context, root string, ch chan<- []string, batchSize
 
 		return nil
 	})
-	_ = err // WalkDir errors after SkipAll are benign
+	_ = err // fire-and-forget: WalkDir errors after SkipAll are benign
 
 	// Flush remaining
 	if len(batch) > 0 {

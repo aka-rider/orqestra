@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 )
 
 // ErrBudgetExhausted is returned when a model's token budget is exceeded.
@@ -134,8 +135,14 @@ func (l *Limiter) Status(ctx context.Context, model string) (*ModelStatus, error
 
 // StatusAll returns usage state for all models that have limits configured.
 func (l *Limiter) StatusAll(ctx context.Context) ([]ModelStatus, error) {
-	var results []ModelStatus
+	var models []string
 	for model := range l.limits {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+
+	var results []ModelStatus
+	for _, model := range models {
 		status, err := l.Status(ctx, model)
 		if err != nil {
 			return nil, err

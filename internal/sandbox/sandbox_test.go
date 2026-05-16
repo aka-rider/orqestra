@@ -826,9 +826,6 @@ func TestLimits_ZombieReaping(t *testing.T) {
 		t.Fatal("expected context cancellation error")
 	}
 
-	// Brief wait for cleanup
-	time.Sleep(100 * time.Millisecond)
-
 	// The process group should be dead — this is tested by context cancellation
 	// triggering SIGKILL to -PGID in sandbox.Run
 	t.Logf("zombie reaping test passed: %v", err)

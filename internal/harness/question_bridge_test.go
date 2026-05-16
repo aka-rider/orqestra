@@ -184,8 +184,16 @@ func TestQuestionBridge_ContextCancellation(t *testing.T) {
 	bridge.Stop()
 
 	// Socket should be cleaned up
-	time.Sleep(50 * time.Millisecond)
-	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
+	socketRemoved := false
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sockPath); os.IsNotExist(err) {
+			socketRemoved = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if !socketRemoved {
 		t.Error("socket file should be removed after stop")
 	}
 }
