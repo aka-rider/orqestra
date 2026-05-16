@@ -686,6 +686,21 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 	return s, nil
 }
 
+// skipUserQuestion discards the active AskUserQuestion with the default
+// "user skipped" payload. Component-local skip — independent of the global
+// Ctrl+C double-press gate owned by Model.handleKey.
+func (s PipelineScreen) skipUserQuestion() PipelineScreen {
+	if s.questionCustomActive >= 0 {
+		s.questionTextarea.Blur()
+		s.questionCustomActive = -1
+		s.hasQuestionTA = false
+	}
+	s.content = ContentStreaming
+	s.SyncViewports()
+	s.PendingIntent = SubmitQuestionAnswerIntent{Answer: harness.MCPAnswer{Skipped: true}}
+	return s
+}
+
 // HandleCtrlCCancel handles the first Ctrl+C press by emitting the appropriate
 // cancel intent based on current content mode.
 func (s PipelineScreen) HandleCtrlCCancel() PipelineScreen {
@@ -697,9 +712,7 @@ func (s PipelineScreen) HandleCtrlCCancel() PipelineScreen {
 	case ContentStreaming, ContentAgentHistory:
 		s.PendingIntent = CancelPipelineIntent{}
 	case ContentUserQuestion:
-		s.content = ContentStreaming
-		s.SyncViewports()
-		s.PendingIntent = SubmitQuestionAnswerIntent{Answer: harness.MCPAnswer{Skipped: true}}
+		s = s.skipUserQuestion()
 	default:
 		s.PendingIntent = CancelPipelineIntent{}
 	}
@@ -991,6 +1004,14 @@ func (s PipelineScreen) viewUserQuestion(width int) string {
 		// Show custom text indicator if text was added for this option
 		if text, ok := s.questionCustom[i]; ok && text != "" && s.questionCustomActive != i {
 			b.WriteString(fmt.Sprintf("  %s", questionHintStyle.Render("✎ "+text)))
+		}
+		// Show Tab affordance on the highlighted row when no custom text is set
+		// and the inline editor isn't already open for this option.
+		if i == s.questionCursor && s.questionCustomActive != i {
+			if text, ok := s.questionCustom[i]; !ok || strings.TrimSpace(text) == "" {
+				b.WriteString("  ")
+				b.WriteString(questionHintStyle.Render("[Tab: add context]"))
+			}
 		}
 		b.WriteString("\n")
 
@@ -1327,9 +1348,9 @@ func (s PipelineScreen) viewFooter() string {
 			return keyStyle.Render(" [Enter] submit | [Esc] skip                           [^H] help  ") + ctrlCHint
 		}
 		if s.userQuestion.MultiSelect {
-			return keyStyle.Render(" [↑↓] navigate | [Space] toggle | [Enter] confirm | [Esc] skip   [^H] help  ") + ctrlCHint
+			return keyStyle.Render(" [↑↓] navigate | [Space] toggle | [Tab] add context | [Enter] confirm | [Esc] skip  [^H] help  ") + ctrlCHint
 		}
-		return keyStyle.Render(" [↑↓] navigate | [Enter] select | [Esc] skip            [^H] help  ") + ctrlCHint
+		return keyStyle.Render(" [↑↓] navigate | [Tab] add context | [Enter] select | [Esc] skip  [^H] help  ") + ctrlCHint
 	case ContentPlanReview:
 		footer := " [^A] accept | [^E] edit in editor | [Enter] comment | [Shift+Enter] newline"
 		if s.planDiff != "" {

@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
@@ -228,5 +230,90 @@ func TestEditConfirm_EscapeReturns(t *testing.T) {
 	}
 	if !s.hasPlanComment {
 		t.Error("expected hasPlanComment to be true after escape")
+	}
+}
+
+func setupUserQuestionScreen(multi bool) PipelineScreen {
+	s := NewPipelineScreen("test")
+	s.content = ContentUserQuestion
+	s.userQuestion = harness.MCPToolCall{
+		Question:    "Pick one",
+		MultiSelect: multi,
+		Options: []harness.MCPToolOption{
+			{Label: "Yes", Hint: "and..."},
+			{Label: "No", Hint: "because..."},
+		},
+	}
+	s.questionSelected = map[int]bool{}
+	s.questionCustom = map[int]string{}
+	s.questionCustomActive = -1
+	s.contentVP.SetWidth(80)
+	s.contentVP.SetHeight(20)
+	return s
+}
+
+func TestUserQuestion_HandleCtrlCCancel_EmitsSkipIntent(t *testing.T) {
+	s := setupUserQuestionScreen(false)
+	s = s.HandleCtrlCCancel()
+	if s.content != ContentStreaming {
+		t.Errorf("expected ContentStreaming, got %v", s.content)
+	}
+	intent, ok := s.PendingIntent.(SubmitQuestionAnswerIntent)
+	if !ok {
+		t.Fatalf("expected SubmitQuestionAnswerIntent, got %T", s.PendingIntent)
+	}
+	if !intent.Answer.Skipped {
+		t.Errorf("expected Skipped:true")
+	}
+}
+
+func TestUserQuestion_HandleCtrlCCancel_ClosesInlineEditor(t *testing.T) {
+	s := setupUserQuestionScreen(false)
+	ta := textarea.New()
+	ta.Focus()
+	s.questionTextarea = ta
+	s.questionCustomActive = 0
+	s.hasQuestionTA = true
+
+	s = s.HandleCtrlCCancel()
+
+	if s.questionCustomActive != -1 {
+		t.Errorf("expected questionCustomActive=-1, got %d", s.questionCustomActive)
+	}
+	if s.hasQuestionTA {
+		t.Errorf("expected hasQuestionTA=false")
+	}
+	intent, ok := s.PendingIntent.(SubmitQuestionAnswerIntent)
+	if !ok || !intent.Answer.Skipped {
+		t.Errorf("expected skipped intent, got %#v", s.PendingIntent)
+	}
+}
+
+func TestUserQuestion_TabHintRendered(t *testing.T) {
+	s := setupUserQuestionScreen(false)
+	out := s.viewUserQuestion(80)
+	if !strings.Contains(out, "Tab") || !strings.Contains(out, "add context") {
+		t.Errorf("expected Tab hint in render, got:\n%s", out)
+	}
+}
+
+func TestUserQuestion_TabHintSuppressedWhenCustomTextPresent(t *testing.T) {
+	s := setupUserQuestionScreen(false)
+	s.questionCustom[0] = "and this is why"
+	out := s.viewUserQuestion(80)
+	// The highlighted option (cursor=0) already shows ✎ marker; Tab hint must
+	// not stack next to it.
+	if strings.Contains(out, "add context") {
+		t.Errorf("expected Tab hint to be suppressed when custom text exists, got:\n%s", out)
+	}
+}
+
+func TestUserQuestion_FooterIncludesTab(t *testing.T) {
+	for _, multi := range []bool{false, true} {
+		s := setupUserQuestionScreen(multi)
+		f := s.viewFooter()
+		if !strings.Contains(f, "[Tab] add context") {
+			t.Errorf("multi=%v: expected [Tab] add context in footer, got: %s", multi, f)
+		}
 	}
 }
