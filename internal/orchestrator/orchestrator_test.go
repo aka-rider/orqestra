@@ -1053,3 +1053,45 @@ assertEnd:
 		t.Errorf("expected gate to re-emit after revert, gateCount=%d", gateCount)
 	}
 }
+
+func TestStreamBuffer_DropsRawStreamFrames(t *testing.T) {
+	sb := NewStreamBuffer(50)
+	input := `{"type":"assistant","message":{"content":[{"type":"text","text":"ignored"}]}}` + "\n" +
+		"hello" + "\n" +
+		`{"type":"result","subtype":"success","result":"ignored"}` + "\n"
+	sb.Append(input)
+
+	_, lines, _ := sb.Snapshot()
+	for _, line := range lines {
+		if t2, ok := looksLikeStreamEventFrame(line); ok {
+			t.Errorf("snapshot retained raw stream-event frame (type=%q): %q", t2, line)
+		}
+	}
+	var found bool
+	for _, line := range lines {
+		if line == "hello" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected plain text %q in snapshot, got %v", "hello", lines)
+	}
+}
+
+func TestStreamBuffer_PassesThroughLooseBraces(t *testing.T) {
+	sb := NewStreamBuffer(50)
+	sb.Append("{not json\n")
+
+	_, lines, _ := sb.Snapshot()
+	var found bool
+	for _, line := range lines {
+		if line == "{not json" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected loose-brace line %q to pass through, got %v", "{not json", lines)
+	}
+}

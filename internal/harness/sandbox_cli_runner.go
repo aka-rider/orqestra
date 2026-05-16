@@ -74,7 +74,7 @@ func (r *SandboxCLIRunner) RunStreaming(ctx context.Context, prompt, systemPromp
 	args := r.buildCommand(prompt, systemPrompt, true)
 	output, err := r.runParsed(ctx, args, stdout)
 	if err != nil {
-		return RunResult{Output: output}, err
+		return RunResult{Output: extractStreamResult(output)}, err
 	}
 	return RunResult{Output: extractStreamResult(output), Usage: extractStreamUsage(output), SessionID: extractStreamSessionID(output)}, nil
 }
@@ -84,7 +84,7 @@ func (r *SandboxCLIRunner) RunContinue(ctx context.Context, sessionID, prompt st
 	args := []string{"claude", "--resume", sessionID, "--dangerously-skip-permissions", "-p", prompt, "--output-format", "stream-json", "--verbose"}
 	output, err := r.runParsed(ctx, args, stdout)
 	if err != nil {
-		return RunResult{Output: output}, err
+		return RunResult{Output: extractStreamResult(output)}, err
 	}
 	return RunResult{Output: extractStreamResult(output), Usage: extractStreamUsage(output), SessionID: extractStreamSessionID(output)}, nil
 }
@@ -187,8 +187,27 @@ func (r *SandboxCLIRunner) runParsed(ctx context.Context, args []string, display
 		}
 	}()
 
+	raw, scanErr := parseStreamLines(cmdStdout, display)
+	if scanErr != nil {
+		return raw, fmt.Errorf("sandbox cli runner scan: %w", scanErr)
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return raw, fmt.Errorf("sandbox cli runner exec: %w (stderr: %s)", err, errBuf.String())
+	}
+	return raw, nil
+}
+
+// parseStreamLines reads stream-json NDJSON from src line by line, routes each
+// parsed event through dispatchStreamEvent (which writes human-readable text
+// and fires ActivitySink callbacks on display when applicable), and returns
+// the full raw NDJSON for post-processing (usage, session ID, result text).
+// display may be nil; dispatchStreamEvent guards against that. Non-JSON lines
+// are passed through to display unchanged so degraded CLI output remains
+// visible.
+func parseStreamLines(src io.Reader, display io.Writer) (string, error) {
 	var rawBuf bytes.Buffer
-	scanner := bufio.NewScanner(cmdStdout)
+	scanner := bufio.NewScanner(src)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -209,11 +228,7 @@ func (r *SandboxCLIRunner) runParsed(ctx context.Context, args []string, display
 		dispatchStreamEvent(event, display) // nil-safe: dispatchStreamEvent guards display == nil
 	}
 	if err := scanner.Err(); err != nil {
-		return rawBuf.String(), fmt.Errorf("sandbox cli runner scan: %w", err)
-	}
-
-	if err := cmd.Wait(); err != nil {
-		return rawBuf.String(), fmt.Errorf("sandbox cli runner exec: %w (stderr: %s)", err, errBuf.String())
+		return rawBuf.String(), err
 	}
 	return rawBuf.String(), nil
 }
