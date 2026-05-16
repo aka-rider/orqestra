@@ -2,15 +2,14 @@
 .PHONY: build run test test-unit test-integration lint clean e2e sandbox-image test-sandbox
 
 THIS_MAKEFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
-BIN_DIR := $(dir $(THIS_MAKEFILE_PATH))bin
-BINARY := "$(BIN_DIR)/orqestra"
+ORQESTRA := "$(dir $(THIS_MAKEFILE_PATH))orqestra"
+
 
 build:
-	mkdir -p $(BIN_DIR)
-	CGO_ENABLED=0 go build -ldflags "-s -w" -o $(BINARY) ./cmd/orqestra
+	CGO_ENABLED=0 go build -ldflags "-s -w" -o $(ORQESTRA) ./cmd/orqestra
 
 run: build
-	$(BINARY) $(ARGS)
+	$(ORQESTRA) $(ARGS)
 
 # Test tiers:
 #   make test             — unit tests (no external deps, fast, run on every commit)
