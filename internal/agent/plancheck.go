@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/yuin/goldmark"
@@ -55,7 +56,7 @@ func CheckPlanHealth(md string) []string {
 
 		return ast.WalkContinue, nil
 	})
-	_ = err // Walk doesn't return errors in our usage
+	_ = err // fire-and-forget: Walk doesn't return errors in our usage
 
 	if !hasHeading && len(stripped) > 0 {
 		warnings = append(warnings, "Plan has zero headings (expected structured markdown)")
@@ -70,6 +71,14 @@ func CheckPlanHealth(md string) []string {
 	}
 	if unclosedFence {
 		warnings = append(warnings, "Plan contains an unclosed code fence")
+	}
+
+	// Detect unresolved CRITIC FLAG markers left by the architect.
+	// These indicate findings the architect could not resolve and deferred
+	// to the human reviewer.
+	flagCount := strings.Count(md, "⚠ CRITIC FLAG")
+	if flagCount > 0 {
+		warnings = append(warnings, fmt.Sprintf("Plan contains %d unresolved ⚠ CRITIC FLAG marker(s) — review before approving", flagCount))
 	}
 
 	// Truncation check: if the last line ends mid-word it's likely truncated.

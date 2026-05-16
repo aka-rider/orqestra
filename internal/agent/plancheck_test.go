@@ -105,6 +105,23 @@ Steps: change things around in the codebase to make it better and then ship it.
 `,
 			wantWarn: []string{"Done when"},
 		},
+		{
+			name: "unresolved critic flags",
+			markdown: `# Plan
+## Goal
+We need to make this text reasonably long to pass the stub check without triggering any false warnings.
+## Work Packages
+### 1. Do stuff
+⚠ CRITIC FLAG: Architect could not verify whether this breaks callers.
+**Done when:**
+- Tests pass
+### 2. More stuff
+⚠ CRITIC FLAG: Unclear if backward-compatible.
+**Done when:**
+- Build succeeds.
+`,
+			wantWarn: []string{"2 unresolved ⚠ CRITIC FLAG"},
+		},
 	}
 
 	for _, tc := range tests {
