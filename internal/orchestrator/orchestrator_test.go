@@ -953,3 +953,103 @@ assertions6:
 		t.Errorf("expected at least 2 commits (initial + edit), got %d:\n%s", len(lines), string(out))
 	}
 }
+
+func TestGate_EmitsPlanHistoryDirAndHead(t *testing.T) {
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
+
+	tmpDir := t.TempDir()
+	engine.RunDirFactory = func(slug string) (agent.SessionDir, error) {
+		dir := filepath.Join(tmpDir, slug)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return agent.SessionDir{}, err
+		}
+		return agent.SessionDir{Path: dir}, nil
+	}
+
+	ctx := context.Background()
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
+
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case event, ok := <-channels.Events:
+			if !ok {
+				t.Fatal("events closed without plan approval gate")
+			}
+			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+				wantDir := filepath.Join(tmpDir, "run", "plan-history")
+				if event.Gate.PlanHistoryDir != wantDir {
+					t.Errorf("PlanHistoryDir = %q, want %q", event.Gate.PlanHistoryDir, wantDir)
+				}
+				if event.Gate.PlanHistoryHeadSHA == "" {
+					t.Error("PlanHistoryHeadSHA should be populated when planRepo exists")
+				}
+				if len(event.Gate.PlanHistoryHeadSHA) < 7 {
+					t.Errorf("PlanHistoryHeadSHA looks short: %q", event.Gate.PlanHistoryHeadSHA)
+				}
+				channels.Decisions <- Decision{Type: DecisionCancel}
+				return
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for plan gate")
+		}
+	}
+}
+
+func TestGate_DecisionEditEmptyComment_NoArchitect(t *testing.T) {
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
+
+	tmpDir := t.TempDir()
+	engine.RunDirFactory = func(slug string) (agent.SessionDir, error) {
+		dir := filepath.Join(tmpDir, slug)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return agent.SessionDir{}, err
+		}
+		return agent.SessionDir{Path: dir}, nil
+	}
+
+	editedPlan := "# Plan\n\n## Goal\nReverted.\n\n## Work Packages\n\n### 1. Do it\n\n**Steps:**\n1. Edit foo.go\n\n**Done when:**\n- Tests pass"
+
+	ctx := context.Background()
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
+
+	timeout := time.After(10 * time.Second)
+
+	var gateCount int
+	architectStartsAfterEdit := 0
+	editSent := false
+	for {
+		select {
+		case event, ok := <-channels.Events:
+			if !ok {
+				goto assertEnd
+			}
+			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+				gateCount++
+				if gateCount == 1 {
+					// Revert path: edit with empty Comment.
+					channels.Decisions <- Decision{Type: DecisionEdit, EditedContent: editedPlan, Comment: ""}
+					editSent = true
+				} else {
+					channels.Decisions <- Decision{Type: DecisionApprove}
+				}
+			}
+			if editSent && event.Type == EventAgentStarted && event.AgentID == "architect" {
+				// Only count architect starts that happen between sending the
+				// empty-comment edit and the next gate re-emit.
+				if gateCount == 1 {
+					architectStartsAfterEdit++
+				}
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for gate cycle")
+		}
+	}
+assertEnd:
+	if architectStartsAfterEdit != 0 {
+		t.Errorf("architect re-engaged on empty-comment edit (revert path broken): %d starts", architectStartsAfterEdit)
+	}
+	if gateCount < 2 {
+		t.Errorf("expected gate to re-emit after revert, gateCount=%d", gateCount)
+	}
+}

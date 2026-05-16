@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"charm.land/bubbles/v2/viewport"
@@ -226,6 +227,16 @@ func (s RunDetailScreen) Update(msg tea.Msg) (RunDetailScreen, tea.Cmd) {
 	switch keyMsg.String() {
 	case "ctrl+e":
 		return s.openStepLog()
+	case "ctrl+y":
+		if s.detail.Path != "" {
+			s.PendingIntent = OpenPlanHistoryIntent{
+				HistoryDir: filepath.Join(s.detail.Path, "plan-history"),
+				ReadOnly:   true,
+				// HeadSHA intentionally empty: loader resolves it via
+				// planRevisionsLoadedMsg.HeadSHA, which the screen adopts.
+			}
+		}
+		return s, nil
 	}
 	switch keyMsg.Code {
 	case tea.KeyEscape:
@@ -296,7 +307,7 @@ func (s RunDetailScreen) View(width, height int) string {
 
 	// Footer
 	footer := dividerStyle.Render(strings.Repeat("─", width)) + "\n" +
-		keyStyle.Render(" [↑↓] scroll log | [Tab/⇧Tab] step | [PgUp/PgDn] scroll plan | [^E] open log | [Esc] back  [^C] quit")
+		keyStyle.Render(" [↑↓] log | [Tab/⇧Tab] step | [PgUp/PgDn] plan | [^E] open log | [^Y] history | [Esc] back  [^C] quit")
 
 	return header + "\n" + upper + "\n" + divider + "\n" + lower + "\n" + footer
 }

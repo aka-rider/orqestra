@@ -5,6 +5,7 @@ import (
 
 	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/orchestrator"
+	"github.com/xiii/orqestra/internal/plan"
 )
 
 // --- TUI Messages (tea.Msg types) ---
@@ -129,3 +130,49 @@ func (ConfirmEditIntent) isIntent() {}
 
 // ctrlCTimeoutMsg resets the Ctrl+C pending-quit state after the time gate expires.
 type ctrlCTimeoutMsg struct{}
+
+// OpenPlanHistoryIntent requests opening the plan-history viewer (Ctrl+Y).
+// ReadOnly is true when invoked from a historical Run Detail screen — the
+// viewer hides the revert hint and ignores the `r` key. HeadSHA may be empty
+// at the read-only entry point; the loader will resolve and return it via
+// planRevisionsLoadedMsg.HeadSHA.
+type OpenPlanHistoryIntent struct {
+	HistoryDir string
+	HeadSHA    string
+	ReadOnly   bool
+}
+
+func (OpenPlanHistoryIntent) isIntent() {}
+
+// ClosePlanHistoryIntent dismisses the plan-history viewer.
+type ClosePlanHistoryIntent struct{}
+
+func (ClosePlanHistoryIntent) isIntent() {}
+
+// RevertPlanIntent reverts the live plan to a historical revision via a
+// forward DecisionEdit with empty Comment (non-destructive — the orchestrator
+// skips architect re-engagement when Comment is empty).
+type RevertPlanIntent struct {
+	Content  string
+	ShortSHA string
+}
+
+func (RevertPlanIntent) isIntent() {}
+
+// planRevisionsLoadedMsg carries the revision list and resolved HEAD SHA
+// returned by loadPlanRevisions.
+type planRevisionsLoadedMsg struct {
+	HistoryDir string
+	HeadSHA    string
+	Revisions  []plan.Revision
+	Err        error
+}
+
+// planRevisionDetailLoadedMsg carries the full content and HEAD-vs-selected
+// diff for a single revision.
+type planRevisionDetailLoadedMsg struct {
+	SHA     string
+	Content string
+	Diff    string
+	Err     error
+}

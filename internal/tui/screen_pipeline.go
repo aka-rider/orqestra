@@ -62,6 +62,10 @@ type PipelineScreen struct {
 	reviewTokensIn  int64
 	reviewTokensOut int64
 
+	// Plan history (Ctrl+Y viewer) — set from EventGateRequest.
+	planHistoryDir     string
+	planHistoryHeadSHA string
+
 	// Agent history navigation
 	focusedAgent int
 
@@ -268,6 +272,8 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 		switch event.Gate.Type {
 		case orchestrator.GatePlanApproval:
 			s.planDiff = event.Gate.PlanDiff
+			s.planHistoryDir = event.Gate.PlanHistoryDir
+			s.planHistoryHeadSHA = event.Gate.PlanHistoryHeadSHA
 			s.diffViewport.SetContent(s.planDiff)
 			if len(s.chatHistory) > 0 && s.planDiff != "" {
 				s.chatHistory = append(s.chatHistory, ChatEntry{
@@ -679,6 +685,15 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 			s.hasPlanComment = false
 			s.contentVP.GotoTop()
 			s.SyncViewports()
+		}
+		return s, nil
+	case "ctrl+y":
+		if s.planHistoryDir != "" {
+			s.PendingIntent = OpenPlanHistoryIntent{
+				HistoryDir: s.planHistoryDir,
+				HeadSHA:    s.planHistoryHeadSHA,
+				ReadOnly:   false,
+			}
 		}
 		return s, nil
 	}
@@ -1270,6 +1285,7 @@ func (s PipelineScreen) viewHelp() string {
  [Ctrl+R]      Historical runs
  [Ctrl+Q]      Quit (at completion)
  [Ctrl+H]      Toggle this help
+ [Ctrl+Y]      Plan history viewer
  [Alt+1-9]     View agent output
  [Ctrl+C]      Cancel → exit (time-gated)
  [Esc]         Back / dismiss
@@ -1355,6 +1371,9 @@ func (s PipelineScreen) viewFooter() string {
 		footer := " [^A] accept | [^E] edit in editor | [Enter] comment | [Shift+Enter] newline"
 		if s.planDiff != "" {
 			footer += " | [^D] diff"
+		}
+		if s.planHistoryDir != "" {
+			footer += " | [^Y] history"
 		}
 		footer += "  " + ctrlCHint
 		if len(s.chatHistory) > 0 && (s.reviewTokensIn+s.reviewTokensOut > 0) {
