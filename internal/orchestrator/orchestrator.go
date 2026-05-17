@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -459,6 +460,59 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 	}
 	logger.Info("run started", "prompt_len", len(input.Prompt), "auto_approve", input.AutoApprove, "plan_file", input.PlanFile != "")
 
+	// --- Per-agent lifecycle log helpers ---
+	agentStart := map[string]time.Time{}
+	architectAttempt := 0
+	logAgentEvent := func(event, agentID string, attempt int, usage harness.TokenUsage, err error) {
+		key := agentID + ":" + strconv.Itoa(attempt)
+		switch event {
+		case "agent_started":
+			agentStart[key] = time.Now()
+			logger.Info("agent_started", "agent", agentID, "attempt", attempt)
+		case "agent_done":
+			var durMS int64
+			if start, ok := agentStart[key]; ok {
+				durMS = time.Since(start).Milliseconds()
+			}
+			logger.Info("agent_done", "agent", agentID, "attempt", attempt,
+				"input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens,
+				"duration_ms", durMS)
+		case "agent_failed":
+			var durMS int64
+			if start, ok := agentStart[key]; ok {
+				durMS = time.Since(start).Milliseconds()
+			}
+			errStr := ""
+			if err != nil {
+				errStr = err.Error()
+			}
+			logger.Info("agent_failed", "agent", agentID, "attempt", attempt,
+				"input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens,
+				"duration_ms", durMS, "err", errStr)
+		}
+	}
+	logClaudeSession := func(agentID string, attempt int, sessionID, sessionLogCopy string) {
+		if sessionID == "" {
+			logger.Warn("claude_session_missing", "agent", agentID, "attempt", attempt)
+			return
+		}
+		logger.Info("claude_session",
+			"agent", agentID, "attempt", attempt,
+			"session_id", sessionID,
+			"project_path", claudeProjectPath(session),
+			"session_log_copy", sessionLogCopy)
+	}
+	logClaudeSessionPre := func(agentID string, attempt int, sessionID string) {
+		if sessionID == "" {
+			logger.Warn("claude_session_missing", "agent", agentID, "attempt", attempt)
+			return
+		}
+		logger.Info("claude_session",
+			"agent", agentID, "attempt", attempt,
+			"session_id", sessionID,
+			"project_path", claudeProjectPath(session))
+	}
+
 	cwd := ""
 	if session.Path != "" {
 		cwd = filepath.Dir(filepath.Dir(filepath.Dir(session.Path)))
@@ -522,6 +576,8 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 	// --- Research ---
 	{
 		emit(Event{Type: EventPhaseChange, Phase: PhaseResearching})
+		logger.Info("phase", "phase", string(PhaseResearching))
+		logAgentEvent("agent_started", "researcher", 1, harness.TokenUsage{}, nil)
 		emit(Event{Type: EventAgentStarted, AgentID: "researcher"})
 		stream.SetAgent("researcher")
 
@@ -550,7 +606,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		if err != nil {
 			researchLogCopy, cpErr := agent.CopySessionLog(session, cwd, researchSessionID, "researcher_session.jsonl")
 			if cpErr != nil {
-				slog.Warn("copy session log", "agent", "researcher", "err", cpErr)
+				logger.Warn("copy session log", "agent", "researcher", "err", cpErr)
 			}
 			writeArtifactJSON(session, "researcher_meta.json", agent.StepMeta{
 				AgentID: "researcher", ModelRef: e.Config.Researcher.Model, StartTime: researchStart, EndTime: time.Now(),
@@ -558,6 +614,8 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 				ClaudeProjectPath:    claudeProjectPath(session),
 				ClaudeSessionLogPath: researchLogCopy,
 			})
+			logClaudeSession("researcher", 1, researchSessionID, researchLogCopy)
+			logAgentEvent("agent_failed", "researcher", 1, harness.TokenUsage{}, err)
 			emit(Event{Type: EventAgentFailed, AgentID: "researcher", Err: err})
 			emit(Event{Type: EventError, Err: fmt.Errorf("research: %w", err)})
 			return
@@ -565,7 +623,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 
 		researchLogCopy, cpErr := agent.CopySessionLog(session, cwd, researchSessionID, "researcher_session.jsonl")
 		if cpErr != nil {
-			slog.Warn("copy session log", "agent", "researcher", "err", cpErr)
+			logger.Warn("copy session log", "agent", "researcher", "err", cpErr)
 		}
 		writeArtifact(session, "researcher_draft.md", draft.Markdown)
 		writeArtifactJSON(session, "researcher_meta.json", agent.StepMeta{
@@ -575,12 +633,17 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			ClaudeProjectPath:    claudeProjectPath(session),
 			ClaudeSessionLogPath: researchLogCopy,
 		})
+		logClaudeSession("researcher", 1, researchSessionID, researchLogCopy)
+		logAgentEvent("agent_done", "researcher", 1, draftUsage, nil)
 		emit(Event{Type: EventAgentDone, AgentID: "researcher",
 			InputTokens: draftUsage.InputTokens, OutputTokens: draftUsage.OutputTokens,
 			ResearchDraft: draft.Markdown})
 
 		// --- Planning ---
 		emit(Event{Type: EventPhaseChange, Phase: PhasePlanning})
+		logger.Info("phase", "phase", string(PhasePlanning))
+		architectAttempt++
+		logAgentEvent("agent_started", "architect", architectAttempt, harness.TokenUsage{}, nil)
 		emit(Event{Type: EventAgentStarted, AgentID: "architect"})
 		stream.SetAgent("architect")
 
@@ -609,7 +672,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		if planErr != nil {
 			archLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_session.jsonl")
 			if cpErr != nil {
-				slog.Warn("copy session log", "agent", "architect", "err", cpErr)
+				logger.Warn("copy session log", "agent", "architect", "err", cpErr)
 			}
 			archPlanFilePath := ""
 			if archLogCopy != "" {
@@ -622,6 +685,8 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 				ClaudeSessionLogPath: archLogCopy,
 				ClaudePlanFilePath:   archPlanFilePath,
 			})
+			logClaudeSession("architect", architectAttempt, planSessionID, archLogCopy)
+			logAgentEvent("agent_failed", "architect", architectAttempt, harness.TokenUsage{}, planErr)
 			emit(Event{Type: EventAgentFailed, AgentID: "architect", Err: planErr})
 			emit(Event{Type: EventError, Err: fmt.Errorf("planning: %w", planErr)})
 			return
@@ -629,7 +694,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 
 		archLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_session.jsonl")
 		if cpErr != nil {
-			slog.Warn("copy session log", "agent", "architect", "err", cpErr)
+			logger.Warn("copy session log", "agent", "architect", "err", cpErr)
 		}
 		archPlanFilePath := ""
 		if archLogCopy != "" {
@@ -643,6 +708,8 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			ClaudeSessionLogPath: archLogCopy,
 			ClaudePlanFilePath:   archPlanFilePath,
 		})
+		logClaudeSession("architect", architectAttempt, planSessionID, archLogCopy)
+		logAgentEvent("agent_done", "architect", architectAttempt, planUsage, nil)
 		emit(Event{Type: EventAgentDone, AgentID: "architect",
 			InputTokens: planUsage.InputTokens, OutputTokens: planUsage.OutputTokens})
 
@@ -664,6 +731,8 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 	// --- Critic Review ---
 	if e.Runners.Critic != nil {
 		emit(Event{Type: EventPhaseChange, Phase: PhaseCritiquing})
+		logger.Info("phase", "phase", string(PhaseCritiquing))
+		logAgentEvent("agent_started", "critic", 1, harness.TokenUsage{}, nil)
 		emit(Event{Type: EventAgentStarted, AgentID: "critic"})
 		stream.SetAgent("critic")
 
@@ -692,7 +761,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		if criticErr != nil {
 			criticLogCopy, cpErr := agent.CopySessionLog(session, cwd, criticSessionID, "critic_session.jsonl")
 			if cpErr != nil {
-				slog.Warn("copy session log", "agent", "critic", "err", cpErr)
+				logger.Warn("copy session log", "agent", "critic", "err", cpErr)
 			}
 			writeArtifactJSON(session, "critic_meta.json", agent.StepMeta{
 				AgentID: "critic", ModelRef: e.Config.Critic.Model, StartTime: criticStart, EndTime: time.Now(),
@@ -700,6 +769,8 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 				ClaudeProjectPath:    claudeProjectPath(session),
 				ClaudeSessionLogPath: criticLogCopy,
 			})
+			logClaudeSession("critic", 1, criticSessionID, criticLogCopy)
+			logAgentEvent("agent_failed", "critic", 1, harness.TokenUsage{}, criticErr)
 			emit(Event{Type: EventAgentFailed, AgentID: "critic", Err: criticErr})
 			emit(Event{Type: EventError, Err: fmt.Errorf("critic review: %w", criticErr)})
 			return
@@ -707,7 +778,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 
 		criticLogCopy, cpErr := agent.CopySessionLog(session, cwd, criticSessionID, "critic_session.jsonl")
 		if cpErr != nil {
-			slog.Warn("copy session log", "agent", "critic", "err", cpErr)
+			logger.Warn("copy session log", "agent", "critic", "err", cpErr)
 		}
 		writeArtifact(session, "critic_report.md", criticResult.Markdown)
 		writeArtifactJSON(session, "critic_meta.json", agent.StepMeta{
@@ -717,6 +788,8 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			ClaudeProjectPath:    claudeProjectPath(session),
 			ClaudeSessionLogPath: criticLogCopy,
 		})
+		logClaudeSession("critic", 1, criticSessionID, criticLogCopy)
+		logAgentEvent("agent_done", "critic", 1, criticUsage, nil)
 		emit(Event{Type: EventAgentDone, AgentID: "critic",
 			InputTokens: criticUsage.InputTokens, OutputTokens: criticUsage.OutputTokens})
 
@@ -740,6 +813,8 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		}
 
 		// --- Architect Second Pass (critic feedback) ---
+		architectAttempt++
+		logAgentEvent("agent_started", "architect", architectAttempt, harness.TokenUsage{}, nil)
 		emit(Event{Type: EventAgentStarted, AgentID: "architect"})
 		stream.SetAgent("architect")
 		revStart := time.Now()
@@ -751,7 +826,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		if revErr != nil {
 			archCritRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_critic_revision_session.jsonl")
 			if cpErr != nil {
-				slog.Warn("copy session log", "agent", "architect", "err", cpErr)
+				logger.Warn("copy session log", "agent", "architect", "err", cpErr)
 			}
 			archCritRevPlanFilePath := ""
 			if archCritRevLogCopy != "" {
@@ -765,6 +840,8 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 				ClaudeSessionLogPath: archCritRevLogCopy,
 				ClaudePlanFilePath:   archCritRevPlanFilePath,
 			})
+			logClaudeSession("architect", architectAttempt, planSessionID, archCritRevLogCopy)
+			logAgentEvent("agent_failed", "architect", architectAttempt, harness.TokenUsage{}, revErr)
 			emit(Event{Type: EventAgentFailed, AgentID: "architect", Err: revErr})
 			emit(Event{Type: EventError, Err: fmt.Errorf("architect critic revision: %w", revErr)})
 			return
@@ -772,7 +849,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 
 		archCritRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_critic_revision_session.jsonl")
 		if cpErr != nil {
-			slog.Warn("copy session log", "agent", "architect", "err", cpErr)
+			logger.Warn("copy session log", "agent", "architect", "err", cpErr)
 		}
 		archCritRevPlanFilePath := ""
 		if archCritRevLogCopy != "" {
@@ -787,6 +864,8 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			ClaudeSessionLogPath: archCritRevLogCopy,
 			ClaudePlanFilePath:   archCritRevPlanFilePath,
 		})
+		logClaudeSession("architect", architectAttempt, planSessionID, archCritRevLogCopy)
+		logAgentEvent("agent_done", "architect", architectAttempt, revisedUsage, nil)
 		emit(Event{Type: EventAgentDone, AgentID: "architect",
 			InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens})
 
@@ -820,6 +899,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 planGate:
 	// --- Plan Approval Gate ---
 	emit(Event{Type: EventPlanReady, FinalPlan: finalPlanMarkdown})
+	logger.Info("plan_ready", "len", len(finalPlanMarkdown), "warnings", len(finalPlanWarnings))
 
 	if !input.AutoApprove {
 		for {
@@ -851,12 +931,14 @@ planGate:
 				PlanHistoryDir:     historyDir,
 				PlanHistoryHeadSHA: historyHeadSHA,
 			}})
+			logger.Info("gate_request", "auto_approve", false)
 
 			select {
 			case decision := <-decisions:
 				switch decision.Type {
 				case DecisionCancel:
 					emit(Event{Type: EventComplete, Phase: PhaseDone})
+					logger.Info("run_complete", "status", "cancelled")
 					return
 				// NOTE: Revert flow (TUI plan-history viewer, Ctrl+Y) reuses this
 				// branch with Comment == "" and an EditedContent payload taken from
@@ -870,6 +952,7 @@ planGate:
 					finalPlanMarkdown = edited
 					finalPlanWarnings = agent.CheckPlanHealth(edited)
 					logger.Info("gate: user edit", "comment_len", len(decision.Comment))
+					logger.Info("gate_decision", "decision", "edit", "comment_len", len(decision.Comment))
 					if planRepo != nil {
 						if err := planRepo.CommitPlan(edited, "user: manual edit"); err != nil {
 							logger.Warn("plan commit failed", "err", err)
@@ -890,6 +973,8 @@ planGate:
 								logger.Warn("user comment dialog commit failed", "err", err)
 							}
 						}
+						architectAttempt++
+						logAgentEvent("agent_started", "architect", architectAttempt, harness.TokenUsage{}, nil)
 						emit(Event{Type: EventAgentStarted, AgentID: "architect"})
 						stream.SetAgent("architect")
 						revStart := time.Now()
@@ -914,6 +999,8 @@ planGate:
 								ClaudeSessionLogPath: archRevLogCopy,
 								ClaudePlanFilePath:   archRevPlanFilePath,
 							})
+							logClaudeSession("architect", architectAttempt, planSessionID, archRevLogCopy)
+							logAgentEvent("agent_failed", "architect", architectAttempt, harness.TokenUsage{}, err)
 							emit(Event{Type: EventAgentFailed, AgentID: "architect", Err: err})
 							emit(Event{Type: EventError, Err: fmt.Errorf("architect revision: %w", err)})
 							return
@@ -936,6 +1023,8 @@ planGate:
 							ClaudeSessionLogPath: archRevLogCopy,
 							ClaudePlanFilePath:   archRevPlanFilePath,
 						})
+						logClaudeSession("architect", architectAttempt, planSessionID, archRevLogCopy)
+						logAgentEvent("agent_done", "architect", architectAttempt, revisedUsage, nil)
 						emit(Event{Type: EventAgentDone, AgentID: "architect",
 							InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens})
 
@@ -968,10 +1057,13 @@ planGate:
 					}
 					continue // re-show gate with (possibly revised) plan
 				case DecisionComment:
+					architectAttempt++
+					logAgentEvent("agent_started", "architect", architectAttempt, harness.TokenUsage{}, nil)
 					emit(Event{Type: EventAgentStarted, AgentID: "architect"})
 					stream.SetAgent("architect")
 					revStart := time.Now()
 					logger.Info("gate: user comment", "comment_len", len(decision.Comment))
+					logger.Info("gate_decision", "decision", "comment", "comment_len", len(decision.Comment))
 
 					// Persist user comment in dialog
 					if planRepo != nil {
@@ -1006,7 +1098,7 @@ planGate:
 					if err != nil {
 						archRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_revision_session.jsonl")
 						if cpErr != nil {
-							slog.Warn("copy session log", "agent", "architect", "err", cpErr)
+							logger.Warn("copy session log", "agent", "architect", "err", cpErr)
 						}
 						archRevPlanFilePath := ""
 						if archRevLogCopy != "" {
@@ -1020,6 +1112,8 @@ planGate:
 							ClaudeSessionLogPath: archRevLogCopy,
 							ClaudePlanFilePath:   archRevPlanFilePath,
 						})
+						logClaudeSession("architect", architectAttempt, planSessionID, archRevLogCopy)
+						logAgentEvent("agent_failed", "architect", architectAttempt, harness.TokenUsage{}, err)
 						emit(Event{Type: EventAgentFailed, AgentID: "architect", Err: err})
 						emit(Event{Type: EventError, Err: fmt.Errorf("architect revision: %w", err)})
 						return
@@ -1027,7 +1121,7 @@ planGate:
 
 					archRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_revision_session.jsonl")
 					if cpErr != nil {
-						slog.Warn("copy session log", "agent", "architect", "err", cpErr)
+						logger.Warn("copy session log", "agent", "architect", "err", cpErr)
 					}
 					archRevPlanFilePath := ""
 					if archRevLogCopy != "" {
@@ -1042,6 +1136,8 @@ planGate:
 						ClaudeSessionLogPath: archRevLogCopy,
 						ClaudePlanFilePath:   archRevPlanFilePath,
 					})
+					logClaudeSession("architect", architectAttempt, planSessionID, archRevLogCopy)
+					logAgentEvent("agent_done", "architect", architectAttempt, revisedUsage, nil)
 					emit(Event{Type: EventAgentDone, AgentID: "architect",
 						InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens})
 
@@ -1075,6 +1171,7 @@ planGate:
 					continue // re-show gate with (possibly revised) plan
 				case DecisionApprove:
 					logger.Info("gate: user approved plan")
+					logger.Info("gate_decision", "decision", "approve")
 					// proceed
 				}
 			case <-ctx.Done():
@@ -1090,16 +1187,20 @@ planGate:
 	// --- NoExecute: stop after plan gate ---
 	if input.NoExecute {
 		emit(Event{Type: EventPhaseChange, Phase: PhaseDone})
+		logger.Info("phase", "phase", string(PhaseDone))
 		emit(Event{Type: EventComplete, Phase: PhaseDone,
 			FinalPlan: finalPlanMarkdown,
 			Status:    StatusSuccess,
 			RunDir:    session.Path,
 		})
+		logger.Info("run_complete", "status", "noexecute")
 		return
 	}
 
 	// --- Worker Execution ---
 	emit(Event{Type: EventPhaseChange, Phase: PhaseExecuting})
+	logger.Info("phase", "phase", string(PhaseExecuting))
+	logAgentEvent("agent_started", "worker", 1, harness.TokenUsage{}, nil)
 	emit(Event{Type: EventAgentStarted, AgentID: "worker"})
 	stream.SetAgent("worker")
 	workerStart := time.Now()
@@ -1143,6 +1244,12 @@ planGate:
 			Status: "failed", Error: execErr.Error(),
 			ClaudeProjectPath: claudeProjectPath(session),
 		})
+		if workResult.SessionID == "" {
+			logClaudeSessionPre("worker", 1, "")
+		} else {
+			logClaudeSessionPre("worker", 1, workResult.SessionID)
+		}
+		logAgentEvent("agent_failed", "worker", 1, harness.TokenUsage{}, execErr)
 		emit(Event{Type: EventAgentFailed, AgentID: "worker", Err: execErr})
 		emit(Event{Type: EventError, Err: execErr})
 		return
@@ -1150,7 +1257,7 @@ planGate:
 
 	workerLogCopy, cpErr := agent.CopySessionLog(session, cwd, workResult.SessionID, "worker_session.jsonl")
 	if cpErr != nil {
-		slog.Warn("copy session log", "agent", "worker", "err", cpErr)
+		logger.Warn("copy session log", "agent", "worker", "err", cpErr)
 	}
 	writeArtifact(session, "worker_output.txt", workResult.Output)
 	writeArtifactJSON(session, "worker_meta.json", agent.StepMeta{
@@ -1160,6 +1267,8 @@ planGate:
 		ClaudeProjectPath:    claudeProjectPath(session),
 		ClaudeSessionLogPath: workerLogCopy,
 	})
+	logClaudeSession("worker", 1, workResult.SessionID, workerLogCopy)
+	logAgentEvent("agent_done", "worker", 1, workResult.Usage, nil)
 	emit(Event{Type: EventAgentDone, AgentID: "worker", WorkOutput: workResult.Output,
 		InputTokens: workResult.Usage.InputTokens, OutputTokens: workResult.Usage.OutputTokens})
 
@@ -1169,6 +1278,8 @@ planGate:
 
 	// --- Worker Self-Validation via Session Continuation ---
 	emit(Event{Type: EventPhaseChange, Phase: PhaseSelfValidating})
+	logger.Info("phase", "phase", string(PhaseSelfValidating))
+	logAgentEvent("agent_started", "validator", 1, harness.TokenUsage{}, nil)
 	emit(Event{Type: EventAgentStarted, AgentID: "validator"})
 	stream.SetAgent("validator")
 	valStart := time.Now()
@@ -1187,7 +1298,7 @@ planGate:
 			slog.Warn("worker self-validation failed", "err", valErr)
 			valLogCopy, cpErr := agent.CopySessionLog(session, cwd, workResult.SessionID, "validator_session.jsonl")
 			if cpErr != nil {
-				slog.Warn("copy session log", "agent", "validator", "err", cpErr)
+				logger.Warn("copy session log", "agent", "validator", "err", cpErr)
 			}
 			writeArtifactJSON(session, "validator_meta.json", agent.StepMeta{
 				AgentID: "validator", ModelRef: e.Config.Worker.Model, StartTime: valStart, EndTime: time.Now(),
@@ -1195,6 +1306,8 @@ planGate:
 				ClaudeProjectPath:    claudeProjectPath(session),
 				ClaudeSessionLogPath: valLogCopy,
 			})
+			logClaudeSession("validator", 1, workResult.SessionID, valLogCopy)
+			logAgentEvent("agent_failed", "validator", 1, harness.TokenUsage{}, valErr)
 			emit(Event{Type: EventAgentFailed, AgentID: "validator", Err: valErr})
 			// Non-fatal: proceed with whatever output we have
 		} else {
@@ -1204,7 +1317,7 @@ planGate:
 			}
 			valLogCopy, cpErr := agent.CopySessionLog(session, cwd, valResult.SessionID, "validator_session.jsonl")
 			if cpErr != nil {
-				slog.Warn("copy session log", "agent", "validator", "err", cpErr)
+				logger.Warn("copy session log", "agent", "validator", "err", cpErr)
 			}
 			writeArtifactJSON(session, "validator_meta.json", agent.StepMeta{
 				AgentID: "validator", ModelRef: e.Config.Worker.Model, StartTime: valStart, EndTime: time.Now(),
@@ -1213,11 +1326,13 @@ planGate:
 				ClaudeProjectPath:    claudeProjectPath(session),
 				ClaudeSessionLogPath: valLogCopy,
 			})
+			logClaudeSession("validator", 1, valResult.SessionID, valLogCopy)
+			logAgentEvent("agent_done", "validator", 1, valResult.Usage, nil)
 			emit(Event{Type: EventAgentDone, AgentID: "validator",
 				InputTokens: valResult.Usage.InputTokens, OutputTokens: valResult.Usage.OutputTokens})
 		}
 	} else {
-		slog.Warn("no session ID from worker — attempting disconnected validation")
+		logger.Warn("validator session missing, running disconnected")
 		// Fallback: run validation as a new session (less effective but still useful)
 		valResult, valErr := workerRunner.RunStreaming(ctx, validationPrompt, "", &streamWriter{buf: stream})
 		if valErr != nil {
@@ -1227,6 +1342,8 @@ planGate:
 				Status: "failed", Error: valErr.Error(),
 				ClaudeProjectPath: claudeProjectPath(session),
 			})
+			logClaudeSessionPre("validator", 1, "")
+			logAgentEvent("agent_failed", "validator", 1, harness.TokenUsage{}, valErr)
 			emit(Event{Type: EventAgentFailed, AgentID: "validator", Err: valErr})
 		} else {
 			validationOutput = valResult.Output
@@ -1235,7 +1352,7 @@ planGate:
 			}
 			discValLogCopy, cpErr := agent.CopySessionLog(session, cwd, valResult.SessionID, "validator_session.jsonl")
 			if cpErr != nil {
-				slog.Warn("copy session log", "agent", "validator", "err", cpErr)
+				logger.Warn("copy session log", "agent", "validator", "err", cpErr)
 			}
 			writeArtifactJSON(session, "validator_meta.json", agent.StepMeta{
 				AgentID: "validator", ModelRef: e.Config.Worker.Model, StartTime: valStart, EndTime: time.Now(),
@@ -1244,6 +1361,8 @@ planGate:
 				ClaudeProjectPath:    claudeProjectPath(session),
 				ClaudeSessionLogPath: discValLogCopy,
 			})
+			logClaudeSession("validator", 1, valResult.SessionID, discValLogCopy)
+			logAgentEvent("agent_done", "validator", 1, valResult.Usage, nil)
 			emit(Event{Type: EventAgentDone, AgentID: "validator",
 				InputTokens: valResult.Usage.InputTokens, OutputTokens: valResult.Usage.OutputTokens})
 		}
@@ -1312,6 +1431,7 @@ planGate:
 						ConflictFiles:  mergeResult.ConflictFiles,
 					},
 				})
+				logger.Warn("merge_conflict", "worktree_branch", wt.Branch, "target_branch", targetBranch, "files", len(mergeResult.ConflictFiles))
 				select {
 				case decision := <-decisions:
 					if decision.Type == DecisionMergeAbort {
@@ -1332,12 +1452,14 @@ planGate:
 
 	// --- Completion ---
 	emit(Event{Type: EventPhaseChange, Phase: PhaseDone})
+	logger.Info("phase", "phase", string(PhaseDone))
 	emit(Event{Type: EventComplete, Phase: PhaseDone,
 		FinalPlan:        finalPlanMarkdown,
 		WorkerValidation: validationOutput,
 		Status:           status,
 		RunDir:           session.Path,
 	})
+	logger.Info("run_complete", "status", string(status))
 }
 
 // commitMsg builds a git commit message from a prefix and a comment.
