@@ -682,6 +682,9 @@ func (m *Model) recalculateLayout() {
 
 	// Pipeline viewports and bounds
 	m.pipelineScreen.RecalculateLayout(m.width, contentHeight)
+	if m.pipelineScreen.content == ContentUserQuestion && m.pipelineScreen.hasQuestion {
+		m.pipelineScreen.question = m.pipelineScreen.question.SetWidth(m.width)
+	}
 	inputTop := contentHeight
 	m.pipelineScreen.bounds = layoutBounds{
 		content: image.Rect(0, 0, m.width, contentHeight),

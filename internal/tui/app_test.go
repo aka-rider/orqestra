@@ -243,13 +243,11 @@ func TestTUI_UserQuestion_CtrlCSkipsWithDefault(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.active = true
 	m.pipelineScreen.content = ContentUserQuestion
-	m.pipelineScreen.userQuestion = harness.MCPToolCall{
+	m.pipelineScreen.question = newUserQuestion(harness.MCPToolCall{
 		Question: "Pick one",
 		Options:  []harness.MCPToolOption{{Label: "Yes"}, {Label: "No"}},
-	}
-	m.pipelineScreen.questionSelected = map[int]bool{}
-	m.pipelineScreen.questionCustom = map[int]string{}
-	m.pipelineScreen.questionCustomActive = -1
+	}, 80)
+	m.pipelineScreen.hasQuestion = true
 
 	updated, _ := sendCtrl(m, 'c')
 	mm := updated.(Model)

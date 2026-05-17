@@ -13,7 +13,6 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
@@ -77,13 +76,8 @@ type PipelineScreen struct {
 	awaitingPlanDecision bool
 
 	// User question state (MCP AskUserQuestion bridge)
-	userQuestion         harness.MCPToolCall
-	questionCursor       int
-	questionSelected     map[int]bool   // for multi-select
-	questionCustom       map[int]string // per-option custom context text
-	questionCustomActive int            // index of option with custom input open, -1 = none
-	questionTextarea     textarea.Model // for freeform or inline custom text
-	hasQuestionTA        bool           // true when freeform textarea is active
+	question    userQuestionModel
+	hasQuestion bool
 
 	// Merge conflict state
 	mergeConflict orchestrator.MergeConflictInfo
@@ -158,12 +152,8 @@ func (s *PipelineScreen) Reset() {
 	s.showHelp = false
 	s.active = false
 	s.phase = ""
-	s.userQuestion = harness.MCPToolCall{}
-	s.questionCursor = 0
-	s.questionSelected = nil
-	s.questionCustom = nil
-	s.questionCustomActive = -1
-	s.hasQuestionTA = false
+	s.question = userQuestionModel{activeEditor: -1}
+	s.hasQuestion = false
 	s.mergeConflict = orchestrator.MergeConflictInfo{}
 	s.pendingEditContent = ""
 	s.editConfirmCursor = 0
@@ -320,25 +310,9 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 
 	case orchestrator.EventUserQuestion:
 		s.content = ContentUserQuestion
-		s.userQuestion = event.UserQuestion
-		s.questionCursor = 0
-		s.questionSelected = make(map[int]bool)
-		s.questionCustom = make(map[int]string)
-		s.questionCustomActive = -1
+		s.question = newUserQuestion(event.UserQuestion, width)
+		s.hasQuestion = true
 		s.contentVP.GotoTop()
-		if len(event.UserQuestion.Options) == 0 {
-			// Freeform mode
-			ta := textarea.New()
-			ta.Placeholder = "Type your answer..."
-			ta.SetWidth(max(1, width-4))
-			ta.SetHeight(3)
-			ta.CharLimit = 1024
-			ta.Focus()
-			s.questionTextarea = ta
-			s.hasQuestionTA = true
-		} else {
-			s.hasQuestionTA = false
-		}
 
 	case orchestrator.EventMergeConflict:
 		s.mergeConflict = event.MergeConflict
@@ -417,7 +391,19 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 
 	switch s.content {
 	case ContentUserQuestion:
-		return s.handleUserQuestionKey(msg)
+		var cmd tea.Cmd
+		s.question, cmd = s.question.Update(msg)
+		// Refresh the cached contentVP after every keystroke so the textarea's
+		// new value is visible immediately, rather than at the next tick.
+		s.SyncViewports()
+		if s.question.Done() {
+			answer := s.question.Answer()
+			s.content = ContentStreaming
+			s.hasQuestion = false
+			s.PendingIntent = SubmitQuestionAnswerIntent{Answer: answer}
+			s.SyncViewports()
+		}
+		return s, cmd
 	case ContentPlanReview:
 		return s.handlePlanReviewKey(msg)
 	case ContentPlanDiff:
@@ -458,9 +444,14 @@ func (s PipelineScreen) HandleMouse(msg tea.MouseMsg) (PipelineScreen, tea.Cmd) 
 
 // UpdateSubModel passes non-key messages to focused sub-models (textareas).
 func (s PipelineScreen) UpdateSubModel(msg tea.Msg) (PipelineScreen, tea.Cmd) {
-	if s.content == ContentUserQuestion && s.hasQuestionTA {
+	if s.content == ContentUserQuestion && s.hasQuestion {
 		var cmd tea.Cmd
-		s.questionTextarea, cmd = s.questionTextarea.Update(msg)
+		s.question, cmd = s.question.Update(msg)
+		// Keep the cached contentVP in sync on blink/timer-driven messages
+		// too. Completion handling is owned by the key path (Model.handleKey
+		// drives Update; this path is fed by Model.Update tail and does not
+		// drain PendingIntent), so do NOT transition state here.
+		s.SyncViewports()
 		return s, cmd
 	}
 	if s.content == ContentEditConfirm && s.hasEditComment {
@@ -469,157 +460,6 @@ func (s PipelineScreen) UpdateSubModel(msg tea.Msg) (PipelineScreen, tea.Cmd) {
 		return s, cmd
 	}
 	return s, nil
-}
-
-func (s PipelineScreen) handleUserQuestionKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
-	opts := s.userQuestion.Options
-
-	// Freeform mode (no options)
-	if len(opts) == 0 && s.hasQuestionTA {
-		switch msg.Code {
-		case tea.KeyEscape:
-			s.content = ContentStreaming
-			s.SyncViewports()
-			s.PendingIntent = SubmitQuestionAnswerIntent{Answer: harness.MCPAnswer{Skipped: true}}
-			return s, nil
-		case tea.KeyEnter:
-			if !msg.Mod.Contains(tea.ModShift) && !msg.Mod.Contains(tea.ModAlt) {
-				text := strings.TrimSpace(s.questionTextarea.Value())
-				s.content = ContentStreaming
-				s.SyncViewports()
-				s.PendingIntent = SubmitQuestionAnswerIntent{Answer: harness.MCPAnswer{FreeformText: text}}
-				return s, nil
-			}
-			s.questionTextarea.InsertString("\n")
-			return s, nil
-		}
-		var cmd tea.Cmd
-		s.questionTextarea, cmd = s.questionTextarea.Update(msg)
-		return s, cmd
-	}
-
-	// Custom text input is active — forward keys to textarea unless special
-	if s.questionCustomActive >= 0 {
-		switch msg.Code {
-		case tea.KeyTab:
-			// Confirm custom text and return to option navigation
-			text := strings.TrimSpace(s.questionTextarea.Value())
-			if text != "" {
-				s.questionCustom[s.questionCustomActive] = text
-			} else {
-				delete(s.questionCustom, s.questionCustomActive)
-			}
-			s.questionTextarea.Blur()
-			s.questionCustomActive = -1
-			s.hasQuestionTA = false
-			s.SyncViewports()
-			return s, nil
-		case tea.KeyEscape:
-			// Cancel custom edit, discard changes
-			s.questionTextarea.Blur()
-			s.questionCustomActive = -1
-			s.hasQuestionTA = false
-			s.SyncViewports()
-			return s, nil
-		case tea.KeyEnter:
-			// Confirm custom text (same as Tab-collapse) — do NOT submit the whole answer
-			if !msg.Mod.Contains(tea.ModShift) && !msg.Mod.Contains(tea.ModAlt) {
-				text := strings.TrimSpace(s.questionTextarea.Value())
-				if text != "" {
-					s.questionCustom[s.questionCustomActive] = text
-				} else {
-					delete(s.questionCustom, s.questionCustomActive)
-				}
-				s.questionTextarea.Blur()
-				s.questionCustomActive = -1
-				s.hasQuestionTA = false
-				s.SyncViewports()
-				return s, nil
-			}
-		}
-		var cmd tea.Cmd
-		s.questionTextarea, cmd = s.questionTextarea.Update(msg)
-		return s, cmd
-	}
-
-	// Options mode (no custom input active)
-	switch msg.Code {
-	case tea.KeyEscape:
-		s.content = ContentStreaming
-		s.SyncViewports()
-		s.PendingIntent = SubmitQuestionAnswerIntent{Answer: harness.MCPAnswer{Skipped: true}}
-		return s, nil
-	case tea.KeyUp:
-		if s.questionCursor > 0 {
-			s.questionCursor--
-		}
-		s.SyncViewports()
-		return s, nil
-	case tea.KeyDown:
-		if s.questionCursor < len(opts)-1 {
-			s.questionCursor++
-		}
-		s.SyncViewports()
-		return s, nil
-	case tea.KeyTab:
-		// Expand inline custom text input for highlighted option
-		ta := textarea.New()
-		ta.Placeholder = "Add context..."
-		ta.SetWidth(max(1, s.contentVP.Width()-6))
-		ta.SetHeight(1)
-		ta.CharLimit = 512
-		// Restore any previously entered custom text
-		if prev, ok := s.questionCustom[s.questionCursor]; ok {
-			ta.SetValue(prev)
-		}
-		ta.Focus()
-		s.questionTextarea = ta
-		s.questionCustomActive = s.questionCursor
-		s.hasQuestionTA = true
-		s.SyncViewports()
-		return s, nil
-	case tea.KeyEnter:
-		// Single-select shortcut: if nothing selected, select cursor AND confirm
-		answer := s.buildQuestionAnswer()
-		s.content = ContentStreaming
-		s.SyncViewports()
-		s.PendingIntent = SubmitQuestionAnswerIntent{Answer: answer}
-		return s, nil
-	}
-
-	switch msg.String() {
-	case " ":
-		if s.userQuestion.MultiSelect {
-			s.questionSelected[s.questionCursor] = !s.questionSelected[s.questionCursor]
-			s.SyncViewports()
-		}
-		return s, nil
-	}
-	return s, nil
-}
-
-func (s PipelineScreen) buildQuestionAnswer() harness.MCPAnswer {
-	var selected []int
-	for i := range s.userQuestion.Options {
-		if s.questionSelected[i] {
-			selected = append(selected, i)
-		}
-	}
-	// If nothing was explicitly selected in single-select mode, select cursor
-	if len(selected) == 0 && !s.userQuestion.MultiSelect && len(s.userQuestion.Options) > 0 {
-		selected = []int{s.questionCursor}
-	}
-	// Populate custom texts from per-option context input
-	var customTexts map[int]string
-	for idx, text := range s.questionCustom {
-		if strings.TrimSpace(text) != "" {
-			if customTexts == nil {
-				customTexts = make(map[int]string)
-			}
-			customTexts[idx] = strings.TrimSpace(text)
-		}
-	}
-	return harness.MCPAnswer{SelectedIndices: selected, CustomTexts: customTexts}
 }
 
 func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
@@ -695,21 +535,6 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 	return s, nil
 }
 
-// skipUserQuestion discards the active AskUserQuestion with the default
-// "user skipped" payload. Component-local skip — independent of the global
-// Ctrl+C double-press gate owned by Model.handleKey.
-func (s PipelineScreen) skipUserQuestion() PipelineScreen {
-	if s.questionCustomActive >= 0 {
-		s.questionTextarea.Blur()
-		s.questionCustomActive = -1
-		s.hasQuestionTA = false
-	}
-	s.content = ContentStreaming
-	s.SyncViewports()
-	s.PendingIntent = SubmitQuestionAnswerIntent{Answer: harness.MCPAnswer{Skipped: true}}
-	return s
-}
-
 // HandleCtrlCCancel handles the first Ctrl+C press by emitting the appropriate
 // cancel intent based on current content mode.
 func (s PipelineScreen) HandleCtrlCCancel() PipelineScreen {
@@ -721,7 +546,12 @@ func (s PipelineScreen) HandleCtrlCCancel() PipelineScreen {
 	case ContentStreaming, ContentAgentHistory:
 		s.PendingIntent = CancelPipelineIntent{}
 	case ContentUserQuestion:
-		s = s.skipUserQuestion()
+		s.question = s.question.Cancel()
+		answer := s.question.Answer()
+		s.content = ContentStreaming
+		s.hasQuestion = false
+		s.PendingIntent = SubmitQuestionAnswerIntent{Answer: answer}
+		s.SyncViewports()
 	default:
 		s.PendingIntent = CancelPipelineIntent{}
 	}
@@ -853,16 +683,7 @@ func (s PipelineScreen) viewInputZone() string {
 		}
 		return status
 	case ContentUserQuestion:
-		if s.questionCustomActive >= 0 {
-			return keyStyle.Render(" [Tab/Enter] save context | [Esc] discard")
-		}
-		if s.hasQuestionTA {
-			return keyStyle.Render(" Type your answer, then [Enter] to submit | [Esc] skip")
-		}
-		if s.userQuestion.MultiSelect {
-			return keyStyle.Render(" [Space] toggle | [Tab] add context | [Enter] confirm | [Esc] skip")
-		}
-		return keyStyle.Render(" [Enter] confirm | [Tab] add context | [Esc] skip")
+		return keyStyle.Render(s.question.InputZone())
 	case ContentPlanReview:
 		if s.hasPlanComment {
 			return s.planComment.View() + "\n" +
@@ -896,7 +717,7 @@ func (s PipelineScreen) viewContent(width int) string {
 	case ContentStreaming:
 		return s.viewStreaming(width)
 	case ContentUserQuestion:
-		return s.viewUserQuestion(width)
+		return s.question.View(width)
 	case ContentPlanReview:
 		return s.viewPlanReview(width)
 	case ContentPlanDiff:
@@ -962,74 +783,6 @@ func (s PipelineScreen) viewStreaming(width int) string {
 			b.WriteString("\n")
 		}
 	}
-	return b.String()
-}
-
-func (s PipelineScreen) viewUserQuestion(width int) string {
-	var b strings.Builder
-	q := s.userQuestion
-
-	// Question header — wrapped to content width
-	b.WriteString(renderPrefixedText(phaseStyle, " ", q.Question, width))
-	b.WriteString("\n")
-
-	if len(q.Options) == 0 && s.hasQuestionTA {
-		// Freeform mode
-		b.WriteString(fmt.Sprintf("   %s\n", s.questionTextarea.View()))
-		return b.String()
-	}
-
-	// Options mode
-	for i, opt := range q.Options {
-		cursor := "  "
-		if i == s.questionCursor {
-			cursor = phaseStyle.Render("> ")
-		}
-
-		var marker string
-		if q.MultiSelect {
-			if s.questionSelected[i] {
-				marker = passStyle.Bold(true).Render("[x] ")
-			} else {
-				marker = "[ ] "
-			}
-		} else {
-			if s.questionSelected[i] {
-				marker = passStyle.Bold(true).Render("(•) ")
-			} else {
-				marker = "( ) "
-			}
-		}
-
-		label := opt.Label
-		if i == s.questionCursor {
-			label = goalStyle.Render(opt.Label)
-		}
-
-		b.WriteString(fmt.Sprintf("%s%s%s", cursor, marker, label))
-		if opt.Hint != "" {
-			b.WriteString(fmt.Sprintf("  %s", questionHintStyle.Render(opt.Hint)))
-		}
-		// Show custom text indicator if text was added for this option
-		if text, ok := s.questionCustom[i]; ok && text != "" && s.questionCustomActive != i {
-			b.WriteString(fmt.Sprintf("  %s", questionHintStyle.Render("✎ "+text)))
-		}
-		// Show Tab affordance on the highlighted row when no custom text is set
-		// and the inline editor isn't already open for this option.
-		if i == s.questionCursor && s.questionCustomActive != i {
-			if text, ok := s.questionCustom[i]; !ok || strings.TrimSpace(text) == "" {
-				b.WriteString("  ")
-				b.WriteString(questionHintStyle.Render("[Tab: add context]"))
-			}
-		}
-		b.WriteString("\n")
-
-		// Render inline custom text editor when expanded for this option
-		if s.questionCustomActive == i {
-			b.WriteString(fmt.Sprintf("     %s %s\n", questionGutterStyle.Render("┊"), s.questionTextarea.View()))
-		}
-	}
-
 	return b.String()
 }
 
@@ -1354,13 +1107,7 @@ func (s PipelineScreen) viewFooter() string {
 	}
 	switch s.content {
 	case ContentUserQuestion:
-		if s.hasQuestionTA {
-			return keyStyle.Render(" [Enter] submit | [Esc] skip                           [^H] help  ") + ctrlCHint
-		}
-		if s.userQuestion.MultiSelect {
-			return keyStyle.Render(" [↑↓] navigate | [Space] toggle | [Tab] add context | [Enter] confirm | [Esc] skip  [^H] help  ") + ctrlCHint
-		}
-		return keyStyle.Render(" [↑↓] navigate | [Tab] add context | [Enter] confirm | [Esc] skip  [^H] help  ") + ctrlCHint
+		return keyStyle.Render(s.question.Footer()+"  [^H] help  ") + ctrlCHint
 	case ContentPlanReview:
 		footer := " [^A] accept | [^E] edit in editor | [Enter] comment | [Shift+Enter] newline"
 		if s.planDiff != "" {
