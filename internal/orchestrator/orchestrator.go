@@ -282,6 +282,14 @@ type Decision struct {
 	Type          DecisionType
 	EditedContent string
 	Comment       string // for DecisionComment
+	// AutoApprove, when true on a DecisionEdit, instructs the gate loop
+	// to treat the edit as a final approval (no re-show, no architect
+	// re-engagement). Set by the TUI only after the user has explicitly
+	// confirmed the edited content (^E -> save -> Yes). The revert path
+	// (plan-history Ctrl+Y) leaves this false so the user must re-review.
+	// If Comment is non-empty, architect re-engagement takes precedence
+	// and AutoApprove is ignored (user asked for another review).
+	AutoApprove bool
 }
 
 // Event is emitted by the orchestrator to notify the TUI of progress.
@@ -1055,7 +1063,17 @@ planGate:
 							emit(Event{Type: EventChatResponse, ChatText: chatResponse})
 						}
 					}
-					continue // re-show gate with (possibly revised) plan
+					// Auto-approve path: user already confirmed the edited content at the
+					// TUI (^E -> save -> Yes, no comment). Skip the re-show and fall
+					// through to the post-gate break, matching DecisionApprove semantics.
+					// Revert path (RevertPlanIntent) and any edit-with-comment continue
+					// to re-show the gate so the user reviews the revision.
+					if decision.Comment != "" || !decision.AutoApprove {
+						continue
+					}
+					logger.Info("gate: user confirmed external edit")
+					logger.Info("gate_decision", "decision", "edit-auto-approve")
+					// fall through to break after the select
 				case DecisionComment:
 					architectAttempt++
 					logAgentEvent("agent_started", "architect", architectAttempt, harness.TokenUsage{}, nil)

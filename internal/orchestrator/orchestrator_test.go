@@ -1054,6 +1054,62 @@ assertEnd:
 	}
 }
 
+func TestGate_DecisionEditAutoApprove_ProceedsToWorker(t *testing.T) {
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
+
+	tmpDir := t.TempDir()
+	engine.RunDirFactory = func(slug string) (agent.SessionDir, error) {
+		dir := filepath.Join(tmpDir, slug)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return agent.SessionDir{}, err
+		}
+		return agent.SessionDir{Path: dir}, nil
+	}
+
+	editedPlan := "# Plan\n\n## Goal\nUser-confirmed.\n\n## Work Packages\n\n### 1. Do it\n\n**Steps:**\n1. Edit foo.go\n\n**Done when:**\n- Tests pass"
+
+	ctx := context.Background()
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
+
+	timeout := time.After(10 * time.Second)
+
+	var gateCount int
+	var workerStartedAfterEdit bool
+	editSent := false
+	for {
+		select {
+		case event, ok := <-channels.Events:
+			if !ok {
+				goto assertEnd
+			}
+			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+				gateCount++
+				if gateCount > 1 {
+					t.Errorf("gate re-emitted after AutoApprove edit (auto-approve path broken): gateCount=%d", gateCount)
+				}
+				channels.Decisions <- Decision{
+					Type:          DecisionEdit,
+					EditedContent: editedPlan,
+					AutoApprove:   true,
+				}
+				editSent = true
+			}
+			if editSent && event.Type == EventAgentStarted && event.AgentID == "worker" {
+				workerStartedAfterEdit = true
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for worker after auto-approve edit")
+		}
+	}
+assertEnd:
+	if gateCount != 1 {
+		t.Errorf("expected exactly one gate request, got %d", gateCount)
+	}
+	if !workerStartedAfterEdit {
+		t.Error("worker did not start after AutoApprove edit")
+	}
+}
+
 func TestStreamBuffer_DropsRawStreamFrames(t *testing.T) {
 	sb := NewStreamBuffer(50)
 	input := `{"type":"assistant","message":{"content":[{"type":"text","text":"ignored"}]}}` + "\n" +
