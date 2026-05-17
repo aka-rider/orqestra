@@ -156,6 +156,9 @@ func TestEditConfirm_YesWithComment(t *testing.T) {
 	if intent.Comment != "Fixed imports" {
 		t.Errorf("expected Comment %q, got %q", "Fixed imports", intent.Comment)
 	}
+	if intent.AutoApprove {
+		t.Errorf("expected AutoApprove=false when comment is non-empty")
+	}
 	if s.content != ContentStreaming {
 		t.Errorf("expected ContentStreaming, got %d", s.content)
 	}
@@ -176,6 +179,9 @@ func TestEditConfirm_YesNoComment(t *testing.T) {
 	}
 	if intent.Comment != "" {
 		t.Errorf("expected empty Comment, got %q", intent.Comment)
+	}
+	if !intent.AutoApprove {
+		t.Errorf("expected AutoApprove=true when comment is empty")
 	}
 	if s.content != ContentStreaming {
 		t.Errorf("expected ContentStreaming, got %d", s.content)
@@ -315,5 +321,28 @@ func TestUserQuestion_FooterIncludesTab(t *testing.T) {
 		if !strings.Contains(f, "[Tab] add context") {
 			t.Errorf("multi=%v: expected [Tab] add context in footer, got: %s", multi, f)
 		}
+		if !strings.Contains(f, "[Enter] confirm") {
+			t.Errorf("multi=%v: expected [Enter] confirm in footer, got: %s", multi, f)
+		}
+	}
+}
+
+func TestUserQuestion_MultiSelectToggleVisible(t *testing.T) {
+	s := setupUserQuestionScreen(true)
+	// Simulate a Space keypress via the same dispatch path as runtime:
+	// handleUserQuestionKey switches on msg.String(), which for printable
+	// characters reflects the Text field.
+	s, _ = s.handleUserQuestionKey(tea.KeyPressMsg{Text: " "})
+
+	if !s.questionSelected[0] {
+		t.Fatalf("expected option 0 to be toggled on after Space")
+	}
+
+	out := s.viewUserQuestion(80)
+	if !strings.Contains(out, "[x]") {
+		t.Errorf("expected toggled option to render [x], got:\n%s", out)
+	}
+	if !strings.Contains(out, "[ ]") {
+		t.Errorf("expected un-toggled option to render [ ], got:\n%s", out)
 	}
 }

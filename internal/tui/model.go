@@ -501,6 +501,7 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 				Type:          orchestrator.DecisionEdit,
 				EditedContent: i.EditedContent,
 				Comment:       i.Comment,
+				AutoApprove:   i.AutoApprove,
 			}
 		}
 		m.pipelineScreen.awaitingPlanDecision = false
@@ -588,9 +589,9 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 		}
 		return m, batch(nil)
 	case RevertPlanIntent:
-		// Comment intentionally empty: avoids architect re-engagement at
-		// orchestrator.go:792. Audit trail = the git commit "user: manual edit"
-		// written by orchestrator.go.
+		// Comment intentionally empty; AutoApprove intentionally false: revert
+		// must re-show the gate so the user reviews the historical revision
+		// before approving. See `DecisionEdit` branch in orchestrator.go.
 		if m.decisions != nil {
 			m.decisions <- orchestrator.Decision{
 				Type:          orchestrator.DecisionEdit,

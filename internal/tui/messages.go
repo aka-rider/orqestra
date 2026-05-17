@@ -124,6 +124,7 @@ func (AbortMergeIntent) isIntent() {}
 type ConfirmEditIntent struct {
 	EditedContent string
 	Comment       string // optional context describing the edit
+	AutoApprove   bool   // set when "Yes" with no comment — skip gate re-show
 }
 
 func (ConfirmEditIntent) isIntent() {}

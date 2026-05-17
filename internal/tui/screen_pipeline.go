@@ -591,14 +591,8 @@ func (s PipelineScreen) handleUserQuestionKey(msg tea.KeyPressMsg) (PipelineScre
 	case " ":
 		if s.userQuestion.MultiSelect {
 			s.questionSelected[s.questionCursor] = !s.questionSelected[s.questionCursor]
-		} else {
-			// Single-select: clear all, select current
-			for k := range s.questionSelected {
-				delete(s.questionSelected, k)
-			}
-			s.questionSelected[s.questionCursor] = true
+			s.SyncViewports()
 		}
-		s.SyncViewports()
 		return s, nil
 	}
 	return s, nil
@@ -868,7 +862,7 @@ func (s PipelineScreen) viewInputZone() string {
 		if s.userQuestion.MultiSelect {
 			return keyStyle.Render(" [Space] toggle | [Tab] add context | [Enter] confirm | [Esc] skip")
 		}
-		return keyStyle.Render(" [Space] select | [Tab] add context | [Enter] confirm | [Esc] skip")
+		return keyStyle.Render(" [Enter] confirm | [Tab] add context | [Esc] skip")
 	case ContentPlanReview:
 		if s.hasPlanComment {
 			return s.planComment.View() + "\n" +
@@ -879,9 +873,9 @@ func (s PipelineScreen) viewInputZone() string {
 		return keyStyle.Render(" [^A] abort merge and keep worktree branch | [Esc] back to stream")
 	case ContentEditConfirm:
 		if s.hasEditComment {
-			return keyStyle.Render(" [Enter] confirm | [Shift+Enter] newline | [Tab] collapse | [Esc] cancel")
+			return keyStyle.Render(" [Tab/Enter] save context | [Esc] discard")
 		}
-		return keyStyle.Render(" [↑/↓] select | [Enter] confirm | [Tab] add context | [Esc] discard")
+		return keyStyle.Render(" [Enter] confirm | [Tab] add context | [Esc] discard")
 	case ContentAgentHistory:
 		agentName := ""
 		if s.focusedAgent > 0 && s.focusedAgent <= len(s.agents) {
@@ -989,21 +983,21 @@ func (s PipelineScreen) viewUserQuestion(width int) string {
 	for i, opt := range q.Options {
 		cursor := "  "
 		if i == s.questionCursor {
-			cursor = phaseStyle.Render("▶ ")
+			cursor = phaseStyle.Render("> ")
 		}
 
 		var marker string
 		if q.MultiSelect {
 			if s.questionSelected[i] {
-				marker = passStyle.Render("☑ ")
+				marker = passStyle.Bold(true).Render("[x] ")
 			} else {
-				marker = dimStyle.Render("☐ ")
+				marker = "[ ] "
 			}
 		} else {
 			if s.questionSelected[i] {
-				marker = passStyle.Render("● ")
+				marker = passStyle.Bold(true).Render("(•) ")
 			} else {
-				marker = dimStyle.Render("○ ")
+				marker = "( ) "
 			}
 		}
 
@@ -1366,7 +1360,7 @@ func (s PipelineScreen) viewFooter() string {
 		if s.userQuestion.MultiSelect {
 			return keyStyle.Render(" [↑↓] navigate | [Space] toggle | [Tab] add context | [Enter] confirm | [Esc] skip  [^H] help  ") + ctrlCHint
 		}
-		return keyStyle.Render(" [↑↓] navigate | [Tab] add context | [Enter] select | [Esc] skip  [^H] help  ") + ctrlCHint
+		return keyStyle.Render(" [↑↓] navigate | [Tab] add context | [Enter] confirm | [Esc] skip  [^H] help  ") + ctrlCHint
 	case ContentPlanReview:
 		footer := " [^A] accept | [^E] edit in editor | [Enter] comment | [Shift+Enter] newline"
 		if s.planDiff != "" {
@@ -1380,6 +1374,11 @@ func (s PipelineScreen) viewFooter() string {
 			footer += dimStyle.Render(fmt.Sprintf("  Review: %s", formatTokens(s.reviewTokensIn+s.reviewTokensOut)))
 		}
 		return keyStyle.Render(footer)
+	case ContentEditConfirm:
+		if s.hasEditComment {
+			return keyStyle.Render(" [Tab/Enter] save context | [Esc] discard                    [^H] help  ") + ctrlCHint
+		}
+		return keyStyle.Render(" [↑↓] navigate | [Tab] add context | [Enter] confirm | [Esc] discard  [^H] help  ") + ctrlCHint
 	case ContentPlanDiff:
 		return keyStyle.Render(" [Esc] return to plan | [^D] return to plan              [^H] help  ") + ctrlCHint
 	case ContentMergeConflict:
@@ -1484,6 +1483,7 @@ func (s PipelineScreen) handleEditConfirmKey(msg tea.KeyPressMsg) (PipelineScree
 			s.PendingIntent = ConfirmEditIntent{
 				EditedContent: s.pendingEditContent,
 				Comment:       comment,
+				AutoApprove:   comment == "",
 			}
 			s.pendingEditContent = ""
 			s.hasEditComment = false
@@ -1539,6 +1539,7 @@ func (s PipelineScreen) handleEditConfirmKey(msg tea.KeyPressMsg) (PipelineScree
 			s.PendingIntent = ConfirmEditIntent{
 				EditedContent: s.pendingEditContent,
 				Comment:       comment,
+				AutoApprove:   comment == "",
 			}
 			s.pendingEditContent = ""
 			s.hasEditComment = false
