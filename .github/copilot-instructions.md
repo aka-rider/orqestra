@@ -110,6 +110,7 @@ These are review blockers. If existing code contains one near the task, do not s
 - Map-order-dependent output: sort keys before rendering, comparing, persisting golden output, or generating deterministic artifacts.
 - `time.Sleep` as test synchronization: tests must coordinate with channels, contexts, fake clocks, hooks, or explicit process signals.
 - Catch-all packages: do not create `types`, `utils`, `helpers`, or `misc`. Put concepts in the package that owns the behavior.
+- Oversize source files: a Go source file over 500 lines is a code smell that must be eliminated before further work in that file ships. Split by entity into new files in the same package; do not let new feature work pile onto an already-oversize file.
 - Magic layout arithmetic: layout dimensions must come from measured components or named chrome constants, not unexplained offsets.
 
 </banned_patterns>
@@ -132,6 +133,7 @@ These are review blockers. If existing code contains one near the task, do not s
   - `internal/tui/`: pure rendering, MVU state transitions, screen models, user interaction.
   - `internal/plan/`: plan-history and markdown persistence adapters.
   - `internal/scheduler/`: DAG execution support; treat as separate from the active orchestrator pipeline unless explicitly wired.
+- One entity per file: each Go source file owns a single primary type (struct, interface, or top-level coordinator) plus the constants, helpers, and adapter wrappers that exist only to serve it. Sibling entities live in their own files in the same package. Catch-all containers (`types.go`, `utils.go`, `misc.go`) remain forbidden under `<banned_patterns>`; the rule here is positive — give each entity its own home.
 - Constructors and loaders that can fail return errors. Do not panic except for impossible embedded build-time invariants.
 - Prefer concrete types internally. Introduce interfaces at the consumer boundary when tests or alternate implementations need them now.
 - Use `context.Context` for subprocesses, LLM calls, validators, sandboxes, and long-running orchestration steps.
