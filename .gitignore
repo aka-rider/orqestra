@@ -1,6 +1,5 @@
 # binary
 orqestra
-bin/
 
 # Go
 *.test
@@ -11,7 +10,6 @@ coverage.txt
 .env
 *.env
 orqestra.yaml
-clipproxy.yaml
 
 # macOS
 .DS_Store
@@ -27,3 +25,4 @@ node_modules/
 copilot-data
 .tmp-integration-test/
 .serena/
+transcribe

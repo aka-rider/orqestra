@@ -18,7 +18,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-BINARY="$REPO_ROOT/bin/orqestra"
+BINARY="$REPO_ROOT/orqestra"
 
 # --- Parse flags ---
 RESUME_FROM=1
