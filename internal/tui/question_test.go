@@ -27,7 +27,7 @@ func singleQ() harness.MCPToolCall {
 }
 
 func multiQ() harness.MCPToolCall {
-	return harness.MCPToolCall{Question: "pick many", MultiSelect: true, Options: qOptions()}
+	return harness.MCPToolCall{Question: "pick", MultiSelect: true, Options: qOptions()}
 }
 
 func freeformQ() harness.MCPToolCall {
