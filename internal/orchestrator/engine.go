@@ -78,14 +78,14 @@ type Engine struct {
 type RunChannels struct {
 	Events    <-chan Event
 	Decisions chan<- Decision
-	Stream    *StreamBuffer
+	Stream    *StreamRing
 }
 
 // Start launches the pipeline in a goroutine. Returns channels immediately.
 func (e *Engine) Start(ctx context.Context, input Input) RunChannels {
 	events := make(chan Event, 16)
 	decisions := make(chan Decision, 1)
-	stream := NewStreamBuffer(200)
+	stream := NewStreamRing(200)
 
 	go func() {
 		defer close(events)
@@ -130,7 +130,7 @@ func (e *Engine) Run(ctx context.Context, input Input, emit func(Event)) (Result
 	return result, nil
 }
 
-func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, decisions <-chan Decision, stream *StreamBuffer) {
+func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, decisions <-chan Decision, stream *StreamRing) {
 	emit := func(ev Event) {
 		select {
 		case events <- ev:
@@ -187,7 +187,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 				durMS = time.Since(start).Milliseconds()
 			}
 			logger.Info("agent_done", "agent", agentID, "attempt", attempt,
-				"input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens,
+				"input_tokens", usage.Input, "output_tokens", usage.Output,
 				"duration_ms", durMS)
 		case "agent_failed":
 			var durMS int64
@@ -199,7 +199,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 				errStr = err.Error()
 			}
 			logger.Info("agent_failed", "agent", agentID, "attempt", attempt,
-				"input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens,
+				"input_tokens", usage.Input, "output_tokens", usage.Output,
 				"duration_ms", durMS, "err", errStr)
 		}
 	}
@@ -309,7 +309,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		var err error
 		for attempt := 1; attempt <= researchAttempts; attempt++ {
 			var rResult agent.PlanResult
-			rResult, err = researcherPlanner.Run(ctx, researchPrompt, &streamWriter{buf: stream})
+			rResult, err = researcherPlanner.Run(ctx, researchPrompt, &streamWriter{ring: stream})
 			if err == nil {
 				draft.Markdown = rResult.Plan
 				draftUsage = rResult.Usage
@@ -347,14 +347,14 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		writeArtifactJSON(session, "researcher_meta.json", agent.StepMeta{
 			AgentID: "researcher", ModelRef: e.Config.Researcher.Model, StartTime: researchStart, EndTime: time.Now(),
 			ClaudeSessionID: researchSessionID, Status: "done",
-			InputTokens: draftUsage.InputTokens, OutputTokens: draftUsage.OutputTokens,
+			InputTokens: draftUsage.Input, OutputTokens: draftUsage.Output,
 			ClaudeProjectPath:    claudeProjectPath(session),
 			ClaudeSessionLogPath: researchLogCopy,
 		})
 		logClaudeSession("researcher", 1, researchSessionID, researchLogCopy)
 		logAgentEvent("agent_done", "researcher", 1, draftUsage, nil)
 		emit(Event{Type: EventAgentDone, AgentID: "researcher",
-			InputTokens: draftUsage.InputTokens, OutputTokens: draftUsage.OutputTokens,
+			InputTokens: draftUsage.Input, OutputTokens: draftUsage.Output,
 			ResearchDraft: draft.Markdown})
 
 		// --- Planning ---
@@ -379,7 +379,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		var planErr error
 		for attempt := 1; attempt <= architectAttempts; attempt++ {
 			var aResult agent.PlanResult
-			aResult, planErr = architectPlanner.Run(ctx, architectPrompt, &streamWriter{buf: stream})
+			aResult, planErr = architectPlanner.Run(ctx, architectPrompt, &streamWriter{ring: stream})
 			if planErr == nil {
 				planSessionID = aResult.SessionID
 				planUsage = aResult.Usage
@@ -425,7 +425,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		writeArtifactJSON(session, "architect_meta.json", agent.StepMeta{
 			AgentID: "architect", ModelRef: e.Config.Architect.Model, StartTime: planStart, EndTime: time.Now(),
 			ClaudeSessionID: planSessionID, Status: "done",
-			InputTokens: planUsage.InputTokens, OutputTokens: planUsage.OutputTokens,
+			InputTokens: planUsage.Input, OutputTokens: planUsage.Output,
 			ClaudeProjectPath:    claudeProjectPath(session),
 			ClaudeSessionLogPath: archLogCopy,
 			ClaudePlanFilePath:   archPlanFilePath,
@@ -433,14 +433,14 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		logClaudeSession("architect", architectAttempt, planSessionID, archLogCopy)
 		logAgentEvent("agent_done", "architect", architectAttempt, planUsage, nil)
 		emit(Event{Type: EventAgentDone, AgentID: "architect",
-			InputTokens: planUsage.InputTokens, OutputTokens: planUsage.OutputTokens})
+			InputTokens: planUsage.Input, OutputTokens: planUsage.Output})
 
 		finalPlanWarnings = planResult.Warnings
 		finalPlanMarkdown = planResult.Markdown
 		if planRepo != nil {
 			if err := planRepo.CommitPlanAndDialog(finalPlanMarkdown, plan.DialogEntry{
 				Timestamp: time.Now(), Role: "architect", Message: "initial plan",
-				OutputTokens: int(planUsage.OutputTokens),
+				OutputTokens: int(planUsage.Output),
 			}); err != nil {
 				logger.Warn("plan commit failed", "err", err)
 			}
@@ -474,7 +474,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		var criticErr error
 		for attempt := 1; attempt <= criticAttempts; attempt++ {
 			var cResult agent.PlanResult
-			cResult, criticErr = criticPlanner.Run(ctx, criticPrompt, &streamWriter{buf: stream})
+			cResult, criticErr = criticPlanner.Run(ctx, criticPrompt, &streamWriter{ring: stream})
 			if criticErr == nil {
 				criticMarkdown = cResult.Plan
 				criticUsage = cResult.Usage
@@ -512,14 +512,14 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		writeArtifactJSON(session, "critic_meta.json", agent.StepMeta{
 			AgentID: "critic", ModelRef: e.Config.Critic.Model, StartTime: criticStart, EndTime: time.Now(),
 			ClaudeSessionID: criticSessionID, Status: "done",
-			InputTokens: criticUsage.InputTokens, OutputTokens: criticUsage.OutputTokens,
+			InputTokens: criticUsage.Input, OutputTokens: criticUsage.Output,
 			ClaudeProjectPath:    claudeProjectPath(session),
 			ClaudeSessionLogPath: criticLogCopy,
 		})
 		logClaudeSession("critic", 1, criticSessionID, criticLogCopy)
 		logAgentEvent("agent_done", "critic", 1, criticUsage, nil)
 		emit(Event{Type: EventAgentDone, AgentID: "critic",
-			InputTokens: criticUsage.InputTokens, OutputTokens: criticUsage.OutputTokens})
+			InputTokens: criticUsage.Input, OutputTokens: criticUsage.Output})
 
 		criticReportMarkdown = criticMarkdown
 
@@ -534,7 +534,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			}
 			if err := planRepo.CommitDialog(plan.DialogEntry{
 				Timestamp: time.Now(), Role: "critic", Message: firstLine,
-				OutputTokens: int(criticUsage.OutputTokens),
+				OutputTokens: int(criticUsage.Output),
 			}); err != nil {
 				logger.Warn("critic dialog commit failed", "err", err)
 			}
@@ -551,7 +551,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		if critBaselineErr != nil {
 			slog.Debug("could not snapshot plan file baseline before critic revision", "err", critBaselineErr)
 		}
-		critRevResult, revErr := architectPlanner.Continue(ctx, planSessionID, agent.CriticContinuePrompt(finalPlanMarkdown, criticMarkdown), &streamWriter{buf: stream})
+		critRevResult, revErr := architectPlanner.Continue(ctx, planSessionID, agent.CriticContinuePrompt(finalPlanMarkdown, criticMarkdown), &streamWriter{ring: stream})
 		chatResponse := critRevResult.Chat
 		revisedPlan := agent.DetectPlanRevision(critRevResult.Plan, critBaseline, critBaselineErr, finalPlanMarkdown)
 		revisedUsage := critRevResult.Usage
@@ -593,7 +593,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			AgentID: "architect", ModelRef: e.Config.Architect.Model,
 			StartTime: revStart, EndTime: time.Now(),
 			ClaudeSessionID: planSessionID, Status: "done",
-			InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens,
+			InputTokens: revisedUsage.Input, OutputTokens: revisedUsage.Output,
 			ClaudeProjectPath:    claudeProjectPath(session),
 			ClaudeSessionLogPath: archCritRevLogCopy,
 			ClaudePlanFilePath:   archCritRevPlanFilePath,
@@ -601,7 +601,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		logClaudeSession("architect", architectAttempt, planSessionID, archCritRevLogCopy)
 		logAgentEvent("agent_done", "architect", architectAttempt, revisedUsage, nil)
 		emit(Event{Type: EventAgentDone, AgentID: "architect",
-			InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens})
+			InputTokens: revisedUsage.Input, OutputTokens: revisedUsage.Output})
 
 		if revisedPlan != nil {
 			finalPlanMarkdown = revisedPlan.Markdown
@@ -609,7 +609,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			if planRepo != nil {
 				if commitErr := planRepo.CommitPlanAndDialog(finalPlanMarkdown, plan.DialogEntry{
 					Timestamp: time.Now(), Role: "architect", Message: "Re: critic feedback",
-					OutputTokens: int(revisedUsage.OutputTokens),
+					OutputTokens: int(revisedUsage.Output),
 				}); commitErr != nil {
 					logger.Warn("plan commit failed", "err", commitErr)
 				}
@@ -622,7 +622,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			if planRepo != nil {
 				if commitErr := planRepo.CommitDialog(plan.DialogEntry{
 					Timestamp: time.Now(), Role: "architect", Message: "Re: critic feedback (no changes)",
-					OutputTokens: int(revisedUsage.OutputTokens),
+					OutputTokens: int(revisedUsage.Output),
 				}); commitErr != nil {
 					logger.Warn("dialog commit failed", "err", commitErr)
 				}
@@ -723,7 +723,7 @@ planGate:
 						} else {
 							editContinuePrompt = agent.ContinuePrompt(finalPlanMarkdown, decision.Comment)
 						}
-						editResult, err := architectPlanner.Continue(ctx, planSessionID, editContinuePrompt, &streamWriter{buf: stream})
+						editResult, err := architectPlanner.Continue(ctx, planSessionID, editContinuePrompt, &streamWriter{ring: stream})
 						chatResponse := editResult.Chat
 						revisedPlan := agent.DetectPlanRevision(editResult.Plan, editBaseline, editBaselineErr, finalPlanMarkdown)
 						revisedUsage := editResult.Usage
@@ -764,7 +764,7 @@ planGate:
 							AgentID: "architect", ModelRef: e.Config.Architect.Model,
 							StartTime: revStart, EndTime: time.Now(),
 							ClaudeSessionID: planSessionID, Status: "done",
-							InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens,
+							InputTokens: revisedUsage.Input, OutputTokens: revisedUsage.Output,
 							ClaudeProjectPath:    claudeProjectPath(session),
 							ClaudeSessionLogPath: archRevLogCopy,
 							ClaudePlanFilePath:   archRevPlanFilePath,
@@ -772,7 +772,7 @@ planGate:
 						logClaudeSession("architect", architectAttempt, planSessionID, archRevLogCopy)
 						logAgentEvent("agent_done", "architect", architectAttempt, revisedUsage, nil)
 						emit(Event{Type: EventAgentDone, AgentID: "architect",
-							InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens})
+							InputTokens: revisedUsage.Input, OutputTokens: revisedUsage.Output})
 
 						if revisedPlan != nil {
 							finalPlanMarkdown = revisedPlan.Markdown
@@ -780,7 +780,7 @@ planGate:
 							if planRepo != nil {
 								if commitErr := planRepo.CommitPlanAndDialog(finalPlanMarkdown, plan.DialogEntry{
 									Timestamp: time.Now(), Role: "architect", Message: "Re: " + truncateMsg(decision.Comment, 50),
-									OutputTokens: int(revisedUsage.OutputTokens),
+									OutputTokens: int(revisedUsage.Output),
 								}); commitErr != nil {
 									logger.Warn("plan commit failed", "err", commitErr)
 								}
@@ -793,7 +793,7 @@ planGate:
 								if commitErr := planRepo.CommitDialog(plan.DialogEntry{
 									Timestamp: time.Now(), Role: "architect",
 									Message:      "Re: " + truncateMsg(decision.Comment, 50) + " (chat only)",
-									OutputTokens: int(revisedUsage.OutputTokens),
+									OutputTokens: int(revisedUsage.Output),
 								}); commitErr != nil {
 									logger.Warn("dialog commit failed", "err", commitErr)
 								}
@@ -841,7 +841,7 @@ planGate:
 							slog.Debug("could not snapshot plan file baseline before comment revision", "err", commentBaselineErr)
 						}
 						var commentResult agent.PlanResult
-						commentResult, err = architectPlanner.Continue(ctx, planSessionID, agent.ContinuePrompt(finalPlanMarkdown, decision.Comment), &streamWriter{buf: stream})
+						commentResult, err = architectPlanner.Continue(ctx, planSessionID, agent.ContinuePrompt(finalPlanMarkdown, decision.Comment), &streamWriter{ring: stream})
 						if err == nil {
 							chatResponse = commentResult.Chat
 							revisedPlan = agent.DetectPlanRevision(commentResult.Plan, commentBaseline, commentBaselineErr, finalPlanMarkdown)
@@ -851,7 +851,7 @@ planGate:
 						// Fallback for cold start (--plan flag) — no session to resume
 						coldPrompt := guardPrompt(agent.ArchitectRevisionPrompt(finalPlanMarkdown, decision.Comment), input.Prompt, "architect (cold-start)")
 						var coldResult agent.PlanResult
-						coldResult, err = architectPlanner.Run(ctx, coldPrompt, &streamWriter{buf: stream})
+						coldResult, err = architectPlanner.Run(ctx, coldPrompt, &streamWriter{ring: stream})
 						revisedUsage = coldResult.Usage // populated even on error if partial
 						if err == nil {
 							planSessionID = coldResult.SessionID
@@ -896,7 +896,7 @@ planGate:
 						AgentID: "architect", ModelRef: e.Config.Architect.Model,
 						StartTime: revStart, EndTime: time.Now(),
 						ClaudeSessionID: planSessionID, Status: "done",
-						InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens,
+						InputTokens: revisedUsage.Input, OutputTokens: revisedUsage.Output,
 						ClaudeProjectPath:    claudeProjectPath(session),
 						ClaudeSessionLogPath: archRevLogCopy,
 						ClaudePlanFilePath:   archRevPlanFilePath,
@@ -904,7 +904,7 @@ planGate:
 					logClaudeSession("architect", architectAttempt, planSessionID, archRevLogCopy)
 					logAgentEvent("agent_done", "architect", architectAttempt, revisedUsage, nil)
 					emit(Event{Type: EventAgentDone, AgentID: "architect",
-						InputTokens: revisedUsage.InputTokens, OutputTokens: revisedUsage.OutputTokens})
+						InputTokens: revisedUsage.Input, OutputTokens: revisedUsage.Output})
 
 					if revisedPlan != nil {
 						finalPlanMarkdown = revisedPlan.Markdown
@@ -912,7 +912,7 @@ planGate:
 						if planRepo != nil {
 							if commitErr := planRepo.CommitPlanAndDialog(finalPlanMarkdown, plan.DialogEntry{
 								Timestamp: time.Now(), Role: "architect", Message: "Re: " + truncateMsg(decision.Comment, 50),
-								OutputTokens: int(revisedUsage.OutputTokens),
+								OutputTokens: int(revisedUsage.Output),
 							}); commitErr != nil {
 								logger.Warn("plan commit failed", "err", commitErr)
 							}
@@ -926,7 +926,7 @@ planGate:
 							if commitErr := planRepo.CommitDialog(plan.DialogEntry{
 								Timestamp: time.Now(), Role: "architect",
 								Message:      "Re: " + truncateMsg(decision.Comment, 50) + " (chat only)",
-								OutputTokens: int(revisedUsage.OutputTokens),
+								OutputTokens: int(revisedUsage.Output),
 							}); commitErr != nil {
 								logger.Warn("dialog commit failed", "err", commitErr)
 							}
@@ -995,7 +995,7 @@ planGate:
 	}
 
 	execPrompt := agent.BuildExecutionPromptFromPlan(finalPlanMarkdown)
-	workResult, execErr := workerRunner.RunStreaming(ctx, execPrompt, "", &streamWriter{buf: stream})
+	workResult, execErr := workerRunner.RunStreaming(ctx, execPrompt, "", &streamWriter{ring: stream})
 
 	// Clean up worktree on failure or cancellation.
 	if execErr != nil {
@@ -1028,14 +1028,14 @@ planGate:
 	writeArtifactJSON(session, "worker_meta.json", agent.StepMeta{
 		AgentID: "worker", ModelRef: e.Config.Worker.Model, StartTime: workerStart, EndTime: time.Now(),
 		ClaudeSessionID: workResult.SessionID, Status: "done",
-		InputTokens: workResult.Usage.InputTokens, OutputTokens: workResult.Usage.OutputTokens,
+		InputTokens: workResult.Usage.Input, OutputTokens: workResult.Usage.Output,
 		ClaudeProjectPath:    claudeProjectPath(session),
 		ClaudeSessionLogPath: workerLogCopy,
 	})
 	logClaudeSession("worker", 1, workResult.SessionID, workerLogCopy)
 	logAgentEvent("agent_done", "worker", 1, workResult.Usage, nil)
 	emit(Event{Type: EventAgentDone, AgentID: "worker", WorkOutput: workResult.Output,
-		InputTokens: workResult.Usage.InputTokens, OutputTokens: workResult.Usage.OutputTokens})
+		InputTokens: workResult.Usage.Input, OutputTokens: workResult.Usage.Output})
 
 	// lastSessionID tracks the most recent session continuation — used for
 	// commit message generation after validation completes.
@@ -1058,7 +1058,7 @@ planGate:
 	validationPrompt := agent.WorkerValidationPrompt(retryBudget)
 
 	if workResult.SessionID != "" {
-		valResult, valErr := workerRunner.RunContinue(ctx, workResult.SessionID, validationPrompt, &streamWriter{buf: stream})
+		valResult, valErr := workerRunner.RunContinue(ctx, workResult.SessionID, validationPrompt, &streamWriter{ring: stream})
 		if valErr != nil {
 			slog.Warn("worker self-validation failed", "err", valErr)
 			valLogCopy, cpErr := agent.CopySessionLog(session, cwd, workResult.SessionID, "validator_session.jsonl")
@@ -1087,19 +1087,19 @@ planGate:
 			writeArtifactJSON(session, "validator_meta.json", agent.StepMeta{
 				AgentID: "validator", ModelRef: e.Config.Worker.Model, StartTime: valStart, EndTime: time.Now(),
 				ClaudeSessionID: valResult.SessionID, Status: "done",
-				InputTokens: valResult.Usage.InputTokens, OutputTokens: valResult.Usage.OutputTokens,
+				InputTokens: valResult.Usage.Input, OutputTokens: valResult.Usage.Output,
 				ClaudeProjectPath:    claudeProjectPath(session),
 				ClaudeSessionLogPath: valLogCopy,
 			})
 			logClaudeSession("validator", 1, valResult.SessionID, valLogCopy)
 			logAgentEvent("agent_done", "validator", 1, valResult.Usage, nil)
 			emit(Event{Type: EventAgentDone, AgentID: "validator",
-				InputTokens: valResult.Usage.InputTokens, OutputTokens: valResult.Usage.OutputTokens})
+				InputTokens: valResult.Usage.Input, OutputTokens: valResult.Usage.Output})
 		}
 	} else {
 		logger.Warn("validator session missing, running disconnected")
 		// Fallback: run validation as a new session (less effective but still useful)
-		valResult, valErr := workerRunner.RunStreaming(ctx, validationPrompt, "", &streamWriter{buf: stream})
+		valResult, valErr := workerRunner.RunStreaming(ctx, validationPrompt, "", &streamWriter{ring: stream})
 		if valErr != nil {
 			slog.Warn("disconnected validation failed", "err", valErr)
 			writeArtifactJSON(session, "validator_meta.json", agent.StepMeta{
@@ -1122,14 +1122,14 @@ planGate:
 			writeArtifactJSON(session, "validator_meta.json", agent.StepMeta{
 				AgentID: "validator", ModelRef: e.Config.Worker.Model, StartTime: valStart, EndTime: time.Now(),
 				ClaudeSessionID: valResult.SessionID, Status: "done",
-				InputTokens: valResult.Usage.InputTokens, OutputTokens: valResult.Usage.OutputTokens,
+				InputTokens: valResult.Usage.Input, OutputTokens: valResult.Usage.Output,
 				ClaudeProjectPath:    claudeProjectPath(session),
 				ClaudeSessionLogPath: discValLogCopy,
 			})
 			logClaudeSession("validator", 1, valResult.SessionID, discValLogCopy)
 			logAgentEvent("agent_done", "validator", 1, valResult.Usage, nil)
 			emit(Event{Type: EventAgentDone, AgentID: "validator",
-				InputTokens: valResult.Usage.InputTokens, OutputTokens: valResult.Usage.OutputTokens})
+				InputTokens: valResult.Usage.Input, OutputTokens: valResult.Usage.Output})
 		}
 	}
 

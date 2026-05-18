@@ -38,14 +38,14 @@ func TestFileHyperlink_RelativePath(t *testing.T) {
 func setupTestPipelineScreen() PipelineScreen {
 	s := NewPipelineScreen("test")
 	s.cwd = "/test/dir"
-	sb := orchestrator.NewStreamBuffer(50)
+	sb := orchestrator.NewStreamRing(50)
 	sb.SetAgent("researcher")
-	sb.Append("stream line 1\n")
-	sb.Append("stream line 2\n")
-	sb.Append("stream line 3\n")
-	sb.Append("stream line 4\n")
-	sb.Append("stream line 5\n")
-	sb.Append("stream line 6\n") // > 5 lines to test preview
+	sb.AppendText("stream line 1\n")
+	sb.AppendText("stream line 2\n")
+	sb.AppendText("stream line 3\n")
+	sb.AppendText("stream line 4\n")
+	sb.AppendText("stream line 5\n")
+	sb.AppendText("stream line 6\n") // > 5 lines to test preview
 
 	sb.AppendActivity("Read", "file1.txt")
 	sb.AppendActivity("Bash", "ls -l")

@@ -49,7 +49,7 @@ func hydratedModels(t *testing.T) map[string]Model {
 		}
 		m.pipelineScreen.focusedAgent = 1
 
-		sb := orchestrator.NewStreamBuffer(50)
+		sb := orchestrator.NewStreamRing(50)
 		sb.SetAgent("researcher")
 		sb.AppendActivity("Read", "file.go")
 		sb.SetAgent("architect") // snaps "researcher"
@@ -71,7 +71,7 @@ func hydratedModels(t *testing.T) map[string]Model {
 			{ID: "researcher", State: "done", Elapsed: 30 * time.Second, StartedAt: time.Now().Add(-30 * time.Second), InputTokens: 2000, OutputTokens: 1000},
 		}
 
-		sb := orchestrator.NewStreamBuffer(50)
+		sb := orchestrator.NewStreamRing(50)
 		sb.SetAgent("researcher")
 		sb.AppendActivity("Read", "file.go")
 		sb.SetAgent("architect") // snaps "researcher"

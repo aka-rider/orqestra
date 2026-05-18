@@ -240,9 +240,8 @@ func extractJSONUsage(raw string) TokenUsage {
 	}
 	if err := json.Unmarshal([]byte(raw), &envelope); err == nil && envelope.Usage != nil {
 		return TokenUsage{
-			InputTokens:  envelope.Usage.InputTokens,
-			OutputTokens: envelope.Usage.OutputTokens,
-			TotalTokens:  envelope.Usage.InputTokens + envelope.Usage.OutputTokens,
+			Input:  envelope.Usage.InputTokens,
+			Output: envelope.Usage.OutputTokens,
 		}
 	}
 	return TokenUsage{}
@@ -265,9 +264,8 @@ func extractStreamUsage(raw string) TokenUsage {
 		}
 		if event.Type == "result" && event.Usage != nil {
 			last = TokenUsage{
-				InputTokens:  event.Usage.InputTokens,
-				OutputTokens: event.Usage.OutputTokens,
-				TotalTokens:  event.Usage.InputTokens + event.Usage.OutputTokens,
+				Input:  event.Usage.InputTokens,
+				Output: event.Usage.OutputTokens,
 			}
 		}
 	}

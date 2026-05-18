@@ -17,10 +17,12 @@ import (
 
 // TokenUsage captures token consumption from an LLM call.
 type TokenUsage struct {
-	InputTokens  int64
-	OutputTokens int64
-	TotalTokens  int64
+	Input  int64
+	Output int64
 }
+
+// Total returns the sum of input and output tokens.
+func (u TokenUsage) Total() int64 { return u.Input + u.Output }
 
 // RunResult captures the output and token usage from a CLIRunner invocation.
 type RunResult struct {
@@ -238,9 +240,8 @@ func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (
 	var usage TokenUsage
 	if err := json.Unmarshal([]byte(raw), &envelope); err == nil && envelope.Usage != nil {
 		usage = TokenUsage{
-			InputTokens:  envelope.Usage.InputTokens,
-			OutputTokens: envelope.Usage.OutputTokens,
-			TotalTokens:  envelope.Usage.InputTokens + envelope.Usage.OutputTokens,
+			Input:  envelope.Usage.InputTokens,
+			Output: envelope.Usage.OutputTokens,
 		}
 	}
 
@@ -381,6 +382,14 @@ func parseStream(r io.Reader, display io.Writer) (result string, isError bool, u
 
 		dispatchStreamEvent(event, display)
 
+		// Dispatch usage to UsageSink on any event carrying token stats.
+		// This fires mid-call (not just on "result") if Claude CLI emits usage.
+		if event.Usage != nil {
+			if sink, ok := display.(UsageSink); ok {
+				sink.OnUsage(event.Usage.InputTokens, event.Usage.OutputTokens)
+			}
+		}
+
 		if event.Type == "result" {
 			result = event.Result
 			isError = event.IsError
@@ -392,9 +401,8 @@ func parseStream(r io.Reader, display io.Writer) (result string, isError bool, u
 			}
 			if event.Usage != nil {
 				usage = TokenUsage{
-					InputTokens:  event.Usage.InputTokens,
-					OutputTokens: event.Usage.OutputTokens,
-					TotalTokens:  event.Usage.InputTokens + event.Usage.OutputTokens,
+					Input:  event.Usage.InputTokens,
+					Output: event.Usage.OutputTokens,
 				}
 			}
 		}

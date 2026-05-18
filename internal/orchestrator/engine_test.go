@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,7 +13,6 @@ import (
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/testutil"
-	"github.com/xiii/orqestra/internal/tokenlimit"
 )
 
 func testEngineWithPlanFiles(t *testing.T, researcherOutput, architectOutput, workerOutput, validationOutput string) *Engine {
@@ -324,7 +324,7 @@ func TestEngine_BudgetExhausted(t *testing.T) {
 	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 	engine.Runners.Researcher = &testutil.FakeRunner{
 		Calls: []testutil.FakeCall{{
-			Err: &tokenlimit.ErrBudgetExhausted{Model: "test", Used: 100, Limit: 50},
+			Err: fmt.Errorf("%w: used 100 of 50", ErrBudgetExhausted),
 		}},
 	}
 

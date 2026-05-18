@@ -280,8 +280,8 @@ func runScenario(ctx context.Context, cfg *config.Config, selfBin string, s scen
 		judgePass:    pass,
 		judgeReason:  reason,
 		duration:     elapsed,
-		inputTokens:  result.Usage.InputTokens,
-		outputTokens: result.Usage.OutputTokens,
+		inputTokens:  result.Usage.Input,
+		outputTokens: result.Usage.Output,
 	}
 }
 

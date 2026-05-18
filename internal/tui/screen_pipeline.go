@@ -41,7 +41,7 @@ type PipelineScreen struct {
 	lastErr          error
 
 	// Streaming output — shared buffer polled on tick
-	streamBuf *orchestrator.StreamBuffer
+	streamBuf *orchestrator.StreamRing
 
 	// Plan review state
 	planComment    textarea.Model
@@ -167,7 +167,7 @@ func (s *PipelineScreen) Reset() {
 }
 
 // SetStreamBuf sets the shared stream buffer for live output.
-func (s *PipelineScreen) SetStreamBuf(buf *orchestrator.StreamBuffer) {
+func (s *PipelineScreen) SetStreamBuf(buf *orchestrator.StreamRing) {
 	s.streamBuf = buf
 }
 
@@ -744,7 +744,7 @@ func (s PipelineScreen) viewStreaming(width int) string {
 	var streamLines []string
 	var activities []orchestrator.Activity
 	if s.streamBuf != nil {
-		streamAgent, streamLines, activities = s.streamBuf.Snapshot()
+		streamAgent, streamLines, activities = s.streamBuf.SnapshotCompat()
 	}
 
 	b.WriteString(fmt.Sprintf(" Phase: %s", s.phase))

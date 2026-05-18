@@ -37,8 +37,8 @@ func (s *StatsTracker) Record(event StreamEvent) {
 	case ToolUse:
 		s.toolCalls = append(s.toolCalls, ToolCallSummary{Name: e.Name})
 	case Result:
-		s.inTokens += e.Usage.InputTokens
-		s.outTokens += e.Usage.OutputTokens
+		s.inTokens += e.Usage.Input
+		s.outTokens += e.Usage.Output
 	}
 }
 

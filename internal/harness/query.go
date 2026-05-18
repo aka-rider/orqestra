@@ -199,9 +199,8 @@ func (r *CLIQueryRunner) Query(ctx context.Context, cfg QueryConfig) (<-chan Str
 				var usage TokenUsage
 				if raw.Usage != nil {
 					usage = TokenUsage{
-						InputTokens:  raw.Usage.InputTokens,
-						OutputTokens: raw.Usage.OutputTokens,
-						TotalTokens:  raw.Usage.InputTokens + raw.Usage.OutputTokens,
+						Input:  raw.Usage.InputTokens,
+						Output: raw.Usage.OutputTokens,
 					}
 				}
 				ch <- Result{Output: raw.Result, Usage: usage}

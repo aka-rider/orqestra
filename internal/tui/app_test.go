@@ -622,12 +622,12 @@ func TestTUI_StreamingOutput(t *testing.T) {
 	m.events = make(chan orchestrator.Event, 5)
 
 	// Create a shared stream buffer (like the orchestrator would)
-	stream := orchestrator.NewStreamBuffer(200)
+	stream := orchestrator.NewStreamRing(200)
 	m.pipelineScreen.streamBuf = stream
 
 	// Simulate agent start + streaming output via the shared buffer
 	stream.SetAgent("researcher")
-	stream.Append("Analyzing prompt...\nProcessing request...")
+	stream.AppendText("Analyzing prompt...\nProcessing request...")
 
 	m.recalculateLayout()
 	m.pipelineScreen.SyncViewports()
@@ -646,13 +646,13 @@ func TestTUI_StreamingOutput(t *testing.T) {
 }
 
 func TestTUI_StreamingOutputReset(t *testing.T) {
-	stream := orchestrator.NewStreamBuffer(200)
+	stream := orchestrator.NewStreamRing(200)
 
 	// Simulate first agent
 	stream.SetAgent("researcher")
-	stream.Append("researcher output line")
+	stream.AppendText("researcher output line\n")
 
-	agentID, lines, _ := stream.Snapshot()
+	agentID, lines, _ := stream.SnapshotCompat()
 	if agentID != "researcher" {
 		t.Errorf("expected agent 'researcher', got %q", agentID)
 	}
@@ -663,7 +663,7 @@ func TestTUI_StreamingOutputReset(t *testing.T) {
 	// Simulate second agent — buffer should reset
 	stream.SetAgent("architect")
 
-	agentID2, lines2, _ := stream.Snapshot()
+	agentID2, lines2, _ := stream.SnapshotCompat()
 	if agentID2 != "architect" {
 		t.Errorf("expected agent 'architect', got %q", agentID2)
 	}
@@ -673,17 +673,17 @@ func TestTUI_StreamingOutputReset(t *testing.T) {
 }
 
 func TestStreamBuffer_TokenAccumulation(t *testing.T) {
-	stream := orchestrator.NewStreamBuffer(200)
+	stream := orchestrator.NewStreamRing(200)
 	stream.SetAgent("researcher")
 
 	// Simulate token-level writes (each content_block_delta is a few chars)
-	stream.Append("I")
-	stream.Append("'ll")
-	stream.Append(" analyze")
-	stream.Append(" the")
-	stream.Append(" request")
+	stream.AppendText("I")
+	stream.AppendText("'ll")
+	stream.AppendText(" analyze")
+	stream.AppendText(" the")
+	stream.AppendText(" request")
 
-	_, lines, _ := stream.Snapshot()
+	_, lines, _ := stream.SnapshotCompat()
 	if len(lines) != 1 {
 		t.Errorf("expected 1 line from token-level writes, got %d: %v", len(lines), lines)
 	}
@@ -692,9 +692,9 @@ func TestStreamBuffer_TokenAccumulation(t *testing.T) {
 	}
 
 	// Now write a newline to start a new line
-	stream.Append(".\nNext line here")
+	stream.AppendText(".\nNext line here")
 
-	_, lines, _ = stream.Snapshot()
+	_, lines, _ = stream.SnapshotCompat()
 	if len(lines) != 2 {
 		t.Errorf("expected 2 lines after newline, got %d: %v", len(lines), lines)
 	}

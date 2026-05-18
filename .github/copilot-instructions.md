@@ -81,7 +81,7 @@ Before planning or editing code, decide whether the task touches one of these do
 4. Best-effort work must be named as best effort: if failure does not change correctness, log or surface the operation, resource, and error, then keep user-visible state truthful.
 5. LLM output is hostile input: parse typed formats with typed parsers, validate paths under allowed roots, gate commands through known execution boundaries, and preserve raw text when parsing is advisory.
 6. Domain state and execution metadata stay separate: domain types describe Orqestra concepts; token usage, timing, session IDs, plan-file paths, and logs are returned or persisted at orchestration boundaries.
-7. Value semantics by default: use values unless nil has a distinct meaning, the type owns a process/resource/sync primitive, or mutation sharing is deliberate and documented by the API shape.
+7. Value semantics by default: use values unless nil has a distinct meaning, the type owns a process/resource/sync primitive, or mutation sharing is deliberate and documented by the API shape. For absence/optionality in data crossing goroutine boundaries, prefer `struct { ...; Valid bool }` over `*struct`. The zero value must be meaningful; the `Valid` flag carries the same semantics without aliasing or nil-check overhead.
 8. User-visible truth: the TUI and artifacts must never imply an agent, validation, merge, or sandbox step succeeded when it was skipped, degraded, or failed.
 9. Small, idiomatic Go: prefer concrete structs and narrow consumer-owned interfaces; add abstraction only after two real call sites need it.
 
