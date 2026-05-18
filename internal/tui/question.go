@@ -221,7 +221,7 @@ func (m userQuestionModel) updateOptions(key tea.KeyPressMsg) (userQuestionModel
 		m.answer = m.buildAnswer()
 		return m, nil
 	}
-	if key.String() == " " && m.mode == questionMulti {
+	if key.Text == " " && m.mode == questionMulti {
 		m.selected[m.cursor] = !m.selected[m.cursor]
 	}
 	return m, nil
