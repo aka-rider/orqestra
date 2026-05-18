@@ -76,7 +76,7 @@ func NewClaudeCLI(resolved config.ResolvedModel, opts ...ClaudeCLIOption) *Claud
 // NewClaudeCLIFromConfig creates a Claude CLI runner from a model_ref.
 // Returns an error if modelRef is empty or cannot be resolved.
 // Model-level runtime options are applied before caller-supplied options.
-func NewClaudeCLIFromConfig(cfg *config.Config, modelRef string, opts ...ClaudeCLIOption) (CLIRunner, error) {
+func NewClaudeCLIFromConfig(cfg *config.Config, modelRef string, opts ...ClaudeCLIOption) (ContinuableRunner, error) {
 	if modelRef == "" {
 		return nil, fmt.Errorf("missing model_ref")
 	}

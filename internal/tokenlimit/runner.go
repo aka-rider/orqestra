@@ -2,23 +2,22 @@ package tokenlimit
 
 import (
 	"context"
-	"fmt"
 	"io"
 
 	"github.com/xiii/orqestra/internal/harness"
 )
 
-// LimitedRunner wraps a CLIRunner with token budget enforcement.
+// LimitedRunner wraps a ContinuableRunner with token budget enforcement.
 // It checks the budget before each call and records usage after.
 type LimitedRunner struct {
-	inner   harness.CLIRunner
+	inner   harness.ContinuableRunner
 	limiter *Limiter
 	model   string // underlying model string for budget tracking
 	agentID string // identifies which agent/stage is consuming tokens
 }
 
-// NewLimitedRunner wraps a CLIRunner with token budget enforcement.
-func NewLimitedRunner(inner harness.CLIRunner, limiter *Limiter, model, agentID string) *LimitedRunner {
+// NewLimitedRunner wraps a ContinuableRunner with token budget enforcement.
+func NewLimitedRunner(inner harness.ContinuableRunner, limiter *Limiter, model, agentID string) *LimitedRunner {
 	return &LimitedRunner{
 		inner:   inner,
 		limiter: limiter,
@@ -67,19 +66,13 @@ func (r *LimitedRunner) RunStreaming(ctx context.Context, prompt, systemPrompt s
 	return result, innerErr
 }
 
-// RunContinue delegates to the inner runner's ContinuableRunner.RunContinue
-// if it supports continuation, enforcing token budget.
+// RunContinue resumes a previous session, enforcing the token budget.
 func (r *LimitedRunner) RunContinue(ctx context.Context, sessionID, prompt string, stdout io.Writer) (harness.RunResult, error) {
-	cr, ok := r.inner.(harness.ContinuableRunner)
-	if !ok {
-		return harness.RunResult{}, fmt.Errorf("inner runner does not support session continuation")
-	}
-
 	if err := r.limiter.Check(ctx, r.model, r.agentID); err != nil {
 		return harness.RunResult{}, err
 	}
 
-	result, innerErr := cr.RunContinue(ctx, sessionID, prompt, stdout)
+	result, innerErr := r.inner.RunContinue(ctx, sessionID, prompt, stdout)
 
 	if result.Usage.TotalTokens > 0 {
 		if budgetErr := r.limiter.Record(ctx, r.model, r.agentID, result.Usage.TotalTokens); budgetErr != nil {

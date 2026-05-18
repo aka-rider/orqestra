@@ -256,9 +256,11 @@ func TestEngine_PlanFileBeforeGate(t *testing.T) {
 func TestEngine_PhaseOrder_WithCritic(t *testing.T) {
 	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 
+	criticSID := "critic-phase-sid"
 	criticReport := "## Critic Report\n\n### Blockers Found\n\nNone found.\n\n### Summary\n- Total blockers: 0 (0 high, 0 medium, 0 low)\n- Overall assessment: Plan is ready for execution."
+	testutil.SetupPlanFile(t, criticSID, criticReport)
 	engine.Runners.Critic = &testutil.FakeRunner{
-		Calls: []testutil.FakeCall{{Output: criticReport}},
+		Calls: []testutil.FakeCall{{Output: criticReport, SessionID: criticSID}},
 	}
 
 	ctx := context.Background()
@@ -547,6 +549,7 @@ func TestEngine_CriticRevision_AlwaysCommitted(t *testing.T) {
 	testutil.SetupPlanFile(t, architectSID, testutil.ValidPlanMarkdown())
 
 	criticReport := "## Critic Report\n\n### Blockers Found\n\nNone found.\n\n### Summary\n- Total blockers: 0\n- Overall assessment: Plan is ready."
+	testutil.SetupPlanFile(t, "critic-sid", criticReport)
 
 	architectRunner := &testutil.FakeRunner{
 		Calls: []testutil.FakeCall{
@@ -666,6 +669,7 @@ func TestEngine_FullConversation_Integrity(t *testing.T) {
 	testutil.SetupPlanFile(t, architectSID, testutil.ValidPlanMarkdown())
 
 	criticReport := "## Critic Report\n\n### Blockers Found\n\nNone.\n\n### Summary\n- Total blockers: 0"
+	testutil.SetupPlanFile(t, "critic-sid", criticReport)
 	revisedPlan := "# Plan\n\n## Goal\nRevised after comment 1.\n\n## Work Packages\n\n### 1. Updated\n\n**Steps:**\n1. Edit\n\n**Done when:**\n- Tests pass"
 
 	architectRunner := &testutil.FakeRunner{
@@ -1017,4 +1021,3 @@ assertEnd:
 		t.Error("worker did not start after AutoApprove edit")
 	}
 }
-

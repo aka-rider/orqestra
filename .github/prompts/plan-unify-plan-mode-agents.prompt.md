@@ -58,16 +58,24 @@ reads stdout — data flow bug). Worker stays separate, uses runner directly.
    Run(ctx, prompt, stdout) → (PlanResult, error)
      - calls runner.RunStreaming(ctx, prompt, system, stdout)
      - calls ReadPlanFromRun(result) for authoritative output
+     - HARD FAIL on plan-file read error (initial runs must produce a plan)
      - returns PlanResult{Plan, Chat, Usage, SessionID}
    Continue(ctx, sessionID, prompt, stdout) → (PlanResult, error)
      - calls runner.RunContinue(ctx, sessionID, prompt, stdout)
-     - calls ReadPlanFromRun(result) for authoritative output
-     - returns PlanResult with Chat = result.Output (for gate responses)
+     - calls ReadPlanFromRun(result) — but TOLERATES failure
+     - if plan file unreadable: PlanResult.Plan = "" (no plan output this turn)
+     - PlanResult.Chat = result.Output (always populated)
+     - error returned ONLY for runner failures, never for plan-file-missing
+     - rationale: conversational continuations (gate Q&A) don't edit the plan;
+       the continuation's RunResult may lack PlanFilePath; ReadPlanFromRun
+       would fail. Current detectPlanRevision swallows this as nil revision.
+       Planner.Continue must preserve that grace.
    ```
 
    `PlanResult` type: `{ Plan string, Chat string, Usage TokenUsage, SessionID string }`
-   - `Plan`: plan file content (authoritative output, always populated)
-   - `Chat`: stream result text (for continuation chat/Q&A responses)
+   - `Plan`: plan file content (always populated on Run; may be empty on Continue
+     when the model chatted without editing the plan)
+   - `Chat`: stream result text (always populated; used for gate Q&A responses)
 
 6. **Create `internal/agent/prompts.go`** — extract all prompt templates:
    - `ArchitectPrompt(userPrompt, researchFacts string) string`
@@ -90,8 +98,10 @@ reads stdout — data flow bug). Worker stays separate, uses runner directly.
 
 8. **Write tests** in `internal/agent/planner_test.go`:
    - Verify `Run` reads plan file from `ReadPlanFromRun`
+   - Verify `Run` HARD FAILS when plan file missing on initial call
    - Verify `Continue` reads plan file + populates Chat from stream
-   - Error propagation (runner error, plan-file read error)
+   - Verify `Continue` TOLERATES plan file read failure (Plan="" on chat-only)
+   - Error propagation (runner error vs plan-file-missing distinction)
    - Canary check: prompt present → no-op; prompt missing → prepend + flag
    - Use `testutil.FakeRunner` + `testutil.SetupPlanFile`
 
@@ -139,7 +149,9 @@ orchestrator -- data preserved, just relocated).
 ## Phase 5: Cleanup (optional, separate PR)
 
 22. Delete `Specification`, `PlanOutput`, `ProjectPlan`, `WorkPackage` if no live
-    code path uses them.
+    code path uses them. MUST also delete `plan.FromPlanOutput` and
+    `plan.ToPlanOutput` in `internal/plan/spec.go` — they reference these types
+    but have zero callers (verified: dead code). Compilation breaks without this.
 
 23. Update CLAUDE.md / copilot-instructions.md references to `RawPlan`, agent
     structs, `ReadPlanFromRun` callers.
@@ -168,8 +180,7 @@ orchestrator -- data preserved, just relocated).
 
 **Modified (orchestrator):**
 
-- `internal/orchestrator/orchestrator.go` — Runners struct, all agent call sites
-- `internal/orchestrator/orchestrator_test.go` — test helpers
+<has been refactored since the plan was made, proceed with caution>
 
 **Modified (tests):**
 
@@ -186,6 +197,17 @@ orchestrator -- data preserved, just relocated).
 6. `go test -race ./... -v`
 7. `make test`
 8. Smoke: `./bin/orqestra --prompt "test" --auto-approve --config orqestra.yaml`
+
+## Testing risk: Critic plan-file output
+
+The critic currently reads from `result.Output` (stream text). Switching to plan
+file content via `ReadPlanFromRun` is theoretically sound — Claude CLI plan mode
+automatically routes model output to the plan file (same mechanism the researcher
+uses; the model doesn't need to explicitly call a tool). BUT we have never read
+the critic's output from the plan file before. Integration test must verify: run
+critic in plan mode and confirm `ReadPlanFromRun` returns the same substantive
+content as `result.Output`. Formatting differences are acceptable if content is
+equivalent.
 
 ## Open question: Naming
 

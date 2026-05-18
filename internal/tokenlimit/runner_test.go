@@ -12,10 +12,11 @@ import (
 	"github.com/xiii/orqestra/internal/harness"
 )
 
-// mockCLIRunner implements harness.CLIRunner for testing.
+// mockCLIRunner implements harness.ContinuableRunner for testing.
 type mockCLIRunner struct {
 	runPrintFn     func(ctx context.Context, prompt, systemPrompt string) (harness.RunResult, error)
 	runStreamingFn func(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (harness.RunResult, error)
+	runContinueFn  func(ctx context.Context, sessionID, prompt string, stdout io.Writer) (harness.RunResult, error)
 }
 
 func (m *mockCLIRunner) RunPrint(ctx context.Context, prompt, systemPrompt string) (harness.RunResult, error) {
@@ -28,6 +29,13 @@ func (m *mockCLIRunner) RunPrint(ctx context.Context, prompt, systemPrompt strin
 func (m *mockCLIRunner) RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (harness.RunResult, error) {
 	if m.runStreamingFn != nil {
 		return m.runStreamingFn(ctx, prompt, systemPrompt, stdout)
+	}
+	return harness.RunResult{}, nil
+}
+
+func (m *mockCLIRunner) RunContinue(ctx context.Context, sessionID, prompt string, stdout io.Writer) (harness.RunResult, error) {
+	if m.runContinueFn != nil {
+		return m.runContinueFn(ctx, sessionID, prompt, stdout)
 	}
 	return harness.RunResult{}, nil
 }

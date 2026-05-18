@@ -27,6 +27,14 @@ type Input struct {
 	NoExecute   bool   // stop after plan gate
 }
 
+func guardPrompt(assembled, original, agentID string) string {
+	out, tripped := agent.CheckPromptIntegrity(assembled, original)
+	if tripped {
+		slog.Warn("prompt integrity canary tripped", "agent", agentID)
+	}
+	return out
+}
+
 // RunStatus classifies the final outcome.
 type RunStatus string
 
@@ -46,11 +54,11 @@ type Result struct {
 // RunDirFactory creates a session directory for artifact persistence.
 type RunDirFactory func(slug string) (agent.SessionDir, error)
 
-// Runners holds all CLIRunners for each agent role.
+// Runners holds all runners for each agent role.
 type Runners struct {
-	Researcher harness.CLIRunner
-	Architect  harness.CLIRunner
-	Critic     harness.CLIRunner
+	Researcher harness.ContinuableRunner
+	Architect  harness.ContinuableRunner
+	Critic     harness.ContinuableRunner
 	Worker     harness.ContinuableRunner
 }
 
@@ -250,7 +258,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 	var finalPlanWarnings []string
 	var criticReportMarkdown string
 	var planSessionID string // function scope — survives across gate loop iterations
-	architect := agent.NewArchitect(e.Runners.Architect, e.Config.Architect)
+	architectPlanner := agent.NewPlanner(e.Runners.Architect, e.Config.Architect.SystemPrompt)
 
 	// Initialize plan version history (git micro-repo)
 	var planRepo *plan.GitRepo
@@ -285,7 +293,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		emit(Event{Type: EventAgentStarted, AgentID: "researcher"})
 		stream.SetAgent("researcher")
 
-		researcher := agent.NewResearcher(e.Runners.Researcher, e.Config.Researcher)
+		researcherPlanner := agent.NewPlanner(e.Runners.Researcher, e.Config.Researcher.SystemPrompt)
 		researchStart := time.Now()
 
 		researchAttempts := e.Config.Retry.ResearcherAttempts
@@ -293,13 +301,19 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			researchAttempts = 1
 		}
 
+		researchPrompt := guardPrompt(researcherInput, input.Prompt, "researcher")
+
 		var draft agent.RawPlan
 		var draftUsage harness.TokenUsage
 		var researchSessionID string
 		var err error
 		for attempt := 1; attempt <= researchAttempts; attempt++ {
-			draft, draftUsage, researchSessionID, err = researcher.ResearchStreaming(ctx, researcherInput, &streamWriter{buf: stream})
+			var rResult agent.PlanResult
+			rResult, err = researcherPlanner.Run(ctx, researchPrompt, &streamWriter{buf: stream})
 			if err == nil {
+				draft.Markdown = rResult.Plan
+				draftUsage = rResult.Usage
+				researchSessionID = rResult.SessionID
 				break
 			}
 			if attempt < researchAttempts {
@@ -358,14 +372,18 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			architectAttempts = 1
 		}
 
+		architectPrompt := guardPrompt(agent.ArchitectPrompt(input.Prompt, draft.Markdown), input.Prompt, "architect")
+
 		var planResult agent.RawPlan
 		var planUsage harness.TokenUsage
 		var planErr error
 		for attempt := 1; attempt <= architectAttempts; attempt++ {
-			var sid string
-			planResult, planUsage, sid, planErr = architect.RefineStreaming(ctx, input.Prompt, draft.Markdown, &streamWriter{buf: stream})
+			var aResult agent.PlanResult
+			aResult, planErr = architectPlanner.Run(ctx, architectPrompt, &streamWriter{buf: stream})
 			if planErr == nil {
-				planSessionID = sid
+				planSessionID = aResult.SessionID
+				planUsage = aResult.Usage
+				planResult = agent.RawPlan{Markdown: aResult.Plan, Warnings: agent.CheckPlanHealth(aResult.Plan)}
 				break
 			}
 			if attempt < architectAttempts {
@@ -440,7 +458,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		emit(Event{Type: EventAgentStarted, AgentID: "critic"})
 		stream.SetAgent("critic")
 
-		critic := agent.NewCritic(e.Runners.Critic, e.Config.Critic)
+		criticPlanner := agent.NewPlanner(e.Runners.Critic, e.Config.Critic.SystemPrompt)
 		criticStart := time.Now()
 
 		criticAttempts := e.Config.Retry.CriticAttempts
@@ -448,13 +466,19 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			criticAttempts = 1
 		}
 
-		var criticResult agent.CriticReport
+		criticPrompt := guardPrompt(agent.CriticReviewPrompt(input.Prompt, finalPlanMarkdown), input.Prompt, "critic")
+
+		var criticMarkdown string
 		var criticUsage harness.TokenUsage
 		var criticSessionID string
 		var criticErr error
 		for attempt := 1; attempt <= criticAttempts; attempt++ {
-			criticResult, criticUsage, criticSessionID, criticErr = critic.ReviewStreaming(ctx, input.Prompt, finalPlanMarkdown, &streamWriter{buf: stream})
+			var cResult agent.PlanResult
+			cResult, criticErr = criticPlanner.Run(ctx, criticPrompt, &streamWriter{buf: stream})
 			if criticErr == nil {
+				criticMarkdown = cResult.Plan
+				criticUsage = cResult.Usage
+				criticSessionID = cResult.SessionID
 				break
 			}
 			if attempt < criticAttempts {
@@ -484,7 +508,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		if cpErr != nil {
 			logger.Warn("copy session log", "agent", "critic", "err", cpErr)
 		}
-		writeArtifact(session, "critic_report.md", criticResult.Markdown)
+		writeArtifact(session, "critic_report.md", criticMarkdown)
 		writeArtifactJSON(session, "critic_meta.json", agent.StepMeta{
 			AgentID: "critic", ModelRef: e.Config.Critic.Model, StartTime: criticStart, EndTime: time.Now(),
 			ClaudeSessionID: criticSessionID, Status: "done",
@@ -497,11 +521,11 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		emit(Event{Type: EventAgentDone, AgentID: "critic",
 			InputTokens: criticUsage.InputTokens, OutputTokens: criticUsage.OutputTokens})
 
-		criticReportMarkdown = criticResult.Markdown
+		criticReportMarkdown = criticMarkdown
 
 		// Persist critic report in dialog
 		if planRepo != nil {
-			firstLine := criticResult.Markdown
+			firstLine := criticMarkdown
 			if idx := strings.IndexByte(firstLine, '\n'); idx > 0 {
 				firstLine = firstLine[:idx]
 			}
@@ -523,8 +547,14 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		stream.SetAgent("architect")
 		revStart := time.Now()
 
-		chatResponse, revisedPlan, revisedUsage, revErr := architect.ContinueWithCriticReport(
-			ctx, planSessionID, finalPlanMarkdown, criticResult.Markdown, &streamWriter{buf: stream})
+		critBaseline, critBaselineErr := agent.ReadPlanFromRun(harness.RunResult{SessionID: planSessionID})
+		if critBaselineErr != nil {
+			slog.Debug("could not snapshot plan file baseline before critic revision", "err", critBaselineErr)
+		}
+		critRevResult, revErr := architectPlanner.Continue(ctx, planSessionID, agent.CriticContinuePrompt(finalPlanMarkdown, criticMarkdown), &streamWriter{buf: stream})
+		chatResponse := critRevResult.Chat
+		revisedPlan := agent.DetectPlanRevision(critRevResult.Plan, critBaseline, critBaselineErr, finalPlanMarkdown)
+		revisedUsage := critRevResult.Usage
 		_ = chatResponse // architect may include reasoning alongside plan revision
 
 		if revErr != nil {
@@ -683,8 +713,20 @@ planGate:
 						stream.SetAgent("architect")
 						revStart := time.Now()
 
-						chatResponse, revisedPlan, revisedUsage, err := architect.ContinueSessionWithDiff(
-							ctx, planSessionID, finalPlanMarkdown, diff, decision.Comment, &streamWriter{buf: stream})
+						editBaseline, editBaselineErr := agent.ReadPlanFromRun(harness.RunResult{SessionID: planSessionID})
+						if editBaselineErr != nil {
+							slog.Debug("could not snapshot plan file baseline before edit revision", "err", editBaselineErr)
+						}
+						var editContinuePrompt string
+						if diff != "" {
+							editContinuePrompt = agent.ContinueWithDiffPrompt(finalPlanMarkdown, diff, decision.Comment)
+						} else {
+							editContinuePrompt = agent.ContinuePrompt(finalPlanMarkdown, decision.Comment)
+						}
+						editResult, err := architectPlanner.Continue(ctx, planSessionID, editContinuePrompt, &streamWriter{buf: stream})
+						chatResponse := editResult.Chat
+						revisedPlan := agent.DetectPlanRevision(editResult.Plan, editBaseline, editBaselineErr, finalPlanMarkdown)
+						revisedUsage := editResult.Usage
 
 						if err != nil {
 							archRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_revision_session.jsonl")
@@ -794,18 +836,27 @@ planGate:
 					var err error
 
 					if planSessionID != "" {
-						chatResponse, revisedPlan, revisedUsage, err = architect.ContinueSession(
-							ctx, planSessionID, finalPlanMarkdown, decision.Comment, &streamWriter{buf: stream})
+						commentBaseline, commentBaselineErr := agent.ReadPlanFromRun(harness.RunResult{SessionID: planSessionID})
+						if commentBaselineErr != nil {
+							slog.Debug("could not snapshot plan file baseline before comment revision", "err", commentBaselineErr)
+						}
+						var commentResult agent.PlanResult
+						commentResult, err = architectPlanner.Continue(ctx, planSessionID, agent.ContinuePrompt(finalPlanMarkdown, decision.Comment), &streamWriter{buf: stream})
+						if err == nil {
+							chatResponse = commentResult.Chat
+							revisedPlan = agent.DetectPlanRevision(commentResult.Plan, commentBaseline, commentBaselineErr, finalPlanMarkdown)
+							revisedUsage = commentResult.Usage
+						}
 					} else {
 						// Fallback for cold start (--plan flag) — no session to resume
-						revised, revUsage, revSID, refineErr := architect.RefineWithCommentsStreaming(
-							ctx, finalPlanMarkdown, decision.Comment, &streamWriter{buf: stream})
-						if refineErr == nil {
-							planSessionID = revSID
-							revisedPlan = &revised
+						coldPrompt := guardPrompt(agent.ArchitectRevisionPrompt(finalPlanMarkdown, decision.Comment), input.Prompt, "architect (cold-start)")
+						var coldResult agent.PlanResult
+						coldResult, err = architectPlanner.Run(ctx, coldPrompt, &streamWriter{buf: stream})
+						revisedUsage = coldResult.Usage // populated even on error if partial
+						if err == nil {
+							planSessionID = coldResult.SessionID
+							revisedPlan = &agent.RawPlan{Markdown: coldResult.Plan, Warnings: agent.CheckPlanHealth(coldResult.Plan)}
 						}
-						revisedUsage = revUsage
-						err = refineErr
 						chatResponse = ""
 					}
 
@@ -1174,17 +1225,6 @@ planGate:
 		RunDir:           session.Path,
 	})
 	logger.Info("run_complete", "status", string(status))
-}
-
-// commitMsg builds a git commit message from a prefix and a comment.
-func commitMsg(prefix, comment string) string {
-	if comment == "" {
-		return prefix
-	}
-	if len(comment) > 50 {
-		return prefix + ": " + comment[:50]
-	}
-	return prefix + ": " + comment
 }
 
 // truncateMsg truncates s to maxLen characters, collapsing newlines to spaces.
