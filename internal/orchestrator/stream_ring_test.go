@@ -183,3 +183,101 @@ func TestStreamRing_ConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestStreamRing_RecordUsage_Accumulates(t *testing.T) {
+	r := NewStreamRing(100)
+	r.SetAgent("worker")
+
+	r.RecordUsage(100, 50)
+	r.RecordUsage(200, 75)
+
+	in, out, start := r.SnapshotUsage()
+	if in != 300 {
+		t.Errorf("input = %d, want 300", in)
+	}
+	if out != 125 {
+		t.Errorf("output = %d, want 125", out)
+	}
+	if start.IsZero() {
+		t.Error("start should not be zero")
+	}
+}
+
+func TestStreamRing_SetAgent_CapturesUsage(t *testing.T) {
+	r := NewStreamRing(100)
+	r.SetAgent("researcher")
+
+	r.RecordUsage(500, 200)
+
+	r.SetAgent("architect")
+
+	// Researcher usage should be captured
+	snap := r.AgentUsage("researcher")
+	if snap.Input != 500 || snap.Output != 200 {
+		t.Errorf("researcher usage = {%d, %d}, want {500, 200}", snap.Input, snap.Output)
+	}
+	if snap.Start.IsZero() || snap.End.IsZero() {
+		t.Error("researcher usage times should not be zero")
+	}
+
+	// Architect should start fresh
+	in, out, _ := r.SnapshotUsage()
+	if in != 0 || out != 0 {
+		t.Errorf("architect live usage = {%d, %d}, want {0, 0}", in, out)
+	}
+
+	// Unknown agent returns zero
+	unknown := r.AgentUsage("unknown")
+	if unknown.Input != 0 || unknown.Output != 0 {
+		t.Errorf("unknown usage = {%d, %d}, want {0, 0}", unknown.Input, unknown.Output)
+	}
+}
+
+func TestStreamRing_RecordUsageAndAppendStats(t *testing.T) {
+	r := NewStreamRing(100)
+	r.SetAgent("test")
+
+	r.RecordUsage(1000, 500)
+	r.AppendStats(1000, 500)
+
+	// Should accumulate
+	in, out, _ := r.SnapshotUsage()
+	if in != 1000 || out != 500 {
+		t.Errorf("live usage = {%d, %d}, want {1000, 500}", in, out)
+	}
+
+	// Should also append stats entry
+	_, entries := r.Snapshot()
+	if len(entries) != 1 || entries[0].Kind != EntryStats {
+		t.Errorf("entries = %+v, want 1 EntryStats", entries)
+	}
+}
+
+func TestStreamRing_RecordUsage_ConcurrentSafe(t *testing.T) {
+	r := NewStreamRing(100)
+	r.SetAgent("test")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			r.RecordUsage(10, 5)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			r.SnapshotUsage()
+		}
+	}()
+
+	wg.Wait()
+
+	in, out, _ := r.SnapshotUsage()
+	if in != 1000 || out != 500 {
+		t.Errorf("final usage = {%d, %d}, want {1000, 500}", in, out)
+	}
+}

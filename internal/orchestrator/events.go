@@ -114,6 +114,9 @@ type Event struct {
 	InputTokens  int64
 	OutputTokens int64
 
+	// Meta carries model metadata for the agent. Set on EventAgentStarted.
+	Meta AgentMeta
+
 	// ChatText is set on EventChatResponse — architect answered without revising the plan.
 	ChatText string
 

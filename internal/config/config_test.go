@@ -315,9 +315,9 @@ func TestModelNotFoundError_Is(t *testing.T) {
 
 func TestModelNotFoundError_Error_Fields(t *testing.T) {
 	tests := []struct {
-		name    string
-		err     *ModelNotFoundError
-		want    []string
+		name string
+		err  *ModelNotFoundError
+		want []string
 	}{
 		{
 			name: "basic",
@@ -330,14 +330,14 @@ func TestModelNotFoundError_Error_Fields(t *testing.T) {
 			want: []string{`model "foo" not found: researcher.model`},
 		},
 		{
-			name:    "with available",
-			err:     &ModelNotFoundError{Name: "foo", Available: []string{"a", "b"}},
-			want:    []string{`(available: a, b)`},
+			name: "with available",
+			err:  &ModelNotFoundError{Name: "foo", Available: []string{"a", "b"}},
+			want: []string{`(available: a, b)`},
 		},
 		{
-			name:    "all fields",
-			err:     &ModelNotFoundError{Name: "foo", Context: "researcher.model", Available: []string{"m", "s"}},
-			want:    []string{`model "foo" not found: researcher.model (available: m, s)`},
+			name: "all fields",
+			err:  &ModelNotFoundError{Name: "foo", Context: "researcher.model", Available: []string{"m", "s"}},
+			want: []string{`model "foo" not found: researcher.model (available: m, s)`},
 		},
 	}
 	for _, tt := range tests {
@@ -869,5 +869,50 @@ execution_graph:
 	}
 	if len(agent.Sandbox.AllowWrite) != 1 || agent.Sandbox.AllowWrite[0] != "/tmp/worker-cache" {
 		t.Errorf("agent allow_write = %v, want [/tmp/worker-cache]", agent.Sandbox.AllowWrite)
+	}
+}
+
+func TestModelMeta_Found(t *testing.T) {
+	cfg := &Config{
+		Models: map[string]ModelConfig{
+			"large": {Provider: "anthropic", Model: "claude-opus-4", ContextWindow: 200000},
+		},
+	}
+	mc, ok := cfg.ModelMeta("large")
+	if !ok {
+		t.Fatal("ModelMeta(large) returned ok=false")
+	}
+	if mc.Model != "claude-opus-4" {
+		t.Errorf("Model = %q, want claude-opus-4", mc.Model)
+	}
+	if mc.ContextWindow != 200000 {
+		t.Errorf("ContextWindow = %d, want 200000", mc.ContextWindow)
+	}
+}
+
+func TestModelMeta_CaseInsensitive(t *testing.T) {
+	cfg := &Config{
+		Models: map[string]ModelConfig{
+			"Large": {Provider: "anthropic", Model: "claude-opus-4", ContextWindow: 200000},
+		},
+	}
+	mc, ok := cfg.ModelMeta("large")
+	if !ok {
+		t.Fatal("ModelMeta(large) should find 'Large' case-insensitively")
+	}
+	if mc.Model != "claude-opus-4" {
+		t.Errorf("Model = %q, want claude-opus-4", mc.Model)
+	}
+}
+
+func TestModelMeta_NotFound(t *testing.T) {
+	cfg := &Config{
+		Models: map[string]ModelConfig{
+			"large": {Provider: "anthropic", Model: "claude-opus-4"},
+		},
+	}
+	_, ok := cfg.ModelMeta("nonexistent")
+	if ok {
+		t.Error("ModelMeta(nonexistent) should return ok=false")
 	}
 }

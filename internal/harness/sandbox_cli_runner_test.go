@@ -62,46 +62,32 @@ func TestExtractStreamResult(t *testing.T) {
 	}
 }
 
-// recordingDisplay is a test double implementing io.Writer and ActivitySink.
-// It records every byte slice written and every OnToolUse call so tests can
-// verify exactly what bytes reach the user-facing presentation surface and
-// that tool activity routing through dispatchStreamEvent still fires.
-type recordingDisplay struct {
-	writes   [][]byte
-	toolUses []toolUseCall
-}
-
-type toolUseCall struct {
-	name   string
-	detail string
-}
-
-func (r *recordingDisplay) Write(p []byte) (int, error) {
-	buf := make([]byte, len(p))
-	copy(buf, p)
-	r.writes = append(r.writes, buf)
-	return len(p), nil
-}
-
-func (r *recordingDisplay) OnToolUse(name, detail string) {
-	r.toolUses = append(r.toolUses, toolUseCall{name: name, detail: detail})
-}
-
 func TestRunParsed_ExtractsTextAndRoutesActivities(t *testing.T) {
 	raw, err := os.ReadFile("testdata/worker_stream_sample.jsonl")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
 
-	display := &recordingDisplay{}
-	gotRaw, err := parseStreamLines(bytes.NewReader(raw), display)
+	events := make(chan StreamUpdate, 128)
+	var updates []StreamUpdate
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ev := range events {
+			updates = append(updates, ev)
+		}
+	}()
+
+	gotRaw, err := parseStreamLines(bytes.NewReader(raw), events)
+	close(events)
+	<-done
 	if err != nil {
 		t.Fatalf("parseStreamLines: %v", err)
 	}
 
-	// (a) No raw stream-event frame leaks into display.
-	for i, w := range display.writes {
-		trimmed := strings.TrimSpace(string(w))
+	// (a) No raw stream-event frame leaks into text updates.
+	for i, ev := range updates {
+		trimmed := strings.TrimSpace(ev.Text)
 		if trimmed == "" || trimmed[0] != '{' {
 			continue
 		}
@@ -109,28 +95,28 @@ func TestRunParsed_ExtractsTextAndRoutesActivities(t *testing.T) {
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal([]byte(trimmed), &probe); err == nil && probe.Type != "" {
-			t.Errorf("display write %d leaked stream-event frame: type=%q content=%q", i, probe.Type, trimmed)
+			t.Errorf("text update %d leaked stream-event frame: type=%q content=%q", i, probe.Type, trimmed)
 		}
 	}
 
-	// (b) Assistant text "OK" reached the display.
+	// (b) Assistant text "OK" reached updates.
 	var combined bytes.Buffer
-	for _, w := range display.writes {
-		combined.Write(w)
+	for _, ev := range updates {
+		combined.WriteString(ev.Text)
 	}
 	if !strings.Contains(combined.String(), "OK") {
-		t.Errorf("display did not receive assistant text %q; got %q", "OK", combined.String())
+		t.Errorf("updates did not receive assistant text %q; got %q", "OK", combined.String())
 	}
 
-	// (c) Read tool-use recorded exactly once on the activity sink.
+	// (c) Read tool-use recorded exactly once.
 	readCount := 0
-	for _, tu := range display.toolUses {
-		if tu.name == "Read" {
+	for _, ev := range updates {
+		if ev.Tool == "Read" {
 			readCount++
 		}
 	}
 	if readCount != 1 {
-		t.Errorf("expected 1 Read tool-use, got %d (all=%+v)", readCount, display.toolUses)
+		t.Errorf("expected 1 Read tool-use, got %d", readCount)
 	}
 
 	// (d) extractStreamResult on the round-tripped raw returns the result text.

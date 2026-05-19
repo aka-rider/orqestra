@@ -27,14 +27,20 @@ const (
 	// Run detail lower pane height (raw agent JSONL log)
 	constRunLogHeight = 8
 
+	// Run detail chrome: header(2) + upper/lower divider(1) + footer(2)
+	constRunDetailChromeHeight = 5
+
+	// Run detail left pane (agent menu) as percentage of terminal width.
+	constRunDetailMenuPct = 30
+
+	// Run detail minimum width for agent card pane (ensures card borders fit).
+	constRunDetailMinMenuW = 30
+
 	// Content pane inset — 1-char left padding on each side.
 	constContentInset = 2
 
-	// Default context window size for the dashboard progress bar.
-	constDefaultContextWindow = 200_000
-
 	// Bottom sidebar height (agent list strip below the input zone).
-	constSidebarHeight = 6
+	constSidebarHeight = 1
 
 	// Number of raw stream lines to preview below activities
 	streamPreviewLines = 5

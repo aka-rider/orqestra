@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"context"
 	"errors"
-	"io"
 	"testing"
 
 	"github.com/xiii/orqestra/internal/harness"
@@ -18,11 +17,11 @@ func (s *stubRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult
 	return s.result, s.err
 }
 
-func (s *stubRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
+func (s *stubRunner) RunStreaming(_ context.Context, _, _ string, _ chan<- harness.StreamUpdate) (harness.RunResult, error) {
 	return s.result, s.err
 }
 
-func (s *stubRunner) RunContinue(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
+func (s *stubRunner) RunContinue(_ context.Context, _, _ string, _ chan<- harness.StreamUpdate) (harness.RunResult, error) {
 	return s.result, s.err
 }
 

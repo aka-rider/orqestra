@@ -182,21 +182,35 @@ func TestTUI_RunDetail_KeyNavigation(t *testing.T) {
 	m.runDetailScreen.logLines = []string{"line1", "line2"}
 	m.recalculateLayout()
 
-	// Tab moves step cursor down
-	result, _ := sendKey(m, tea.KeyTab)
+	// Down arrow moves step cursor (menu focused by default)
+	result, _ := sendKey(m, tea.KeyDown)
 	model := result.(Model)
 	if model.runDetailScreen.stepCursor != 1 {
-		t.Errorf("expected step cursor 1 after Tab, got %d", model.runDetailScreen.stepCursor)
+		t.Errorf("expected step cursor 1 after Down, got %d", model.runDetailScreen.stepCursor)
 	}
 
-	// Shift+Tab moves step cursor up
-	result, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	// Up arrow moves step cursor up
+	result, _ = sendKey(model, tea.KeyUp)
 	model = result.(Model)
 	if model.runDetailScreen.stepCursor != 0 {
-		t.Errorf("expected step cursor 0 after Shift+Tab, got %d", model.runDetailScreen.stepCursor)
+		t.Errorf("expected step cursor 0 after Up, got %d", model.runDetailScreen.stepCursor)
 	}
 
-	// Esc returns to runs list
+	// Tab changes focus to content pane
+	result, _ = sendKey(m, tea.KeyTab)
+	model = result.(Model)
+	if model.runDetailScreen.focus != RunDetailFocusContent {
+		t.Errorf("expected RunDetailFocusContent after Tab, got %d", model.runDetailScreen.focus)
+	}
+
+	// Esc from content returns to menu focus
+	result, _ = sendKey(model, tea.KeyEscape)
+	model = result.(Model)
+	if model.runDetailScreen.focus != RunDetailFocusMenu {
+		t.Errorf("expected RunDetailFocusMenu after Esc from content, got %d", model.runDetailScreen.focus)
+	}
+
+	// Esc from menu returns to runs list
 	result, _ = sendKey(m, tea.KeyEscape)
 	model = result.(Model)
 	if model.state != StateRunsList {

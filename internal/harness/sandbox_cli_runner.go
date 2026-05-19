@@ -70,9 +70,9 @@ func (r *SandboxCLIRunner) RunPrint(ctx context.Context, prompt, systemPrompt st
 }
 
 // RunStreaming runs the claude CLI with streaming output under seatbelt.
-func (r *SandboxCLIRunner) RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (RunResult, error) {
+func (r *SandboxCLIRunner) RunStreaming(ctx context.Context, prompt, systemPrompt string, events chan<- StreamUpdate) (RunResult, error) {
 	args := r.buildCommand(prompt, systemPrompt, true)
-	output, err := r.runParsed(ctx, args, stdout)
+	output, err := r.runParsed(ctx, args, events)
 	if err != nil {
 		return RunResult{Output: extractStreamResult(output)}, err
 	}
@@ -80,9 +80,9 @@ func (r *SandboxCLIRunner) RunStreaming(ctx context.Context, prompt, systemPromp
 }
 
 // RunContinue resumes a previous session under seatbelt.
-func (r *SandboxCLIRunner) RunContinue(ctx context.Context, sessionID, prompt string, stdout io.Writer) (RunResult, error) {
+func (r *SandboxCLIRunner) RunContinue(ctx context.Context, sessionID, prompt string, events chan<- StreamUpdate) (RunResult, error) {
 	args := []string{"claude", "--resume", sessionID, "--dangerously-skip-permissions", "-p", prompt, "--output-format", "stream-json", "--verbose"}
-	output, err := r.runParsed(ctx, args, stdout)
+	output, err := r.runParsed(ctx, args, events)
 	if err != nil {
 		return RunResult{Output: extractStreamResult(output)}, err
 	}
@@ -139,7 +139,7 @@ func (r *SandboxCLIRunner) run(ctx context.Context, args []string, stdout io.Wri
 // writes human-readable text and tool activities to display, and returns
 // the full raw NDJSON output for post-processing (usage + session ID extraction).
 // display may be nil; dispatchStreamEvent handles nil safely.
-func (r *SandboxCLIRunner) runParsed(ctx context.Context, args []string, display io.Writer) (string, error) {
+func (r *SandboxCLIRunner) runParsed(ctx context.Context, args []string, events chan<- StreamUpdate) (string, error) {
 	sb, err := sandbox.New(sandbox.Config{
 		RepoPath:     r.repoPath,
 		RepoWritable: r.writable,
@@ -187,7 +187,7 @@ func (r *SandboxCLIRunner) runParsed(ctx context.Context, args []string, display
 		}
 	}()
 
-	raw, scanErr := parseStreamLines(cmdStdout, display)
+	raw, scanErr := parseStreamLines(cmdStdout, events)
 	if scanErr != nil {
 		return raw, fmt.Errorf("sandbox cli runner scan: %w", scanErr)
 	}
@@ -199,16 +199,13 @@ func (r *SandboxCLIRunner) runParsed(ctx context.Context, args []string, display
 }
 
 // parseStreamLines reads stream-json NDJSON from src line by line, routes each
-// parsed event through dispatchStreamEvent (which writes human-readable text
-// and fires ActivitySink callbacks on display when applicable), and returns
+// parsed event through emitStreamEvents, and returns
 // the full raw NDJSON for post-processing (usage, session ID, result text).
-// display may be nil; dispatchStreamEvent guards against that. Non-JSON lines
-// are passed through to display unchanged so degraded CLI output remains
-// visible.
-func parseStreamLines(src io.Reader, display io.Writer) (string, error) {
+// events may be nil. Non-JSON lines are emitted as Text events when provided.
+func parseStreamLines(src io.Reader, events chan<- StreamUpdate) (string, error) {
 	var rawBuf bytes.Buffer
 	scanner := bufio.NewScanner(src)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, initialScanBufferBytes), maxJSONLLineBytes)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		rawBuf.Write(line)
@@ -219,13 +216,15 @@ func parseStreamLines(src io.Reader, display io.Writer) (string, error) {
 		var event streamEvent
 		if err := json.Unmarshal(line, &event); err != nil {
 			slog.Debug("non-JSON stream line from sandbox cli", "line_len", len(line))
-			if display != nil {
-				display.Write(line)         // nolint:errcheck
-				display.Write([]byte("\n")) // nolint:errcheck
+			if events != nil {
+				events <- StreamUpdate{Text: string(line) + "\n"}
 			}
 			continue
 		}
-		dispatchStreamEvent(event, display) // nil-safe: dispatchStreamEvent guards display == nil
+		emitStreamEvents(event, events)
+		if event.Usage != nil && events != nil {
+			events <- StreamUpdate{Input: event.Usage.InputTokens, Output: event.Usage.OutputTokens, UsageValid: true}
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return rawBuf.String(), err

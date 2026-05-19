@@ -35,7 +35,7 @@ type RunResult struct {
 // CLIRunner is the interface for running claude CLI commands.
 type CLIRunner interface {
 	RunPrint(ctx context.Context, prompt, systemPrompt string) (RunResult, error)
-	RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (RunResult, error)
+	RunStreaming(ctx context.Context, prompt, systemPrompt string, events chan<- StreamUpdate) (RunResult, error)
 }
 
 // ContinuableRunner extends CLIRunner with session continuation support.
@@ -44,7 +44,7 @@ type ContinuableRunner interface {
 	CLIRunner
 	// RunContinue resumes a previous session with a new prompt.
 	// The session retains its tool state, conversation history, and sandbox.
-	RunContinue(ctx context.Context, sessionID, prompt string, stdout io.Writer) (RunResult, error)
+	RunContinue(ctx context.Context, sessionID, prompt string, events chan<- StreamUpdate) (RunResult, error)
 }
 
 // ClaudeCLI executes the `claude` binary as a subprocess.
@@ -250,7 +250,7 @@ func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (
 
 // RunStreaming runs `claude -p <prompt> --append-system-prompt <systemPrompt> --output-format stream-json --verbose`
 // and streams displayable content to stdout. Returns the final result text.
-func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (RunResult, error) {
+func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt string, events chan<- StreamUpdate) (RunResult, error) {
 	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"}
 	if merged := mergeAppendPrompts(systemPrompt, c.appendSystemPrompt); merged != "" {
 		args = append(args, "--append-system-prompt", merged)
@@ -278,7 +278,7 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 	var sessionID string
 	var planFilePath string
 	var parseErr error
-	result, resultIsError, usage, sessionID, planFilePath, parseErr = parseStream(cmdStdout, stdout)
+	result, resultIsError, usage, sessionID, planFilePath, parseErr = parseStream(cmdStdout, events)
 
 	cmdErr := cmd.Wait()
 	if cmdErr != nil {
@@ -307,7 +307,7 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 // RunContinue resumes a previous Claude CLI session with a follow-up prompt.
 // Used for worker self-validation: the worker validates its own work in the
 // same session that performed the implementation.
-func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, stdout io.Writer) (RunResult, error) {
+func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, events chan<- StreamUpdate) (RunResult, error) {
 	args := []string{"--resume", sessionID, "-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"}
 	args = append(args, c.buildFinalArgs()...)
 
@@ -332,7 +332,7 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 	var newSessionID string
 	var planFilePath string
 	var parseErr error
-	result, resultIsError, usage, newSessionID, planFilePath, parseErr = parseStream(cmdStdout, stdout)
+	result, resultIsError, usage, newSessionID, planFilePath, parseErr = parseStream(cmdStdout, events)
 
 	cmdErr := cmd.Wait()
 	if cmdErr != nil {
@@ -357,9 +357,9 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, s
 // display (nil-safe), and accumulates the result, error state, usage, session
 // ID, and plan file path from the result event. This is the single source of
 // truth for Claude CLI stream parsing — used by RunStreaming and RunContinue.
-func parseStream(r io.Reader, display io.Writer) (result string, isError bool, usage TokenUsage, sessionID, planFilePath string, err error) {
+func parseStream(r io.Reader, events chan<- StreamUpdate) (result string, isError bool, usage TokenUsage, sessionID, planFilePath string, err error) {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large JSON lines
+	scanner.Buffer(make([]byte, initialScanBufferBytes), maxJSONLLineBytes)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -369,9 +369,8 @@ func parseStream(r io.Reader, display io.Writer) (result string, isError bool, u
 		var event streamEvent
 		if err := json.Unmarshal(line, &event); err != nil {
 			slog.Debug("non-JSON stream line from claude CLI", "err", err, "line_len", len(line))
-			if display != nil {
-				display.Write(line)         // nolint:errcheck — best-effort stream display
-				display.Write([]byte("\n")) // nolint:errcheck
+			if events != nil {
+				events <- StreamUpdate{Text: string(line) + "\n"}
 			}
 			continue
 		}
@@ -380,13 +379,16 @@ func parseStream(r io.Reader, display io.Writer) (result string, isError bool, u
 			sessionID = event.SessionID
 		}
 
-		dispatchStreamEvent(event, display)
+		emitStreamEvents(event, events)
 
-		// Dispatch usage to UsageSink on any event carrying token stats.
-		// This fires mid-call (not just on "result") if Claude CLI emits usage.
+		// Emit usage on any event carrying token stats.
 		if event.Usage != nil {
-			if sink, ok := display.(UsageSink); ok {
-				sink.OnUsage(event.Usage.InputTokens, event.Usage.OutputTokens)
+			if events != nil {
+				events <- StreamUpdate{
+					Input:      event.Usage.InputTokens,
+					Output:     event.Usage.OutputTokens,
+					UsageValid: true,
+				}
 			}
 		}
 
@@ -505,55 +507,55 @@ func (e *streamEvent) extractToolUse() (name string, args json.RawMessage) {
 	return "", nil
 }
 
-// dispatchStreamEvent writes the human-readable content of a single stream-json
-// event to display, and fires OnToolUse on display if it implements ActivitySink.
-// Used by both ClaudeCLI and SandboxCLIRunner to avoid duplicating the switch logic.
-// display may be nil (e.g. orchestrator commit-message RunContinue(..., nil)).
-func dispatchStreamEvent(event streamEvent, display io.Writer) {
-	if display == nil {
+// emitStreamEvents converts a stream-json event into typed StreamUpdate entries.
+// Used by both ClaudeCLI and SandboxCLIRunner to avoid duplicating switch logic.
+func emitStreamEvents(event streamEvent, events chan<- StreamUpdate) {
+	if events == nil {
 		return
 	}
+	for _, e := range streamEventsFrom(event) {
+		events <- e
+	}
+}
+
+func streamEventsFrom(event streamEvent) []StreamUpdate {
+	var out []StreamUpdate
 	switch event.Type {
 	case "assistant":
 		if text := event.extractAssistantText(); text != "" {
-			display.Write([]byte(text)) // nolint:errcheck — best-effort stream display
+			out = append(out, StreamUpdate{Text: text})
 		}
-		if sink, ok := display.(ActivitySink); ok {
-			for _, tu := range event.extractAssistantToolUses() {
-				sink.OnToolUse(tu.Name, ToolDetail(tu.Name, tu.Input))
-			}
+		for _, tu := range event.extractAssistantToolUses() {
+			out = append(out, StreamUpdate{Tool: tu.Name, Detail: ToolDetail(tu.Name, tu.Input)})
 		}
 	case "content_block_delta":
 		if event.Delta.Text != "" {
-			display.Write([]byte(event.Delta.Text)) // nolint:errcheck
+			out = append(out, StreamUpdate{Text: event.Delta.Text})
 		}
 	case "content_block_start":
-		if sink, ok := display.(ActivitySink); ok {
-			if name, args := event.extractToolUse(); name != "" {
-				sink.OnToolUse(name, ToolDetail(name, args))
-			}
+		if name, args := event.extractToolUse(); name != "" {
+			out = append(out, StreamUpdate{Tool: name, Detail: ToolDetail(name, args)})
 		}
 	case "stream_event":
 		if event.Event == nil {
-			return
+			return out
 		}
 		var inner streamEvent
 		if err := json.Unmarshal(event.Event, &inner); err != nil {
-			return
+			return out
 		}
 		switch inner.Type {
 		case "content_block_start":
-			if sink, ok := display.(ActivitySink); ok {
-				if name, args := inner.extractToolUse(); name != "" {
-					sink.OnToolUse(name, ToolDetail(name, args))
-				}
+			if name, args := inner.extractToolUse(); name != "" {
+				out = append(out, StreamUpdate{Tool: name, Detail: ToolDetail(name, args)})
 			}
 		case "content_block_delta":
 			if inner.Delta.Text != "" {
-				display.Write([]byte(inner.Delta.Text)) // nolint:errcheck
+				out = append(out, StreamUpdate{Text: inner.Delta.Text})
 			}
 		}
 	}
+	return out
 }
 
 // BuildModelEnv returns the environment variables needed to route the claude binary

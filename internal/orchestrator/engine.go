@@ -62,6 +62,24 @@ type Runners struct {
 	Worker     harness.ContinuableRunner
 }
 
+// resolveAgentMeta builds AgentMeta from the config for the given model ref.
+// Returns a partially-populated AgentMeta (with ModelRef set) if the model is
+// not found — never a silent fallback to a different model.
+func resolveAgentMeta(cfg *config.Config, modelRef string) AgentMeta {
+	meta := AgentMeta{ModelRef: modelRef}
+	if cfg == nil || modelRef == "" {
+		return meta
+	}
+	mc, ok := cfg.ModelMeta(modelRef)
+	if !ok {
+		return meta
+	}
+	meta.ModelDisplay = mc.Model
+	meta.Provider = mc.Provider
+	meta.ContextWindow = mc.ContextWindow
+	return meta
+}
+
 // Engine is the hardcoded Go orchestrator that runs the full pipeline.
 type Engine struct {
 	Config         *config.Config
@@ -76,23 +94,27 @@ type Engine struct {
 
 // RunChannels provides bidirectional communication between Engine and TUI.
 type RunChannels struct {
-	Events    <-chan Event
-	Decisions chan<- Decision
-	Stream    *StreamRing
+	Events        <-chan Event
+	Decisions     chan<- Decision
+	StreamUpdates <-chan harness.StreamUpdate
+	History       *StreamHistoryStore
 }
 
 // Start launches the pipeline in a goroutine. Returns channels immediately.
 func (e *Engine) Start(ctx context.Context, input Input) RunChannels {
 	events := make(chan Event, 16)
 	decisions := make(chan Decision, 1)
-	stream := NewStreamRing(200)
+	streamUpdates := make(chan harness.StreamUpdate, 512)
+	history := NewStreamHistoryStore()
+	capture := newStreamCapture(history)
 
 	go func() {
 		defer close(events)
-		e.run(ctx, input, events, decisions, stream)
+		defer close(streamUpdates)
+		e.run(ctx, input, events, decisions, capture, streamUpdates)
 	}()
 
-	return RunChannels{Events: events, Decisions: decisions, Stream: stream}
+	return RunChannels{Events: events, Decisions: decisions, StreamUpdates: streamUpdates, History: history}
 }
 
 // Run executes the full pipeline synchronously (legacy callback API).
@@ -130,7 +152,61 @@ func (e *Engine) Run(ctx context.Context, input Input, emit func(Event)) (Result
 	return result, nil
 }
 
-func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, decisions <-chan Decision, stream *StreamRing) {
+func runWithStreamConsumer[T any](
+	call func(events chan<- harness.StreamUpdate) (T, error),
+	capture *streamCapture,
+	out chan<- harness.StreamUpdate,
+) (T, error) {
+	if capture == nil {
+		return call(nil)
+	}
+
+	events := make(chan harness.StreamUpdate, 256)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ev := range events {
+			if out != nil {
+				select {
+				case out <- ev:
+				default:
+				}
+			}
+			capture.OnUpdate(ev)
+		}
+	}()
+
+	res, err := call(events)
+	close(events)
+	<-done
+	return res, err
+}
+
+func runPlanner(ctx context.Context, planner *agent.Planner, prompt string, capture *streamCapture, out chan<- harness.StreamUpdate) (agent.PlanResult, error) {
+	return runWithStreamConsumer(func(events chan<- harness.StreamUpdate) (agent.PlanResult, error) {
+		return planner.Run(ctx, prompt, events)
+	}, capture, out)
+}
+
+func continuePlanner(ctx context.Context, planner *agent.Planner, sessionID, prompt string, capture *streamCapture, out chan<- harness.StreamUpdate) (agent.PlanResult, error) {
+	return runWithStreamConsumer(func(events chan<- harness.StreamUpdate) (agent.PlanResult, error) {
+		return planner.Continue(ctx, sessionID, prompt, events)
+	}, capture, out)
+}
+
+func runRunnerStreaming(ctx context.Context, runner harness.ContinuableRunner, prompt, systemPrompt string, capture *streamCapture, out chan<- harness.StreamUpdate) (harness.RunResult, error) {
+	return runWithStreamConsumer(func(events chan<- harness.StreamUpdate) (harness.RunResult, error) {
+		return runner.RunStreaming(ctx, prompt, systemPrompt, events)
+	}, capture, out)
+}
+
+func runRunnerContinue(ctx context.Context, runner harness.ContinuableRunner, sessionID, prompt string, capture *streamCapture, out chan<- harness.StreamUpdate) (harness.RunResult, error) {
+	return runWithStreamConsumer(func(events chan<- harness.StreamUpdate) (harness.RunResult, error) {
+		return runner.RunContinue(ctx, sessionID, prompt, events)
+	}, capture, out)
+}
+
+func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, decisions <-chan Decision, stream *streamCapture, streamOut chan<- harness.StreamUpdate) {
 	emit := func(ev Event) {
 		select {
 		case events <- ev:
@@ -260,6 +336,12 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 	var planSessionID string // function scope — survives across gate loop iterations
 	architectPlanner := agent.NewPlanner(e.Runners.Architect, e.Config.Architect.SystemPrompt)
 
+	// Pre-resolve model metadata for session artifacts (StepMeta persistence).
+	resMeta := resolveAgentMeta(e.Config, e.Config.Researcher.Model)
+	archMeta := resolveAgentMeta(e.Config, e.Config.Architect.Model)
+	critMeta := resolveAgentMeta(e.Config, e.Config.Critic.Model)
+	workMeta := resolveAgentMeta(e.Config, e.Config.Worker.Model)
+
 	// Initialize plan version history (git micro-repo)
 	var planRepo *plan.GitRepo
 	if session.Path != "" {
@@ -290,7 +372,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		emit(Event{Type: EventPhaseChange, Phase: PhaseResearching})
 		logger.Info("phase", "phase", string(PhaseResearching))
 		logAgentEvent("agent_started", "researcher", 1, harness.TokenUsage{}, nil)
-		emit(Event{Type: EventAgentStarted, AgentID: "researcher"})
+		emit(Event{Type: EventAgentStarted, AgentID: "researcher", Meta: resolveAgentMeta(e.Config, e.Config.Researcher.Model)})
 		stream.SetAgent("researcher")
 
 		researcherPlanner := agent.NewPlanner(e.Runners.Researcher, e.Config.Researcher.SystemPrompt)
@@ -309,7 +391,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		var err error
 		for attempt := 1; attempt <= researchAttempts; attempt++ {
 			var rResult agent.PlanResult
-			rResult, err = researcherPlanner.Run(ctx, researchPrompt, &streamWriter{ring: stream})
+			rResult, err = runPlanner(ctx, researcherPlanner, researchPrompt, stream, streamOut)
 			if err == nil {
 				draft.Markdown = rResult.Plan
 				draftUsage = rResult.Usage
@@ -328,6 +410,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			}
 			writeArtifactJSON(session, "researcher_meta.json", agent.StepMeta{
 				AgentID: "researcher", ModelRef: e.Config.Researcher.Model, StartTime: researchStart, EndTime: time.Now(),
+				ModelDisplay: resMeta.ModelDisplay, Provider: resMeta.Provider, ContextWindow: resMeta.ContextWindow,
 				ClaudeSessionID: researchSessionID, Status: "failed", Error: err.Error(),
 				ClaudeProjectPath:    claudeProjectPath(session),
 				ClaudeSessionLogPath: researchLogCopy,
@@ -346,6 +429,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		writeArtifact(session, "researcher_draft.md", draft.Markdown)
 		writeArtifactJSON(session, "researcher_meta.json", agent.StepMeta{
 			AgentID: "researcher", ModelRef: e.Config.Researcher.Model, StartTime: researchStart, EndTime: time.Now(),
+			ModelDisplay: resMeta.ModelDisplay, Provider: resMeta.Provider, ContextWindow: resMeta.ContextWindow,
 			ClaudeSessionID: researchSessionID, Status: "done",
 			InputTokens: draftUsage.Input, OutputTokens: draftUsage.Output,
 			ClaudeProjectPath:    claudeProjectPath(session),
@@ -362,7 +446,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		logger.Info("phase", "phase", string(PhasePlanning))
 		architectAttempt++
 		logAgentEvent("agent_started", "architect", architectAttempt, harness.TokenUsage{}, nil)
-		emit(Event{Type: EventAgentStarted, AgentID: "architect"})
+		emit(Event{Type: EventAgentStarted, AgentID: "architect", Meta: resolveAgentMeta(e.Config, e.Config.Architect.Model)})
 		stream.SetAgent("architect")
 
 		planStart := time.Now()
@@ -379,7 +463,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		var planErr error
 		for attempt := 1; attempt <= architectAttempts; attempt++ {
 			var aResult agent.PlanResult
-			aResult, planErr = architectPlanner.Run(ctx, architectPrompt, &streamWriter{ring: stream})
+			aResult, planErr = runPlanner(ctx, architectPlanner, architectPrompt, stream, streamOut)
 			if planErr == nil {
 				planSessionID = aResult.SessionID
 				planUsage = aResult.Usage
@@ -402,6 +486,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			}
 			writeArtifactJSON(session, "architect_meta.json", agent.StepMeta{
 				AgentID: "architect", ModelRef: e.Config.Architect.Model, StartTime: planStart, EndTime: time.Now(),
+				ModelDisplay: archMeta.ModelDisplay, Provider: archMeta.Provider, ContextWindow: archMeta.ContextWindow,
 				ClaudeSessionID: planSessionID, Status: "failed", Error: planErr.Error(),
 				ClaudeProjectPath:    claudeProjectPath(session),
 				ClaudeSessionLogPath: archLogCopy,
@@ -424,6 +509,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		}
 		writeArtifactJSON(session, "architect_meta.json", agent.StepMeta{
 			AgentID: "architect", ModelRef: e.Config.Architect.Model, StartTime: planStart, EndTime: time.Now(),
+			ModelDisplay: archMeta.ModelDisplay, Provider: archMeta.Provider, ContextWindow: archMeta.ContextWindow,
 			ClaudeSessionID: planSessionID, Status: "done",
 			InputTokens: planUsage.Input, OutputTokens: planUsage.Output,
 			ClaudeProjectPath:    claudeProjectPath(session),
@@ -455,7 +541,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		emit(Event{Type: EventPhaseChange, Phase: PhaseCritiquing})
 		logger.Info("phase", "phase", string(PhaseCritiquing))
 		logAgentEvent("agent_started", "critic", 1, harness.TokenUsage{}, nil)
-		emit(Event{Type: EventAgentStarted, AgentID: "critic"})
+		emit(Event{Type: EventAgentStarted, AgentID: "critic", Meta: resolveAgentMeta(e.Config, e.Config.Critic.Model)})
 		stream.SetAgent("critic")
 
 		criticPlanner := agent.NewPlanner(e.Runners.Critic, e.Config.Critic.SystemPrompt)
@@ -474,7 +560,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		var criticErr error
 		for attempt := 1; attempt <= criticAttempts; attempt++ {
 			var cResult agent.PlanResult
-			cResult, criticErr = criticPlanner.Run(ctx, criticPrompt, &streamWriter{ring: stream})
+			cResult, criticErr = runPlanner(ctx, criticPlanner, criticPrompt, stream, streamOut)
 			if criticErr == nil {
 				criticMarkdown = cResult.Plan
 				criticUsage = cResult.Usage
@@ -493,6 +579,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			}
 			writeArtifactJSON(session, "critic_meta.json", agent.StepMeta{
 				AgentID: "critic", ModelRef: e.Config.Critic.Model, StartTime: criticStart, EndTime: time.Now(),
+				ModelDisplay: critMeta.ModelDisplay, Provider: critMeta.Provider, ContextWindow: critMeta.ContextWindow,
 				ClaudeSessionID: criticSessionID, Status: "failed", Error: criticErr.Error(),
 				ClaudeProjectPath:    claudeProjectPath(session),
 				ClaudeSessionLogPath: criticLogCopy,
@@ -511,6 +598,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		writeArtifact(session, "critic_report.md", criticMarkdown)
 		writeArtifactJSON(session, "critic_meta.json", agent.StepMeta{
 			AgentID: "critic", ModelRef: e.Config.Critic.Model, StartTime: criticStart, EndTime: time.Now(),
+			ModelDisplay: critMeta.ModelDisplay, Provider: critMeta.Provider, ContextWindow: critMeta.ContextWindow,
 			ClaudeSessionID: criticSessionID, Status: "done",
 			InputTokens: criticUsage.Input, OutputTokens: criticUsage.Output,
 			ClaudeProjectPath:    claudeProjectPath(session),
@@ -543,7 +631,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		// --- Architect Second Pass (critic feedback) ---
 		architectAttempt++
 		logAgentEvent("agent_started", "architect", architectAttempt, harness.TokenUsage{}, nil)
-		emit(Event{Type: EventAgentStarted, AgentID: "architect"})
+		emit(Event{Type: EventAgentStarted, AgentID: "architect", Meta: resolveAgentMeta(e.Config, e.Config.Architect.Model)})
 		stream.SetAgent("architect")
 		revStart := time.Now()
 
@@ -551,7 +639,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		if critBaselineErr != nil {
 			slog.Debug("could not snapshot plan file baseline before critic revision", "err", critBaselineErr)
 		}
-		critRevResult, revErr := architectPlanner.Continue(ctx, planSessionID, agent.CriticContinuePrompt(finalPlanMarkdown, criticMarkdown), &streamWriter{ring: stream})
+		critRevResult, revErr := continuePlanner(ctx, architectPlanner, planSessionID, agent.CriticContinuePrompt(finalPlanMarkdown, criticMarkdown), stream, streamOut)
 		chatResponse := critRevResult.Chat
 		revisedPlan := agent.DetectPlanRevision(critRevResult.Plan, critBaseline, critBaselineErr, finalPlanMarkdown)
 		revisedUsage := critRevResult.Usage
@@ -566,8 +654,9 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			if archCritRevLogCopy != "" {
 				archCritRevPlanFilePath, _ = harness.ExtractPlanFilePath(archCritRevLogCopy) // best-effort
 			}
-			writeArtifactJSON(session, "architect_critic_revision_meta.json", agent.StepMeta{
+			writeArtifactJSON(session, fmt.Sprintf("architect_critic_revision_%d_meta.json", architectAttempt), agent.StepMeta{
 				AgentID: "architect", ModelRef: e.Config.Architect.Model,
+				ModelDisplay: archMeta.ModelDisplay, Provider: archMeta.Provider, ContextWindow: archMeta.ContextWindow,
 				StartTime: revStart, EndTime: time.Now(),
 				ClaudeSessionID: planSessionID, Status: "failed", Error: revErr.Error(),
 				ClaudeProjectPath:    claudeProjectPath(session),
@@ -589,8 +678,9 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		if archCritRevLogCopy != "" {
 			archCritRevPlanFilePath, _ = harness.ExtractPlanFilePath(archCritRevLogCopy) // best-effort
 		}
-		writeArtifactJSON(session, "architect_critic_revision_meta.json", agent.StepMeta{
+		writeArtifactJSON(session, fmt.Sprintf("architect_critic_revision_%d_meta.json", architectAttempt), agent.StepMeta{
 			AgentID: "architect", ModelRef: e.Config.Architect.Model,
+			ModelDisplay: archMeta.ModelDisplay, Provider: archMeta.Provider, ContextWindow: archMeta.ContextWindow,
 			StartTime: revStart, EndTime: time.Now(),
 			ClaudeSessionID: planSessionID, Status: "done",
 			InputTokens: revisedUsage.Input, OutputTokens: revisedUsage.Output,
@@ -709,7 +799,7 @@ planGate:
 						}
 						architectAttempt++
 						logAgentEvent("agent_started", "architect", architectAttempt, harness.TokenUsage{}, nil)
-						emit(Event{Type: EventAgentStarted, AgentID: "architect"})
+						emit(Event{Type: EventAgentStarted, AgentID: "architect", Meta: resolveAgentMeta(e.Config, e.Config.Architect.Model)})
 						stream.SetAgent("architect")
 						revStart := time.Now()
 
@@ -723,7 +813,7 @@ planGate:
 						} else {
 							editContinuePrompt = agent.ContinuePrompt(finalPlanMarkdown, decision.Comment)
 						}
-						editResult, err := architectPlanner.Continue(ctx, planSessionID, editContinuePrompt, &streamWriter{ring: stream})
+						editResult, err := continuePlanner(ctx, architectPlanner, planSessionID, editContinuePrompt, stream, streamOut)
 						chatResponse := editResult.Chat
 						revisedPlan := agent.DetectPlanRevision(editResult.Plan, editBaseline, editBaselineErr, finalPlanMarkdown)
 						revisedUsage := editResult.Usage
@@ -737,8 +827,9 @@ planGate:
 							if archRevLogCopy != "" {
 								archRevPlanFilePath, _ = harness.ExtractPlanFilePath(archRevLogCopy)
 							}
-							writeArtifactJSON(session, "architect_revision_meta.json", agent.StepMeta{
+							writeArtifactJSON(session, fmt.Sprintf("architect_revision_%d_meta.json", architectAttempt), agent.StepMeta{
 								AgentID: "architect", ModelRef: e.Config.Architect.Model,
+								ModelDisplay: archMeta.ModelDisplay, Provider: archMeta.Provider, ContextWindow: archMeta.ContextWindow,
 								StartTime: revStart, EndTime: time.Now(),
 								ClaudeSessionID: planSessionID, Status: "failed", Error: err.Error(),
 								ClaudeProjectPath:    claudeProjectPath(session),
@@ -760,8 +851,9 @@ planGate:
 						if archRevLogCopy != "" {
 							archRevPlanFilePath, _ = harness.ExtractPlanFilePath(archRevLogCopy)
 						}
-						writeArtifactJSON(session, "architect_revision_meta.json", agent.StepMeta{
+						writeArtifactJSON(session, fmt.Sprintf("architect_revision_%d_meta.json", architectAttempt), agent.StepMeta{
 							AgentID: "architect", ModelRef: e.Config.Architect.Model,
+							ModelDisplay: archMeta.ModelDisplay, Provider: archMeta.Provider, ContextWindow: archMeta.ContextWindow,
 							StartTime: revStart, EndTime: time.Now(),
 							ClaudeSessionID: planSessionID, Status: "done",
 							InputTokens: revisedUsage.Input, OutputTokens: revisedUsage.Output,
@@ -815,7 +907,7 @@ planGate:
 				case DecisionComment:
 					architectAttempt++
 					logAgentEvent("agent_started", "architect", architectAttempt, harness.TokenUsage{}, nil)
-					emit(Event{Type: EventAgentStarted, AgentID: "architect"})
+					emit(Event{Type: EventAgentStarted, AgentID: "architect", Meta: resolveAgentMeta(e.Config, e.Config.Architect.Model)})
 					stream.SetAgent("architect")
 					revStart := time.Now()
 					logger.Info("gate: user comment", "comment_len", len(decision.Comment))
@@ -841,7 +933,7 @@ planGate:
 							slog.Debug("could not snapshot plan file baseline before comment revision", "err", commentBaselineErr)
 						}
 						var commentResult agent.PlanResult
-						commentResult, err = architectPlanner.Continue(ctx, planSessionID, agent.ContinuePrompt(finalPlanMarkdown, decision.Comment), &streamWriter{ring: stream})
+						commentResult, err = continuePlanner(ctx, architectPlanner, planSessionID, agent.ContinuePrompt(finalPlanMarkdown, decision.Comment), stream, streamOut)
 						if err == nil {
 							chatResponse = commentResult.Chat
 							revisedPlan = agent.DetectPlanRevision(commentResult.Plan, commentBaseline, commentBaselineErr, finalPlanMarkdown)
@@ -851,7 +943,7 @@ planGate:
 						// Fallback for cold start (--plan flag) — no session to resume
 						coldPrompt := guardPrompt(agent.ArchitectRevisionPrompt(finalPlanMarkdown, decision.Comment), input.Prompt, "architect (cold-start)")
 						var coldResult agent.PlanResult
-						coldResult, err = architectPlanner.Run(ctx, coldPrompt, &streamWriter{ring: stream})
+						coldResult, err = runPlanner(ctx, architectPlanner, coldPrompt, stream, streamOut)
 						revisedUsage = coldResult.Usage // populated even on error if partial
 						if err == nil {
 							planSessionID = coldResult.SessionID
@@ -869,8 +961,9 @@ planGate:
 						if archRevLogCopy != "" {
 							archRevPlanFilePath, _ = harness.ExtractPlanFilePath(archRevLogCopy) // best-effort
 						}
-						writeArtifactJSON(session, "architect_revision_meta.json", agent.StepMeta{
+						writeArtifactJSON(session, fmt.Sprintf("architect_revision_%d_meta.json", architectAttempt), agent.StepMeta{
 							AgentID: "architect", ModelRef: e.Config.Architect.Model,
+							ModelDisplay: archMeta.ModelDisplay, Provider: archMeta.Provider, ContextWindow: archMeta.ContextWindow,
 							StartTime: revStart, EndTime: time.Now(),
 							ClaudeSessionID: planSessionID, Status: "failed", Error: err.Error(),
 							ClaudeProjectPath:    claudeProjectPath(session),
@@ -892,8 +985,9 @@ planGate:
 					if archRevLogCopy != "" {
 						archRevPlanFilePath, _ = harness.ExtractPlanFilePath(archRevLogCopy) // best-effort
 					}
-					writeArtifactJSON(session, "architect_revision_meta.json", agent.StepMeta{
+					writeArtifactJSON(session, fmt.Sprintf("architect_revision_%d_meta.json", architectAttempt), agent.StepMeta{
 						AgentID: "architect", ModelRef: e.Config.Architect.Model,
+						ModelDisplay: archMeta.ModelDisplay, Provider: archMeta.Provider, ContextWindow: archMeta.ContextWindow,
 						StartTime: revStart, EndTime: time.Now(),
 						ClaudeSessionID: planSessionID, Status: "done",
 						InputTokens: revisedUsage.Input, OutputTokens: revisedUsage.Output,
@@ -966,7 +1060,7 @@ planGate:
 	emit(Event{Type: EventPhaseChange, Phase: PhaseExecuting})
 	logger.Info("phase", "phase", string(PhaseExecuting))
 	logAgentEvent("agent_started", "worker", 1, harness.TokenUsage{}, nil)
-	emit(Event{Type: EventAgentStarted, AgentID: "worker"})
+	emit(Event{Type: EventAgentStarted, AgentID: "worker", Meta: resolveAgentMeta(e.Config, e.Config.Worker.Model)})
 	stream.SetAgent("worker")
 	workerStart := time.Now()
 
@@ -995,7 +1089,7 @@ planGate:
 	}
 
 	execPrompt := agent.BuildExecutionPromptFromPlan(finalPlanMarkdown)
-	workResult, execErr := workerRunner.RunStreaming(ctx, execPrompt, "", &streamWriter{ring: stream})
+	workResult, execErr := runRunnerStreaming(ctx, workerRunner, execPrompt, "", stream, streamOut)
 
 	// Clean up worktree on failure or cancellation.
 	if execErr != nil {
@@ -1006,6 +1100,7 @@ planGate:
 		}
 		writeArtifactJSON(session, "worker_meta.json", agent.StepMeta{
 			AgentID: "worker", ModelRef: e.Config.Worker.Model, StartTime: workerStart, EndTime: time.Now(),
+			ModelDisplay: workMeta.ModelDisplay, Provider: workMeta.Provider, ContextWindow: workMeta.ContextWindow,
 			Status: "failed", Error: execErr.Error(),
 			ClaudeProjectPath: claudeProjectPath(session),
 		})
@@ -1027,6 +1122,7 @@ planGate:
 	writeArtifact(session, "worker_output.txt", workResult.Output)
 	writeArtifactJSON(session, "worker_meta.json", agent.StepMeta{
 		AgentID: "worker", ModelRef: e.Config.Worker.Model, StartTime: workerStart, EndTime: time.Now(),
+		ModelDisplay: workMeta.ModelDisplay, Provider: workMeta.Provider, ContextWindow: workMeta.ContextWindow,
 		ClaudeSessionID: workResult.SessionID, Status: "done",
 		InputTokens: workResult.Usage.Input, OutputTokens: workResult.Usage.Output,
 		ClaudeProjectPath:    claudeProjectPath(session),
@@ -1045,7 +1141,7 @@ planGate:
 	emit(Event{Type: EventPhaseChange, Phase: PhaseSelfValidating})
 	logger.Info("phase", "phase", string(PhaseSelfValidating))
 	logAgentEvent("agent_started", "validator", 1, harness.TokenUsage{}, nil)
-	emit(Event{Type: EventAgentStarted, AgentID: "validator"})
+	emit(Event{Type: EventAgentStarted, AgentID: "validator", Meta: resolveAgentMeta(e.Config, e.Config.Worker.Model)})
 	stream.SetAgent("validator")
 	valStart := time.Now()
 
@@ -1058,7 +1154,7 @@ planGate:
 	validationPrompt := agent.WorkerValidationPrompt(retryBudget)
 
 	if workResult.SessionID != "" {
-		valResult, valErr := workerRunner.RunContinue(ctx, workResult.SessionID, validationPrompt, &streamWriter{ring: stream})
+		valResult, valErr := runRunnerContinue(ctx, workerRunner, workResult.SessionID, validationPrompt, stream, streamOut)
 		if valErr != nil {
 			slog.Warn("worker self-validation failed", "err", valErr)
 			valLogCopy, cpErr := agent.CopySessionLog(session, cwd, workResult.SessionID, "validator_session.jsonl")
@@ -1067,6 +1163,7 @@ planGate:
 			}
 			writeArtifactJSON(session, "validator_meta.json", agent.StepMeta{
 				AgentID: "validator", ModelRef: e.Config.Worker.Model, StartTime: valStart, EndTime: time.Now(),
+				ModelDisplay: workMeta.ModelDisplay, Provider: workMeta.Provider, ContextWindow: workMeta.ContextWindow,
 				ClaudeSessionID: workResult.SessionID, Status: "failed", Error: valErr.Error(),
 				ClaudeProjectPath:    claudeProjectPath(session),
 				ClaudeSessionLogPath: valLogCopy,
@@ -1086,6 +1183,7 @@ planGate:
 			}
 			writeArtifactJSON(session, "validator_meta.json", agent.StepMeta{
 				AgentID: "validator", ModelRef: e.Config.Worker.Model, StartTime: valStart, EndTime: time.Now(),
+				ModelDisplay: workMeta.ModelDisplay, Provider: workMeta.Provider, ContextWindow: workMeta.ContextWindow,
 				ClaudeSessionID: valResult.SessionID, Status: "done",
 				InputTokens: valResult.Usage.Input, OutputTokens: valResult.Usage.Output,
 				ClaudeProjectPath:    claudeProjectPath(session),
@@ -1099,11 +1197,12 @@ planGate:
 	} else {
 		logger.Warn("validator session missing, running disconnected")
 		// Fallback: run validation as a new session (less effective but still useful)
-		valResult, valErr := workerRunner.RunStreaming(ctx, validationPrompt, "", &streamWriter{ring: stream})
+		valResult, valErr := runRunnerStreaming(ctx, workerRunner, validationPrompt, "", stream, streamOut)
 		if valErr != nil {
 			slog.Warn("disconnected validation failed", "err", valErr)
 			writeArtifactJSON(session, "validator_meta.json", agent.StepMeta{
 				AgentID: "validator", ModelRef: e.Config.Worker.Model, StartTime: valStart, EndTime: time.Now(),
+				ModelDisplay: workMeta.ModelDisplay, Provider: workMeta.Provider, ContextWindow: workMeta.ContextWindow,
 				Status: "failed", Error: valErr.Error(),
 				ClaudeProjectPath: claudeProjectPath(session),
 			})
@@ -1121,6 +1220,7 @@ planGate:
 			}
 			writeArtifactJSON(session, "validator_meta.json", agent.StepMeta{
 				AgentID: "validator", ModelRef: e.Config.Worker.Model, StartTime: valStart, EndTime: time.Now(),
+				ModelDisplay: workMeta.ModelDisplay, Provider: workMeta.Provider, ContextWindow: workMeta.ContextWindow,
 				ClaudeSessionID: valResult.SessionID, Status: "done",
 				InputTokens: valResult.Usage.Input, OutputTokens: valResult.Usage.Output,
 				ClaudeProjectPath:    claudeProjectPath(session),

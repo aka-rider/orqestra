@@ -13,6 +13,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
@@ -42,6 +43,7 @@ type PipelineScreen struct {
 
 	// Streaming output — shared buffer polled on tick
 	streamBuf *orchestrator.StreamRing
+	history   *orchestrator.StreamHistoryStore
 
 	// Plan review state
 	planComment    textarea.Model
@@ -89,11 +91,18 @@ type PipelineScreen struct {
 	ctrlCPending  bool // set by parent model when Ctrl+C time gate is active
 	active        bool // true while pipeline is running
 
+	// Animation state
+	animFrame int // incremented by animTickMsg for shimmer/pulse effects
+
+	// Live streaming metrics (polled from StreamRing on tick)
+	liveInput  int64
+	liveOutput int64
+	liveStart  time.Time
+
 	// Viewports
-	contentVP   viewport.Model
-	sidebarVP   viewport.Model
-	dashboardVP viewport.Model
-	bounds      layoutBounds
+	contentVP viewport.Model
+	dashboard DashboardModel
+	bounds    layoutBounds
 
 	PendingIntent tea.Msg // set by Update, consumed by parent
 }
@@ -102,16 +111,11 @@ type PipelineScreen struct {
 func NewPipelineScreen(configName string) PipelineScreen {
 	cvp := viewport.New()
 	cvp.MouseWheelEnabled = true
-	svp := viewport.New()
-	svp.MouseWheelEnabled = true
-	dvp := viewport.New()
-	dvp.MouseWheelEnabled = true
 
 	return PipelineScreen{
-		configName:  configName,
-		contentVP:   cvp,
-		sidebarVP:   svp,
-		dashboardVP: dvp,
+		configName: configName,
+		contentVP:  cvp,
+		dashboard:  NewDashboardModel(),
 	}
 }
 
@@ -136,6 +140,7 @@ func (s *PipelineScreen) Reset() {
 	s.workerValidation = ""
 	s.hasValidation = false
 	s.streamBuf = nil
+	s.history = nil
 	s.hasPlanComment = false
 	s.editorRunning = false
 	s.awaitingPlanDecision = false
@@ -158,17 +163,50 @@ func (s *PipelineScreen) Reset() {
 	s.pendingEditContent = ""
 	s.editConfirmCursor = 0
 	s.hasEditComment = false
+	s.animFrame = 0
+	s.liveInput = 0
+	s.liveOutput = 0
+	s.liveStart = time.Time{}
 	s.contentVP.SetContent("")
-	s.sidebarVP.SetContent("")
-	s.dashboardVP.SetContent("")
 	s.contentVP.GotoTop()
-	s.sidebarVP.GotoTop()
-	s.dashboardVP.GotoTop()
+	s.dashboard = NewDashboardModel()
 }
 
 // SetStreamBuf sets the shared stream buffer for live output.
 func (s *PipelineScreen) SetStreamBuf(buf *orchestrator.StreamRing) {
 	s.streamBuf = buf
+}
+
+// SetHistoryStore sets the historical stream store for per-agent read-only views.
+func (s *PipelineScreen) SetHistoryStore(store *orchestrator.StreamHistoryStore) {
+	s.history = store
+}
+
+// DrainStreamUpdates consumes currently buffered stream updates without blocking.
+func (s *PipelineScreen) DrainStreamUpdates(updates <-chan harness.StreamUpdate) {
+	if updates == nil || s.streamBuf == nil {
+		return
+	}
+	for {
+		select {
+		case u, ok := <-updates:
+			if !ok {
+				return
+			}
+			switch {
+			case u.Text != "":
+				s.streamBuf.AppendText(u.Text)
+			case u.Tool != "":
+				s.streamBuf.AppendActivity(u.Tool, u.Detail)
+			}
+			if u.UsageValid {
+				s.streamBuf.RecordUsage(u.Input, u.Output)
+				s.streamBuf.AppendStats(u.Input, u.Output)
+			}
+		default:
+			return
+		}
+	}
 }
 
 // SyncViewports updates pipeline viewport content from current screen state.
@@ -180,7 +218,8 @@ func (s *PipelineScreen) SyncViewports() {
 	s.diffViewport.SetHeight(max(1, s.contentVP.Height()-3))
 
 	if s.showDashboard {
-		s.dashboardVP.SetContent(s.viewDashboard())
+		// Feed live agent data to dashboard
+		s.dashboard.SetAgents(s.agents)
 	} else {
 		var contentView string
 		if s.showHelp {
@@ -193,7 +232,14 @@ func (s *PipelineScreen) SyncViewports() {
 		if atBottom && s.content == ContentStreaming {
 			s.contentVP.GotoBottom()
 		}
-		s.sidebarVP.SetContent(s.viewSidebar(w))
+	}
+
+	// Poll live metrics from stream ring
+	if s.streamBuf != nil && s.active {
+		in, out, start := s.streamBuf.SnapshotUsage()
+		s.liveInput = in
+		s.liveOutput = out
+		s.liveStart = start
 	}
 }
 
@@ -208,10 +254,7 @@ func (s PipelineScreen) effectiveWidth() int {
 func (s *PipelineScreen) RecalculateLayout(width, contentHeight int) {
 	s.contentVP.SetWidth(width)
 	s.contentVP.SetHeight(contentHeight)
-	s.sidebarVP.SetWidth(width)
-	s.sidebarVP.SetHeight(constSidebarHeight)
-	s.dashboardVP.SetWidth(width)
-	s.dashboardVP.SetHeight(contentHeight)
+	s.dashboard.SetSize(width, contentHeight)
 }
 
 // ApplyEvent updates the screen based on a single orchestrator event.
@@ -225,7 +268,18 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 		}
 
 	case orchestrator.EventAgentStarted:
-		s.agents = append(s.agents, AgentRow{ID: event.AgentID, State: "running", StartedAt: time.Now()})
+		if s.streamBuf != nil {
+			s.streamBuf.SetAgent(event.AgentID)
+		}
+		s.agents = append(s.agents, AgentRow{
+			ID:            event.AgentID,
+			State:         "running",
+			StartedAt:     time.Now(),
+			ModelRef:      event.Meta.ModelRef,
+			ModelDisplay:  event.Meta.ModelDisplay,
+			Provider:      event.Meta.Provider,
+			ContextWindow: event.Meta.ContextWindow,
+		})
 
 	case orchestrator.EventAgentDone:
 		for i := range s.agents {
@@ -351,7 +405,7 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	case tea.KeyPgUp, tea.KeyPgDown:
 		var cmd tea.Cmd
 		if s.showDashboard {
-			s.dashboardVP, cmd = s.dashboardVP.Update(msg)
+			s.dashboard, cmd = s.dashboard.Update(msg)
 		} else {
 			s.contentVP, cmd = s.contentVP.Update(msg)
 		}
@@ -365,13 +419,19 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		return s, nil
 	}
 
-	// If dashboard is showing, Esc returns to split view
+	// If dashboard is showing, route all keys to the DashboardModel FSM
 	if s.showDashboard {
-		if msg.Code == tea.KeyEscape {
-			s.showDashboard = false
-			s.SyncViewports()
+		var cmd tea.Cmd
+		s.dashboard, cmd = s.dashboard.Update(msg)
+		// Check for close intent
+		if s.dashboard.PendingIntent != nil {
+			if _, ok := s.dashboard.PendingIntent.(CloseDashboardIntent); ok {
+				s.showDashboard = false
+				s.dashboard.PendingIntent = nil
+				s.SyncViewports()
+			}
 		}
-		return s, nil
+		return s, cmd
 	}
 
 	// Alt+1-9 for agent navigation
@@ -433,9 +493,7 @@ func (s PipelineScreen) HandleMouse(msg tea.MouseMsg) (PipelineScreen, tea.Cmd) 
 
 	var cmd tea.Cmd
 	if s.showDashboard {
-		s.dashboardVP, cmd = s.dashboardVP.Update(msg)
-	} else if p.In(s.bounds.sidebar) {
-		s.sidebarVP, cmd = s.sidebarVP.Update(msg)
+		s.dashboard, cmd = s.dashboard.Update(msg)
 	} else if p.In(s.bounds.content) {
 		s.contentVP, cmd = s.contentVP.Update(msg)
 	}
@@ -639,23 +697,14 @@ func (s PipelineScreen) View(width, height int) string {
 	input := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
 		s.viewInputZone() + "\n"
 
-	// Sidebar strip (full-width agent list below input)
-	var sidebarDiv string
-	if s.configName != "" {
-		title := " " + s.configName + " "
-		repeat := max(0, w-len(title))
-		sidebarDiv = dividerStyle.Render(title + strings.Repeat("─", repeat))
-	} else {
-		sidebarDiv = dividerStyle.Render(strings.Repeat("─", w))
-	}
-	sidebar := sidebarDiv + "\n" +
-		s.sidebarVP.View()
+	// Status bar (1 line replacing old 6-line sidebar)
+	sidebar := s.viewStatusLine(w) + "\n"
 
 	// Content zone — viewports already synced in Update()
 	contentHeight := max(0, s.contentVP.Height())
 	var body string
 	if s.showDashboard {
-		body = s.dashboardVP.View()
+		body = s.dashboard.View()
 	} else {
 		body = s.contentVP.View()
 	}
@@ -666,6 +715,131 @@ func (s PipelineScreen) View(width, height int) string {
 
 	// No body zone — omit the body line terminator to preserve height invariant.
 	return input + sidebar + footer
+}
+
+// --- Status Bar (1-line replacement for the old 6-line sidebar) ---
+
+// shimmerFrames are the 5-frame animation for the status bar tail.
+var shimmerFrames = []string{"·∘○∘·", "∘○∘·∘", "○∘·∘○", "∘·∘○∘", "·∘○∘·"}
+
+// viewStatusLine renders the 1-line status bar with agent chain, live metrics,
+// and shimmer animation. Applies left-overflow truncation when width is tight.
+func (s PipelineScreen) viewStatusLine(width int) string {
+	if len(s.agents) == 0 {
+		if s.configName != "" {
+			return dimStyle.Render(" " + s.configName)
+		}
+		return ""
+	}
+
+	// Build agent chain: "✓res ✓arch ▶work"
+	var chain strings.Builder
+	var activeRow *AgentRow
+	for i := range s.agents {
+		a := &s.agents[i]
+		var icon string
+		switch a.State {
+		case "done":
+			icon = "✓"
+		case "failed":
+			icon = "✗"
+		case "cancelled":
+			icon = "⊘"
+		case "gate":
+			icon = "●"
+		case "running":
+			icon = "▶"
+			activeRow = a
+		default:
+			icon = "○"
+		}
+		name := a.ID
+		if len(name) > 4 {
+			name = name[:4]
+		}
+		if chain.Len() > 0 {
+			chain.WriteString(" ")
+		}
+		chain.WriteString(icon)
+		chain.WriteString(name)
+	}
+
+	// Build active agent detail (metrics)
+	var detail string
+	if activeRow != nil {
+		var d strings.Builder
+		if activeRow.ModelDisplay != "" {
+			model := activeRow.ModelDisplay
+			if len(model) > 16 {
+				model = model[:16]
+			}
+			d.WriteString(model)
+			d.WriteString(" ")
+		}
+		d.WriteString(fmt.Sprintf("↑%s ↓%s", formatTokenCompact(s.liveInput), formatTokenCompact(s.liveOutput)))
+
+		if activeRow.ContextWindow > 0 {
+			pct := (s.liveInput + s.liveOutput) * 100 / activeRow.ContextWindow
+			d.WriteString(fmt.Sprintf(" ⊞%d%%", pct))
+		}
+
+		elapsed := time.Since(s.liveStart).Seconds()
+		if elapsed > 0 && s.liveOutput > 0 {
+			tokPS := float64(s.liveOutput) / elapsed
+			d.WriteString(fmt.Sprintf(" %dt/s", int(tokPS)))
+		}
+		detail = d.String()
+	}
+
+	// Build shimmer (only while active)
+	var shimmer string
+	if s.active && len(shimmerFrames) > 0 {
+		shimmer = " " + shimmerFrames[s.animFrame%len(shimmerFrames)]
+	}
+
+	// Compose full line: " chain: detail shimmer"
+	var full string
+	if detail != "" {
+		full = " " + chain.String() + ": " + detail + shimmer
+	} else {
+		full = " " + chain.String() + shimmer
+	}
+
+	// Truncation: drop shimmer, then tok/s, then truncate chain from left
+	if len(full) > width {
+		// Try without shimmer
+		if detail != "" {
+			full = " " + chain.String() + ": " + detail
+		} else {
+			full = " " + chain.String()
+		}
+	}
+	if len(full) > width && width > 4 {
+		// Truncate from the left
+		excess := len(full) - width + 3 // room for "<.."
+		if excess < len(full) {
+			full = " <.." + full[excess+1:]
+		}
+	}
+	if len(full) > width {
+		full = full[:width]
+	}
+
+	return dimStyle.Render(full)
+}
+
+// formatTokenCompact formats a token count as a compact string (e.g. 1234 → "1.2k").
+func formatTokenCompact(n int64) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	if n < 10000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	if n < 1000000 {
+		return fmt.Sprintf("%dk", n/1000)
+	}
+	return fmt.Sprintf("%.1fM", float64(n)/1000000)
 }
 
 func (s PipelineScreen) viewInputZone() string {
@@ -891,19 +1065,20 @@ func (s PipelineScreen) viewCompletion(width int) string {
 
 		b.WriteString(fmt.Sprintf(" Agent: %s (%s)  ⏱ %s  Tokens: %s\n", goalStyle.Render(a.ID), a.State, agentElapsed, tokens))
 
-		if s.streamBuf != nil {
-			activities := s.streamBuf.AgentActivities(a.ID)
-			var fileActivities []orchestrator.Activity
-			for _, act := range activities {
-				if isFilePathTool(act.Tool) {
-					fileActivities = append(fileActivities, act)
-				}
+		var activities []orchestrator.Activity
+		if s.history != nil {
+			activities = s.history.AgentActivities(orchestrator.AgentID(a.ID))
+		} else if s.streamBuf != nil {
+			activities = s.streamBuf.AgentActivities(a.ID)
+		}
+		var fileActivities []orchestrator.Activity
+		for _, act := range activities {
+			if isFilePathTool(act.Tool) {
+				fileActivities = append(fileActivities, act)
 			}
-			if len(fileActivities) > 0 {
-				b.WriteString(renderActivityLog(fileActivities, width, s.cwd, 3))
-			} else {
-				b.WriteString("   (no file activities)\n")
-			}
+		}
+		if len(fileActivities) > 0 {
+			b.WriteString(renderActivityLog(fileActivities, width, s.cwd, 3))
 		} else {
 			b.WriteString("   (no file activities)\n")
 		}
@@ -935,87 +1110,19 @@ func (s PipelineScreen) viewAgentHistory(width int) string {
 		b.WriteString(dividerStyle.Render(strings.Repeat("─", max(1, width-constContentInset))))
 		b.WriteString("\n")
 
-		if s.streamBuf != nil {
-			activities := s.streamBuf.AgentActivities(a.ID)
-			if len(activities) > 0 {
-				b.WriteString(renderActivityLog(activities, width, s.cwd, len(activities)))
-			} else {
-				b.WriteString(fmt.Sprintf(" No activity recorded for %s\n", a.ID))
-			}
+		var activities []orchestrator.Activity
+		if s.history != nil {
+			activities = s.history.AgentActivities(orchestrator.AgentID(a.ID))
+		} else if s.streamBuf != nil {
+			activities = s.streamBuf.AgentActivities(a.ID)
+		}
+		if len(activities) > 0 {
+			b.WriteString(renderActivityLog(activities, width, s.cwd, len(activities)))
 		} else {
 			b.WriteString(fmt.Sprintf(" No activity recorded for %s\n", a.ID))
 		}
 	} else {
 		b.WriteString(" No agent selected\n")
-	}
-	return b.String()
-}
-
-func (s PipelineScreen) viewDashboard() string {
-	w := s.dashboardVP.Width()
-	if w < minWidth {
-		w = minWidth
-	}
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf(" %-14s   %-7s %5s %8s %8s %7s  %s\n",
-		"Agent", "State", "Time", "In Tok", "Out Tok", "Tok/s", "Context"))
-	b.WriteString(strings.Repeat("─", w))
-	b.WriteString("\n")
-	for _, a := range s.agents {
-		icon := "○"
-		stateStr := "wait"
-		switch a.State {
-		case "running":
-			icon = "▶"
-			stateStr = "run"
-		case "done":
-			icon = "✓"
-			stateStr = "done"
-		case "failed":
-			icon = "✗"
-			stateStr = "fail"
-		case "cancelled":
-			icon = "⊘"
-			stateStr = "cancel"
-		case "gate":
-			icon = "●"
-			stateStr = "gate"
-		}
-
-		elapsed := "-"
-		if a.State == "running" && !a.StartedAt.IsZero() {
-			elapsed = time.Since(a.StartedAt).Truncate(time.Second).String()
-		} else if a.Elapsed > 0 {
-			elapsed = a.Elapsed.Truncate(time.Second).String()
-		}
-
-		inTok := "-"
-		outTok := "-"
-		tokPS := "-"
-		ctxBar := "░░░░░░░░  -"
-		if a.InputTokens > 0 || a.OutputTokens > 0 {
-			inTok = formatTokenCount(a.InputTokens)
-			outTok = formatTokenCount(a.OutputTokens)
-			if a.Elapsed.Seconds() > 0 {
-				tokPS = fmt.Sprintf("%.1f", float64(a.OutputTokens)/a.Elapsed.Seconds())
-			}
-			pct := float64(a.InputTokens+a.OutputTokens) / constDefaultContextWindow * 100
-			if pct > 100 {
-				pct = 100
-			}
-			filled := int(pct / 12.5)
-			empty := 8 - filled
-			if empty < 0 {
-				empty = 0
-			}
-			ctxBar = fmt.Sprintf("%s%s %2.0f%%",
-				strings.Repeat("█", filled),
-				strings.Repeat("░", empty),
-				pct)
-		}
-
-		b.WriteString(fmt.Sprintf(" %-14s %s %-7s %5s %8s %8s %7s  %s\n",
-			a.ID, icon, stateStr, elapsed, inTok, outTok, tokPS, ctxBar))
 	}
 	return b.String()
 }
@@ -1039,72 +1146,17 @@ func (s PipelineScreen) viewHelp() string {
 `
 }
 
-func (s PipelineScreen) viewSidebar(width int) string {
-	var b strings.Builder
-	b.WriteString(" Agents\n")
-	b.WriteString(strings.Repeat("─", width))
-	b.WriteString("\n")
-
-	var totalTokens int64
-	for _, a := range s.agents {
-		icon := "○"
-		switch a.State {
-		case "running":
-			icon = "▶"
-		case "done":
-			icon = "✓"
-		case "failed":
-			icon = "✗"
-		case "cancelled":
-			icon = "⊘"
-		case "gate":
-			icon = "●"
-		}
-
-		elapsed := "-"
-		if a.State == "running" && !a.StartedAt.IsZero() {
-			elapsed = time.Since(a.StartedAt).Truncate(time.Second).String()
-		} else if a.Elapsed > 0 {
-			elapsed = a.Elapsed.Truncate(time.Second).String()
-		}
-
-		tokens := "-"
-		total := a.InputTokens + a.OutputTokens
-		if total > 0 {
-			tokens = formatTokens(total)
-		}
-		totalTokens += total
-
-		id := a.ID
-		maxID := width - 16
-		if maxID < 4 {
-			maxID = 4
-		}
-		if len(id) > maxID {
-			id = id[:maxID]
-		}
-
-		b.WriteString(fmt.Sprintf(" %s %-*s %5s %6s\n", icon, maxID, id, elapsed, tokens))
-	}
-	if len(s.agents) == 0 {
-		b.WriteString(" (waiting)\n")
-	}
-
-	if totalTokens > 0 || len(s.agents) > 0 {
-		b.WriteString(strings.Repeat("─", width))
-		b.WriteString("\n")
-		totalElapsed := time.Since(s.startTime).Truncate(time.Second)
-		b.WriteString(fmt.Sprintf(" total: %s | %s\n", formatTokens(totalTokens), totalElapsed))
-	}
-
-	return b.String()
-}
-
 func (s PipelineScreen) viewFooter() string {
 	ctrlCHint := "[^C] cancel"
 	if s.ctrlCPending {
 		ctrlCHint = warnStyle.Render("[^C] EXIT")
 	}
+
+	// Dashboard overlay uses its own footer
+	if s.showDashboard {
+		return keyStyle.Render(" [Esc] return | [Tab] cycle | [PgUp/Dn] scroll              [^H] help  ") + ctrlCHint
+	}
+
 	switch s.content {
 	case ContentUserQuestion:
 		return keyStyle.Render(s.question.Footer()+"  [^H] help  ") + ctrlCHint
@@ -1394,23 +1446,4 @@ func formatTokens(n int64) string {
 		return fmt.Sprintf("%.0fk", float64(n)/1000)
 	}
 	return fmt.Sprintf("%.1fM", float64(n)/1000000)
-}
-
-// formatTokenCount formats a token count with comma separators.
-func formatTokenCount(n int64) string {
-	if n == 0 {
-		return "-"
-	}
-	s := fmt.Sprintf("%d", n)
-	if len(s) <= 3 {
-		return s
-	}
-	var result []byte
-	for i, c := range s {
-		if i > 0 && (len(s)-i)%3 == 0 {
-			result = append(result, ',')
-		}
-		result = append(result, byte(c))
-	}
-	return string(result)
 }

@@ -5,8 +5,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-
-	"github.com/xiii/orqestra/internal/harness"
+	"time"
 )
 
 // Activity records a single tool invocation observed in the agent stream.
@@ -46,16 +45,29 @@ type StreamEntry struct {
 
 const defaultRingCapacity = 200
 
+// AgentUsageSnapshot records accumulated token usage for a completed agent phase.
+type AgentUsageSnapshot struct {
+	Input  int64
+	Output int64
+	Start  time.Time
+	End    time.Time
+}
+
 // StreamRing is a concurrent-safe ring buffer of StreamEntry values shared
 // between the orchestrator (writer) and the TUI (reader). The TUI polls it
 // on tick to avoid channel backpressure that would block the subprocess.
 type StreamRing struct {
-	mu             sync.Mutex
-	entries        []StreamEntry
-	maxEntries     int
-	agentID        string
-	partial        string // incomplete line accumulator (not yet in entries)
-	agentSnapshots map[string][]StreamEntry
+	mu         sync.Mutex
+	entries    []StreamEntry
+	maxEntries int
+	agentID    string
+	partial    string // incomplete line accumulator (not yet in entries)
+	history    *StreamHistoryStore
+
+	// Live token accumulation for the current agent.
+	liveInput  int64
+	liveOutput int64
+	liveStart  time.Time
 }
 
 // NewStreamRing creates a StreamRing with the given entry capacity.
@@ -64,13 +76,13 @@ func NewStreamRing(maxEntries int) *StreamRing {
 		maxEntries = defaultRingCapacity
 	}
 	return &StreamRing{
-		maxEntries:     maxEntries,
-		agentSnapshots: make(map[string][]StreamEntry),
+		maxEntries: maxEntries,
+		history:    NewStreamHistoryStore(),
 	}
 }
 
 // SetAgent resets the ring for a new active agent, snapshotting the previous
-// agent's entries.
+// agent's entries and capturing accumulated usage.
 func (r *StreamRing) SetAgent(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -81,14 +93,21 @@ func (r *StreamRing) SetAgent(id string) {
 		r.partial = ""
 	}
 
-	if r.agentID != "" && len(r.entries) > 0 {
-		snapshot := make([]StreamEntry, len(r.entries))
-		copy(snapshot, r.entries)
-		r.agentSnapshots[r.agentID] = snapshot
+	if r.agentID != "" {
+		usage := AgentUsageSnapshot{
+			Input:  r.liveInput,
+			Output: r.liveOutput,
+			Start:  r.liveStart,
+			End:    time.Now(),
+		}
+		r.history.Capture(AgentID(r.agentID), r.entries, usage)
 	}
 
 	r.agentID = id
 	r.entries = nil
+	r.liveInput = 0
+	r.liveOutput = 0
+	r.liveStart = time.Now()
 }
 
 // Append adds an entry to the ring buffer.
@@ -99,6 +118,29 @@ func (r *StreamRing) Append(entry StreamEntry) {
 	if len(r.entries) > r.maxEntries {
 		r.entries = r.entries[len(r.entries)-r.maxEntries:]
 	}
+}
+
+// RecordUsage accumulates token counts for the current active agent.
+// Called by streamWriter.OnUsage on every usage report from the harness.
+func (r *StreamRing) RecordUsage(input, output int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.liveInput += input
+	r.liveOutput += output
+}
+
+// SnapshotUsage returns the accumulated token usage for the current agent
+// and the time the agent started. Safe for concurrent reads from the TUI tick.
+func (r *StreamRing) SnapshotUsage() (input, output int64, start time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.liveInput, r.liveOutput, r.liveStart
+}
+
+// AgentUsage returns the accumulated usage snapshot for a completed agent.
+// Returns zero value with zero times if the agent has no recorded usage.
+func (r *StreamRing) AgentUsage(id string) AgentUsageSnapshot {
+	return r.history.AgentUsage(AgentID(id))
 }
 
 // Snapshot returns the current agent ID and a copy of all entries.
@@ -113,21 +155,20 @@ func (r *StreamRing) Snapshot() (agentID string, entries []StreamEntry) {
 // AgentEntries returns a copy of the recorded entries for the given agent.
 func (r *StreamRing) AgentEntries(id string) []StreamEntry {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	if r.agentID == id {
 		out := make([]StreamEntry, len(r.entries))
 		copy(out, r.entries)
+		r.mu.Unlock()
 		return out
 	}
+	r.mu.Unlock()
 
-	entries, ok := r.agentSnapshots[id]
-	if !ok {
-		return nil
-	}
-	out := make([]StreamEntry, len(entries))
-	copy(out, entries)
-	return out
+	return r.history.AgentEntries(AgentID(id))
+}
+
+// History returns the store used for historical per-agent data.
+func (r *StreamRing) History() *StreamHistoryStore {
+	return r.history
 }
 
 // --- Compatibility helpers ---
@@ -251,32 +292,3 @@ func (r *StreamRing) AppendActivity(tool, detail string) {
 func (r *StreamRing) AppendStats(input, output int64) {
 	r.Append(StreamEntry{Kind: EntryStats, Stats: StreamStats{Input: input, Output: output, Valid: true}})
 }
-
-// --- streamWriter: adapts StreamRing to io.Writer + harness.ActivitySink + harness.UsageSink ---
-
-// streamWriter implements io.Writer, harness.ActivitySink, and harness.UsageSink
-// by appending to a StreamRing. Created per-agent call, writes to the long-lived ring.
-type streamWriter struct {
-	ring *StreamRing
-}
-
-func (w *streamWriter) Write(p []byte) (int, error) {
-	if len(p) > 0 {
-		w.ring.AppendText(string(p))
-	}
-	return len(p), nil
-}
-
-// OnToolUse implements harness.ActivitySink.
-func (w *streamWriter) OnToolUse(name, detail string) {
-	w.ring.AppendActivity(name, detail)
-}
-
-// OnUsage implements harness.UsageSink.
-func (w *streamWriter) OnUsage(input, output int64) {
-	w.ring.AppendStats(input, output)
-}
-
-// Verify interface compliance at compile time.
-var _ harness.ActivitySink = (*streamWriter)(nil)
-var _ harness.UsageSink = (*streamWriter)(nil)

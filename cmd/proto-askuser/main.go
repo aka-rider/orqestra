@@ -246,7 +246,19 @@ func runScenario(ctx context.Context, cfg *config.Config, selfBin string, s scen
 
 	// Run the model
 	var outputBuf strings.Builder
-	result, runErr := runner.RunStreaming(scenarioCtx, s.prompt, systemPrompt, &outputBuf)
+	updates := make(chan harness.StreamUpdate, 256)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for u := range updates {
+			if u.Text != "" {
+				_, _ = outputBuf.WriteString(u.Text)
+			}
+		}
+	}()
+	result, runErr := runner.RunStreaming(scenarioCtx, s.prompt, systemPrompt, updates)
+	close(updates)
+	<-done
 	elapsed := time.Since(start)
 
 	if runErr != nil {

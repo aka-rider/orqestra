@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 
 	"github.com/xiii/orqestra/internal/harness"
 )
@@ -65,12 +64,12 @@ func (r *budgetedRunner) RunPrint(ctx context.Context, prompt, systemPrompt stri
 	return result, nil
 }
 
-func (r *budgetedRunner) RunStreaming(ctx context.Context, prompt, systemPrompt string, stdout io.Writer) (harness.RunResult, error) {
+func (r *budgetedRunner) RunStreaming(ctx context.Context, prompt, systemPrompt string, events chan<- harness.StreamUpdate) (harness.RunResult, error) {
 	if err := r.guard.Check(); err != nil {
 		return harness.RunResult{}, err
 	}
 
-	result, innerErr := r.inner.RunStreaming(ctx, prompt, systemPrompt, stdout)
+	result, innerErr := r.inner.RunStreaming(ctx, prompt, systemPrompt, events)
 	r.record(result.Usage)
 
 	if innerErr != nil {
@@ -82,12 +81,12 @@ func (r *budgetedRunner) RunStreaming(ctx context.Context, prompt, systemPrompt 
 	return result, nil
 }
 
-func (r *budgetedRunner) RunContinue(ctx context.Context, sessionID, prompt string, stdout io.Writer) (harness.RunResult, error) {
+func (r *budgetedRunner) RunContinue(ctx context.Context, sessionID, prompt string, events chan<- harness.StreamUpdate) (harness.RunResult, error) {
 	if err := r.guard.Check(); err != nil {
 		return harness.RunResult{}, err
 	}
 
-	result, innerErr := r.inner.RunContinue(ctx, sessionID, prompt, stdout)
+	result, innerErr := r.inner.RunContinue(ctx, sessionID, prompt, events)
 	r.record(result.Usage)
 
 	if innerErr != nil {

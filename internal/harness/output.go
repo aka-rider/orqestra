@@ -6,23 +6,6 @@ import (
 	"strings"
 )
 
-// ActivitySink receives tool-use notifications from the harness during streaming.
-// Implementations can use this to display tool activity in the TUI.
-// The harness checks for this interface via type assertion on the io.Writer
-// passed to RunStreaming/RunContinue, so callers that don't implement it are
-// unaffected.
-type ActivitySink interface {
-	OnToolUse(name, detail string)
-}
-
-// UsageSink receives token usage notifications from the harness during streaming.
-// The harness checks for this interface via type assertion on the io.Writer
-// passed to RunStreaming/RunContinue. Usage is reported whenever the Claude CLI
-// stream contains a usage field (mid-call or result event).
-type UsageSink interface {
-	OnUsage(input, output int64)
-}
-
 // ToolDetail extracts a human-readable summary from a tool invocation's
 // name and raw JSON arguments. Used to populate the TUI activity bar.
 func ToolDetail(name string, args json.RawMessage) string {

@@ -323,3 +323,119 @@ func TestUserQuestion_MultiSelectToggleVisible(t *testing.T) {
 		t.Errorf("expected un-toggled option to render [ ], got:\n%s", out)
 	}
 }
+
+// --- Status Bar Tests ---
+
+func TestViewStatusLine_Empty(t *testing.T) {
+	s := PipelineScreen{}
+	out := s.viewStatusLine(80)
+	if out != "" {
+		t.Errorf("expected empty status line with no agents, got: %q", out)
+	}
+}
+
+func TestViewStatusLine_ConfigName(t *testing.T) {
+	s := PipelineScreen{configName: "orqestra.yaml"}
+	out := s.viewStatusLine(80)
+	if !strings.Contains(out, "orqestra.yaml") {
+		t.Errorf("expected config name in status line, got: %q", out)
+	}
+}
+
+func TestViewStatusLine_AgentChain(t *testing.T) {
+	s := PipelineScreen{
+		active: true,
+		agents: []AgentRow{
+			{ID: "researcher", State: "done"},
+			{ID: "architect", State: "done"},
+			{ID: "worker", State: "running", ModelDisplay: "claude-opus-4", ContextWindow: 200000},
+		},
+		liveInput:  12000,
+		liveOutput: 8000,
+		liveStart:  time.Now().Add(-30 * time.Second),
+	}
+	out := s.viewStatusLine(120)
+
+	if !strings.Contains(out, "✓rese") {
+		t.Errorf("expected ✓rese for done researcher, got: %q", out)
+	}
+	if !strings.Contains(out, "✓arch") {
+		t.Errorf("expected ✓arch for done architect, got: %q", out)
+	}
+	if !strings.Contains(out, "▶work") {
+		t.Errorf("expected ▶work for running worker, got: %q", out)
+	}
+	if !strings.Contains(out, "claude-opus-4") {
+		t.Errorf("expected model name in status line, got: %q", out)
+	}
+	if !strings.Contains(out, "↑12k") {
+		t.Errorf("expected input tokens ↑12k, got: %q", out)
+	}
+	if !strings.Contains(out, "↓8.0k") {
+		t.Errorf("expected output tokens ↓8.0k, got: %q", out)
+	}
+}
+
+func TestViewStatusLine_Truncation(t *testing.T) {
+	s := PipelineScreen{
+		active: true,
+		agents: []AgentRow{
+			{ID: "researcher", State: "done"},
+			{ID: "architect", State: "done"},
+			{ID: "critic", State: "done"},
+			{ID: "worker", State: "running", ModelDisplay: "claude-opus-4", ContextWindow: 200000},
+		},
+		liveInput:  50000,
+		liveOutput: 30000,
+		liveStart:  time.Now().Add(-60 * time.Second),
+	}
+	out := s.viewStatusLine(40)
+
+	// Should fit within width
+	// Note: dimStyle may add ANSI escapes, so we can't check raw len
+	if out == "" {
+		t.Error("expected non-empty status line even at narrow width")
+	}
+}
+
+func TestViewStatusLine_ShimmerCycles(t *testing.T) {
+	s := PipelineScreen{
+		active:    true,
+		agents:    []AgentRow{{ID: "worker", State: "running"}},
+		liveStart: time.Now(),
+	}
+
+	results := map[string]bool{}
+	for i := 0; i < 5; i++ {
+		s.animFrame = i
+		out := s.viewStatusLine(80)
+		results[out] = true
+	}
+	// Should have at least 2 different outputs (shimmer changes)
+	if len(results) < 2 {
+		t.Error("expected shimmer to produce different frames")
+	}
+}
+
+func TestFormatTokenCompact(t *testing.T) {
+	tests := []struct {
+		input int64
+		want  string
+	}{
+		{0, "0"},
+		{999, "999"},
+		{1000, "1.0k"},
+		{1500, "1.5k"},
+		{9999, "10.0k"},
+		{10000, "10k"},
+		{123456, "123k"},
+		{1000000, "1.0M"},
+		{1500000, "1.5M"},
+	}
+	for _, tt := range tests {
+		got := formatTokenCompact(tt.input)
+		if got != tt.want {
+			t.Errorf("formatTokenCompact(%d) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}

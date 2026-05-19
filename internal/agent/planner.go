@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"strings"
 
@@ -39,8 +38,8 @@ func NewPlanner(runner harness.ContinuableRunner, system string) *Planner {
 // Run executes a new planning session with the given prompt. It reads authoritative
 // output from the plan file via ReadPlanFromRun. Returns a hard error if the plan
 // file is unreadable — initial runs must produce a plan.
-func (p *Planner) Run(ctx context.Context, prompt string, stdout io.Writer) (PlanResult, error) {
-	result, err := p.runner.RunStreaming(ctx, prompt, p.system, stdout)
+func (p *Planner) Run(ctx context.Context, prompt string, events chan<- harness.StreamUpdate) (PlanResult, error) {
+	result, err := p.runner.RunStreaming(ctx, prompt, p.system, events)
 	if err != nil {
 		return PlanResult{}, fmt.Errorf("planner run: %w", err)
 	}
@@ -64,8 +63,8 @@ func (p *Planner) Run(ctx context.Context, prompt string, stdout io.Writer) (Pla
 // RunResult may lack a PlanFilePath. When the plan file is unreadable, Plan is
 // empty and Chat carries the model's response. Errors are returned only for runner
 // failures, never for plan-file-missing.
-func (p *Planner) Continue(ctx context.Context, sessionID, prompt string, stdout io.Writer) (PlanResult, error) {
-	result, err := p.runner.RunContinue(ctx, sessionID, prompt, stdout)
+func (p *Planner) Continue(ctx context.Context, sessionID, prompt string, events chan<- harness.StreamUpdate) (PlanResult, error) {
+	result, err := p.runner.RunContinue(ctx, sessionID, prompt, events)
 	if err != nil {
 		return PlanResult{}, fmt.Errorf("planner continue: %w", err)
 	}

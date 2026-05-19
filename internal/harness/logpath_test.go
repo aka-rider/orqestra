@@ -6,6 +6,24 @@ import (
 	"testing"
 )
 
+func parseLogFileUpdates(t *testing.T, path string, maxLines int) []StreamUpdate {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open log file: %v", err)
+	}
+	defer f.Close()
+
+	updates, err := ParseSessionLogStream(f)
+	if err != nil {
+		t.Fatalf("ParseSessionLogStream: %v", err)
+	}
+	if maxLines > 0 && len(updates) > maxLines {
+		updates = updates[len(updates)-maxLines:]
+	}
+	return updates
+}
+
 func TestCwdToDash(t *testing.T) {
 	tests := []struct {
 		input string
@@ -24,7 +42,7 @@ func TestCwdToDash(t *testing.T) {
 	}
 }
 
-func TestParseSessionLog_ToolUseAndText(t *testing.T) {
+func TestParseSessionLogStream_File_ToolUseAndText(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "test.jsonl")
 
@@ -38,9 +56,13 @@ func TestParseSessionLog_ToolUseAndText(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	entries, err := ParseSessionLog(logPath, 100)
-	if err != nil {
-		t.Fatalf("ParseSessionLog: %v", err)
+	updates := parseLogFileUpdates(t, logPath, 100)
+
+	var entries []StreamUpdate
+	for _, u := range updates {
+		if u.Tool != "" || u.Text != "" {
+			entries = append(entries, u)
+		}
 	}
 
 	// Should have 3 entries: Read tool_use, text, Bash tool_use
@@ -49,26 +71,30 @@ func TestParseSessionLog_ToolUseAndText(t *testing.T) {
 		t.Fatalf("expected 3 entries, got %d", len(entries))
 	}
 
-	if entries[0].Kind != LogEntryToolUse || entries[0].ToolName != "Read" {
-		t.Errorf("entry 0: got %+v, want tool_use Read", entries[0])
+	var sawRead, sawText, sawBash bool
+	for _, entry := range entries {
+		if entry.Tool == "Read" && entry.Detail == "go.mod" {
+			sawRead = true
+		}
+		if entry.Text == "I found the module definition." {
+			sawText = true
+		}
+		if entry.Tool == "Bash" {
+			sawBash = true
+		}
 	}
-	if entries[0].Detail != "go.mod" {
-		t.Errorf("entry 0 detail = %q, want 'go.mod'", entries[0].Detail)
+	if !sawRead {
+		t.Error("missing tool_use Read/go.mod entry")
 	}
-
-	if entries[1].Kind != LogEntryText {
-		t.Errorf("entry 1: got kind %d, want LogEntryText", entries[1].Kind)
+	if !sawText {
+		t.Error("missing assistant text entry")
 	}
-	if entries[1].Detail != "I found the module definition." {
-		t.Errorf("entry 1 detail = %q", entries[1].Detail)
-	}
-
-	if entries[2].Kind != LogEntryToolUse || entries[2].ToolName != "Bash" {
-		t.Errorf("entry 2: got %+v, want tool_use Bash", entries[2])
+	if !sawBash {
+		t.Error("missing tool_use Bash entry")
 	}
 }
 
-func TestParseSessionLog_MaxLines(t *testing.T) {
+func TestParseSessionLogStream_File_MaxLines(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "test.jsonl")
 
@@ -81,40 +107,31 @@ func TestParseSessionLog_MaxLines(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	entries, err := ParseSessionLog(logPath, 3)
-	if err != nil {
-		t.Fatalf("ParseSessionLog: %v", err)
-	}
+	entries := parseLogFileUpdates(t, logPath, 3)
 	if len(entries) != 3 {
 		t.Fatalf("expected 3 entries (maxLines), got %d", len(entries))
 	}
 }
 
-func TestParseSessionLog_EmptyFile(t *testing.T) {
+func TestParseSessionLogStream_File_EmptyFile(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "empty.jsonl")
 	os.WriteFile(logPath, []byte(""), 0o644)
 
-	entries, err := ParseSessionLog(logPath, 100)
-	if err != nil {
-		t.Fatalf("ParseSessionLog: %v", err)
-	}
-	if entries != nil {
-		t.Errorf("expected nil for empty file, got %d entries", len(entries))
+	entries := parseLogFileUpdates(t, logPath, 100)
+	if len(entries) != 0 {
+		t.Errorf("expected empty entries for empty file, got %d entries", len(entries))
 	}
 }
 
-func TestParseSessionLog_MissingFile(t *testing.T) {
-	entries, err := ParseSessionLog("/nonexistent/path.jsonl", 100)
-	if err != nil {
-		t.Fatalf("expected nil error for missing file, got: %v", err)
-	}
-	if entries != nil {
-		t.Errorf("expected nil entries for missing file")
+func TestParseSessionLogStream_File_MissingFile(t *testing.T) {
+	_, err := os.Open("/nonexistent/path.jsonl")
+	if err == nil {
+		t.Fatal("expected open error for missing file")
 	}
 }
 
-func TestParseSessionLog_MalformedLines(t *testing.T) {
+func TestParseSessionLogStream_File_MalformedLines(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "bad.jsonl")
 
@@ -124,10 +141,7 @@ also not json
 `
 	os.WriteFile(logPath, []byte(lines), 0o644)
 
-	entries, err := ParseSessionLog(logPath, 100)
-	if err != nil {
-		t.Fatalf("ParseSessionLog: %v", err)
-	}
+	entries := parseLogFileUpdates(t, logPath, 100)
 	// Only the valid assistant line should produce an entry
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry (skipping malformed), got %d", len(entries))

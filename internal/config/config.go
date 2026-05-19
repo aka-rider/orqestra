@@ -84,6 +84,17 @@ func (c *Config) lookupModel(name string) (*ModelConfig, string) {
 	return nil, ""
 }
 
+// ModelMeta returns the ModelConfig and canonical key for the given model
+// reference name. Uses case-insensitive lookup. Returns ok=false if the model
+// is not found in the configuration.
+func (c *Config) ModelMeta(name string) (ModelConfig, bool) {
+	mc, _ := c.lookupModel(name)
+	if mc == nil {
+		return ModelConfig{}, false
+	}
+	return *mc, true
+}
+
 // modelNames returns a sorted list of available model names.
 func (c *Config) modelNames() []string {
 	names := make([]string, 0, len(c.Models))

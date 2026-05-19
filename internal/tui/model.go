@@ -11,6 +11,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/agent"
+	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
@@ -42,12 +43,16 @@ const (
 
 // AgentRow tracks a single agent's status in the sidebar.
 type AgentRow struct {
-	ID           string
-	State        string // "running", "done", "waiting", "failed", "cancelled", "gate"
-	Elapsed      time.Duration
-	StartedAt    time.Time
-	InputTokens  int64
-	OutputTokens int64
+	ID            string
+	State         string // "running", "done", "waiting", "failed", "cancelled", "gate"
+	Elapsed       time.Duration
+	StartedAt     time.Time
+	InputTokens   int64
+	OutputTokens  int64
+	ModelRef      string // config key used for this agent
+	ModelDisplay  string // short display name (e.g. "claude-opus-4")
+	Provider      string // provider name from config
+	ContextWindow int64  // context window in tokens (0 = unknown)
 }
 
 // Model is the top-level Bubble Tea model for the Orqestra TUI.
@@ -57,9 +62,10 @@ type Model struct {
 	height int
 
 	// Pipeline communication (domain side-effects stay on root)
-	events    <-chan orchestrator.Event
-	decisions chan<- orchestrator.Decision
-	cancel    context.CancelFunc
+	events        <-chan orchestrator.Event
+	streamUpdates <-chan harness.StreamUpdate
+	decisions     chan<- orchestrator.Decision
+	cancel        context.CancelFunc
 
 	// Engine
 	engine *orchestrator.Engine
@@ -103,6 +109,12 @@ const (
 func tickCmd() tea.Cmd {
 	return tea.Tick(tickInterval, func(t time.Time) tea.Msg {
 		return tickMsg(t)
+	})
+}
+
+func animTickCmd() tea.Cmd {
+	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
+		return animTickMsg(t)
 	})
 }
 
@@ -204,6 +216,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		if m.state == StatePipeline {
+			m.pipelineScreen.DrainStreamUpdates(m.streamUpdates)
 			// Skip pipeline sync while the plan-history viewer is overlaid: its
 			// rendering is owned by planHistoryScreen, and timer ticks must not
 			// rebuild unrelated viewport content (tui-instructions.md §async).
@@ -211,6 +224,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pipelineScreen.SyncViewports()
 			}
 			return m, tickCmd()
+		}
+		return m, nil
+
+	case animTickMsg:
+		if m.state == StatePipeline && m.pipelineScreen.active {
+			m.pipelineScreen.animFrame++
+			return m, animTickCmd()
 		}
 		return m, nil
 
@@ -432,7 +452,7 @@ func (m Model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.state = StatePipeline
 			m.recalculateLayout()
 			pipelineCmd := m.startPipeline(i.Prompt)
-			return m, pipelineCmd
+			return m, tea.Batch(pipelineCmd, animTickCmd())
 		case NavigateToRunsListIntent:
 			m.navigateToRunsList()
 			return m, nil
@@ -448,7 +468,13 @@ func (m Model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func inputHeightChanged(prevContent, nextContent ContentMode, prevComment, nextComment bool) bool {
 	prevTall := prevContent == ContentPlanReview && prevComment
 	nextTall := nextContent == ContentPlanReview && nextComment
-	return prevTall != nextTall
+	if prevTall != nextTall {
+		return true
+	}
+	// Question mode uses dynamic height
+	prevQuestion := prevContent == ContentUserQuestion
+	nextQuestion := nextContent == ContentUserQuestion
+	return prevQuestion != nextQuestion
 }
 
 // handlePipelineKey delegates to PipelineScreen and handles intents.
@@ -616,8 +642,10 @@ func (m *Model) startPipeline(prompt string) tea.Cmd {
 		Prompt: prompt,
 	})
 	m.events = channels.Events
+	m.streamUpdates = channels.StreamUpdates
 	m.decisions = channels.Decisions
-	m.pipelineScreen.SetStreamBuf(channels.Stream)
+	m.pipelineScreen.SetStreamBuf(orchestrator.NewStreamRing(200))
+	m.pipelineScreen.SetHistoryStore(channels.History)
 
 	return tea.Batch(waitForEvent(channels.Events), tickCmd())
 }
@@ -669,6 +697,10 @@ func (m *Model) recalculateLayout() {
 	case StatePipeline:
 		if m.pipelineScreen.content == ContentPlanReview && m.pipelineScreen.hasPlanComment {
 			inputHeight = constPlanReviewInputHeight
+		} else if m.pipelineScreen.content == ContentUserQuestion && m.pipelineScreen.hasQuestion {
+			// Auto-grow input zone for question options
+			optCount := len(m.pipelineScreen.question.q.Options)
+			inputHeight = max(constPipelineInputHeight, optCount+2)
 		} else {
 			inputHeight = constPipelineInputHeight
 		}
@@ -701,14 +733,16 @@ func (m *Model) recalculateLayout() {
 	m.runsListScreen.viewport.SetWidth(m.width)
 	m.runsListScreen.viewport.SetHeight(contentHeight)
 
-	// Run detail: full-width upper pane (steps remain on right for historical view)
+	// Run detail: agent menu LEFT, plan content RIGHT, log BOTTOM.
+	// RunDetail manages its own chrome; don't rely on pipeline's usedHeight.
 	if m.state == StateRunDetail {
-		upperHeight := max(0, contentHeight-constRunLogHeight-1)
-		halfW := m.width / 2
-		m.runDetailScreen.detailVP.SetWidth(halfW)
-		m.runDetailScreen.detailVP.SetHeight(upperHeight)
-		m.runDetailScreen.stepsVP.SetWidth(m.width - halfW - 1)
+		upperHeight := max(0, m.height-constRunDetailChromeHeight-constRunLogHeight)
+		menuW := max(constRunDetailMinMenuW, m.width*constRunDetailMenuPct/100)
+		contentW := max(0, m.width-menuW-1)
+		m.runDetailScreen.stepsVP.SetWidth(menuW)
 		m.runDetailScreen.stepsVP.SetHeight(upperHeight)
+		m.runDetailScreen.detailVP.SetWidth(contentW)
+		m.runDetailScreen.detailVP.SetHeight(upperHeight)
 		m.runDetailScreen.logVP.SetWidth(m.width)
 		m.runDetailScreen.logVP.SetHeight(constRunLogHeight)
 	}

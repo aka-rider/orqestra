@@ -99,7 +99,7 @@ func TestLayout_HeightInvariant_SmallTerminal(t *testing.T) {
 func TestLayout_RecalculateConstants(t *testing.T) {
 	m := layoutTestModel(120, 40, StatePipeline)
 
-	// New geometry: full-width content, constSidebarHeight-tall sidebar
+	// New geometry: full-width content, constSidebarHeight=1 (status bar)
 	contentHeight := 40 - constPipelineInputHeight - constFooterHeight - constSidebarHeight
 
 	if m.pipelineScreen.contentVP.Width() != 120 {
@@ -108,14 +108,8 @@ func TestLayout_RecalculateConstants(t *testing.T) {
 	if m.pipelineScreen.contentVP.Height() != contentHeight {
 		t.Errorf("contentVP.Height = %d, want %d", m.pipelineScreen.contentVP.Height(), contentHeight)
 	}
-	if m.pipelineScreen.sidebarVP.Width() != 120 {
-		t.Errorf("sidebarVP.Width = %d, want 120", m.pipelineScreen.sidebarVP.Width())
-	}
-	if m.pipelineScreen.sidebarVP.Height() != constSidebarHeight {
-		t.Errorf("sidebarVP.Height = %d, want %d", m.pipelineScreen.sidebarVP.Height(), constSidebarHeight)
-	}
-	if m.pipelineScreen.dashboardVP.Width() != 120 {
-		t.Errorf("dashboardVP.Width = %d, want 120", m.pipelineScreen.dashboardVP.Width())
+	if m.pipelineScreen.dashboard.width != 120 {
+		t.Errorf("dashboard.width = %d, want 120", m.pipelineScreen.dashboard.width)
 	}
 }
 
@@ -141,15 +135,14 @@ func TestLayout_BelowMinimumNoOp(t *testing.T) {
 	}
 }
 
-func TestLayout_SidebarGeometry(t *testing.T) {
+func TestLayout_StatusBarGeometry(t *testing.T) {
+	// Status bar is 1 line — just verify the layout math is consistent
 	widths := []int{60, 80, 120, 200}
 	for _, w := range widths {
 		m := layoutTestModel(w, 40, StatePipeline)
-		if m.pipelineScreen.sidebarVP.Width() != w {
-			t.Errorf("width=%d: sidebarVP.Width=%d, want %d", w, m.pipelineScreen.sidebarVP.Width(), w)
-		}
-		if m.pipelineScreen.sidebarVP.Height() != constSidebarHeight {
-			t.Errorf("width=%d: sidebarVP.Height=%d, want %d", w, m.pipelineScreen.sidebarVP.Height(), constSidebarHeight)
+		expectedContent := 40 - constPipelineInputHeight - constFooterHeight - constSidebarHeight
+		if m.pipelineScreen.contentVP.Height() != expectedContent {
+			t.Errorf("width=%d: contentVP.Height=%d, want %d", w, m.pipelineScreen.contentVP.Height(), expectedContent)
 		}
 	}
 }

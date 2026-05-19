@@ -3,7 +3,6 @@ package testutil
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -57,12 +56,12 @@ func (f *FakeRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult
 	return harness.RunResult{Output: out.Output, SessionID: out.SessionID, PlanFilePath: out.PlanFilePath, Usage: out.Usage}, out.Err
 }
 
-func (f *FakeRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
+func (f *FakeRunner) RunStreaming(_ context.Context, _, _ string, _ chan<- harness.StreamUpdate) (harness.RunResult, error) {
 	out := f.next()
 	return harness.RunResult{Output: out.Output, SessionID: out.SessionID, PlanFilePath: out.PlanFilePath, Usage: out.Usage}, out.Err
 }
 
-func (f *FakeRunner) RunContinue(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
+func (f *FakeRunner) RunContinue(_ context.Context, _, _ string, _ chan<- harness.StreamUpdate) (harness.RunResult, error) {
 	out := f.next()
 	return harness.RunResult{Output: out.Output, SessionID: out.SessionID, PlanFilePath: out.PlanFilePath, Usage: out.Usage}, out.Err
 }

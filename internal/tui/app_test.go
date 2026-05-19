@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"testing"
@@ -23,11 +22,11 @@ func (n *noopRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult
 	return harness.RunResult{Output: `{"verdict":"accept","brief":{"task":"t","end_state":"e","scope":[],"non_scope":[]},"questions":[],"confidence":0.9}`}, nil
 }
 
-func (n *noopRunner) RunStreaming(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
+func (n *noopRunner) RunStreaming(_ context.Context, _, _ string, _ chan<- harness.StreamUpdate) (harness.RunResult, error) {
 	return harness.RunResult{Output: `{"verdict":"accept","brief":{"task":"t","end_state":"e","scope":[],"non_scope":[]},"questions":[],"confidence":0.9}`}, nil
 }
 
-func (n *noopRunner) RunContinue(_ context.Context, _, _ string, _ io.Writer) (harness.RunResult, error) {
+func (n *noopRunner) RunContinue(_ context.Context, _, _ string, _ chan<- harness.StreamUpdate) (harness.RunResult, error) {
 	return harness.RunResult{Output: "✓ all pass"}, nil
 }
 
@@ -522,22 +521,24 @@ func TestTUI_SidebarTokens(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.active = true
 	m.width = 120
 	m.height = 40
 	m.pipelineScreen.agents = []AgentRow{
 		{ID: "researcher", State: "done", Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402},
-		{ID: "architect", State: "running", StartedAt: time.Now().Add(-24 * time.Second), InputTokens: 0, OutputTokens: 0},
+		{ID: "architect", State: "running", StartedAt: time.Now().Add(-24 * time.Second), InputTokens: 0, OutputTokens: 0, ModelDisplay: "claude-opus-4"},
 	}
 	m.recalculateLayout()
 	m.pipelineScreen.SyncViewports()
 
 	view := viewString(m)
 
-	if !strings.Contains(view, "1.6k") {
-		t.Error("expected sidebar to show formatted token count '1.6k' for researcher")
+	// Status bar shows agent chain with state icons
+	if !strings.Contains(view, "✓rese") {
+		t.Error("expected status bar to show done researcher with ✓ icon")
 	}
-	if !strings.Contains(view, "total:") {
-		t.Error("expected sidebar to show totals row")
+	if !strings.Contains(view, "▶arch") {
+		t.Error("expected status bar to show running architect with ▶ icon")
 	}
 }
 
@@ -549,17 +550,18 @@ func TestTUI_DashboardTokens(t *testing.T) {
 	m.width = 120
 	m.height = 40
 	m.pipelineScreen.agents = []AgentRow{
-		{ID: "researcher", State: "done", Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402},
+		{ID: "researcher", State: "done", Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402, ModelDisplay: "claude-opus-4"},
 	}
 	m.recalculateLayout()
 	m.pipelineScreen.SyncViewports()
 
 	view := viewString(m)
-	if !strings.Contains(view, "In Tok") {
-		t.Error("expected dashboard header with 'In Tok'")
+	// New dashboard shows agent cards with state icons and model names
+	if !strings.Contains(view, "researcher") {
+		t.Error("expected dashboard to show agent name 'researcher'")
 	}
-	if !strings.Contains(view, "1,218") {
-		t.Error("expected dashboard to show input tokens '1,218'")
+	if !strings.Contains(view, "✓") {
+		t.Error("expected dashboard to show done icon ✓")
 	}
 }
 
