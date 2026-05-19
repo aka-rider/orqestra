@@ -45,7 +45,7 @@ func hydratedModels(t *testing.T) map[string]Model {
 		m.state = StatePipeline
 		m.pipelineScreen.content = ContentAgentHistory
 		m.pipelineScreen.agents = []AgentRow{
-			{ID: "researcher", State: "running", Elapsed: 30 * time.Second, StartedAt: time.Now().Add(-30 * time.Second), InputTokens: 2000, OutputTokens: 1000},
+			{ID: "researcher", State: AgentStateRunning, Elapsed: 30 * time.Second, StartedAt: time.Now().Add(-30 * time.Second), InputTokens: 2000, OutputTokens: 1000},
 		}
 		m.pipelineScreen.focusedAgent = 1
 
@@ -68,7 +68,7 @@ func hydratedModels(t *testing.T) map[string]Model {
 		m.pipelineScreen.hasValidation = true
 		m.pipelineScreen.workerValidation = "pass"
 		m.pipelineScreen.agents = []AgentRow{
-			{ID: "researcher", State: "done", Elapsed: 30 * time.Second, StartedAt: time.Now().Add(-30 * time.Second), InputTokens: 2000, OutputTokens: 1000},
+			{ID: "researcher", State: AgentStateDone, Elapsed: 30 * time.Second, StartedAt: time.Now().Add(-30 * time.Second), InputTokens: 2000, OutputTokens: 1000},
 		}
 
 		sb := orchestrator.NewStreamRing(50)
@@ -105,8 +105,8 @@ func hydratedModels(t *testing.T) map[string]Model {
 		m.pipelineScreen.hasPlan = true
 		m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nDo the thing."
 		m.pipelineScreen.chatHistory = []ChatEntry{
-			{Role: "you", Text: "Why step 3 before step 4?"},
-			{Role: "architect", Text: "Because config parser must init first."},
+			{Role: ChatRoleUser, Text: "Why step 3 before step 4?"},
+			{Role: ChatRoleArchitect, Text: "Because config parser must init first."},
 		}
 		m.pipelineScreen.hasPlanComment = true
 		m.pipelineScreen.planComment = textarea.New()

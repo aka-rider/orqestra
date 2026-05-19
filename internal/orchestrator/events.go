@@ -1,6 +1,6 @@
 package orchestrator
 
-import "github.com/xiii/orqestra/internal/harness"
+import "github.com/xiii/orqestra/internal/mcp"
 
 // EventType classifies orchestrator events emitted to the TUI.
 type EventType int
@@ -121,7 +121,7 @@ type Event struct {
 	ChatText string
 
 	// UserQuestion is set on EventUserQuestion.
-	UserQuestion harness.MCPToolCall
+	UserQuestion mcp.ToolCall
 
 	// MergeConflict is set on EventMergeConflict.
 	MergeConflict MergeConflictInfo

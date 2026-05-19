@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/testutil"
 )
 
@@ -217,7 +218,7 @@ func TestCopySessionLog_EmptySessionID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dest, err := CopySessionLog(sess, tmp, "", "test.jsonl")
+	dest, err := CopySessionLog(sess, tmp, "", "test.jsonl", func(_, _ string) (string, error) { return "", nil })
 	if err != nil {
 		t.Fatalf("expected nil error for empty sessionID, got: %v", err)
 	}
@@ -237,7 +238,7 @@ func TestCopySessionLog_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dest, err := CopySessionLog(sess, cwd, "nonexistent-session-id", "test.jsonl")
+	dest, err := CopySessionLog(sess, cwd, "nonexistent-session-id", "test.jsonl", harness.ResolveSessionLogPath)
 	if err == nil {
 		t.Fatal("expected error for nonexistent session ID, got nil")
 	}
@@ -262,7 +263,7 @@ func TestCopySessionLog_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dest, err := CopySessionLog(sess, cwd, sessionID, "researcher_session.jsonl")
+	dest, err := CopySessionLog(sess, cwd, sessionID, "researcher_session.jsonl", harness.ResolveSessionLogPath)
 	if err != nil {
 		t.Fatalf("CopySessionLog: %v", err)
 	}

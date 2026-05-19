@@ -8,8 +8,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/xiii/orqestra/internal/harness"
 )
 
 // SessionDir manages the host-side session directory where pipeline artifacts accumulate.
@@ -211,16 +209,19 @@ func readStringArtifact(dir, name string) string {
 	return string(data)
 }
 
+// SessionLogResolver resolves the on-disk path of a Claude CLI session JSONL.
+type SessionLogResolver func(repoPath, sessionID string) (string, error)
+
 // CopySessionLog copies the Claude CLI session JSONL for sessionID into this session
 // directory as destName (e.g., "researcher_session.jsonl").
 // repoPath is the repository root used to locate the source JSONL.
 // Returns ("", nil) if sessionID is empty or if the session dir is unset.
 // Returns ("", err) on IO failure — callers should slog.Warn and continue.
-func CopySessionLog(s SessionDir, repoPath, sessionID, destName string) (string, error) {
+func CopySessionLog(s SessionDir, repoPath, sessionID, destName string, resolve SessionLogResolver) (string, error) {
 	if sessionID == "" || s.Path == "" {
 		return "", nil
 	}
-	src, err := harness.ResolveSessionLogPath(repoPath, sessionID)
+	src, err := resolve(repoPath, sessionID)
 	if err != nil {
 		return "", fmt.Errorf("copy session log: resolve %s: %w", sessionID, err)
 	}

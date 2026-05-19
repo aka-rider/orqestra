@@ -11,7 +11,6 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/agent"
-	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
@@ -41,10 +40,22 @@ const (
 	ContentPlanHistory                      // Ctrl+Y plan history viewer (live gate)
 )
 
+// AgentState classifies an agent's execution state.
+type AgentState string
+
+const (
+	AgentStateRunning   AgentState = "running"
+	AgentStateDone      AgentState = "done"
+	AgentStateWaiting   AgentState = "waiting"
+	AgentStateFailed    AgentState = "failed"
+	AgentStateCancelled AgentState = "cancelled"
+	AgentStateGate      AgentState = "gate"
+)
+
 // AgentRow tracks a single agent's status in the sidebar.
 type AgentRow struct {
 	ID            string
-	State         string // "running", "done", "waiting", "failed", "cancelled", "gate"
+	State         AgentState
 	Elapsed       time.Duration
 	StartedAt     time.Time
 	InputTokens   int64
@@ -63,7 +74,7 @@ type Model struct {
 
 	// Pipeline communication (domain side-effects stay on root)
 	events        <-chan orchestrator.Event
-	streamUpdates <-chan harness.StreamUpdate
+	streamUpdates <-chan orchestrator.StreamEntry
 	decisions     chan<- orchestrator.Decision
 	cancel        context.CancelFunc
 
@@ -507,11 +518,10 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 	}
 	switch i := intent.(type) {
 	case SubmitQuestionAnswerIntent:
-		if m.engine != nil && m.engine.QuestionBridge != nil {
-			bridge := m.engine.QuestionBridge
+		if m.engine != nil {
 			ans := i.Answer
 			return m, batch(func() tea.Msg {
-				bridge.SendAnswer(ans)
+				m.engine.SendAnswer(ans)
 				return nil
 			})
 		}

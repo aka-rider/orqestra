@@ -1,4 +1,4 @@
-package harness
+package mcp
 
 import (
 	"context"
@@ -24,14 +24,12 @@ func TestQuestionBridge_RoundTrip(t *testing.T) {
 	}
 	defer bridge.Stop()
 
-	// Verify socket file exists
 	if _, err := os.Stat(sockPath); err != nil {
 		t.Fatalf("socket file should exist: %v", err)
 	}
 
-	// Simulate MCP server: dial, send question, read answer
 	done := make(chan error, 1)
-	var gotAnswer MCPAnswer
+	var gotAnswer Answer
 
 	go func() {
 		conn, err := net.Dial("unix", sockPath)
@@ -41,9 +39,9 @@ func TestQuestionBridge_RoundTrip(t *testing.T) {
 		}
 		defer conn.Close()
 
-		question := MCPToolCall{
+		question := ToolCall{
 			Question: "What color do you prefer?",
-			Options: []MCPToolOption{
+			Options: []ToolOption{
 				{Label: "Red", Hint: "warm color"},
 				{Label: "Blue", Hint: "cool color"},
 			},
@@ -66,7 +64,6 @@ func TestQuestionBridge_RoundTrip(t *testing.T) {
 		done <- nil
 	}()
 
-	// Read question from bridge
 	select {
 	case q := <-bridge.Questions():
 		if q.Question != "What color do you prefer?" {
@@ -79,12 +76,10 @@ func TestQuestionBridge_RoundTrip(t *testing.T) {
 		t.Fatal("timeout waiting for question")
 	}
 
-	// Send answer
-	bridge.SendAnswer(MCPAnswer{
+	bridge.SendAnswer(Answer{
 		SelectedIndices: []int{1},
 	})
 
-	// Wait for mock MCP server to finish
 	select {
 	case err := <-done:
 		if err != nil {
@@ -94,7 +89,6 @@ func TestQuestionBridge_RoundTrip(t *testing.T) {
 		t.Fatal("timeout waiting for mock MCP server")
 	}
 
-	// Verify answer
 	if len(gotAnswer.SelectedIndices) != 1 || gotAnswer.SelectedIndices[0] != 1 {
 		t.Errorf("answer = %+v, want selected index 1", gotAnswer)
 	}
@@ -114,7 +108,7 @@ func TestQuestionBridge_FreeformRoundTrip(t *testing.T) {
 	defer bridge.Stop()
 
 	done := make(chan error, 1)
-	var gotAnswer MCPAnswer
+	var gotAnswer Answer
 
 	go func() {
 		conn, err := net.Dial("unix", sockPath)
@@ -124,7 +118,7 @@ func TestQuestionBridge_FreeformRoundTrip(t *testing.T) {
 		}
 		defer conn.Close()
 
-		question := MCPToolCall{Question: "What is your name?"}
+		question := ToolCall{Question: "What is your name?"}
 		payload, _ := json.Marshal(question)
 		if err := writeFrame(conn, payload); err != nil {
 			done <- err
@@ -152,7 +146,7 @@ func TestQuestionBridge_FreeformRoundTrip(t *testing.T) {
 		t.Fatal("timeout")
 	}
 
-	bridge.SendAnswer(MCPAnswer{FreeformText: "Alice"})
+	bridge.SendAnswer(Answer{FreeformText: "Alice"})
 
 	select {
 	case err := <-done:
@@ -179,11 +173,9 @@ func TestQuestionBridge_ContextCancellation(t *testing.T) {
 		t.Fatalf("bridge start: %v", err)
 	}
 
-	// Cancel immediately
 	cancel()
 	bridge.Stop()
 
-	// Socket should be cleaned up
 	socketRemoved := false
 	for i := 0; i < 50; i++ {
 		if _, err := os.Stat(sockPath); os.IsNotExist(err) {

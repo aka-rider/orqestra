@@ -7,9 +7,8 @@ type AgentID string
 
 // AgentStreamSnapshot stores all historical stream artifacts for one agent.
 type AgentStreamSnapshot struct {
-	Entries  []StreamEntry
-	Usage    AgentUsageSnapshot
-	HasUsage bool
+	Entries []StreamEntry
+	Usage   AgentUsageSnapshot
 }
 
 // StreamHistoryStore keeps historical per-agent stream artifacts.
@@ -45,7 +44,6 @@ func (h *StreamHistoryStore) Capture(agentID AgentID, entries []StreamEntry, usa
 
 	if usage.Input > 0 || usage.Output > 0 {
 		snapshot.Usage = usage
-		snapshot.HasUsage = true
 	}
 
 	h.agents[agentID] = snapshot
@@ -83,7 +81,7 @@ func (h *StreamHistoryStore) AgentUsage(id AgentID) AgentUsageSnapshot {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	agent, ok := h.agents[id]
-	if !ok || !agent.HasUsage {
+	if !ok || (agent.Usage.Input == 0 && agent.Usage.Output == 0) {
 		return AgentUsageSnapshot{}
 	}
 	return agent.Usage

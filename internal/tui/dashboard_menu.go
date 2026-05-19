@@ -124,17 +124,17 @@ func (m AgentMenuModel) View() string {
 	return b.String()
 }
 
-func statusIconForState(state string) string {
+func statusIconForState(state AgentState) string {
 	switch state {
-	case "done":
+	case AgentStateDone:
 		return "✓"
-	case "failed":
+	case AgentStateFailed:
 		return "✗"
-	case "cancelled":
+	case AgentStateCancelled:
 		return "⊘"
-	case "gate":
+	case AgentStateGate:
 		return "●"
-	case "running":
+	case AgentStateRunning:
 		return "▶"
 	default:
 		return "○"

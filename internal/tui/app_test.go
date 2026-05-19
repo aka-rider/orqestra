@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
@@ -242,9 +243,9 @@ func TestTUI_UserQuestion_CtrlCSkipsWithDefault(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.active = true
 	m.pipelineScreen.content = ContentUserQuestion
-	m.pipelineScreen.question = newUserQuestion(harness.MCPToolCall{
+	m.pipelineScreen.question = newUserQuestion(mcp.ToolCall{
 		Question: "Pick one",
-		Options:  []harness.MCPToolOption{{Label: "Yes"}, {Label: "No"}},
+		Options:  []mcp.ToolOption{{Label: "Yes"}, {Label: "No"}},
 	}, 80)
 	m.pipelineScreen.hasQuestion = true
 
@@ -268,7 +269,7 @@ func TestTUI_AgentNavigation(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
 	m.pipelineScreen.agents = []AgentRow{
-		{ID: "architect", State: "running"},
+		{ID: "architect", State: AgentStateRunning},
 	}
 
 	// Press Alt+1 to view architect history
@@ -288,7 +289,7 @@ func TestTUI_AgentNavBack(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentAgentHistory
 	m.pipelineScreen.focusedAgent = 1
-	m.pipelineScreen.agents = []AgentRow{{ID: "architect", State: "done"}}
+	m.pipelineScreen.agents = []AgentRow{{ID: "architect", State: AgentStateDone}}
 
 	// Press Esc to go back
 	result, _ := sendKey(m, tea.KeyEscape)
@@ -355,7 +356,7 @@ func TestTUI_SidebarUpdates(t *testing.T) {
 		AgentID: "researcher",
 	}, m.width)
 
-	if len(m.pipelineScreen.agents) != 1 || m.pipelineScreen.agents[0].State != "running" {
+	if len(m.pipelineScreen.agents) != 1 || m.pipelineScreen.agents[0].State != AgentStateRunning {
 		t.Errorf("expected 1 agent running, got %+v", m.pipelineScreen.agents)
 	}
 
@@ -365,7 +366,7 @@ func TestTUI_SidebarUpdates(t *testing.T) {
 		AgentID: "researcher",
 	}, m.width)
 
-	if m.pipelineScreen.agents[0].State != "done" {
+	if m.pipelineScreen.agents[0].State != AgentStateDone {
 		t.Errorf("expected agent state 'done', got %q", m.pipelineScreen.agents[0].State)
 	}
 }
@@ -375,7 +376,7 @@ func TestTUI_FullDashboard(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
 	m.pipelineScreen.agents = []AgentRow{
-		{ID: "architect", State: "running"},
+		{ID: "architect", State: AgentStateRunning},
 	}
 
 	// Press Ctrl+D to toggle dashboard
@@ -525,8 +526,8 @@ func TestTUI_SidebarTokens(t *testing.T) {
 	m.width = 120
 	m.height = 40
 	m.pipelineScreen.agents = []AgentRow{
-		{ID: "researcher", State: "done", Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402},
-		{ID: "architect", State: "running", StartedAt: time.Now().Add(-24 * time.Second), InputTokens: 0, OutputTokens: 0, ModelDisplay: "claude-opus-4"},
+		{ID: "researcher", State: AgentStateDone, Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402},
+		{ID: "architect", State: AgentStateRunning, StartedAt: time.Now().Add(-24 * time.Second), InputTokens: 0, OutputTokens: 0, ModelDisplay: "claude-opus-4"},
 	}
 	m.recalculateLayout()
 	m.pipelineScreen.SyncViewports()
@@ -550,7 +551,7 @@ func TestTUI_DashboardTokens(t *testing.T) {
 	m.width = 120
 	m.height = 40
 	m.pipelineScreen.agents = []AgentRow{
-		{ID: "researcher", State: "done", Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402, ModelDisplay: "claude-opus-4"},
+		{ID: "researcher", State: AgentStateDone, Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402, ModelDisplay: "claude-opus-4"},
 	}
 	m.recalculateLayout()
 	m.pipelineScreen.SyncViewports()
@@ -716,8 +717,8 @@ func TestTUI_NewRunClearsStaleState(t *testing.T) {
 
 	// Simulate stale state from a previous run
 	m.pipelineScreen.agents = []AgentRow{
-		{ID: "researcher", State: "done"},
-		{ID: "architect", State: "failed"},
+		{ID: "researcher", State: AgentStateDone},
+		{ID: "architect", State: AgentStateFailed},
 	}
 	m.pipelineScreen.lastErr = fmt.Errorf("architect failed")
 	m.pipelineScreen.finalPlan = "# Old Plan"
@@ -764,7 +765,7 @@ func TestTUI_RestartClearsErrorAndAgents(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentCompletion
 	m.pipelineScreen.goal = "task"
-	m.pipelineScreen.agents = []AgentRow{{ID: "researcher", State: "done"}}
+	m.pipelineScreen.agents = []AgentRow{{ID: "researcher", State: AgentStateDone}}
 	m.pipelineScreen.lastErr = fmt.Errorf("old error")
 
 	// Press Ctrl+N, then submit new prompt via Enter
@@ -980,7 +981,7 @@ func TestTUI_DrainLoopPlanGate(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
-	m.pipelineScreen.agents = []AgentRow{{ID: "architect", State: "running", StartedAt: time.Now()}}
+	m.pipelineScreen.agents = []AgentRow{{ID: "architect", State: AgentStateRunning, StartedAt: time.Now()}}
 
 	events := make(chan orchestrator.Event, 16)
 	m.events = events
@@ -1046,7 +1047,7 @@ func TestTUI_DrainLoopChannelCloseAfterGate(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
-	m.pipelineScreen.agents = []AgentRow{{ID: "architect", State: "running", StartedAt: time.Now()}}
+	m.pipelineScreen.agents = []AgentRow{{ID: "architect", State: AgentStateRunning, StartedAt: time.Now()}}
 
 	events := make(chan orchestrator.Event, 16)
 	m.events = events
@@ -1197,7 +1198,7 @@ func TestTUI_GlobalKeysBlockedInPlanReview(t *testing.T) {
 	m.pipelineScreen.planComment.SetWidth(80)
 	m.pipelineScreen.planComment.SetHeight(2)
 	m.pipelineScreen.planComment.Focus()
-	m.pipelineScreen.agents = []AgentRow{{ID: "architect", State: "done"}}
+	m.pipelineScreen.agents = []AgentRow{{ID: "architect", State: AgentStateDone}}
 
 	// Press "d" — must NOT toggle dashboard
 	result, _ := sendRune(m, "d")
@@ -1299,7 +1300,7 @@ func TestTUI_ChatResponse(t *testing.T) {
 	if len(m.pipelineScreen.chatHistory) != 1 {
 		t.Fatalf("expected 1 chat entry, got %d", len(m.pipelineScreen.chatHistory))
 	}
-	if m.pipelineScreen.chatHistory[0].Role != "architect" {
+	if m.pipelineScreen.chatHistory[0].Role != ChatRoleArchitect {
 		t.Errorf("expected architect role, got %q", m.pipelineScreen.chatHistory[0].Role)
 	}
 	if !m.pipelineScreen.hasPlanComment {
@@ -1374,7 +1375,7 @@ func TestTUI_PlanDiffIgnoredWithoutHistory(t *testing.T) {
 func TestTUI_ReviewTokenAccumulation(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.pipelineScreen.chatHistory = []ChatEntry{{Role: "you", Text: "q1"}}
+	m.pipelineScreen.chatHistory = []ChatEntry{{Role: ChatRoleUser, Text: "q1"}}
 
 	m.pipelineScreen.ApplyEvent(orchestrator.Event{
 		Type:         orchestrator.EventAgentDone,
@@ -1440,7 +1441,7 @@ func TestTUI_ChatHistory_UserAndArchitect(t *testing.T) {
 	if len(model.pipelineScreen.chatHistory) != 1 {
 		t.Fatalf("expected 1 chat entry, got %d", len(model.pipelineScreen.chatHistory))
 	}
-	if model.pipelineScreen.chatHistory[0].Role != "you" {
+	if model.pipelineScreen.chatHistory[0].Role != ChatRoleUser {
 		t.Errorf("expected 'you' role, got %q", model.pipelineScreen.chatHistory[0].Role)
 	}
 	if model.pipelineScreen.chatHistory[0].Text != "why this approach?" {

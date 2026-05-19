@@ -1,4 +1,4 @@
-package harness
+package mcp
 
 import (
 	"context"
@@ -18,8 +18,8 @@ import (
 type QuestionBridge struct {
 	socketPath    string
 	listener      net.Listener
-	questions     chan MCPToolCall
-	pendingAnswer chan MCPAnswer
+	questions     chan ToolCall
+	pendingAnswer chan Answer
 	done          chan struct{}
 	mu            sync.Mutex
 	stopped       bool
@@ -29,8 +29,8 @@ type QuestionBridge struct {
 func NewQuestionBridge(socketPath string) *QuestionBridge {
 	return &QuestionBridge{
 		socketPath:    socketPath,
-		questions:     make(chan MCPToolCall, 1),
-		pendingAnswer: make(chan MCPAnswer, 1),
+		questions:     make(chan ToolCall, 1),
+		pendingAnswer: make(chan Answer, 1),
 		done:          make(chan struct{}),
 	}
 }
@@ -47,7 +47,6 @@ func (b *QuestionBridge) Start(ctx context.Context) error {
 	}
 	b.mu.Unlock()
 
-	// Clean up stale socket
 	os.Remove(b.socketPath) // fire-and-forget: may not exist
 
 	var err error
@@ -83,7 +82,6 @@ func (b *QuestionBridge) acceptLoop(ctx context.Context) {
 			}
 		}
 
-		// Handle one question/answer exchange per connection
 		b.handleConnection(ctx, conn)
 	}
 }
@@ -91,20 +89,18 @@ func (b *QuestionBridge) acceptLoop(ctx context.Context) {
 func (b *QuestionBridge) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
-	// Read the question
 	questionData, err := readFrame(conn)
 	if err != nil {
 		slog.Debug("question bridge read error", "err", err)
 		return
 	}
 
-	var question MCPToolCall
+	var question ToolCall
 	if err := json.Unmarshal(questionData, &question); err != nil {
 		slog.Debug("question bridge unmarshal error", "err", err)
 		return
 	}
 
-	// Send to orchestrator via channel
 	select {
 	case b.questions <- question:
 	case <-ctx.Done():
@@ -113,17 +109,15 @@ func (b *QuestionBridge) handleConnection(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	// Block waiting for answer from TUI
-	var answer MCPAnswer
+	var answer Answer
 	select {
 	case answer = <-b.pendingAnswer:
 	case <-ctx.Done():
-		answer = MCPAnswer{Skipped: true}
+		answer = Answer{Skipped: true}
 	case <-b.done:
-		answer = MCPAnswer{Skipped: true}
+		answer = Answer{Skipped: true}
 	}
 
-	// Write answer back
 	answerData, err := json.Marshal(answer)
 	if err != nil {
 		slog.Debug("question bridge marshal answer error", "err", err)
@@ -156,12 +150,12 @@ func (b *QuestionBridge) SocketPath() string {
 }
 
 // Questions returns the channel that receives questions from MCP bridge subprocesses.
-func (b *QuestionBridge) Questions() <-chan MCPToolCall {
+func (b *QuestionBridge) Questions() <-chan ToolCall {
 	return b.questions
 }
 
 // SendAnswer delivers a user's answer back to the waiting MCP bridge subprocess.
-func (b *QuestionBridge) SendAnswer(answer MCPAnswer) {
+func (b *QuestionBridge) SendAnswer(answer Answer) {
 	select {
 	case b.pendingAnswer <- answer:
 	case <-b.done:

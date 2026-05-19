@@ -15,6 +15,7 @@ import (
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/plan"
 	"github.com/xiii/orqestra/internal/worktree"
 )
@@ -85,7 +86,7 @@ type Engine struct {
 	Config         *config.Config
 	Runners        Runners
 	RunDirFactory  RunDirFactory
-	QuestionBridge *harness.QuestionBridge
+	QuestionBridge *mcp.QuestionBridge
 	// WorktreeRunnerFactory, when set, is called just before the worker phase to
 	// create a ContinuableRunner scoped to the worktree at the given path.
 	// If nil, the default Runners.Worker is used with repo write access.
@@ -96,7 +97,7 @@ type Engine struct {
 type RunChannels struct {
 	Events        <-chan Event
 	Decisions     chan<- Decision
-	StreamUpdates <-chan harness.StreamUpdate
+	StreamUpdates <-chan StreamEntry
 	History       *StreamHistoryStore
 }
 
@@ -104,17 +105,41 @@ type RunChannels struct {
 func (e *Engine) Start(ctx context.Context, input Input) RunChannels {
 	events := make(chan Event, 16)
 	decisions := make(chan Decision, 1)
-	streamUpdates := make(chan harness.StreamUpdate, 512)
+	rawStream := make(chan harness.StreamUpdate, 512)
+	streamEntries := make(chan StreamEntry, 512)
 	history := NewStreamHistoryStore()
 	capture := newStreamCapture(history)
 
 	go func() {
-		defer close(events)
-		defer close(streamUpdates)
-		e.run(ctx, input, events, decisions, capture, streamUpdates)
+		defer close(streamEntries)
+		for u := range rawStream {
+			var entry StreamEntry
+			switch {
+			case u.Text != "":
+				entry = StreamEntry{Kind: EntryText, Text: u.Text}
+			case u.Tool != "":
+				entry = StreamEntry{Kind: EntryToolUse, Tool: u.Tool, Detail: u.Detail}
+			case u.UsageValid:
+				entry = StreamEntry{Kind: EntryStats, Stats: StreamStats{
+					Input: u.Input, Output: u.Output, Valid: true,
+				}}
+			default:
+				continue
+			}
+			select {
+			case streamEntries <- entry:
+			default:
+			}
+		}
 	}()
 
-	return RunChannels{Events: events, Decisions: decisions, StreamUpdates: streamUpdates, History: history}
+	go func() {
+		defer close(events)
+		defer close(rawStream)
+		e.run(ctx, input, events, decisions, capture, rawStream)
+	}()
+
+	return RunChannels{Events: events, Decisions: decisions, StreamUpdates: streamEntries, History: history}
 }
 
 // Run executes the full pipeline synchronously (legacy callback API).
@@ -150,6 +175,15 @@ func (e *Engine) Run(ctx context.Context, input Input, emit func(Event)) (Result
 		return Result{Status: StatusFailed}, lastErr
 	}
 	return result, nil
+}
+
+// SendAnswer delivers the user's answer to the waiting MCP bridge subprocess.
+// No-op when QuestionBridge is nil.
+func (e *Engine) SendAnswer(ans mcp.Answer) {
+	if e.QuestionBridge == nil {
+		return
+	}
+	e.QuestionBridge.SendAnswer(ans)
 }
 
 func runWithStreamConsumer[T any](
@@ -212,6 +246,10 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		case events <- ev:
 		case <-ctx.Done():
 		}
+	}
+
+	copyLog := func(s agent.SessionDir, repoPath, sessionID, destName string) (string, error) {
+		return agent.CopySessionLog(s, repoPath, sessionID, destName, harness.ResolveSessionLogPath)
 	}
 
 	// Create run directory
@@ -404,7 +442,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			}
 		}
 		if err != nil {
-			researchLogCopy, cpErr := agent.CopySessionLog(session, cwd, researchSessionID, "researcher_session.jsonl")
+			researchLogCopy, cpErr := copyLog(session, cwd, researchSessionID, "researcher_session.jsonl")
 			if cpErr != nil {
 				logger.Warn("copy session log", "agent", "researcher", "err", cpErr)
 			}
@@ -422,7 +460,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			return
 		}
 
-		researchLogCopy, cpErr := agent.CopySessionLog(session, cwd, researchSessionID, "researcher_session.jsonl")
+		researchLogCopy, cpErr := copyLog(session, cwd, researchSessionID, "researcher_session.jsonl")
 		if cpErr != nil {
 			logger.Warn("copy session log", "agent", "researcher", "err", cpErr)
 		}
@@ -476,7 +514,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			}
 		}
 		if planErr != nil {
-			archLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_session.jsonl")
+			archLogCopy, cpErr := copyLog(session, cwd, planSessionID, "architect_session.jsonl")
 			if cpErr != nil {
 				logger.Warn("copy session log", "agent", "architect", "err", cpErr)
 			}
@@ -499,7 +537,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			return
 		}
 
-		archLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_session.jsonl")
+		archLogCopy, cpErr := copyLog(session, cwd, planSessionID, "architect_session.jsonl")
 		if cpErr != nil {
 			logger.Warn("copy session log", "agent", "architect", "err", cpErr)
 		}
@@ -573,7 +611,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			}
 		}
 		if criticErr != nil {
-			criticLogCopy, cpErr := agent.CopySessionLog(session, cwd, criticSessionID, "critic_session.jsonl")
+			criticLogCopy, cpErr := copyLog(session, cwd, criticSessionID, "critic_session.jsonl")
 			if cpErr != nil {
 				logger.Warn("copy session log", "agent", "critic", "err", cpErr)
 			}
@@ -591,7 +629,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			return
 		}
 
-		criticLogCopy, cpErr := agent.CopySessionLog(session, cwd, criticSessionID, "critic_session.jsonl")
+		criticLogCopy, cpErr := copyLog(session, cwd, criticSessionID, "critic_session.jsonl")
 		if cpErr != nil {
 			logger.Warn("copy session log", "agent", "critic", "err", cpErr)
 		}
@@ -646,7 +684,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		_ = chatResponse // architect may include reasoning alongside plan revision
 
 		if revErr != nil {
-			archCritRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_critic_revision_session.jsonl")
+			archCritRevLogCopy, cpErr := copyLog(session, cwd, planSessionID, "architect_critic_revision_session.jsonl")
 			if cpErr != nil {
 				logger.Warn("copy session log", "agent", "architect", "err", cpErr)
 			}
@@ -670,7 +708,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			return
 		}
 
-		archCritRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_critic_revision_session.jsonl")
+		archCritRevLogCopy, cpErr := copyLog(session, cwd, planSessionID, "architect_critic_revision_session.jsonl")
 		if cpErr != nil {
 			logger.Warn("copy session log", "agent", "architect", "err", cpErr)
 		}
@@ -819,7 +857,7 @@ planGate:
 						revisedUsage := editResult.Usage
 
 						if err != nil {
-							archRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_revision_session.jsonl")
+							archRevLogCopy, cpErr := copyLog(session, cwd, planSessionID, "architect_revision_session.jsonl")
 							if cpErr != nil {
 								logger.Warn("copy session log", "agent", "architect", "err", cpErr)
 							}
@@ -843,7 +881,7 @@ planGate:
 							return
 						}
 
-						archRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_revision_session.jsonl")
+						archRevLogCopy, cpErr := copyLog(session, cwd, planSessionID, "architect_revision_session.jsonl")
 						if cpErr != nil {
 							logger.Warn("copy session log", "agent", "architect", "err", cpErr)
 						}
@@ -953,7 +991,7 @@ planGate:
 					}
 
 					if err != nil {
-						archRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_revision_session.jsonl")
+						archRevLogCopy, cpErr := copyLog(session, cwd, planSessionID, "architect_revision_session.jsonl")
 						if cpErr != nil {
 							logger.Warn("copy session log", "agent", "architect", "err", cpErr)
 						}
@@ -977,7 +1015,7 @@ planGate:
 						return
 					}
 
-					archRevLogCopy, cpErr := agent.CopySessionLog(session, cwd, planSessionID, "architect_revision_session.jsonl")
+					archRevLogCopy, cpErr := copyLog(session, cwd, planSessionID, "architect_revision_session.jsonl")
 					if cpErr != nil {
 						logger.Warn("copy session log", "agent", "architect", "err", cpErr)
 					}
@@ -1115,7 +1153,7 @@ planGate:
 		return
 	}
 
-	workerLogCopy, cpErr := agent.CopySessionLog(session, cwd, workResult.SessionID, "worker_session.jsonl")
+	workerLogCopy, cpErr := copyLog(session, cwd, workResult.SessionID, "worker_session.jsonl")
 	if cpErr != nil {
 		logger.Warn("copy session log", "agent", "worker", "err", cpErr)
 	}
@@ -1157,7 +1195,7 @@ planGate:
 		valResult, valErr := runRunnerContinue(ctx, workerRunner, workResult.SessionID, validationPrompt, stream, streamOut)
 		if valErr != nil {
 			slog.Warn("worker self-validation failed", "err", valErr)
-			valLogCopy, cpErr := agent.CopySessionLog(session, cwd, workResult.SessionID, "validator_session.jsonl")
+			valLogCopy, cpErr := copyLog(session, cwd, workResult.SessionID, "validator_session.jsonl")
 			if cpErr != nil {
 				logger.Warn("copy session log", "agent", "validator", "err", cpErr)
 			}
@@ -1177,7 +1215,7 @@ planGate:
 			if valResult.SessionID != "" {
 				lastSessionID = valResult.SessionID
 			}
-			valLogCopy, cpErr := agent.CopySessionLog(session, cwd, valResult.SessionID, "validator_session.jsonl")
+			valLogCopy, cpErr := copyLog(session, cwd, valResult.SessionID, "validator_session.jsonl")
 			if cpErr != nil {
 				logger.Warn("copy session log", "agent", "validator", "err", cpErr)
 			}
@@ -1214,7 +1252,7 @@ planGate:
 			if valResult.SessionID != "" {
 				lastSessionID = valResult.SessionID
 			}
-			discValLogCopy, cpErr := agent.CopySessionLog(session, cwd, valResult.SessionID, "validator_session.jsonl")
+			discValLogCopy, cpErr := copyLog(session, cwd, valResult.SessionID, "validator_session.jsonl")
 			if cpErr != nil {
 				logger.Warn("copy session log", "agent", "validator", "err", cpErr)
 			}
