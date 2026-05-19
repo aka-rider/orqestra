@@ -11,27 +11,27 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/mcp"
 )
 
-func qOptions() []harness.MCPToolOption {
-	return []harness.MCPToolOption{
+func qOptions() []mcp.ToolOption {
+	return []mcp.ToolOption{
 		{Label: "Alpha"},
 		{Label: "Beta"},
 		{Label: "Gamma"},
 	}
 }
 
-func singleQ() harness.MCPToolCall {
-	return harness.MCPToolCall{Question: "pick", Options: qOptions()}
+func singleQ() mcp.ToolCall {
+	return mcp.ToolCall{Question: "pick", Options: qOptions()}
 }
 
-func multiQ() harness.MCPToolCall {
-	return harness.MCPToolCall{Question: "pick", MultiSelect: true, Options: qOptions()}
+func multiQ() mcp.ToolCall {
+	return mcp.ToolCall{Question: "pick", MultiSelect: true, Options: qOptions()}
 }
 
-func freeformQ() harness.MCPToolCall {
-	return harness.MCPToolCall{Question: "freeform"}
+func freeformQ() mcp.ToolCall {
+	return mcp.ToolCall{Question: "freeform"}
 }
 
 // ---------- Bug #1 (visual unification) ----------
@@ -224,7 +224,7 @@ func TestEnter_MultiSelect_UsesToggledSet(t *testing.T) {
 }
 
 func TestEsc_ProducesSkipped(t *testing.T) {
-	for _, q := range []harness.MCPToolCall{singleQ(), multiQ(), freeformQ()} {
+	for _, q := range []mcp.ToolCall{singleQ(), multiQ(), freeformQ()} {
 		m := newUserQuestion(q, 80)
 		m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 		if !m.Done() || !m.Answer().Skipped {

@@ -3,7 +3,7 @@ package tui
 import (
 	"time"
 
-	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
 	"github.com/xiii/orqestra/internal/plan"
 )
@@ -113,7 +113,7 @@ func (ConfirmNewRunIntent) isIntent() {}
 
 // SubmitQuestionAnswerIntent submits a user's answer to an MCP AskUserQuestion.
 type SubmitQuestionAnswerIntent struct {
-	Answer harness.MCPAnswer
+	Answer mcp.Answer
 }
 
 func (SubmitQuestionAnswerIntent) isIntent() {}

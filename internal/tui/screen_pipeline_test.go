@@ -6,7 +6,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
@@ -52,8 +52,8 @@ func setupTestPipelineScreen() PipelineScreen {
 
 	s.SetStreamBuf(sb)
 	s.agents = []AgentRow{
-		{ID: "researcher", State: "done", Elapsed: time.Second, InputTokens: 100, OutputTokens: 50},
-		{ID: "architect", State: "running", StartedAt: time.Now()},
+		{ID: "researcher", State: AgentStateDone, Elapsed: time.Second, InputTokens: 100, OutputTokens: 50},
+		{ID: "architect", State: AgentStateRunning, StartedAt: time.Now()},
 	}
 	s.focusedAgent = 1
 	return s
@@ -239,10 +239,10 @@ func TestEditConfirm_EscapeReturns(t *testing.T) {
 }
 
 func setupUserQuestionScreen(multi bool) PipelineScreen {
-	q := harness.MCPToolCall{
+	q := mcp.ToolCall{
 		Question:    "Pick one",
 		MultiSelect: multi,
-		Options: []harness.MCPToolOption{
+		Options: []mcp.ToolOption{
 			{Label: "Yes", Hint: "and..."},
 			{Label: "No", Hint: "because..."},
 		},
@@ -346,9 +346,9 @@ func TestViewStatusLine_AgentChain(t *testing.T) {
 	s := PipelineScreen{
 		active: true,
 		agents: []AgentRow{
-			{ID: "researcher", State: "done"},
-			{ID: "architect", State: "done"},
-			{ID: "worker", State: "running", ModelDisplay: "claude-opus-4", ContextWindow: 200000},
+			{ID: "researcher", State: AgentStateDone},
+			{ID: "architect", State: AgentStateDone},
+			{ID: "worker", State: AgentStateRunning, ModelDisplay: "claude-opus-4", ContextWindow: 200000},
 		},
 		liveInput:  12000,
 		liveOutput: 8000,
@@ -380,10 +380,10 @@ func TestViewStatusLine_Truncation(t *testing.T) {
 	s := PipelineScreen{
 		active: true,
 		agents: []AgentRow{
-			{ID: "researcher", State: "done"},
-			{ID: "architect", State: "done"},
-			{ID: "critic", State: "done"},
-			{ID: "worker", State: "running", ModelDisplay: "claude-opus-4", ContextWindow: 200000},
+			{ID: "researcher", State: AgentStateDone},
+			{ID: "architect", State: AgentStateDone},
+			{ID: "critic", State: AgentStateDone},
+			{ID: "worker", State: AgentStateRunning, ModelDisplay: "claude-opus-4", ContextWindow: 200000},
 		},
 		liveInput:  50000,
 		liveOutput: 30000,
@@ -401,7 +401,7 @@ func TestViewStatusLine_Truncation(t *testing.T) {
 func TestViewStatusLine_ShimmerCycles(t *testing.T) {
 	s := PipelineScreen{
 		active:    true,
-		agents:    []AgentRow{{ID: "worker", State: "running"}},
+		agents:    []AgentRow{{ID: "worker", State: AgentStateRunning}},
 		liveStart: time.Now(),
 	}
 

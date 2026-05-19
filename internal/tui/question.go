@@ -6,7 +6,7 @@ import (
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
-	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/mcp"
 )
 
 // questionMode is the dispatch mode for userQuestionModel.
@@ -22,7 +22,7 @@ const (
 // content mode. Parent screens forward every message to Update and re-render
 // after each call; rendering goes through View/Footer/InputZone.
 type userQuestionModel struct {
-	q            harness.MCPToolCall
+	q            mcp.ToolCall
 	mode         questionMode
 	cursor       int
 	selected     map[int]bool
@@ -33,11 +33,11 @@ type userQuestionModel struct {
 	width        int
 
 	done   bool
-	answer harness.MCPAnswer
+	answer mcp.Answer
 }
 
 // newUserQuestion builds a fresh component for a given question and width.
-func newUserQuestion(q harness.MCPToolCall, width int) userQuestionModel {
+func newUserQuestion(q mcp.ToolCall, width int) userQuestionModel {
 	m := userQuestionModel{
 		q:            q,
 		selected:     map[int]bool{},
@@ -85,7 +85,7 @@ func (m userQuestionModel) SetWidth(w int) userQuestionModel {
 func (m userQuestionModel) Done() bool { return m.done }
 
 // Answer returns the final answer (only meaningful after Done()).
-func (m userQuestionModel) Answer() harness.MCPAnswer { return m.answer }
+func (m userQuestionModel) Answer() mcp.Answer { return m.answer }
 
 // Cancel marks the question as skipped (used by parent Ctrl+C handling).
 func (m userQuestionModel) Cancel() userQuestionModel {
@@ -95,7 +95,7 @@ func (m userQuestionModel) Cancel() userQuestionModel {
 		m.hasTA = false
 	}
 	m.done = true
-	m.answer = harness.MCPAnswer{Skipped: true}
+	m.answer = mcp.Answer{Skipped: true}
 	return m
 }
 
@@ -164,13 +164,13 @@ func (m userQuestionModel) updateFreeform(key tea.KeyPressMsg) (userQuestionMode
 	switch key.Code {
 	case tea.KeyEscape:
 		m.done = true
-		m.answer = harness.MCPAnswer{Skipped: true}
+		m.answer = mcp.Answer{Skipped: true}
 		return m, nil
 	case tea.KeyEnter:
 		if !key.Mod.Contains(tea.ModShift) && !key.Mod.Contains(tea.ModAlt) {
 			text := strings.TrimSpace(m.ta.Value())
 			m.done = true
-			m.answer = harness.MCPAnswer{FreeformText: text}
+			m.answer = mcp.Answer{FreeformText: text}
 			return m, nil
 		}
 		// Shift+Enter / Alt+Enter: insert newline directly. The textarea's
@@ -190,7 +190,7 @@ func (m userQuestionModel) updateOptions(key tea.KeyPressMsg) (userQuestionModel
 	switch key.Code {
 	case tea.KeyEscape:
 		m.done = true
-		m.answer = harness.MCPAnswer{Skipped: true}
+		m.answer = mcp.Answer{Skipped: true}
 		return m, nil
 	case tea.KeyUp:
 		if m.cursor > 0 {
@@ -227,7 +227,7 @@ func (m userQuestionModel) updateOptions(key tea.KeyPressMsg) (userQuestionModel
 	return m, nil
 }
 
-func (m userQuestionModel) buildAnswer() harness.MCPAnswer {
+func (m userQuestionModel) buildAnswer() mcp.Answer {
 	var selected []int
 	for i := range m.q.Options {
 		if m.selected[i] {
@@ -248,7 +248,7 @@ func (m userQuestionModel) buildAnswer() harness.MCPAnswer {
 		}
 		customTexts[idx] = t
 	}
-	return harness.MCPAnswer{SelectedIndices: selected, CustomTexts: customTexts}
+	return mcp.Answer{SelectedIndices: selected, CustomTexts: customTexts}
 }
 
 // View renders the question header, options, inline editor, and any committed

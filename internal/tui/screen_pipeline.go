@@ -13,13 +13,20 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/orchestrator"
+)
+
+// ChatRole identifies who authored a ChatEntry.
+type ChatRole string
+
+const (
+	ChatRoleUser      ChatRole = "you"
+	ChatRoleArchitect ChatRole = "architect"
 )
 
 // ChatEntry is one turn in the user-architect conversation during plan review.
 type ChatEntry struct {
-	Role          string // "you" or "architect"
+	Role          ChatRole
 	Text          string
 	HasPlanChange bool // true if this entry accompanies a plan revision
 }
@@ -183,7 +190,7 @@ func (s *PipelineScreen) SetHistoryStore(store *orchestrator.StreamHistoryStore)
 }
 
 // DrainStreamUpdates consumes currently buffered stream updates without blocking.
-func (s *PipelineScreen) DrainStreamUpdates(updates <-chan harness.StreamUpdate) {
+func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEntry) {
 	if updates == nil || s.streamBuf == nil {
 		return
 	}
@@ -193,15 +200,14 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan harness.StreamUpdate)
 			if !ok {
 				return
 			}
-			switch {
-			case u.Text != "":
+			switch u.Kind {
+			case orchestrator.EntryText:
 				s.streamBuf.AppendText(u.Text)
-			case u.Tool != "":
+			case orchestrator.EntryToolUse:
 				s.streamBuf.AppendActivity(u.Tool, u.Detail)
-			}
-			if u.UsageValid {
-				s.streamBuf.RecordUsage(u.Input, u.Output)
-				s.streamBuf.AppendStats(u.Input, u.Output)
+			case orchestrator.EntryStats:
+				s.streamBuf.RecordUsage(u.Stats.Input, u.Stats.Output)
+				s.streamBuf.AppendStats(u.Stats.Input, u.Stats.Output)
 			}
 		default:
 			return
@@ -273,7 +279,7 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 		}
 		s.agents = append(s.agents, AgentRow{
 			ID:            event.AgentID,
-			State:         "running",
+			State:         AgentStateRunning,
 			StartedAt:     time.Now(),
 			ModelRef:      event.Meta.ModelRef,
 			ModelDisplay:  event.Meta.ModelDisplay,
@@ -284,7 +290,7 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 	case orchestrator.EventAgentDone:
 		for i := range s.agents {
 			if s.agents[i].ID == event.AgentID {
-				s.agents[i].State = "done"
+				s.agents[i].State = AgentStateDone
 				s.agents[i].Elapsed = time.Since(s.agents[i].StartedAt)
 				s.agents[i].InputTokens = event.InputTokens
 				s.agents[i].OutputTokens = event.OutputTokens
@@ -299,7 +305,7 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 	case orchestrator.EventAgentFailed:
 		for i := range s.agents {
 			if s.agents[i].ID == event.AgentID {
-				s.agents[i].State = "failed"
+				s.agents[i].State = AgentStateFailed
 			}
 		}
 		s.lastErr = event.Err
@@ -307,7 +313,7 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 	case orchestrator.EventAgentCancelled:
 		for i := range s.agents {
 			if s.agents[i].ID == event.AgentID {
-				s.agents[i].State = "cancelled"
+				s.agents[i].State = AgentStateCancelled
 			}
 		}
 
@@ -321,7 +327,7 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 			s.diffViewport.SetContent(s.planDiff)
 			if len(s.chatHistory) > 0 && s.planDiff != "" {
 				s.chatHistory = append(s.chatHistory, ChatEntry{
-					Role: "architect", Text: "(plan revised — see diff with [^D])", HasPlanChange: true,
+					Role: ChatRoleArchitect, Text: "(plan revised — see diff with [^D])", HasPlanChange: true,
 				})
 			}
 			s.awaitingPlanDecision = true
@@ -347,7 +353,7 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 		s.runDir = event.RunDir
 
 	case orchestrator.EventChatResponse:
-		s.chatHistory = append(s.chatHistory, ChatEntry{Role: "architect", Text: event.ChatText})
+		s.chatHistory = append(s.chatHistory, ChatEntry{Role: ChatRoleArchitect, Text: event.ChatText})
 		s.content = ContentPlanReview
 		s.awaitingPlanDecision = true
 		contentWidth := max(1, width)
@@ -537,7 +543,7 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 			}
 			comment := strings.TrimSpace(s.planComment.Value())
 			if comment != "" {
-				s.chatHistory = append(s.chatHistory, ChatEntry{Role: "you", Text: comment})
+				s.chatHistory = append(s.chatHistory, ChatEntry{Role: ChatRoleUser, Text: comment})
 				s.planComment.Reset()
 				s.hasPlanComment = false
 				s.awaitingPlanDecision = false
@@ -739,15 +745,15 @@ func (s PipelineScreen) viewStatusLine(width int) string {
 		a := &s.agents[i]
 		var icon string
 		switch a.State {
-		case "done":
+		case AgentStateDone:
 			icon = "✓"
-		case "failed":
+		case AgentStateFailed:
 			icon = "✗"
-		case "cancelled":
+		case AgentStateCancelled:
 			icon = "⊘"
-		case "gate":
+		case AgentStateGate:
 			icon = "●"
-		case "running":
+		case AgentStateRunning:
 			icon = "▶"
 			activeRow = a
 		default:
@@ -969,7 +975,7 @@ func (s PipelineScreen) viewPlanReview(width int) string {
 		for _, entry := range s.chatHistory {
 			var roleLabel string
 			var labelLen int
-			if entry.Role == "architect" {
+			if entry.Role == ChatRoleArchitect {
 				roleLabel = goalStyle.Render(" Architect: ")
 				labelLen = len(" Architect: ")
 			} else {

@@ -260,7 +260,7 @@ func truncateToWidth(s string, maxWidth int) string {
 // AgentCard holds display data for one agent in the menu.
 type AgentCard struct {
 	ID             string
-	State          string
+	State          AgentState
 	ModelDisplay   string
 	InputTokens    int64
 	OutputTokens   int64
@@ -285,7 +285,7 @@ func agentRowToCard(row AgentRow) AgentCard {
 		OutputTokens:  row.OutputTokens,
 		Elapsed:       elapsed,
 		ContextWindow: row.ContextWindow,
-		IsLive:        row.State == "running",
+		IsLive:        row.State == AgentStateRunning,
 	}
 }
 

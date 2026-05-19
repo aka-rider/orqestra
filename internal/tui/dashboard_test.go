@@ -18,8 +18,8 @@ func TestDashboard_TabCycle(t *testing.T) {
 	d := NewDashboardModel()
 	d.SetSize(120, 40)
 	d.SetAgents([]AgentRow{
-		{ID: "researcher", State: "done"},
-		{ID: "worker", State: "running"},
+		{ID: "researcher", State: AgentStateDone},
+		{ID: "worker", State: AgentStateRunning},
 	})
 
 	// Tab: Menu → ArtTop → ArtBottom → Log → Menu
@@ -35,7 +35,7 @@ func TestDashboard_TabCycle(t *testing.T) {
 func TestDashboard_ShiftTabCycle(t *testing.T) {
 	d := NewDashboardModel()
 	d.SetSize(120, 40)
-	d.SetAgents([]AgentRow{{ID: "worker", State: "running"}})
+	d.SetAgents([]AgentRow{{ID: "worker", State: AgentStateRunning}})
 
 	// Shift+Tab: Menu → Log → ArtBottom → ArtTop → Menu
 	expected := []DashboardFocus{FocusLog, FocusArtBottom, FocusArtTop, FocusMenu}
@@ -85,7 +85,7 @@ func TestDashboard_EscFromLog_ReturnsToMenu(t *testing.T) {
 func TestDashboard_EnterFromMenu_FocusesArtTop(t *testing.T) {
 	d := NewDashboardModel()
 	d.SetSize(120, 40)
-	d.SetAgents([]AgentRow{{ID: "worker", State: "running"}})
+	d.SetAgents([]AgentRow{{ID: "worker", State: AgentStateRunning}})
 
 	d, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if d.focus != FocusArtTop {
@@ -97,9 +97,9 @@ func TestDashboard_MenuCursor(t *testing.T) {
 	d := NewDashboardModel()
 	d.SetSize(120, 40)
 	d.SetAgents([]AgentRow{
-		{ID: "researcher", State: "done"},
-		{ID: "architect", State: "done"},
-		{ID: "worker", State: "running"},
+		{ID: "researcher", State: AgentStateDone},
+		{ID: "architect", State: AgentStateDone},
+		{ID: "worker", State: AgentStateRunning},
 	})
 
 	// Initial cursor at 0
@@ -136,8 +136,8 @@ func TestDashboard_View_NonEmpty(t *testing.T) {
 	d := NewDashboardModel()
 	d.SetSize(120, 40)
 	d.SetAgents([]AgentRow{
-		{ID: "researcher", State: "done", Elapsed: 5 * time.Second, ModelDisplay: "claude-opus-4"},
-		{ID: "worker", State: "running", StartedAt: time.Now()},
+		{ID: "researcher", State: AgentStateDone, Elapsed: 5 * time.Second, ModelDisplay: "claude-opus-4"},
+		{ID: "worker", State: AgentStateRunning, StartedAt: time.Now()},
 	})
 
 	view := d.View()
@@ -162,8 +162,8 @@ func TestDashboard_View_SmallTerminal(t *testing.T) {
 func TestAgentMenuModel_SetAgents(t *testing.T) {
 	m := NewAgentMenuModel()
 	m.SetAgents([]AgentRow{
-		{ID: "a", State: "done"},
-		{ID: "b", State: "running"},
+		{ID: "a", State: AgentStateDone},
+		{ID: "b", State: AgentStateRunning},
 	})
 	if len(m.items) != 2 {
 		t.Errorf("items = %d, want 2", len(m.items))

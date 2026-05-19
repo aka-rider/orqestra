@@ -18,6 +18,7 @@ import (
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/mcp"
 )
 
 func main() {
@@ -30,7 +31,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Usage: proto-askuser mcp-bridge --socket <path>\n")
 			os.Exit(1)
 		}
-		if err := harness.RunMCPServer(os.Args[3]); err != nil {
+		if err := mcp.RunServer(os.Args[3]); err != nil {
 			slog.Error("mcp-bridge failed", "err", err)
 			os.Exit(1)
 		}
@@ -59,9 +60,9 @@ func main() {
 		{
 			name:   "freeform",
 			prompt: freeformPrompt,
-			autoAnswer: func(q harness.MCPToolCall) harness.MCPAnswer {
+			autoAnswer: func(q mcp.ToolCall) mcp.Answer {
 				fmt.Printf("  📨 Question received: %q\n", q.Question)
-				return harness.MCPAnswer{FreeformText: "The project is called Orqestra and it orchestrates LLM pipelines."}
+				return mcp.Answer{FreeformText: "The project is called Orqestra and it orchestrates LLM pipelines."}
 			},
 			judge: func(output string) (bool, string) {
 				lower := strings.ToLower(output)
@@ -76,7 +77,7 @@ func main() {
 		{
 			name:   "single-select",
 			prompt: singleSelectPrompt,
-			autoAnswer: func(q harness.MCPToolCall) harness.MCPAnswer {
+			autoAnswer: func(q mcp.ToolCall) mcp.Answer {
 				fmt.Printf("  📨 Question received: %q\n", q.Question)
 				if len(q.Options) > 0 {
 					fmt.Printf("  📋 Options: ")
@@ -93,7 +94,7 @@ func main() {
 				if len(q.Options) > 1 {
 					idx = 1
 				}
-				return harness.MCPAnswer{SelectedIndices: []int{idx}}
+				return mcp.Answer{SelectedIndices: []int{idx}}
 			},
 			judge: func(output string) (bool, string) {
 				lower := strings.ToLower(output)
@@ -111,7 +112,7 @@ func main() {
 		{
 			name:   "multi-select",
 			prompt: multiSelectPrompt,
-			autoAnswer: func(q harness.MCPToolCall) harness.MCPAnswer {
+			autoAnswer: func(q mcp.ToolCall) mcp.Answer {
 				fmt.Printf("  📨 Question received: %q\n", q.Question)
 				if len(q.Options) > 0 {
 					fmt.Printf("  📋 Options: ")
@@ -128,7 +129,7 @@ func main() {
 				if len(q.Options) > 1 {
 					indices = append(indices, len(q.Options)-1)
 				}
-				return harness.MCPAnswer{SelectedIndices: indices}
+				return mcp.Answer{SelectedIndices: indices}
 			},
 			judge: func(output string) (bool, string) {
 				// The model should produce output incorporating multiple selected items
@@ -196,7 +197,7 @@ func main() {
 type scenario struct {
 	name       string
 	prompt     string
-	autoAnswer func(harness.MCPToolCall) harness.MCPAnswer
+	autoAnswer func(mcp.ToolCall) mcp.Answer
 	judge      func(output string) (bool, string)
 }
 
@@ -215,7 +216,7 @@ func runScenario(ctx context.Context, cfg *config.Config, selfBin string, s scen
 	start := time.Now()
 
 	socketPath := filepath.Join("/tmp", fmt.Sprintf("orq-proto-%s-%d.sock", s.name, os.Getpid()))
-	bridge := harness.NewQuestionBridge(socketPath)
+	bridge := mcp.NewQuestionBridge(socketPath)
 
 	scenarioCtx, scenarioCancel := context.WithTimeout(ctx, 120*time.Second)
 	defer scenarioCancel()

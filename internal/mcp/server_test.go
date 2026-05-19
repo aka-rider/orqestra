@@ -1,4 +1,4 @@
-package harness
+package mcp
 
 import (
 	"encoding/json"
@@ -63,7 +63,6 @@ func TestHandleMCPRequest_ToolsList(t *testing.T) {
 		t.Errorf("tool name = %q, want AskUserQuestion", result.Tools[0].Name)
 	}
 
-	// Verify schema has 'question' as required
 	var schema struct {
 		Required   []string       `json:"required"`
 		Properties map[string]any `json:"properties"`
@@ -74,7 +73,6 @@ func TestHandleMCPRequest_ToolsList(t *testing.T) {
 	if len(schema.Required) != 1 || schema.Required[0] != "question" {
 		t.Errorf("required = %v, want [question]", schema.Required)
 	}
-	// Verify Claude Code compatible: question, options, allow_custom, multi_select
 	for _, key := range []string{"question", "options", "allow_custom", "multi_select"} {
 		if _, ok := schema.Properties[key]; !ok {
 			t.Errorf("missing property %q in schema", key)
@@ -112,8 +110,8 @@ func TestHandleMCPRequest_UnknownMethod(t *testing.T) {
 }
 
 func TestFormatAnswer_Freeform(t *testing.T) {
-	tc := MCPToolCall{Question: "What color?"}
-	ans := MCPAnswer{FreeformText: "blue"}
+	tc := ToolCall{Question: "What color?"}
+	ans := Answer{FreeformText: "blue"}
 	got := FormatAnswer(tc, ans)
 	want := "User's answer: blue"
 	if got != want {
@@ -122,8 +120,8 @@ func TestFormatAnswer_Freeform(t *testing.T) {
 }
 
 func TestFormatAnswer_Skipped(t *testing.T) {
-	tc := MCPToolCall{Question: "What color?"}
-	ans := MCPAnswer{Skipped: true}
+	tc := ToolCall{Question: "What color?"}
+	ans := Answer{Skipped: true}
 	got := FormatAnswer(tc, ans)
 	if got == "" {
 		t.Error("expected non-empty skip message")
@@ -134,14 +132,14 @@ func TestFormatAnswer_Skipped(t *testing.T) {
 }
 
 func TestFormatAnswer_SingleSelect(t *testing.T) {
-	tc := MCPToolCall{
+	tc := ToolCall{
 		Question: "Pick one",
-		Options: []MCPToolOption{
+		Options: []ToolOption{
 			{Label: "Alpha"},
 			{Label: "Beta"},
 		},
 	}
-	ans := MCPAnswer{SelectedIndices: []int{1}}
+	ans := Answer{SelectedIndices: []int{1}}
 	got := FormatAnswer(tc, ans)
 	want := "Selected: Beta"
 	if got != want {
@@ -150,14 +148,14 @@ func TestFormatAnswer_SingleSelect(t *testing.T) {
 }
 
 func TestFormatAnswer_SingleSelectWithCustom(t *testing.T) {
-	tc := MCPToolCall{
+	tc := ToolCall{
 		Question: "Pick one",
-		Options: []MCPToolOption{
+		Options: []ToolOption{
 			{Label: "Alpha"},
 			{Label: "Beta"},
 		},
 	}
-	ans := MCPAnswer{
+	ans := Answer{
 		SelectedIndices: []int{0},
 		CustomTexts:     map[int]string{0: "with extra sauce"},
 	}
@@ -168,16 +166,16 @@ func TestFormatAnswer_SingleSelectWithCustom(t *testing.T) {
 }
 
 func TestFormatAnswer_MultiSelect(t *testing.T) {
-	tc := MCPToolCall{
+	tc := ToolCall{
 		Question:    "Pick many",
 		MultiSelect: true,
-		Options: []MCPToolOption{
+		Options: []ToolOption{
 			{Label: "A"},
 			{Label: "B"},
 			{Label: "C"},
 		},
 	}
-	ans := MCPAnswer{SelectedIndices: []int{0, 2}}
+	ans := Answer{SelectedIndices: []int{0, 2}}
 	got := FormatAnswer(tc, ans)
 	if !contains(got, "Selected (2 of 3)") {
 		t.Errorf("unexpected header: %q", got)
@@ -188,11 +186,11 @@ func TestFormatAnswer_MultiSelect(t *testing.T) {
 }
 
 func TestFormatAnswer_NoSelection(t *testing.T) {
-	tc := MCPToolCall{
+	tc := ToolCall{
 		Question: "Pick one",
-		Options:  []MCPToolOption{{Label: "Alpha"}},
+		Options:  []ToolOption{{Label: "Alpha"}},
 	}
-	ans := MCPAnswer{}
+	ans := Answer{}
 	got := FormatAnswer(tc, ans)
 	if !contains(got, "best judgment") {
 		t.Errorf("expected fallback message, got %q", got)
