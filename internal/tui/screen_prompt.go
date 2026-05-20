@@ -47,6 +47,41 @@ func (s PromptScreen) Value() string { return s.textarea.Value() }
 // SetWidth sets the textarea width.
 func (s *PromptScreen) SetWidth(w int) { s.textarea.SetWidth(w) }
 
+// DesiredInputHeight calculates the desired height for the input zone based on
+// its content, capped at half the terminal height.
+func (s *PromptScreen) DesiredInputHeight(termHeight int) int {
+	val := s.textarea.Value()
+	w := s.textarea.Width()
+	if w <= 0 {
+		return constPromptInputHeight
+	}
+
+	lines := 0
+	paragraphs := strings.Split(val, "\n")
+	for _, p := range paragraphs {
+		plen := lipgloss.Width(p)
+		if plen == 0 {
+			lines += 1
+		} else {
+			lines += (plen / w) + 1
+		}
+	}
+
+	// Calculate desired total height including chrome (divider + instruction label)
+	chrome := 2
+	// Minimum height is chrome + 3 line textarea
+	desired := max(constPromptInputHeight, lines+chrome)
+
+	// Cap at half terminal height
+	maxHeight := max(constPromptInputHeight, termHeight/2)
+	return min(desired, maxHeight)
+}
+
+// SetTextareaHeight explicitly sets the height of the textarea.
+func (s *PromptScreen) SetTextareaHeight(h int) {
+	s.textarea.SetHeight(h)
+}
+
 // Update handles key events for the prompt screen.
 func (s PromptScreen) Update(msg tea.Msg) (PromptScreen, tea.Cmd) {
 	keyMsg, ok := msg.(tea.KeyPressMsg)
@@ -111,7 +146,8 @@ func (s PromptScreen) View(width, height int) string {
 		s.textarea.View() + "\n"
 
 	// Content zone dimensions — no header, no sidebar in prompt view
-	contentHeight := max(0, height-constPromptInputHeight-constFooterHeight)
+	inputHeight := s.DesiredInputHeight(height)
+	contentHeight := max(0, height-inputHeight-constFooterHeight)
 
 	// If content zone too small, skip split view — just render chrome
 	if contentHeight < 2 {

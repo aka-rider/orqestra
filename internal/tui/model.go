@@ -306,8 +306,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Pass non-key messages to focused sub-models
 	if m.state == StatePrompt {
+		prevHeight := m.promptScreen.DesiredInputHeight(m.height)
 		var cmd tea.Cmd
 		m.promptScreen, cmd = m.promptScreen.Update(msg)
+		if m.promptScreen.DesiredInputHeight(m.height) != prevHeight {
+			m.recalculateLayout()
+		}
 		return m, cmd
 	}
 	if m.state == StatePipeline {
@@ -453,8 +457,12 @@ func (m Model) handleRunDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // handlePromptKey delegates to PromptScreen and handles intents.
 func (m Model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	prevHeight := m.promptScreen.DesiredInputHeight(m.height)
 	var cmd tea.Cmd
 	m.promptScreen, cmd = m.promptScreen.Update(msg)
+	if m.promptScreen.DesiredInputHeight(m.height) != prevHeight {
+		m.recalculateLayout()
+	}
 	if intent := m.promptScreen.PendingIntent; intent != nil {
 		m.promptScreen.PendingIntent = nil
 		switch i := intent.(type) {
@@ -703,7 +711,8 @@ func (m *Model) recalculateLayout() {
 	var inputHeight int
 	switch m.state {
 	case StatePrompt:
-		inputHeight = constPromptInputHeight
+		inputHeight = m.promptScreen.DesiredInputHeight(m.height)
+		m.promptScreen.SetTextareaHeight(inputHeight - 2) // Subtract chrome
 	case StatePipeline:
 		if m.pipelineScreen.content == ContentPlanReview && m.pipelineScreen.hasPlanComment {
 			inputHeight = constPlanReviewInputHeight

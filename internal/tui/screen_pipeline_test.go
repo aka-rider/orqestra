@@ -40,15 +40,15 @@ func setupTestPipelineScreen() PipelineScreen {
 	s.cwd = "/test/dir"
 	sb := orchestrator.NewStreamRing(50)
 	sb.SetAgent("researcher")
-	sb.AppendText("stream line 1\n")
-	sb.AppendText("stream line 2\n")
-	sb.AppendText("stream line 3\n")
-	sb.AppendText("stream line 4\n")
-	sb.AppendText("stream line 5\n")
-	sb.AppendText("stream line 6\n")
-	sb.AppendText("stream line 7\n")
-	sb.AppendText("stream line 8\n")
-	sb.AppendText("stream line 9\n")
+	sb.AppendText("stream line 01\n")
+	sb.AppendText("stream line 02\n")
+	sb.AppendText("stream line 03\n")
+	sb.AppendText("stream line 04\n")
+	sb.AppendText("stream line 05\n")
+	sb.AppendText("stream line 06\n")
+	sb.AppendText("stream line 07\n")
+	sb.AppendText("stream line 08\n")
+	sb.AppendText("stream line 09\n")
 	sb.AppendText("stream line 10\n")
 	sb.AppendText("stream line 11\n")
 	sb.AppendText("stream line 12\n")
@@ -78,10 +78,10 @@ func TestViewStreaming_NoRawDump(t *testing.T) {
 		t.Errorf("expected activity names, got %s", out)
 	}
 
-	if strings.Contains(out, "stream line 1") {
+	if strings.Contains(out, "stream line 01") {
 		t.Errorf("expected oldest stream lines to be truncated")
 	}
-	if !strings.Contains(out, "stream line 6") {
+	if !strings.Contains(out, "stream line 06") {
 		t.Errorf("expected newest stream lines to be visible")
 	}
 }
