@@ -194,6 +194,24 @@ func (r *StreamRing) SnapshotCompat() (agentID string, lines []string, activitie
 	return r.agentID, lines, activities
 }
 
+// SnapshotText returns the current agent ID, completed text lines, the current
+// partial line, and tool activities. Unlike SnapshotCompat, the partial is NOT
+// appended to completedLines — callers render the partial as a single trailing
+// element that never wraps.
+func (r *StreamRing) SnapshotText() (agentID string, completedLines []string, partial string, activities []Activity) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.entries {
+		switch e.Kind {
+		case EntryText:
+			completedLines = append(completedLines, e.Text)
+		case EntryToolUse:
+			activities = append(activities, Activity{Tool: e.Tool, Detail: e.Detail})
+		}
+	}
+	return r.agentID, completedLines, r.partial, activities
+}
+
 // AgentActivities returns tool-use entries for the given agent as Activity
 // values, preserving backward compatibility with TUI code.
 func (r *StreamRing) AgentActivities(id string) []Activity {
