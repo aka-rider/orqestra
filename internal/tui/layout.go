@@ -27,8 +27,11 @@ const (
 	// Run detail lower pane height (raw agent JSONL log)
 	constRunLogHeight = 8
 
-	// Run detail chrome: header(2) + upper/lower divider(1) + footer(2)
-	constRunDetailChromeHeight = 5
+	// Run detail header: status line + horizontal divider.
+	constRunDetailHeaderHeight = 2
+
+	// Run detail right-pane chrome: header(2) + input-label(1) + output-separator(1) + footer(2).
+	constRunDetailChromeHeight = 6
 
 	// Run detail left pane (agent menu) as percentage of terminal width.
 	constRunDetailMenuPct = 30
