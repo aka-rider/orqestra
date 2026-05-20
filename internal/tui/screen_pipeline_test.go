@@ -45,7 +45,17 @@ func setupTestPipelineScreen() PipelineScreen {
 	sb.AppendText("stream line 3\n")
 	sb.AppendText("stream line 4\n")
 	sb.AppendText("stream line 5\n")
-	sb.AppendText("stream line 6\n") // > 5 lines to test preview
+	sb.AppendText("stream line 6\n")
+	sb.AppendText("stream line 7\n")
+	sb.AppendText("stream line 8\n")
+	sb.AppendText("stream line 9\n")
+	sb.AppendText("stream line 10\n")
+	sb.AppendText("stream line 11\n")
+	sb.AppendText("stream line 12\n")
+	sb.AppendText("stream line 13\n")
+	sb.AppendText("stream line 14\n")
+	sb.AppendText("stream line 15\n")
+	sb.AppendText("stream line 16\n") // > 15 lines to test preview
 
 	sb.AppendActivity("Read", "file1.txt")
 	sb.AppendActivity("Bash", "ls -l")

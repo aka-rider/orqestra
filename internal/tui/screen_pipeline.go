@@ -92,11 +92,12 @@ type PipelineScreen struct {
 	mergeConflict orchestrator.MergeConflictInfo
 
 	// UI state
-	configName    string
-	showDashboard bool
-	showHelp      bool
-	ctrlCPending  bool // set by parent model when Ctrl+C time gate is active
-	active        bool // true while pipeline is running
+	configName     string
+	showDashboard  bool
+	showHelp       bool
+	ctrlCPending   bool // set by parent model when Ctrl+C time gate is active
+	active         bool // true while pipeline is running
+	streamExpanded bool // true when stream block is expanded via ^O
 
 	// Animation state
 	animFrame int // incremented by animTickMsg for shimmer/pulse effects
@@ -174,6 +175,7 @@ func (s *PipelineScreen) Reset() {
 	s.liveInput = 0
 	s.liveOutput = 0
 	s.liveStart = time.Time{}
+	s.streamExpanded = false
 	s.contentVP.SetContent("")
 	s.contentVP.GotoTop()
 	s.dashboard = NewDashboardModel()
@@ -665,6 +667,10 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 		}
 		s.PendingIntent = NavigateToPromptIntent{PreFillGoal: s.goal}
 		return s, nil
+	case "ctrl+o":
+		s.streamExpanded = !s.streamExpanded
+		s.SyncViewports()
+		return s, nil
 	}
 	return s, nil
 }
@@ -921,10 +927,11 @@ func (s PipelineScreen) viewStreaming(width int) string {
 	}
 
 	var streamAgent string
-	var streamLines []string
+	var completedLines []string
+	var partial string
 	var activities []orchestrator.Activity
 	if s.streamBuf != nil {
-		streamAgent, streamLines, activities = s.streamBuf.SnapshotCompat()
+		streamAgent, completedLines, partial, activities = s.streamBuf.SnapshotText()
 	}
 
 	b.WriteString(fmt.Sprintf(" Phase: %s", s.phase))
@@ -937,31 +944,51 @@ func (s PipelineScreen) viewStreaming(width int) string {
 		b.WriteString(renderActivityLog(activities, width, s.cwd, 20))
 	}
 
-	if len(streamLines) > 0 {
+	if len(completedLines) > 0 || partial != "" {
 		b.WriteString("\n")
 		b.WriteString(streamStyle.Render(" Stream"))
 		b.WriteString("\n")
 
+		// innerWidth is the content width inside the bordered block
+		// (subtract 2 for borders + 2 for 1-char left/right padding).
+		innerWidth := max(1, width-constContentInset-4)
+
+		// Remove earlier occurrences of any repeated line; keep last.
+		unique := deduplicateLines(completedLines)
+
+		// Window to streamPreviewLines completed lines when collapsed.
+		overflow := !s.streamExpanded && len(unique) > streamPreviewLines
 		start := 0
-		if len(streamLines) > streamPreviewLines {
-			start = len(streamLines) - streamPreviewLines
+		if overflow {
+			start = len(unique) - streamPreviewLines
+		}
+		shown := unique[start:]
+
+		// Build block content lines.
+		var contentLines []string
+		contentLines = append(contentLines, shown...)
+
+		// Partial shown as one trailing line (last innerWidth bytes).
+		if partial != "" {
+			display := partial
+			if len(display) > innerWidth {
+				display = display[len(display)-innerWidth:]
+			}
+			contentLines = append(contentLines, display)
 		}
 
-		maxLineWidth := width - constContentInset
-		if maxLineWidth < 1 {
-			maxLineWidth = 1
+		// Expand/collapse hint.
+		if overflow {
+			contentLines = append(contentLines, streamHintStyle.Render("^O  expand"))
+		} else if s.streamExpanded && len(unique) > streamPreviewLines {
+			contentLines = append(contentLines, streamHintStyle.Render("^O  collapse"))
 		}
-		for _, line := range streamLines[start:] {
-			for len(line) > maxLineWidth {
-				b.WriteString(" ")
-				b.WriteString(streamStyle.Render(line[:maxLineWidth]))
-				b.WriteString("\n")
-				line = line[maxLineWidth:]
-			}
-			b.WriteString(" ")
-			b.WriteString(streamStyle.Render(line))
-			b.WriteString("\n")
-		}
+
+		// Word-wrap and render inside bordered block.
+		// lipgloss .Width(innerWidth) word-wraps each \n-delimited line.
+		content := strings.Join(contentLines, "\n")
+		b.WriteString(streamBlockStyle.Width(innerWidth).Render(content))
+		b.WriteString("\n")
 	}
 	return b.String()
 }
@@ -1193,7 +1220,15 @@ func (s PipelineScreen) viewFooter() string {
 	case ContentCompletion:
 		return keyStyle.Render(" [^N] new run | [^R] runs | [^Q] quit                    [^H] help")
 	default:
-		return keyStyle.Render(" [^N] new run                    [^D] expand  [Alt+N] agent  [^H] help  ") + ctrlCHint
+		expandHint := ""
+		if s.active {
+			if s.streamExpanded {
+				expandHint = " [^O] collapse |"
+			} else {
+				expandHint = " [^O] expand |"
+			}
+		}
+		return keyStyle.Render(expandHint+" [^N] new run                    [^D] expand  [Alt+N] agent  [^H] help  ") + ctrlCHint
 	}
 }
 
