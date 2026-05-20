@@ -746,14 +746,15 @@ func (m *Model) recalculateLayout() {
 	// Run detail: agent menu LEFT, plan content RIGHT, log BOTTOM.
 	// RunDetail manages its own chrome; don't rely on pipeline's usedHeight.
 	if m.state == StateRunDetail {
-		upperHeight := max(0, m.height-constRunDetailChromeHeight-constRunLogHeight)
+		stepsFullH := max(0, m.height-constRunDetailHeaderHeight-constFooterHeight)
+		inputH := max(0, m.height-constRunDetailChromeHeight-constRunLogHeight)
 		menuW := max(constRunDetailMinMenuW, m.width*constRunDetailMenuPct/100)
 		contentW := max(0, m.width-menuW-1)
 		m.runDetailScreen.stepsVP.SetWidth(menuW)
-		m.runDetailScreen.stepsVP.SetHeight(upperHeight)
+		m.runDetailScreen.stepsVP.SetHeight(stepsFullH)
 		m.runDetailScreen.detailVP.SetWidth(contentW)
-		m.runDetailScreen.detailVP.SetHeight(upperHeight)
-		m.runDetailScreen.logVP.SetWidth(m.width)
+		m.runDetailScreen.detailVP.SetHeight(inputH)
+		m.runDetailScreen.logVP.SetWidth(contentW)
 		m.runDetailScreen.logVP.SetHeight(constRunLogHeight)
 	}
 
