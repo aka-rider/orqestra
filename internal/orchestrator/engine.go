@@ -84,6 +84,7 @@ func resolveAgentMeta(cfg *config.Config, modelRef string) AgentMeta {
 // Engine is the hardcoded Go orchestrator that runs the full pipeline.
 type Engine struct {
 	Config         *config.Config
+	RepoPath       string // canonical project root (from .orqestra or .git detection)
 	Runners        Runners
 	RunDirFactory  RunDirFactory
 	QuestionBridge *mcp.QuestionBridge
@@ -1103,8 +1104,7 @@ planGate:
 	workerStart := time.Now()
 
 	// Determine which branch to merge back into after the run.
-	repoPath, _ := os.Getwd()
-	targetBranch, branchErr := worktree.CurrentBranch(ctx, repoPath)
+	targetBranch, branchErr := worktree.CurrentBranch(ctx, e.RepoPath)
 	if branchErr != nil {
 		slog.Warn("cannot determine current branch — worktree isolation disabled", "err", branchErr)
 	}
@@ -1117,7 +1117,7 @@ planGate:
 	runID := ""
 	if session.Path != "" && targetBranch != "" && e.WorktreeRunnerFactory != nil {
 		runID = fmt.Sprintf("%d", workerStart.UnixMilli())
-		wt, wtErr = worktree.Create(ctx, repoPath, session.Path, runID)
+		wt, wtErr = worktree.Create(ctx, e.RepoPath, session.Path, runID)
 		if wtErr != nil {
 			slog.Warn("worktree creation failed — falling back to writable repo", "err", wtErr)
 			wt = worktree.Worktree{} // zero value = no worktree
@@ -1418,13 +1418,9 @@ func claudeProjectPath(session agent.SessionDir) string {
 }
 
 // DefaultRunDirFactory returns a RunDirFactory that creates session directories
-// under the current working directory.
-func DefaultRunDirFactory() RunDirFactory {
+// under the given project root.
+func DefaultRunDirFactory(repoPath string) RunDirFactory {
 	return func(slug string) (agent.SessionDir, error) {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return agent.SessionDir{}, fmt.Errorf("get working directory: %w", err)
-		}
-		return agent.NewSessionDir(cwd, slug)
+		return agent.NewSessionDir(repoPath, slug)
 	}
 }
