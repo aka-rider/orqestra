@@ -91,6 +91,10 @@ type PipelineScreen struct {
 	// Merge conflict state
 	mergeConflict orchestrator.MergeConflictInfo
 
+	// Merge error state (merge failed, branch preserved)
+	mergeErrorMsg    string
+	mergeErrorBranch string
+
 	// UI state
 	configName     string
 	showDashboard  bool
@@ -380,6 +384,10 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 		s.mergeConflict = event.MergeConflict
 		s.content = ContentMergeConflict
 		s.contentVP.GotoTop()
+
+	case orchestrator.EventMergeError:
+		s.mergeErrorMsg = event.MergeError
+		s.mergeErrorBranch = event.MergeBranch
 
 	case orchestrator.EventComplete:
 		s.content = ContentCompletion
@@ -984,6 +992,17 @@ func (s PipelineScreen) viewStreaming(width int) string {
 			contentLines = append(contentLines, streamHintStyle.Render("^O  collapse"))
 		}
 
+		// Defensive height clamp: prevent the bordered block from exceeding
+		// the viewport when lipgloss word-wrapping inflates rendered rows.
+		// Subtract border(2) + content above stream block (~6 lines min).
+		// Only apply when viewport has been laid out (height > 0).
+		if vpH := s.contentVP.Height(); vpH > 0 {
+			maxLines := max(3, vpH-8)
+			if len(contentLines) > maxLines {
+				contentLines = contentLines[len(contentLines)-maxLines:]
+			}
+		}
+
 		// Word-wrap and render inside bordered block.
 		// lipgloss .Width(innerWidth) word-wraps each \n-delimited line.
 		content := strings.Join(contentLines, "\n")
@@ -1065,6 +1084,15 @@ func (s PipelineScreen) viewCompletion(width int) string {
 	if s.hasValidation {
 		b.WriteString(" Validation:\n")
 		b.WriteString(renderPrefixedText(lipgloss.NewStyle(), "   ", s.workerValidation, width))
+	}
+	if s.mergeErrorMsg != "" {
+		b.WriteString("\n")
+		b.WriteString(warnStyle.Render(" ⚠ Merge failed — changes on branch: " + s.mergeErrorBranch))
+		b.WriteString("\n")
+		b.WriteString(renderPrefixedText(dimStyle, "   ", s.mergeErrorMsg, width))
+		b.WriteString("\n")
+		b.WriteString(keyStyle.Render("   To merge manually: git merge " + s.mergeErrorBranch))
+		b.WriteString("\n")
 	}
 	elapsed := time.Since(s.startTime).Truncate(time.Second)
 	b.WriteString(fmt.Sprintf("\n Elapsed: %s\n", elapsed))

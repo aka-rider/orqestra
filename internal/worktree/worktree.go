@@ -61,6 +61,17 @@ func (w Worktree) Remove(ctx context.Context, force bool) error {
 	return nil
 }
 
+// RemoveDir removes only the worktree directory without deleting the branch.
+// Used when merge fails and the branch should be preserved for manual resolution.
+func (w Worktree) RemoveDir(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "git", "worktree", "remove", "--force", w.Path)
+	cmd.Dir = w.RepoPath
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("worktree: remove dir %s: %w (output: %s)", w.Path, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // CommitAll stages all changes in the worktree and creates a commit.
 // Returns (false, nil) when there is nothing to commit (clean working tree).
 func (w Worktree) CommitAll(ctx context.Context, message string) (committed bool, err error) {

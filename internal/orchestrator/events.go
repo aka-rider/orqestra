@@ -20,6 +20,7 @@ const (
 	EventChatResponse  // emitted when architect answers without revising the plan
 	EventUserQuestion  // emitted when an agent asks the user a question via MCP
 	EventMergeConflict // emitted when the post-run merge has conflicts
+	EventMergeError    // emitted when the post-run merge fails (dirty repo, permissions, etc.)
 )
 
 // Phase represents the current pipeline phase.
@@ -125,4 +126,9 @@ type Event struct {
 
 	// MergeConflict is set on EventMergeConflict.
 	MergeConflict MergeConflictInfo
+
+	// MergeError is set on EventMergeError — the error message from the failed merge.
+	MergeError string
+	// MergeBranch is set on EventMergeError — the branch containing committed work.
+	MergeBranch string
 }

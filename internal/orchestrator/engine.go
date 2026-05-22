@@ -1323,7 +1323,15 @@ planGate:
 			mergeResult, mergeErr := wt.MergeInto(ctx, targetBranch, buildCommitMsg("merge"))
 			if mergeErr != nil {
 				slog.Warn("worktree merge failed", "err", mergeErr)
-				// Non-fatal: leave worktree branch intact for manual resolution
+				emit(Event{
+					Type:        EventMergeError,
+					MergeError:  mergeErr.Error(),
+					MergeBranch: wt.Branch,
+				})
+				// Remove worktree directory but preserve branch for manual resolution
+				if rmErr := wt.RemoveDir(context.Background()); rmErr != nil {
+					slog.Warn("worktree dir cleanup failed", "err", rmErr)
+				}
 			} else if !mergeResult.Merged {
 				// Conflicts — gate the user
 				emit(Event{
@@ -1344,12 +1352,21 @@ planGate:
 				case <-ctx.Done():
 					// Context cancelled — leave worktree branch as-is
 				}
+				// Remove worktree fully (branch is useless after conflict abort)
+				if rmErr := wt.Remove(context.Background(), true); rmErr != nil {
+					slog.Warn("worktree cleanup failed", "err", rmErr)
+				}
+			} else {
+				// Merge succeeded — clean up worktree and branch
+				if rmErr := wt.Remove(context.Background(), true); rmErr != nil {
+					slog.Warn("worktree cleanup failed", "err", rmErr)
+				}
 			}
-		}
-
-		// Remove the worktree directory regardless of merge outcome
-		if rmErr := wt.Remove(context.Background(), true); rmErr != nil {
-			slog.Warn("worktree cleanup failed", "err", rmErr)
+		} else {
+			// Nothing committed or commit failed — remove worktree fully
+			if rmErr := wt.Remove(context.Background(), true); rmErr != nil {
+				slog.Warn("worktree cleanup failed", "err", rmErr)
+			}
 		}
 	}
 
