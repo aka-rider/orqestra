@@ -66,6 +66,12 @@ func IsGitRoot(dir string) bool {
 	return isDir(filepath.Join(dir, gitDir))
 }
 
+// IsInitialized reports whether root has an .orqestra/ directory.
+// It does not walk up; the caller must supply the root from FindRoot or FindGitRoot.
+func IsInitialized(root string) bool {
+	return isDir(filepath.Join(root, projectDir))
+}
+
 // Init creates .orqestra/sessions/ at root, adds .orqestra/ to .gitignore,
 // and creates the sessions subdirectory. Idempotent: no error if .orqestra
 // already exists.

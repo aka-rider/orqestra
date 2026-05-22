@@ -157,8 +157,8 @@ func TestTUI_RunDetailLayout_ThreeZones(t *testing.T) {
 	}
 
 	// Should contain the separator
-	if !strings.Contains(view, "⇩") {
-		t.Error("detail view should contain the ⇩ separator")
+	if !strings.Contains(view, "Output") {
+		t.Error("detail view should contain the Output separator")
 	}
 
 	// Right column should contain step names

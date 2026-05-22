@@ -316,3 +316,58 @@ func TestInit(t *testing.T) {
 		}
 	})
 }
+
+func TestIsInitialized(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) string
+		want  bool
+	}{
+		{
+			name: "has .orqestra",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				if err := os.Mkdir(filepath.Join(dir, ".orqestra"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				return dir
+			},
+			want: true,
+		},
+		{
+			name: "only .git",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				return dir
+			},
+			want: false,
+		},
+		{
+			name: "empty dir",
+			setup: func(t *testing.T) string {
+				return t.TempDir()
+			},
+			want: false,
+		},
+		{
+			name: "non-existent path",
+			setup: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "no-such-dir")
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := tt.setup(t)
+			got := IsInitialized(dir)
+			if got != tt.want {
+				t.Errorf("IsInitialized(%q) = %v, want %v", dir, got, tt.want)
+			}
+		})
+	}
+}

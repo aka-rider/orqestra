@@ -55,6 +55,7 @@ type ClaudeCLI struct {
 	binary             string                  // path to claude binary, defaults to "claude"
 	inlineMCPServers   map[string]inlineMCPDef // MCP servers injected at runtime
 	appendSystemPrompt string                  // text appended to default system prompt via --append-system-prompt
+	workDir            string                  // working directory for subprocess; empty inherits process CWD
 }
 
 // inlineMCPDef defines an MCP server to inject into --mcp-config.
@@ -211,6 +212,12 @@ func WithInlineMCPServer(name, command string, args []string) ClaudeCLIOption {
 	}
 }
 
+// WithWorkDir sets the working directory for the claude subprocess.
+// When empty (the zero value), the subprocess inherits the process CWD.
+func WithWorkDir(dir string) ClaudeCLIOption {
+	return func(c *ClaudeCLI) { c.workDir = dir }
+}
+
 // RunPrint runs `claude --print -p <prompt> --append-system-prompt <systemPrompt> --output-format json`
 // and returns the output.
 func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (RunResult, error) {
@@ -222,6 +229,9 @@ func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (
 
 	cmd := exec.CommandContext(ctx, c.binary, args...)
 	cmd.Env = c.buildEnv()
+	if c.workDir != "" {
+		cmd.Dir = c.workDir
+	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -259,6 +269,9 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 
 	cmd := exec.CommandContext(ctx, c.binary, args...)
 	cmd.Env = c.buildEnv()
+	if c.workDir != "" {
+		cmd.Dir = c.workDir
+	}
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -313,6 +326,9 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, e
 
 	cmd := exec.CommandContext(ctx, c.binary, args...)
 	cmd.Env = c.buildEnv()
+	if c.workDir != "" {
+		cmd.Dir = c.workDir
+	}
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -596,8 +612,15 @@ func BuildModelEnv(resolved config.ResolvedModel, utility *config.ResolvedModel)
 
 // buildEnv constructs the environment variables for the claude subprocess.
 func (c *ClaudeCLI) buildEnv() []string {
-	env := os.Environ()
-	env = append(env, BuildModelEnv(c.resolved, c.small)...)
+	// Filter out any existing ANTHROPIC_API_KEY from the parent environment
+	// to prevent leakage or conflicts with the runner's configured auth.
+	var clean []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
+			clean = append(clean, kv)
+		}
+	}
+	env := append(clean, BuildModelEnv(c.resolved, c.small)...)
 	return env
 }
 
