@@ -596,6 +596,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		var criticMarkdown string
 		var criticUsage harness.TokenUsage
 		var criticSessionID string
+		var criticStreamFallback bool
 		var criticErr error
 		for attempt := 1; attempt <= criticAttempts; attempt++ {
 			var cResult agent.PlanResult
@@ -604,6 +605,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 				criticMarkdown = cResult.Plan
 				criticUsage = cResult.Usage
 				criticSessionID = cResult.SessionID
+				criticStreamFallback = cResult.StreamFallback
 				break
 			}
 			if attempt < criticAttempts {
@@ -634,11 +636,19 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		if cpErr != nil {
 			logger.Warn("copy session log", "agent", "critic", "err", cpErr)
 		}
+		if criticStreamFallback {
+			logger.Warn("critic report recovered from stream output (plan file was not written)",
+				"session_id", criticSessionID)
+		}
+		criticPlanSource := "plan_file"
+		if criticStreamFallback {
+			criticPlanSource = "stream_fallback"
+		}
 		writeArtifact(session, "critic_report.md", criticMarkdown)
 		writeArtifactJSON(session, "critic_meta.json", agent.StepMeta{
 			AgentID: "critic", ModelRef: e.Config.Critic.Model, StartTime: criticStart, EndTime: time.Now(),
 			ModelDisplay: critMeta.ModelDisplay, Provider: critMeta.Provider, ContextWindow: critMeta.ContextWindow,
-			ClaudeSessionID: criticSessionID, Status: "done",
+			ClaudeSessionID: criticSessionID, Status: "done", PlanSource: criticPlanSource,
 			InputTokens: criticUsage.Input, OutputTokens: criticUsage.Output,
 			ClaudeProjectPath:    claudeProjectPath(session),
 			ClaudeSessionLogPath: criticLogCopy,

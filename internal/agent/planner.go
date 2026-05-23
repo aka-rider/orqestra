@@ -20,6 +20,10 @@ type PlanResult struct {
 	Usage harness.TokenUsage
 	// SessionID is the Claude session identifier for this call.
 	SessionID string
+	// StreamFallback is true when the plan content was recovered from the CLI
+	// stream result text because the plan file was not written to disk. The
+	// content is best-effort and may not match the format of a plan-file report.
+	StreamFallback bool
 }
 
 // Planner is the unified plan-mode agent entity. It wraps a ContinuableRunner
@@ -36,8 +40,9 @@ func NewPlanner(runner harness.ContinuableRunner, system string) *Planner {
 }
 
 // Run executes a new planning session with the given prompt. It reads authoritative
-// output from the plan file via ReadPlanFromRun. Returns a hard error if the plan
-// file is unreadable — initial runs must produce a plan.
+// output from the plan file via ReadPlanFromRun. Falls back to the CLI stream result
+// text when the plan file is unreadable but the stream produced output. Returns a
+// hard error only when both the plan file and stream output are unavailable.
 func (p *Planner) Run(ctx context.Context, prompt string, events chan<- harness.StreamUpdate) (PlanResult, error) {
 	result, err := p.runner.RunStreaming(ctx, prompt, p.system, events)
 	if err != nil {
@@ -46,7 +51,21 @@ func (p *Planner) Run(ctx context.Context, prompt string, events chan<- harness.
 
 	planContent, planErr := ReadPlanFromRun(result)
 	if planErr != nil {
-		return PlanResult{}, fmt.Errorf("planner run: read plan file: %w", planErr)
+		streamText := strings.TrimSpace(result.Output)
+		if result.SessionID == "" || streamText == "" {
+			return PlanResult{}, fmt.Errorf("planner run: read plan file: %w", planErr)
+		}
+		slog.Warn("plan file unreadable, falling back to stream output",
+			"session_id", result.SessionID,
+			"plan_err", planErr,
+		)
+		return PlanResult{
+			Plan:           streamText,
+			Chat:           result.Output,
+			Usage:          result.Usage,
+			SessionID:      result.SessionID,
+			StreamFallback: true,
+		}, nil
 	}
 
 	return PlanResult{

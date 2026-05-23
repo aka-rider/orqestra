@@ -35,14 +35,40 @@ func TestPlanner_Run_Success(t *testing.T) {
 	}
 }
 
-func TestPlanner_Run_HardFailOnMissingPlanFile(t *testing.T) {
+func TestPlanner_Run_HardFailOnMissingPlanFileAndEmptyOutput(t *testing.T) {
 	testutil.MustTempHome(t)
 
-	runner := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "done", SessionID: "nonexistent-session-99"}}}
+	// Stream output is empty AND plan file doesn't exist → hard error.
+	runner := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "", SessionID: "nonexistent-session-99"}}}
 	p := NewPlanner(runner, "sys")
 	_, err := p.Run(context.Background(), "prompt", nil)
 	if err == nil {
-		t.Fatal("expected hard error when plan file is missing on Run")
+		t.Fatal("expected hard error when plan file is missing and stream output is empty")
+	}
+}
+
+func TestPlanner_Run_StreamFallbackWhenPlanFileMissing(t *testing.T) {
+	testutil.MustTempHome(t)
+
+	// Plan file doesn't exist, but stream result has content → fallback.
+	streamReport := "## Critic Report\n\nNo blockers found."
+	runner := &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: streamReport, SessionID: "fallback-session-1"}}}
+	p := NewPlanner(runner, "sys")
+	result, err := p.Run(context.Background(), "prompt", nil)
+	if err != nil {
+		t.Fatalf("expected fallback success, got error: %v", err)
+	}
+	if result.Plan != streamReport {
+		t.Errorf("Plan mismatch:\ngot:  %q\nwant: %q", result.Plan, streamReport)
+	}
+	if !result.StreamFallback {
+		t.Error("expected StreamFallback to be true")
+	}
+	if result.Chat != streamReport {
+		t.Errorf("Chat = %q, want %q", result.Chat, streamReport)
+	}
+	if result.SessionID != "fallback-session-1" {
+		t.Errorf("SessionID = %q, want %q", result.SessionID, "fallback-session-1")
 	}
 }
 

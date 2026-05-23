@@ -1021,3 +1021,36 @@ assertEnd:
 		t.Error("worker did not start after AutoApprove edit")
 	}
 }
+
+func TestEngine_CriticStreamFallback(t *testing.T) {
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
+
+	criticSID := "critic-stream-fallback-sid"
+	criticReport := "## Critic Report\n\nFallback stream report content."
+
+	engine.Runners.Critic = &testutil.FakeRunner{
+		Calls: []testutil.FakeCall{{Output: criticReport, SessionID: criticSID}},
+	}
+
+	tmpDir := t.TempDir()
+	engine.RunDirFactory = func(slug string) (agent.SessionDir, error) {
+		path := filepath.Join(tmpDir, ".orqestra", "sessions", "current")
+		os.MkdirAll(path, 0o755)
+		return agent.SessionDir{Path: path}, nil
+	}
+
+	ctx := context.Background()
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
+	for range channels.Events {
+	}
+
+	metaPath := filepath.Join(tmpDir, ".orqestra", "sessions", "current", "critic_meta.json")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read critic meta: %v", err)
+	}
+
+	if !strings.Contains(string(data), `"plan_source": "stream_fallback"`) {
+		t.Errorf("critic_meta.json missing stream_fallback source: %s", string(data))
+	}
+}

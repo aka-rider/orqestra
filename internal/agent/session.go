@@ -69,6 +69,7 @@ type StepMeta struct {
 	ClaudePlanFilePath   string    `json:"claude_plan_file_path,omitempty"`
 	Status               string    `json:"status"` // "done" or "failed"
 	Error                string    `json:"error,omitempty"`
+	PlanSource           string    `json:"plan_source,omitempty"` // "plan_file" (default) or "stream_fallback"
 	InputTokens          int64     `json:"input_tokens"`
 	OutputTokens         int64     `json:"output_tokens"`
 }
