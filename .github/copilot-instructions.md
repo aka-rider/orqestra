@@ -96,6 +96,7 @@ These are review blockers. If existing code contains one near the task, do not s
 - Silent fallback after explicit user intent: user-supplied config paths, plan paths, model refs, prompt files, sandbox paths, and command targets must not fall back to defaults when missing or invalid.
 - Log-and-continue across integrity boundaries: after an error that affects correctness, model selection, sandboxing, plan source, worker execution, merge state, or user-visible output, return or emit a failure instead of continuing.
 - Swallowed file-system errors: do not treat all `os.Stat` or read errors as absence. Propagate permission, symlink, parse, and IO errors with operation and path context.
+- `os.MkdirAll` masking errors: never use `MkdirAll` for explicit user-initiated creation (e.g. `Init`). It silently succeeds when the directory already exists, hiding state corruption or re-initialization bugs. Use `os.Mkdir` and let the `EEXIST` error surface.
 - Bare ignored errors: `_ = err` is allowed only with an adjacent `// fire-and-forget: <reason>` comment or in tests where the assertion already covers the failure path.
 - Nil interface construction: factories for runners, sandboxes, stores, parsers, resolvers, and orchestrators return `(T, error)` and never use `nil, nil` to mean disabled or misconfigured.
 - Direct worker execution outside the sandbox/worktree boundary: worker shells, validation continuations, and merge-producing execution must use the seatbelt runner or an explicit test double.

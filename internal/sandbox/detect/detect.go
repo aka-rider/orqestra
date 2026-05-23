@@ -231,3 +231,131 @@ func DetectNPM(home string) (*sandbox.Snapshot, error) {
 	snap := p.Snapshot()
 	return &snap, nil
 }
+
+// DetectXcodeDeveloper returns a profile for the active Xcode developer tools.
+// On macOS, /usr/bin/xcrun, /usr/bin/make, etc. dispatch into this directory.
+// Returns nil if xcode-select reports no developer directory.
+func DetectXcodeDeveloper(home string) (*sandbox.Snapshot, error) {
+	out, err := exec.Command("xcode-select", "-p").Output()
+	if err != nil {
+		// xcode-select not found or no developer dir configured
+		return nil, nil
+	}
+	devDir := strings.TrimSpace(string(out))
+	if devDir == "" {
+		return nil, nil
+	}
+	if _, err := os.Stat(devDir); err != nil {
+		return nil, nil
+	}
+
+	p := sandbox.NewToolProfile("xcode-developer", home)
+	if err := p.Allow(devDir, sandbox.Exec); err != nil {
+		return nil, fmt.Errorf("detect xcode developer dir %q: %w", devDir, err)
+	}
+	snap := p.Snapshot()
+	return &snap, nil
+}
+
+// DetectGo returns a profile for Go toolchain, or nil if not installed.
+func DetectGo(home string) (*sandbox.Snapshot, error) {
+	goPath, err := exec.LookPath("go")
+	if errors.Is(err, exec.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("detect go binary: %w", err)
+	}
+
+	p := sandbox.NewToolProfile("go", home)
+
+	// Go binary directory (exec)
+	if err := p.Allow(filepath.Dir(goPath), sandbox.Exec); err != nil {
+		return nil, fmt.Errorf("detect go bin dir: %w", err)
+	}
+
+	// GOROOT — the Go installation (read + exec for tool binaries)
+	goRoot, rootErr := exec.Command(goPath, "env", "GOROOT").Output()
+	if rootErr == nil {
+		root := strings.TrimSpace(string(goRoot))
+		if root != "" {
+			if err := p.AllowOptional(root, sandbox.Exec); err != nil {
+				return nil, fmt.Errorf("detect go GOROOT: %w", err)
+			}
+		}
+	}
+
+	// GOPATH — module cache and built binaries (read+write)
+	goPathDir, pathErr := exec.Command(goPath, "env", "GOPATH").Output()
+	if pathErr == nil {
+		gp := strings.TrimSpace(string(goPathDir))
+		if gp != "" {
+			if err := p.AllowOptional(gp, sandbox.Write); err != nil {
+				return nil, fmt.Errorf("detect go GOPATH: %w", err)
+			}
+			// GOPATH/bin for installed tools (go install'd binaries)
+			if err := p.AllowOptional(filepath.Join(gp, "bin"), sandbox.Exec); err != nil {
+				return nil, fmt.Errorf("detect go GOPATH/bin: %w", err)
+			}
+		}
+	}
+
+	// GOMODCACHE — module download cache (read+write)
+	goModCache, cacheErr := exec.Command(goPath, "env", "GOMODCACHE").Output()
+	if cacheErr == nil {
+		mc := strings.TrimSpace(string(goModCache))
+		if mc != "" {
+			if err := p.AllowOptional(mc, sandbox.Write); err != nil {
+				return nil, fmt.Errorf("detect go GOMODCACHE: %w", err)
+			}
+		}
+	}
+
+	snap := p.Snapshot()
+	return &snap, nil
+}
+
+// DetectPython returns a profile for Python toolchain, or nil if not installed.
+func DetectPython(home string) (*sandbox.Snapshot, error) {
+	// Try python3 first, then python
+	var pyPath string
+	for _, bin := range []string{"python3", "python"} {
+		p, err := exec.LookPath(bin)
+		if err == nil {
+			pyPath = p
+			break
+		}
+	}
+	if pyPath == "" {
+		return nil, nil
+	}
+
+	p := sandbox.NewToolProfile("python", home)
+
+	// Python binary directory (exec)
+	if err := p.Allow(filepath.Dir(pyPath), sandbox.Exec); err != nil {
+		return nil, fmt.Errorf("detect python bin dir: %w", err)
+	}
+
+	// Common Python paths
+	for _, path := range []string{
+		"~/.local/lib/python3",
+		"~/.local/lib",
+		"~/.pyenv",
+	} {
+		if err := p.AllowOptional(path, sandbox.Exec); err != nil {
+			return nil, fmt.Errorf("detect python path %q: %w", path, err)
+		}
+	}
+
+	// pip/pipx cache and installed scripts
+	if err := p.AllowOptional("~/.local/bin", sandbox.Exec); err != nil {
+		return nil, fmt.Errorf("detect python local bin: %w", err)
+	}
+	if err := p.AllowOptional("~/.cache/pip", sandbox.Write); err != nil {
+		return nil, fmt.Errorf("detect python pip cache: %w", err)
+	}
+
+	snap := p.Snapshot()
+	return &snap, nil
+}

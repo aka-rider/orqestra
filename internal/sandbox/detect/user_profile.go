@@ -57,6 +57,9 @@ func AllProfiles(home, claudeBin string, cfg config.SandboxConfig) ([]sandbox.Sn
 		{"homebrew", DetectHomebrew},
 		{"git", DetectGit},
 		{"npm", DetectNPM},
+		{"xcode-developer", DetectXcodeDeveloper},
+		{"go", DetectGo},
+		{"python", DetectPython},
 	} {
 		snap, err := detect.fn(home)
 		if err != nil {
