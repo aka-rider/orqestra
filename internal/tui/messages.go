@@ -163,6 +163,14 @@ type RevertPlanIntent struct {
 
 func (RevertPlanIntent) isIntent() {}
 
+// RestartRunIntent requests restarting a failed or incomplete historical run.
+type RestartRunIntent struct {
+	RunPath           string
+	FirstMissingAgent string
+}
+
+func (RestartRunIntent) isIntent() {}
+
 // planRevisionsLoadedMsg carries the revision list and resolved HEAD SHA
 // returned by loadPlanRevisions.
 type planRevisionsLoadedMsg struct {

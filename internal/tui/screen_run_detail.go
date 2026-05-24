@@ -23,6 +23,7 @@ const (
 // RunDetailScreen manages the run detail inspection view.
 type RunDetailScreen struct {
 	detail        agent.RunDetail
+	completeness  agent.RunCompleteness
 	stepCursor    int
 	focus         RunDetailFocus
 	logLines      []string
@@ -48,9 +49,10 @@ func NewRunDetailScreen() RunDetailScreen {
 	}
 }
 
-// SetDetail assigns the run detail and resets the step cursor.
+// SetDetail assigns the run detail, analyzes completeness, and resets the step cursor.
 func (s *RunDetailScreen) SetDetail(detail agent.RunDetail) {
 	s.detail = detail
+	s.completeness = agent.AnalyzeRunCompleteness(detail.Path, detail)
 	s.stepCursor = 0
 	s.focus = RunDetailFocusMenu
 }
@@ -116,7 +118,11 @@ func (s RunDetailScreen) View(width, height int) string {
 	icon := statusIcon(s.detail.Status)
 	dur := formatDuration(s.detail.Duration)
 	ts := s.detail.Timestamp.Format("2006-01-02 15:04:05")
-	header := headerStyle.Render(fmt.Sprintf(" %s  %s  %s  %s", icon, ts, dur, s.detail.Slug)) + "\n" +
+	incompleteSuffix := ""
+	if !s.completeness.Complete {
+		incompleteSuffix = warnStyle.Render(" ⚠ INCOMPLETE")
+	}
+	header := headerStyle.Render(fmt.Sprintf(" %s  %s  %s  %s%s", icon, ts, dur, s.detail.Slug, incompleteSuffix)) + "\n" +
 		dividerStyle.Render(strings.Repeat("─", width))
 
 	menuWidth := max(constRunDetailMinMenuW, width*constRunDetailMenuPct/100)
@@ -169,7 +175,11 @@ func (s RunDetailScreen) viewFooter() string {
 	case RunDetailFocusLog:
 		focusHint = "log"
 	}
+	var restartHint string
+	if !s.completeness.Complete {
+		restartHint = " | [Ctrl+Shift+R] restart "
+	}
 	return keyStyle.Render(fmt.Sprintf(
-		" [↑↓] select/scroll | [Tab] focus | [Enter] view | [^E] open log | [^Y] history | [Esc] back  [%s]",
-		focusHint))
+		" [↑↓] select/scroll | [Tab] focus | [Enter] view | [^E] open log | [^Y] history | [Esc] back%s[%s]",
+		restartHint, focusHint))
 }

@@ -92,6 +92,10 @@ type Model struct {
 	ctrlCPending  bool
 	ctrlCDeadline time.Time
 	lastErr       error // navigation-level errors (e.g. loading runs)
+
+	// Restart state: carries restart context from run detail to prompt screen.
+	lastRestartRunPath           string
+	lastRestartFirstMissingAgent string
 }
 
 // NewModel creates the initial TUI model.
@@ -448,7 +452,7 @@ func (m Model) handleRunDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.recalculateLayout()
 			m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width())
 			return m, nil
-		case OpenPlanHistoryIntent:
+		case OpenPlanHistoryIntent, RestartRunIntent:
 			return m.processIntent(intent, cmd)
 		}
 	}
@@ -467,6 +471,18 @@ func (m Model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.promptScreen.PendingIntent = nil
 		switch i := intent.(type) {
 		case StartPipelineIntent:
+			// If we have a restart context, start a restart pipeline instead.
+			if m.lastRestartRunPath != "" {
+				runPath := m.lastRestartRunPath
+				firstMissing := m.lastRestartFirstMissingAgent
+				m.lastRestartRunPath = ""
+				m.lastRestartFirstMissingAgent = ""
+				m.pipelineScreen.Start(i.Prompt)
+				m.state = StatePipeline
+				m.recalculateLayout()
+				pipelineCmd := m.startPipelineRestart(i.Prompt, runPath, firstMissing)
+				return m, tea.Batch(pipelineCmd, animTickCmd())
+			}
 			m.pipelineScreen.Start(i.Prompt)
 			m.state = StatePipeline
 			m.recalculateLayout()
@@ -621,6 +637,16 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 		}
 		m.recalculateLayout()
 		return m, batch(cmd)
+	case RestartRunIntent:
+		m.lastRestartRunPath = i.RunPath
+		m.lastRestartFirstMissingAgent = i.FirstMissingAgent
+		m.pipelineScreen.Reset()
+		m.state = StatePrompt
+		m.promptScreen.Reset()
+		// Pre-fill with a restart prompt that includes the missing agent context.
+		prompt := "Restart run from agent: " + i.FirstMissingAgent
+		m.promptScreen.SetValue(prompt)
+		return m, batch(nil)
 	case ClosePlanHistoryIntent:
 		if m.state == StatePlanHistoryDetail {
 			m.state = StateRunDetail
@@ -658,6 +684,29 @@ func (m *Model) startPipeline(prompt string) tea.Cmd {
 
 	channels := m.engine.Start(ctx, orchestrator.Input{
 		Prompt: prompt,
+	})
+	m.events = channels.Events
+	m.streamUpdates = channels.StreamUpdates
+	m.decisions = channels.Decisions
+	m.pipelineScreen.SetStreamBuf(orchestrator.NewStreamRing(200))
+	m.pipelineScreen.SetHistoryStore(channels.History)
+
+	return tea.Batch(waitForEvent(channels.Events), tickCmd())
+}
+
+// startPipelineRestart launches the orchestrator for a restart run and returns
+// a command to start listening. The restart context is passed through the Input.
+func (m *Model) startPipelineRestart(prompt, runPath, firstMissingAgent string) tea.Cmd {
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+
+	channels := m.engine.Start(ctx, orchestrator.Input{
+		Prompt:      prompt,
+		AutoApprove: true,
+		RestartFrom: orchestrator.RestartInput{
+			RunPath:           runPath,
+			FirstMissingAgent: firstMissingAgent,
+		},
 	})
 	m.events = channels.Events
 	m.streamUpdates = channels.StreamUpdates

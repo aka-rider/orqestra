@@ -25,6 +25,14 @@ func (s RunDetailScreen) Update(msg tea.Msg) (RunDetailScreen, tea.Cmd) {
 			}
 		}
 		return s, nil
+	case "ctrl+shift+r":
+		if !s.completeness.Complete && s.detail.Path != "" {
+			s.PendingIntent = RestartRunIntent{
+				RunPath:           s.detail.Path,
+				FirstMissingAgent: s.completeness.FirstMissingAgent,
+			}
+		}
+		return s, nil
 	}
 
 	// Focus-dependent key dispatch.

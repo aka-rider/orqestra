@@ -96,6 +96,25 @@ type RunDetail struct {
 
 const sessionTimeFmt = "2006-01-02-150405"
 
+// KnownAgents lists the canonical agent IDs in pipeline execution order.
+var KnownAgents = []string{"researcher", "architect", "critic", "worker"}
+
+// ArtifactRequirement describes a required artifact and which agent produced it.
+type ArtifactRequirement struct {
+	Name    string
+	AgentID string
+}
+
+// RunCompleteness describes whether a historical run is complete or what is missing.
+type RunCompleteness struct {
+	Complete          bool
+	MissingAgents     []string
+	FailedAgents      []string
+	MissingArtifacts  []ArtifactRequirement
+	FirstMissingAgent string
+	Reason            string
+}
+
 // ListRuns scans .orqestra/sessions/ under repoPath and returns summaries sorted newest-first.
 func ListRuns(repoPath string) ([]RunSummary, error) {
 	sessionsDir := filepath.Join(repoPath, ".orqestra", "sessions")
@@ -270,4 +289,130 @@ func lastStepStatus(dir string) (status string, duration time.Duration, totalTok
 		duration = latest.Sub(earliest)
 	}
 	return status, duration, totalTokens
+}
+
+// deduplicate returns a copy of sl with all duplicate strings removed (order preserved).
+func deduplicate(sl []string) []string {
+	if len(sl) == 0 {
+		return sl
+	}
+	seen := make(map[string]struct{}, len(sl))
+	out := make([]string, 0, len(sl))
+	for _, s := range sl {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// AnalyzeRunCompleteness inspects a session directory and returns a summary of
+// what is missing or failed. It does NOT modify RunDetail.
+func AnalyzeRunCompleteness(runPath string, detail RunDetail) RunCompleteness {
+	var c RunCompleteness
+
+	// Build a map of agentID -> status from step metas.
+	agentStatus := map[string]string{}
+	for _, meta := range detail.Steps {
+		agentStatus[meta.AgentID] = meta.Status
+	}
+
+	// Check each known agent.
+	for _, agentID := range KnownAgents {
+		status, ok := agentStatus[agentID]
+		if !ok {
+			c.MissingAgents = append(c.MissingAgents, agentID)
+			continue
+		}
+		if status == "failed" {
+			c.FailedAgents = append(c.FailedAgents, agentID)
+		}
+	}
+
+	// Check required artifacts.
+	requiredArtifacts := []ArtifactRequirement{
+		{Name: "researcher_draft.md", AgentID: "researcher"},
+		{Name: "architect_meta.json", AgentID: "architect"},
+		{Name: "final_plan.md", AgentID: "architect"},
+	}
+	// Critic artifacts are optional (critic may be nil).
+	if agentStatus["critic"] != "" {
+		requiredArtifacts = append(requiredArtifacts,
+			ArtifactRequirement{Name: "critic_report.md", AgentID: "critic"},
+		)
+	}
+	// Worker artifacts.
+	if agentStatus["worker"] != "" {
+		requiredArtifacts = append(requiredArtifacts,
+			ArtifactRequirement{Name: "worker_output.txt", AgentID: "worker"},
+		)
+	}
+
+	for _, art := range requiredArtifacts {
+		if !fileExists(filepath.Join(runPath, art.Name)) {
+			c.MissingArtifacts = append(c.MissingArtifacts, art)
+		}
+	}
+
+	// Determine first missing agent (pipeline order).
+	for _, agentID := range KnownAgents {
+		if contains(c.MissingAgents, agentID) || contains(c.FailedAgents, agentID) {
+			c.FirstMissingAgent = agentID
+			break
+		}
+	}
+
+	// Build reason string.
+	var reasons []string
+	if len(c.MissingAgents) > 0 {
+		reasons = append(reasons, fmt.Sprintf("agents never ran: %s", strings.Join(c.MissingAgents, ", ")))
+	}
+	if len(c.FailedAgents) > 0 {
+		reasons = append(reasons, fmt.Sprintf("agents failed: %s", strings.Join(c.FailedAgents, ", ")))
+	}
+	if len(c.MissingArtifacts) > 0 {
+		var names []string
+		for _, a := range c.MissingArtifacts {
+			names = append(names, a.Name)
+		}
+		reasons = append(reasons, fmt.Sprintf("missing artifacts: %s", strings.Join(names, ", ")))
+	}
+	if len(reasons) > 0 {
+		c.Reason = strings.Join(reasons, "; ")
+	}
+
+	// NoExecute path: stops at plan gate — not "incomplete" in a broken sense,
+	// but still not a full run.
+	if detail.Status == "noexecute" || detail.Status == "" {
+		// If we have a status but no agents ran, mark as incomplete.
+		if len(c.MissingAgents) > 0 && len(c.FailedAgents) == 0 {
+			c.Complete = false
+		}
+	}
+
+	c.Complete = len(c.MissingAgents) == 0 && len(c.FailedAgents) == 0 && len(c.MissingArtifacts) == 0
+	c.MissingAgents = deduplicate(c.MissingAgents)
+	c.FailedAgents = deduplicate(c.FailedAgents)
+
+	return c
+}
+
+// fileExists reports whether the given path exists and is not a directory.
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir()
+}
+
+// contains reports whether a string slice contains the given value.
+func contains(sl []string, v string) bool {
+	for _, s := range sl {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }

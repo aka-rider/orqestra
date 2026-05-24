@@ -20,12 +20,19 @@ import (
 	"github.com/xiii/orqestra/internal/worktree"
 )
 
+// RestartInput carries context for restarting a failed or incomplete run.
+type RestartInput struct {
+	RunPath           string // session directory of the original run
+	FirstMissingAgent string // first agent that needs re-execution
+}
+
 // Input is the user's request to the orchestrator.
 type Input struct {
 	Prompt      string
 	AutoApprove bool
 	PlanFile    string // pre-loaded plan markdown (--plan flag)
 	NoExecute   bool   // stop after plan gate
+	RestartFrom RestartInput
 }
 
 func guardPrompt(assembled, original, agentID string) string {
@@ -255,6 +262,12 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 
 	// Create run directory
 	var session agent.SessionDir
+	var isRestart bool
+	var restartSrc string
+	if input.RestartFrom.RunPath != "" {
+		isRestart = true
+		restartSrc = input.RestartFrom.RunPath
+	}
 	if e.RunDirFactory != nil {
 		var err error
 		session, err = e.RunDirFactory("run")
@@ -265,6 +278,12 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 	}
 
 	if session.Path != "" {
+		// Restart: copy completed artifacts from the original run.
+		if isRestart && restartSrc != "" {
+			if err := copyCompletedArtifacts(restartSrc, session.Path); err != nil {
+				slog.Warn("restart artifact copy failed", "err", err)
+			}
+		}
 		emit(Event{Type: EventRunDirReady, RunDir: session.Path})
 		writeArtifact(session, "prompt.md", input.Prompt)
 	}
@@ -372,7 +391,8 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 	var finalPlanMarkdown string
 	var finalPlanWarnings []string
 	var criticReportMarkdown string
-	var planSessionID string // function scope — survives across gate loop iterations
+	var draftMarkdownForPlanning string // shared between Research and Planning phases
+	var planSessionID string            // function scope — survives across gate loop iterations
 	architectPlanner := agent.NewPlanner(e.Runners.Architect, e.Config.Architect.SystemPrompt)
 
 	// Pre-resolve model metadata for session artifacts (StepMeta persistence).
@@ -406,8 +426,42 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 		goto planGate
 	}
 
+	// --- Restart: skip completed phases ---
+	if isRestart && restartSrc != "" {
+		// Load final_plan.md from the copied artifacts if it exists.
+		if data := restartReadStringArtifact(restartSrc, "final_plan.md"); data != "" {
+			finalPlanMarkdown = data
+		}
+		// Load planSessionID from the architect meta if it exists.
+		if planMeta := restartReadStringArtifact(restartSrc, "architect_meta.json"); planMeta != "" {
+			var meta agent.StepMeta
+			if json.Unmarshal([]byte(planMeta), &meta) == nil && meta.ClaudeSessionID != "" {
+				planSessionID = meta.ClaudeSessionID
+			}
+		}
+		// Load critic report if critic ran.
+		if data := restartReadStringArtifact(restartSrc, "critic_report.md"); data != "" {
+			criticReportMarkdown = data
+		}
+
+		// Determine which phase to skip to based on the first missing agent.
+		skipTo := input.RestartFrom.FirstMissingAgent
+		switch skipTo {
+		case "researcher":
+			// No skip — run all phases from the beginning.
+		case "architect":
+			// Research completed — skip to planning block.
+			goto skipPlanning
+		case "critic", "worker":
+			// Research + architect completed — skip to plan gate.
+			goto planGate
+		default:
+			// Unknown agent — run from the beginning.
+		}
+	}
+
 	// --- Research ---
-	{
+	if !isRestart || input.RestartFrom.FirstMissingAgent == "researcher" {
 		emit(Event{Type: EventPhaseChange, Phase: PhaseResearching})
 		logger.Info("phase", "phase", string(PhaseResearching))
 		logAgentEvent("agent_started", "researcher", 1, harness.TokenUsage{}, nil)
@@ -480,7 +534,17 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			InputTokens: draftUsage.Input, OutputTokens: draftUsage.Output,
 			ResearchDraft: draft.Markdown})
 
-		// --- Planning ---
+		// Use researcher output for planning.
+		draftMarkdownForPlanning = draft.Markdown
+	} else if isRestart {
+		// Restart from architect/critic/worker — load draft from copied artifacts.
+		if data := restartReadStringArtifact(restartSrc, "researcher_draft.md"); data != "" {
+			draftMarkdownForPlanning = data
+		}
+	}
+
+	// --- Planning ---
+	if !isRestart || input.RestartFrom.FirstMissingAgent == "researcher" || input.RestartFrom.FirstMissingAgent == "architect" {
 		emit(Event{Type: EventPhaseChange, Phase: PhasePlanning})
 		logger.Info("phase", "phase", string(PhasePlanning))
 		architectAttempt++
@@ -495,7 +559,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			architectAttempts = 1
 		}
 
-		architectPrompt := guardPrompt(agent.ArchitectPrompt(input.Prompt, draft.Markdown), input.Prompt, "architect")
+		architectPrompt := guardPrompt(agent.ArchitectPrompt(input.Prompt, draftMarkdownForPlanning), input.Prompt, "architect")
 
 		var planResult agent.RawPlan
 		var planUsage harness.TokenUsage
@@ -573,8 +637,14 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 				lastArchitectHash = hash
 			}
 		}
+	} else if isRestart {
+		// Restart from critic/worker — plan was already restored above.
+		if finalPlanMarkdown == "" {
+			finalPlanMarkdown = restartReadStringArtifact(restartSrc, "final_plan.md")
+		}
 	}
 
+skipPlanning:
 	// --- Critic Review ---
 	if e.Runners.Critic != nil {
 		emit(Event{Type: EventPhaseChange, Phase: PhaseCritiquing})
@@ -1450,4 +1520,69 @@ func DefaultRunDirFactory(repoPath string) RunDirFactory {
 	return func(slug string) (agent.SessionDir, error) {
 		return agent.NewSessionDir(repoPath, slug)
 	}
+}
+
+// copyCompletedArtifacts copies artifacts from a previous run into a new session
+// directory so that completed phases can be skipped on restart.
+func copyCompletedArtifacts(src, dst string) error {
+	if src == "" || dst == "" {
+		return nil
+	}
+	// Required artifacts to copy, in pipeline order.
+	artifacts := []string{
+		"prompt.md",
+		"researcher_draft.md",
+		"researcher_session.jsonl",
+		"researcher_meta.json",
+		"architect_meta.json",
+		"architect_session.jsonl",
+		"critic_report.md",
+		"critic_meta.json",
+		"critic_session.jsonl",
+		"final_plan.md",
+	}
+	for _, name := range artifacts {
+		srcPath := filepath.Join(src, name)
+		if !restartFileExists(srcPath) {
+			continue
+		}
+		dstPath := filepath.Join(dst, name)
+		if err := copyDir(srcPath, dstPath); err != nil {
+			return fmt.Errorf("copying artifact %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// copyDir copies a single file from src to dst.
+func copyDir(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", src, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("creating directory for %s: %w", dst, err)
+	}
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", dst, err)
+	}
+	return nil
+}
+
+// restartReadStringArtifact reads a file as a string, returning empty on any error.
+func restartReadStringArtifact(dir, name string) string {
+	data, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// restartFileExists reports whether the given path exists and is not a directory.
+func restartFileExists(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir()
 }
