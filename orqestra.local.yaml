@@ -9,28 +9,20 @@ providers:
     base_url: http://192.168.50.212:11434
 
 models:
-  large:
-    provider: llama-cpp
-    model: qwen3.6
-
-  medium:
-    provider: llama-cpp
-    model: qwen3.6
-
-  small:
+  qwen:
     provider: llama-cpp
     model: qwen3.6
 
 researcher:
-  model: medium
+  model: qwen
   mcp_servers: [MCP_DOCKER]
 
 architect:
-  model: large
+  model: qwen
   mcp_servers: [MCP_DOCKER]
 
 worker:
-  model: medium
+  model: qwen
   timeout: 30m
   parallelism: 0
   mcp_servers: [MCP_DOCKER]
