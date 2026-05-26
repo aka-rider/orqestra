@@ -75,6 +75,7 @@ const (
 // MergeConflictInfo is carried by EventMergeConflict.
 type MergeConflictInfo struct {
 	WorktreeBranch string   // branch that was merged (for display)
+	WorktreePath   string   // preserved worktree path for manual resolution
 	TargetBranch   string   // branch that received the merge
 	ConflictFiles  []string // list of conflicting files
 }
@@ -131,4 +132,6 @@ type Event struct {
 	MergeError string
 	// MergeBranch is set on EventMergeError — the branch containing committed work.
 	MergeBranch string
+	// MergeWorktreePath is set on merge error/conflict events when manual recovery artifacts are preserved.
+	MergeWorktreePath string
 }

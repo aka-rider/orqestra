@@ -1388,6 +1388,7 @@ planGate:
 	if valParsed.Verdict == agent.VerdictFail {
 		status = StatusFailed
 	}
+	mergeOutcomeFailed := false
 
 	// --- Post-run worktree commit + merge ---
 	if wt.Path != "" {
@@ -1402,25 +1403,26 @@ planGate:
 		if committed && commitErr == nil {
 			mergeResult, mergeErr := wt.MergeInto(ctx, targetBranch, buildCommitMsg("merge"))
 			if mergeErr != nil {
+				mergeOutcomeFailed = true
 				slog.Warn("worktree merge failed", "err", mergeErr)
 				emit(Event{
-					Type:        EventMergeError,
-					MergeError:  mergeErr.Error(),
-					MergeBranch: wt.Branch,
+					Type:              EventMergeError,
+					MergeError:        mergeErr.Error(),
+					MergeBranch:       wt.Branch,
+					MergeWorktreePath: wt.Path,
 				})
-				// Remove worktree directory but preserve branch for manual resolution
-				if rmErr := wt.RemoveDir(context.Background()); rmErr != nil {
-					slog.Warn("worktree dir cleanup failed", "err", rmErr)
-				}
 			} else if !mergeResult.Merged {
+				mergeOutcomeFailed = true
 				// Conflicts — gate the user
 				emit(Event{
 					Type: EventMergeConflict,
 					MergeConflict: MergeConflictInfo{
 						WorktreeBranch: wt.Branch,
+						WorktreePath:   wt.Path,
 						TargetBranch:   targetBranch,
 						ConflictFiles:  mergeResult.ConflictFiles,
 					},
+					MergeWorktreePath: wt.Path,
 				})
 				logger.Warn("merge_conflict", "worktree_branch", wt.Branch, "target_branch", targetBranch, "files", len(mergeResult.ConflictFiles))
 				select {
@@ -1430,11 +1432,7 @@ planGate:
 					}
 					// Any other decision: user resolved externally or accepted abort
 				case <-ctx.Done():
-					// Context cancelled — leave worktree branch as-is
-				}
-				// Remove worktree fully (branch is useless after conflict abort)
-				if rmErr := wt.Remove(context.Background(), true); rmErr != nil {
-					slog.Warn("worktree cleanup failed", "err", rmErr)
+					// Context cancelled — leave worktree branch and path as-is
 				}
 			} else {
 				// Merge succeeded — clean up worktree and branch
@@ -1448,6 +1446,9 @@ planGate:
 				slog.Warn("worktree cleanup failed", "err", rmErr)
 			}
 		}
+	}
+	if mergeOutcomeFailed {
+		status = StatusFailed
 	}
 
 	// --- Completion ---

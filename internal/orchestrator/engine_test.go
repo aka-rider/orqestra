@@ -12,6 +12,7 @@ import (
 
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
+	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/testutil"
 )
 
@@ -45,6 +46,190 @@ func testEngineWithPlanFiles(t *testing.T, researcherOutput, architectOutput, wo
 			Architect:  &testutil.FakeRunner{Calls: []testutil.FakeCall{{Output: "saved", SessionID: architectSID}}},
 			Worker:     &testutil.FakeRunner{Calls: workerCalls},
 		},
+	}
+}
+
+func initGitRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-b", "main")
+	runGit(t, repo, "config", "user.email", "test@example.com")
+	runGit(t, repo, "config", "user.name", "Test User")
+	filePath := filepath.Join(repo, "file.txt")
+	if err := os.WriteFile(filePath, []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write initial file: %v", err)
+	}
+	runGit(t, repo, "add", "file.txt")
+	runGit(t, repo, "commit", "-m", "initial")
+	return repo
+}
+
+func runGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func gitBranchExists(t *testing.T, repoPath, branch string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--verify", branch)
+	cmd.Dir = repoPath
+	return cmd.Run() == nil
+}
+
+func newSessionDirFactory(t *testing.T) RunDirFactory {
+	t.Helper()
+	root := t.TempDir()
+	return func(slug string) (agent.SessionDir, error) {
+		dir := filepath.Join(root, slug)
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			return agent.SessionDir{}, err
+		}
+		return agent.SessionDir{Path: dir}, nil
+	}
+}
+
+func TestEngine_MergeErrorFailsAndPreservesWorktree(t *testing.T) {
+	testutil.MustTempHome(t)
+	repo := initGitRepo(t)
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", agent.MarkerPass+" tests pass")
+	engine.RepoPath = repo
+	engine.RunDirFactory = newSessionDirFactory(t)
+
+	var workerPath string
+	engine.WorktreeRunnerFactory = func(worktreePath string) harness.ContinuableRunner {
+		workerPath = worktreePath
+		return &testutil.FakeRunner{Calls: []testutil.FakeCall{
+			{
+				Output:    "done",
+				SessionID: "worker-merge-error",
+				OnCall: func(_ int) {
+					if err := os.WriteFile(filepath.Join(worktreePath, "file.txt"), []byte("branch change\n"), 0o644); err != nil {
+						t.Fatalf("write worktree change: %v", err)
+					}
+				},
+			},
+			{Output: agent.MarkerPass + " tests pass", SessionID: "worker-merge-error"},
+			{
+				Output:    "feat: merge test",
+				SessionID: "worker-merge-error",
+				OnCall: func(_ int) {
+					if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("dirty repo change\n"), 0o644); err != nil {
+						t.Fatalf("write repo dirty change: %v", err)
+					}
+				},
+			},
+		}}
+	}
+
+	var mergeEvent Event
+	result, err := engine.Run(context.Background(), Input{Prompt: "Add feature X"}, func(event Event) {
+		if event.Type == EventMergeError {
+			mergeEvent = event
+		}
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != StatusFailed {
+		t.Fatalf("status = %q, want %q", result.Status, StatusFailed)
+	}
+	if mergeEvent.MergeBranch == "" {
+		t.Fatal("expected merge branch on merge error event")
+	}
+	if mergeEvent.MergeWorktreePath == "" {
+		t.Fatal("expected preserved worktree path on merge error event")
+	}
+	if mergeEvent.MergeWorktreePath != workerPath {
+		t.Fatalf("merge worktree path = %q, want %q", mergeEvent.MergeWorktreePath, workerPath)
+	}
+	if _, statErr := os.Stat(workerPath); statErr != nil {
+		t.Fatalf("expected preserved worktree path to exist: %v", statErr)
+	}
+	if !gitBranchExists(t, repo, mergeEvent.MergeBranch) {
+		t.Fatalf("expected preserved branch %q to exist", mergeEvent.MergeBranch)
+	}
+	runLog, readErr := os.ReadFile(filepath.Join(result.RunDir, "run.log"))
+	if readErr != nil {
+		t.Fatalf("read run log: %v", readErr)
+	}
+	if !strings.Contains(string(runLog), "run_complete status=failed") {
+		t.Fatalf("run log missing failed completion status:\n%s", string(runLog))
+	}
+}
+
+func TestEngine_MergeConflictFailsAndPreservesWorktree(t *testing.T) {
+	testutil.MustTempHome(t)
+	repo := initGitRepo(t)
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", agent.MarkerPass+" tests pass")
+	engine.RepoPath = repo
+	engine.RunDirFactory = newSessionDirFactory(t)
+
+	var workerPath string
+	engine.WorktreeRunnerFactory = func(worktreePath string) harness.ContinuableRunner {
+		workerPath = worktreePath
+		return &testutil.FakeRunner{Calls: []testutil.FakeCall{
+			{
+				Output:    "done",
+				SessionID: "worker-merge-conflict",
+				OnCall: func(_ int) {
+					if err := os.WriteFile(filepath.Join(worktreePath, "file.txt"), []byte("branch change\n"), 0o644); err != nil {
+						t.Fatalf("write worktree change: %v", err)
+					}
+				},
+			},
+			{Output: agent.MarkerPass + " tests pass", SessionID: "worker-merge-conflict"},
+			{
+				Output:    "feat: merge conflict",
+				SessionID: "worker-merge-conflict",
+				OnCall: func(_ int) {
+					if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("main branch change\n"), 0o644); err != nil {
+						t.Fatalf("write repo change: %v", err)
+					}
+					runGit(t, repo, "add", "file.txt")
+					runGit(t, repo, "commit", "-m", "main branch change")
+				},
+			},
+		}}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
+
+	var mergeEvent Event
+	var complete Event
+	for event := range channels.Events {
+		switch event.Type {
+		case EventMergeConflict:
+			mergeEvent = event
+			cancel()
+		case EventComplete:
+			complete = event
+		}
+	}
+	if mergeEvent.MergeConflict.WorktreeBranch == "" {
+		t.Fatal("expected merge conflict event")
+	}
+	if complete.Status != StatusFailed {
+		t.Fatalf("completion status = %q, want %q", complete.Status, StatusFailed)
+	}
+	if mergeEvent.MergeConflict.WorktreePath == "" {
+		t.Fatal("expected preserved worktree path on merge conflict event")
+	}
+	if mergeEvent.MergeConflict.WorktreePath != workerPath {
+		t.Fatalf("conflict worktree path = %q, want %q", mergeEvent.MergeConflict.WorktreePath, workerPath)
+	}
+	if _, statErr := os.Stat(workerPath); statErr != nil {
+		t.Fatalf("expected preserved conflict worktree path to exist: %v", statErr)
+	}
+	if !gitBranchExists(t, repo, mergeEvent.MergeConflict.WorktreeBranch) {
+		t.Fatalf("expected preserved conflict branch %q to exist", mergeEvent.MergeConflict.WorktreeBranch)
 	}
 }
 

@@ -479,6 +479,38 @@ func TestTUI_CompletionValidation(t *testing.T) {
 	}
 }
 
+func TestTUI_CompletionMergeFailureBanner(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentStreaming
+
+	m.pipelineScreen.ApplyEvent(orchestrator.Event{
+		Type:              orchestrator.EventMergeError,
+		MergeError:        "worktree: merge \"orqestra-run-1\": exit status 2",
+		MergeBranch:       "orqestra-run-1",
+		MergeWorktreePath: "/tmp/orqestra/worktree",
+	}, m.width)
+	m.pipelineScreen.ApplyEvent(orchestrator.Event{
+		Type:             orchestrator.EventComplete,
+		WorkerValidation: "✓ tests pass",
+		Status:           orchestrator.StatusFailed,
+	}, m.width)
+
+	view := m.pipelineScreen.viewCompletion(m.width)
+	if !strings.Contains(view, "Merge failed — manual recovery required") {
+		t.Fatalf("completion view missing merge failure banner:\n%s", view)
+	}
+	if !strings.Contains(view, "Preserved branch: orqestra-run-1") {
+		t.Fatalf("completion view missing preserved branch:\n%s", view)
+	}
+	if !strings.Contains(view, "Preserved worktree: /tmp/orqestra/worktree") {
+		t.Fatalf("completion view missing preserved worktree:\n%s", view)
+	}
+	if !strings.Contains(view, "git merge orqestra-run-1") {
+		t.Fatalf("completion view missing manual merge command:\n%s", view)
+	}
+}
+
 func TestTUI_PgUpPgDown(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline

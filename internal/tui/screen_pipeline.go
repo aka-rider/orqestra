@@ -94,6 +94,7 @@ type PipelineScreen struct {
 	// Merge error state (merge failed, branch preserved)
 	mergeErrorMsg    string
 	mergeErrorBranch string
+	mergeErrorPath   string
 
 	// UI state
 	configName     string
@@ -388,6 +389,7 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 	case orchestrator.EventMergeError:
 		s.mergeErrorMsg = event.MergeError
 		s.mergeErrorBranch = event.MergeBranch
+		s.mergeErrorPath = event.MergeWorktreePath
 
 	case orchestrator.EventComplete:
 		s.content = ContentCompletion
@@ -1087,11 +1089,21 @@ func (s PipelineScreen) viewCompletion(width int) string {
 	}
 	if s.mergeErrorMsg != "" {
 		b.WriteString("\n")
-		b.WriteString(warnStyle.Render(" ⚠ Merge failed — changes on branch: " + s.mergeErrorBranch))
+		b.WriteString(warnStyle.Render(" ⚠ Merge failed — manual recovery required"))
 		b.WriteString("\n")
 		b.WriteString(renderPrefixedText(dimStyle, "   ", s.mergeErrorMsg, width))
 		b.WriteString("\n")
-		b.WriteString(keyStyle.Render("   To merge manually: git merge " + s.mergeErrorBranch))
+		if s.mergeErrorBranch != "" {
+			b.WriteString(renderPrefixedText(dimStyle, "   ", "Preserved branch: "+s.mergeErrorBranch, width))
+			b.WriteString("\n")
+		}
+		if s.mergeErrorPath != "" {
+			b.WriteString(renderPrefixedText(dimStyle, "   ", "Preserved worktree: "+s.mergeErrorPath, width))
+			b.WriteString("\n")
+		}
+		if s.mergeErrorBranch != "" {
+			b.WriteString(keyStyle.Render("   To merge manually from the repo root: git merge " + s.mergeErrorBranch))
+		}
 		b.WriteString("\n")
 	}
 	elapsed := time.Since(s.startTime).Truncate(time.Second)
@@ -1320,6 +1332,9 @@ func (s PipelineScreen) viewMergeConflict(width int) string {
 	}
 	b.WriteString("\n")
 	b.WriteString(dimStyle.Render(fmt.Sprintf(" The worktree branch %q is preserved.\n", s.mergeConflict.WorktreeBranch)))
+	if s.mergeConflict.WorktreePath != "" {
+		b.WriteString(dimStyle.Render(fmt.Sprintf(" Preserved worktree: %s\n", s.mergeConflict.WorktreePath)))
+	}
 	b.WriteString(dimStyle.Render(" Resolve manually: git merge " + s.mergeConflict.WorktreeBranch + "\n"))
 	b.WriteString("\n")
 	b.WriteString(keyStyle.Render(" [^A] abort (keep branch for manual merge)   [Esc] continue"))
