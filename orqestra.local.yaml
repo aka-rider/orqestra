@@ -15,17 +15,14 @@ models:
 
 researcher:
   model: qwen
-  mcp_servers: [MCP_DOCKER]
 
 architect:
   model: qwen
-  mcp_servers: [MCP_DOCKER]
 
 worker:
   model: qwen
   timeout: 30m
   parallelism: 0
-  mcp_servers: [MCP_DOCKER]
 
 sandbox:
   max_lifetime: 35m

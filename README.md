@@ -14,16 +14,19 @@ You give it a feature, it makes a research and writes a detailed plan, you can c
 
 Orqestra is not a replacement for a harness or IDE — it's a companion for when you want to develop a bigger feature.
 
-Same model, same prompt. I run it in Orqestra and Claude Code (with `/plan` first)
+Same model (Qwen3.6-27B-Q4_K_M), same prompt. I ran Claude Code (with `/plan` first).
 
 ```markdown
-Make me Battle Tanks -like (SNES 8bit) with procedural graphics.
-The game must be playable.
+Build a ???-like game using procedural graphics
+The game must be fully playable, featuring welcome screen, gameplay with score, and end game screen showing the score.
 ```
 
-<p align="center">
-<img src="assets/battle-tanks.gif" alt="battle tanks gameplay orqestra vs claude code"/>
-</p>
+<table>
+<tr>
+<td><img src="assets/flappy-bird.gif" alt="Flappy bird gameplay Orqestra vs Claude Code"/></td>
+<td><img src="assets/battle-tanks.gif" alt="Battle Tanks gameplay Orqestra vs Claude Code"/></td>
+</tr>
+</table>
 
 ## OMG, not another agent orchestrator
 
@@ -188,17 +191,15 @@ models:
 
 researcher:
   model: qwen
-  mcp_servers: [MCP_DOCKER] # restrict MCP servers list to spare the model context window
+  mcp_servers: [context7] # restrict MCP servers list to spare the model context window
 
 architect:
   model: qwen
-  mcp_servers: [MCP_DOCKER]
 
 worker:
   model: qwen
   timeout: 30m
   parallelism: 0
-  mcp_servers: [MCP_DOCKER]
 
 sandbox:
   max_lifetime: 35m
