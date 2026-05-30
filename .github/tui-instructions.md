@@ -23,6 +23,7 @@ These are current or recurring weak spots. Do not spread them; fix in scope when
 - `Model.View()` currently copies `ctrlCPending` into the pipeline screen before rendering. Do not add more render-time assignments. Prefer deriving render-only props locally or updating screen state in `Update()`.
 - Run detail log loading parses files synchronously when step selection changes. Future work should use async commands and typed completion messages.
 - Root-level `ctrl+c`, navigation, and gate decisions are delicate. Nested screens may emit intents, but the root model owns global exits and orchestration-side effects.
+- `PipelineScreen` (`screen_pipeline.go`) is the canonical mode-state-flattening offender (see `<state_modeling>`): ~50 fields across 9 content modes, redundant boolean flags, a 40-line `Reset()`, a partial `screen_pipeline_keys.go` split, and a legacy render path duplicating the frame renderer. Do not extend it. When you touch a mode, decompose that mode into its own sub-model rather than adding a field/flag/switch-arm.
 
 </known_pressure_points>
 
@@ -38,6 +39,22 @@ These are current or recurring weak spots. Do not spread them; fix in scope when
 - Stale or transient errors must be stored in model state until rendered or intentionally cleared. Do not rely on TUI stderr for user-visible truth.
 
 </core_rules>
+
+<state_modeling>
+
+## Screen State Modeling
+
+A screen with multiple mutually-exclusive modes is a sum type. Model it as one active sub-model, not as the union of every mode's fields.
+
+- One active mode, one owned value. A screen holds a single active mode — an interface value, or a tag plus the active mode's own struct constructed on entry — never the flattened union of all modes' fields as siblings. `PipelineScreen`'s `content ContentMode` tag sitting beside `planComment`, `editConfirmComment`, `mergeConflict`, `question`, `pendingEditContent`, … is the shape to avoid.
+- No redundant mode flags. Derive "am I in mode X" from the single active mode (its type, or the one tag), never from a parallel boolean. Fields that must agree (`awaitingPlanDecision` ≈ `content==ContentPlanReview`; `hasQuestion`, `hasPlanComment`, `hasEditComment`) will eventually disagree. A bool meaningful only inside one mode belongs inside that mode's type, where it is legal by construction.
+- A mode owns its state, input, and rendering. Mirror `userQuestionModel` and `DashboardModel`: each mode is a value sub-model with its own `Update`/`View` plus lifecycle accessors, owning its textareas, cursors, and selection. Modes emit intents; they never read or write sibling-mode fields, decision channels, or contexts.
+- Reset by re-zeroing, not hand-clearing. A mode's zero value or constructor is its reset. A `Reset()` that manually clears 30+ fields is unencapsulated state — one forgotten line leaks across runs. Prefer reassigning a fresh value (`*s = NewX(cfg)`).
+- One renderer per mode. Do not keep a second/legacy render path "as a fallback". When the data model changes (e.g. the frame list), delete the superseded per-mode renderer in the same change and migrate its tests. Two paths rendering the same mode drift (`viewCompletion` vs `buildCompletionSummary`).
+- Centralize widget construction. Repeated `textarea.New()` + Placeholder/SetWidth/SetHeight/CharLimit/Focus blocks come from one named constructor (e.g. `newCommentTextarea(width, placeholder)`), not copied per entry point.
+- Cache invalidation lives with its source. Derived render content is owned and invalidated by the component that produces it (the dirty flag on `FrameList`), not by a screen-wide `SyncViewports()` that must be remembered at every mutation site.
+
+</state_modeling>
 
 <layout_and_rendering>
 
