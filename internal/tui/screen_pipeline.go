@@ -52,6 +52,9 @@ type PipelineScreen struct {
 	streamBuf *orchestrator.StreamRing
 	history   *orchestrator.StreamHistoryStore
 
+	// Frame list — persistent store for scrollable frame rendering
+	frameList *FrameList
+
 	// Plan review state
 	planComment    textarea.Model
 	hasPlanComment bool
@@ -102,7 +105,7 @@ type PipelineScreen struct {
 	showHelp       bool
 	ctrlCPending   bool // set by parent model when Ctrl+C time gate is active
 	active         bool // true while pipeline is running
-	streamExpanded bool // true when stream block is expanded via ^O
+	streamExpanded bool // DEPRECATED: kept for legacy viewStreaming fallback
 
 	// Animation state
 	animFrame int // incremented by animTickMsg for shimmer/pulse effects
@@ -129,6 +132,7 @@ func NewPipelineScreen(configName string) PipelineScreen {
 		configName: configName,
 		contentVP:  cvp,
 		dashboard:  NewDashboardModel(),
+		frameList:  NewFrameList(80),
 	}
 }
 
@@ -154,6 +158,7 @@ func (s *PipelineScreen) Reset() {
 	s.hasValidation = false
 	s.streamBuf = nil
 	s.history = nil
+	s.frameList = NewFrameList(80)
 	s.hasPlanComment = false
 	s.editorRunning = false
 	s.awaitingPlanDecision = false
@@ -210,8 +215,20 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 			switch u.Kind {
 			case orchestrator.EntryText:
 				s.streamBuf.AppendText(u.Text)
+				s.frameList.UpdateActive(func(f *Frame) {
+					if u.Text != "" {
+						f.AppendText(u.Text)
+					}
+				})
 			case orchestrator.EntryToolUse:
 				s.streamBuf.AppendActivity(u.Tool, u.Detail)
+				s.frameList.UpdateActive(func(f *Frame) {
+					f.AppendTool(ToolBlock{
+						Icon:   IconForAction(u.Tool),
+						Name:   u.Tool,
+						Detail: u.Detail,
+					})
+				})
 			case orchestrator.EntryStats:
 				s.streamBuf.RecordUsage(u.Stats.Input, u.Stats.Output)
 				s.streamBuf.AppendStats(u.Stats.Input, u.Stats.Output)
@@ -234,19 +251,29 @@ func (s *PipelineScreen) SyncViewports() {
 		// Feed live agent data to dashboard
 		s.dashboard.SetAgents(s.agents)
 	} else {
+		// When using frame list rendering, skip SetContent if nothing changed.
+		// FrameList.Render() returns cached content when not dirty.
+		frameListMode := (s.content == ContentStreaming || s.content == ContentPlanReview ||
+			s.content == ContentCompletion || s.content == ContentAgentHistory) &&
+			s.frameList.FrameCount() > 0
+
 		var contentView string
 		if s.showHelp {
 			contentView = s.viewHelp()
+		} else if frameListMode && !s.frameList.IsDirty() {
+			// Frame list unchanged — skip SetContent to preserve scroll
+			goto pollMetrics
 		} else {
 			contentView = s.viewContent(w)
 		}
 		atBottom := s.contentVP.AtBottom()
 		s.contentVP.SetContent(contentView)
-		if atBottom && s.content == ContentStreaming {
+		if atBottom && (s.content == ContentStreaming || s.content == ContentPlanReview) {
 			s.contentVP.GotoBottom()
 		}
 	}
 
+pollMetrics:
 	// Poll live metrics from stream ring
 	if s.streamBuf != nil && s.active {
 		in, out, start := s.streamBuf.SnapshotUsage()
@@ -268,6 +295,7 @@ func (s *PipelineScreen) RecalculateLayout(width, contentHeight int) {
 	s.contentVP.SetWidth(width)
 	s.contentVP.SetHeight(contentHeight)
 	s.dashboard.SetSize(width, contentHeight)
+	s.frameList.SetWidth(width)
 }
 
 // ApplyEvent updates the screen based on a single orchestrator event.
@@ -293,6 +321,13 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 			Provider:      event.Meta.Provider,
 			ContextWindow: event.Meta.ContextWindow,
 		})
+		s.frameList.AppendFrame(Frame{
+			Kind:       AgentFrame,
+			State:      FrameInProgress,
+			AgentID:    event.AgentID,
+			AgentModel: event.Meta.ModelDisplay,
+			StartedAt:  time.Now(),
+		})
 
 	case orchestrator.EventAgentDone:
 		for i := range s.agents {
@@ -308,6 +343,14 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 			s.reviewTokensIn += event.InputTokens
 			s.reviewTokensOut += event.OutputTokens
 		}
+		var agentElapsed time.Duration
+		for i := range s.agents {
+			if s.agents[i].ID == event.AgentID {
+				agentElapsed = s.agents[i].Elapsed
+				break
+			}
+		}
+		s.frameList.FinishActive(agentElapsed, event.InputTokens, event.OutputTokens)
 
 	case orchestrator.EventAgentFailed:
 		for i := range s.agents {
@@ -316,6 +359,7 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 			}
 		}
 		s.lastErr = event.Err
+		s.frameList.FinishActive(0, 0, 0)
 
 	case orchestrator.EventAgentCancelled:
 		for i := range s.agents {
@@ -350,6 +394,12 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 			s.planComment.CharLimit = 1024
 			s.planComment.Focus()
 			s.hasPlanComment = true
+			// Append plan frame to the frame list (InProgress until plan decision)
+			s.frameList.AppendFrame(Frame{
+				Kind:  PlanFrame,
+				State: FrameInProgress,
+				Parts: []ContentPart{{IsText: true, Text: event.Gate.FinalPlanMarkdown}},
+			})
 		}
 
 	case orchestrator.EventPlanReady:
@@ -370,6 +420,10 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 		s.planComment.SetHeight(2)
 		s.planComment.CharLimit = 1024
 		s.planComment.Focus()
+		// Update the PlanFrame with the new chat response
+		s.frameList.UpdateActive(func(f *Frame) {
+			f.AppendText("Architect: " + event.ChatText)
+		})
 		s.hasPlanComment = true
 
 	case orchestrator.EventError:
@@ -399,6 +453,13 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 			s.workerValidation = event.WorkerValidation
 			s.hasValidation = true
 		}
+		// Append completion frame with summary
+		s.frameList.AppendFrame(Frame{
+			Kind:    CompletionFrame,
+			State:   FrameFinished,
+			Elapsed: time.Since(s.startTime),
+			Parts:   []ContentPart{{IsText: true, Text: s.buildCompletionSummary()}},
+		})
 	}
 }
 
@@ -452,7 +513,7 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		return s, cmd
 	}
 
-	// Alt+1-9 for agent navigation
+	// Alt+1-9 for agent navigation — scroll to the agent's frame
 	altKeys := map[string]int{
 		"alt+1": 1, "alt+2": 2, "alt+3": 3, "alt+4": 4, "alt+5": 5,
 		"alt+6": 6, "alt+7": 7, "alt+8": 8, "alt+9": 9,
@@ -460,9 +521,17 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	if idx, ok := altKeys[msg.String()]; ok && s.content != ContentPlanReview && s.content != ContentUserQuestion {
 		if idx <= len(s.agents) {
 			s.focusedAgent = idx
-			s.content = ContentAgentHistory
-			s.contentVP.GotoTop()
-			s.SyncViewports()
+			// Scroll to the frame in the frame list (frame indices are 0-based, idx is 1-based)
+			if s.frameList.FrameCount() > 0 {
+				s.content = ContentStreaming
+				s.SyncViewports() // ensure content is set before scroll
+				topLine := s.frameList.FrameTopLine(idx - 1)
+				s.contentVP.SetYOffset(topLine)
+			} else {
+				s.content = ContentAgentHistory
+				s.contentVP.GotoTop()
+				s.SyncViewports()
+			}
 			return s, nil
 		}
 	}
@@ -560,6 +629,10 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 				s.hasPlanComment = false
 				s.awaitingPlanDecision = false
 				s.content = ContentStreaming
+				// Append user comment to PlanFrame before it gets re-activated
+				s.frameList.UpdateActive(func(f *Frame) {
+					f.AppendText("You: " + comment)
+				})
 				s.SyncViewports()
 				s.PendingIntent = CommentPlanIntent{Comment: comment}
 				return s, nil
@@ -586,6 +659,7 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 		s.awaitingPlanDecision = false
 		s.hasPlanComment = false
 		s.content = ContentStreaming
+		s.frameList.FinishActive(0, 0, 0) // seal the PlanFrame
 		s.SyncViewports()
 		s.PendingIntent = ApprovePlanIntent{}
 		return s, nil
@@ -676,10 +750,6 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 			return s, nil
 		}
 		s.PendingIntent = NavigateToPromptIntent{PreFillGoal: s.goal}
-		return s, nil
-	case "ctrl+o":
-		s.streamExpanded = !s.streamExpanded
-		s.SyncViewports()
 		return s, nil
 	}
 	return s, nil
@@ -813,29 +883,15 @@ func (s PipelineScreen) viewStatusLine(width int) string {
 		detail = d.String()
 	}
 
-	// Build shimmer (only while active)
-	var shimmer string
-	if s.active && len(shimmerFrames) > 0 {
-		shimmer = " " + shimmerFrames[s.animFrame%len(shimmerFrames)]
-	}
-
-	// Compose full line: " chain: detail shimmer"
+	// Compose full line: " chain: detail"
 	var full string
 	if detail != "" {
-		full = " " + chain.String() + ": " + detail + shimmer
+		full = " " + chain.String() + ": " + detail
 	} else {
-		full = " " + chain.String() + shimmer
+		full = " " + chain.String()
 	}
 
-	// Truncation: drop shimmer, then tok/s, then truncate chain from left
-	if len(full) > width {
-		// Try without shimmer
-		if detail != "" {
-			full = " " + chain.String() + ": " + detail
-		} else {
-			full = " " + chain.String()
-		}
-	}
+	// Truncation: drop tok/s, then truncate chain from left
 	if len(full) > width && width > 4 {
 		// Truncate from the left
 		excess := len(full) - width + 3 // room for "<.."
@@ -910,18 +966,25 @@ func (s PipelineScreen) viewInputZone() string {
 
 func (s PipelineScreen) viewContent(width int) string {
 	switch s.content {
-	case ContentStreaming:
-		return s.viewStreaming(width)
+	case ContentStreaming, ContentPlanReview, ContentCompletion, ContentAgentHistory:
+		if s.frameList.FrameCount() > 0 {
+			return s.frameList.Render()
+		}
+		// Fallback to legacy rendering when no frames exist
+		switch s.content {
+		case ContentPlanReview:
+			return s.viewPlanReview(width)
+		case ContentCompletion:
+			return s.viewCompletion(width)
+		case ContentAgentHistory:
+			return s.viewAgentHistory(width)
+		default:
+			return s.viewStreaming(width)
+		}
 	case ContentUserQuestion:
 		return s.question.View(width)
-	case ContentPlanReview:
-		return s.viewPlanReview(width)
 	case ContentPlanDiff:
 		return s.viewPlanDiff(width)
-	case ContentAgentHistory:
-		return s.viewAgentHistory(width)
-	case ContentCompletion:
-		return s.viewCompletion(width)
 	case ContentMergeConflict:
 		return s.viewMergeConflict(width)
 	case ContentEditConfirm:
@@ -966,17 +1029,14 @@ func (s PipelineScreen) viewStreaming(width int) string {
 		// Remove earlier occurrences of any repeated line; keep last.
 		unique := deduplicateLines(completedLines)
 
-		// Window to streamPreviewLines completed lines when collapsed.
-		overflow := !s.streamExpanded && len(unique) > streamPreviewLines
+		// Build block content lines (show last 15 lines when many).
+		const previewMax = 15
 		start := 0
-		if overflow {
-			start = len(unique) - streamPreviewLines
+		if len(unique) > previewMax {
+			start = len(unique) - previewMax
 		}
-		shown := unique[start:]
-
-		// Build block content lines.
 		var contentLines []string
-		contentLines = append(contentLines, shown...)
+		contentLines = append(contentLines, unique[start:]...)
 
 		// Partial shown as one trailing line (last innerWidth bytes).
 		if partial != "" {
@@ -987,17 +1047,7 @@ func (s PipelineScreen) viewStreaming(width int) string {
 			contentLines = append(contentLines, display)
 		}
 
-		// Expand/collapse hint.
-		if overflow {
-			contentLines = append(contentLines, streamHintStyle.Render("^O  expand"))
-		} else if s.streamExpanded && len(unique) > streamPreviewLines {
-			contentLines = append(contentLines, streamHintStyle.Render("^O  collapse"))
-		}
-
-		// Defensive height clamp: prevent the bordered block from exceeding
-		// the viewport when lipgloss word-wrapping inflates rendered rows.
-		// Subtract border(2) + content above stream block (~6 lines min).
-		// Only apply when viewport has been laid out (height > 0).
+		// Defensive height clamp.
 		if vpH := s.contentVP.Height(); vpH > 0 {
 			maxLines := max(3, vpH-8)
 			if len(contentLines) > maxLines {
@@ -1200,6 +1250,55 @@ func (s PipelineScreen) viewAgentHistory(width int) string {
 	return b.String()
 }
 
+// buildCompletionSummary constructs the text content for the CompletionFrame.
+func (s *PipelineScreen) buildCompletionSummary() string {
+	var b strings.Builder
+
+	if s.lastErr != nil {
+		b.WriteString("Error: " + s.lastErr.Error() + "\n\n")
+	}
+	if s.hasValidation {
+		b.WriteString("Validation:\n" + s.workerValidation + "\n\n")
+	}
+	if s.mergeErrorMsg != "" {
+		b.WriteString("⚠ Merge failed — manual recovery required\n")
+		b.WriteString("  " + s.mergeErrorMsg + "\n")
+		if s.mergeErrorBranch != "" {
+			b.WriteString("  Branch: " + s.mergeErrorBranch + "\n")
+			b.WriteString("  git merge " + s.mergeErrorBranch + "\n")
+		}
+		b.WriteString("\n")
+	}
+
+	elapsed := time.Since(s.startTime).Truncate(time.Second)
+	b.WriteString(fmt.Sprintf("Elapsed: %s\n", elapsed))
+
+	var totalIn, totalOut int64
+	for _, a := range s.agents {
+		totalIn += a.InputTokens
+		totalOut += a.OutputTokens
+	}
+	if totalIn+totalOut > 0 {
+		b.WriteString(fmt.Sprintf("Tokens: %s in, %s out (%s total)\n",
+			formatTokens(totalIn), formatTokens(totalOut), formatTokens(totalIn+totalOut)))
+	}
+
+	b.WriteString("\nRun Summary\n")
+	for _, a := range s.agents {
+		agentElapsed := "-"
+		if a.Elapsed > 0 {
+			agentElapsed = a.Elapsed.Round(time.Second).String()
+		}
+		tokens := "-"
+		if a.InputTokens > 0 || a.OutputTokens > 0 {
+			tokens = fmt.Sprintf("↓%s ↑%s", formatTokens(a.InputTokens), formatTokens(a.OutputTokens))
+		}
+		b.WriteString(fmt.Sprintf("  %s (%s) ⏱ %s  %s\n", a.ID, a.State, agentElapsed, tokens))
+	}
+
+	return b.String()
+}
+
 func (s PipelineScreen) viewHelp() string {
 	return ` Orqestra Keybindings
 ─────────────────────────────────
@@ -1260,15 +1359,7 @@ func (s PipelineScreen) viewFooter() string {
 	case ContentCompletion:
 		return keyStyle.Render(" [^N] new run | [^R] runs | [^Q] quit                    [^H] help")
 	default:
-		expandHint := ""
-		if s.active {
-			if s.streamExpanded {
-				expandHint = " [^O] collapse |"
-			} else {
-				expandHint = " [^O] expand |"
-			}
-		}
-		return keyStyle.Render(expandHint+" [^N] new run                    [^D] expand  [Alt+N] agent  [^H] help  ") + ctrlCHint
+		return keyStyle.Render(" [^N] new run                    [^D] expand  [Alt+N] agent  [^H] help  ") + ctrlCHint
 	}
 }
 

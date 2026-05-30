@@ -1,0 +1,66 @@
+ The following is the screenshot of the orqestra running.
+
+ ```
+ Phase: researching  (researcher)
+
+ ❯ Bash       find ~/go/pkg/mod/charm.land/bubbletea -name "*.go" -type f …
+ ⚲ Glob       ~/go/pkg/mod/charm.land/bubbletea/**/*.go
+ ❯ Bash       ls -la ~/go/pkg/mod/charm.land/ 2>/dev/null
+ ✑ Read       /Users/xiii/Developer/rune/go.mod
+ ⚲ Glob       /Users/xiii/Developer/rune/**/*.go
+ ✑ Read       /Users/xiii/Developer/rune/pkg/ui/app.go
+ ✑ Read       /Users/xiii/Developer/rune/pkg/ui/pages/workspace/workspace.go
+ ✑ Read       /Users/xiii/Developer/rune/pkg/ui/components/footer/footer.go
+ ✑ Read       /Users/xiii/Developer/rune/pkg/ui/components/breadcrumb/breadcrumb.go
+ ❯ Bash       go list -m -f "{{.Dir}}" charm.land/bubbletea/v2 2>/dev/null
+ ⚲ Glob       /Users/xiii/Developer/rune/vendor/**/*.go
+ ⚲ Grep       tea\.View|type View
+ ✑ Read       /Users/xiii/Developer/rune/go.sum
+ ❯ Bash       go doc charm.land/bubbletea/v2 2>&1 | head -100
+ · WebSearch
+ ⚲ Grep       Model|interface|Update\(|Init\(
+ ✑ Read       /Users/xiii/Developer/rune/cmd/rune/main.go
+ ⚒ mcp__MCP_DOCKER__resolve-library-id MCP_DOCKER/resolve-library-id
+ ⚲ Grep       View\(\)|tea\.View
+ ✑ Read       /Users/xiii/Developer/rune/pkg/ui/components/filetree/filetree.go
+
+ Stream
+╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ understand how `tea.View` works in bubbletea v2.Good. Now let me read the actual broken file and understand how `tea.View` works in bubbletea │
+│ v2.                                                                                                                                           │
+╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+There are problems with the TUI view.
+
+1. Stream BUG: missing the beginning of the text: "│ understand" and ^O does not expand the view to show it. I assume the beginning is just lost.
+2. Tool usage view is very "dirty" — it is overloaded with irrelevant: "❯ Bash" | "⚲ Glob" ... Bash
+3. Stream frame border is out of place - it focuses user's attention on what exactly?
+
+We are going to mimic claudecode's TUI.
+
+```
+❯ Bash(cd infrastructure && terraform fmt locals.tf eventbridge.tf && echo "fmt OK")
+  ⎿  fmt OK
+
+❯ Bash(cd /Users/xiii/Developer/brocc-ab/file-bridge && git add infrastructure/locals.tf infrastructure/eventbridge.tf && git commit -m
+      "$(cat <<'EOF'
+      fix(infra): shor…)
+  ⎿  [infra/devtest-sftp-destination-phase-b ab6d2be] fix(infra): shorten EventBridge rule name to stay under 64 chars
+      2 files changed, 4 insertions(+), 1 deletion(-)
+
+❯ Bash(git push origin infra/devtest-sftp-destination-phase-b)
+  ⎿  To github-iurii-tech:brocc-ab/file-bridge.git
+        9653c08..ab6d2be  infra/devtest-sftp-destination-phase-b -> infra/devtest-sftp-destination-phase-b
+
+⏺ Pushed. Atlantis should plan cleanly now — rule name will be file-bridge-route-devtest-appserver-catchall-staging (52 chars).
+
+✻ Cooked for 1m 1s
+
+※ recap: Setting up end-to-end camt.053 file delivery from S3 through the pipeline to the Azure SFTP server. PR B is pushed and ready —
+  merge it on GitHub so Atlantis can apply.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────── <project+prompt-summary> ──
+❯ <user's input is outlined with border - brings focus, visible, good>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+```

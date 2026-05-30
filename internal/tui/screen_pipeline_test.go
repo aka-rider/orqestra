@@ -409,6 +409,8 @@ func TestViewStatusLine_Truncation(t *testing.T) {
 }
 
 func TestViewStatusLine_ShimmerCycles(t *testing.T) {
+	// Shimmer moved from status bar to frame list headers.
+	// Status bar should now be stable across animFrame changes.
 	s := PipelineScreen{
 		active:    true,
 		agents:    []AgentRow{{ID: "worker", State: AgentStateRunning}},
@@ -421,9 +423,9 @@ func TestViewStatusLine_ShimmerCycles(t *testing.T) {
 		out := s.viewStatusLine(80)
 		results[out] = true
 	}
-	// Should have at least 2 different outputs (shimmer changes)
-	if len(results) < 2 {
-		t.Error("expected shimmer to produce different frames")
+	// Status bar should be stable (shimmer is in frame headers now)
+	if len(results) != 1 {
+		t.Errorf("expected stable status bar, got %d unique outputs", len(results))
 	}
 }
 

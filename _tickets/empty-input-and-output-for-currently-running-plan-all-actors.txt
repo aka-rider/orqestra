@@ -1,0 +1,49 @@
+The agent is selected, you may see the cursor inside the Input area.
+The selected actor is researcher, so both the prompt, and its output MUST be inside the sessions dir.
+No live streaming from the currently runnign actor either
+
+```
+✓ researcher 7m12s              │▶Input
+  qwen3.6 ↑19 ↓18k              │
+✓ architect 17m32s              │
+  qwen3.6 ↑4 ↓6.7k              │
+✓ critic 9m45s                  │
+  qwen3.6 ↑7 ↓32k               │
+✓ architect 2m6s                │
+  qwen3.6 ↑4 ↓6.7k              │
+                                │
+                                │
+                                │
+                                │
+                                │
+                                │
+                                │
+                                │
+                                │
+                                │
+                                │ Output ────────────────────────────────────────────────────────────────────────────────────────
+                                │
+                                │
+                                │
+                                │
+                                │
+                                │
+                                │
+                                │
+                                │
+                                │
+                                │
+                                │
+                                │
+                                │
+                                │
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Select an agent to view logs
+
+
+
+
+```
+
+
+

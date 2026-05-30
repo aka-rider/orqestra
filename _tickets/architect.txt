@@ -1,0 +1,7 @@
+ You: I don't understand what problem are you solving by moving AskUserQuestion type from harness to orchestrator?
+    Why does orqestrator (run / pipeline overseer) cares about TUI / MCP user interaction?
+ Architect: Good question. The core problem is narrow: `orchestrator/events.go` imports `harness` for one type on one field. That import is the violation — events.go is a pure domain file (event types, no execution logic) and should not kn
+
+    The question is: **where do the types live instead?**
+    ...
+       ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

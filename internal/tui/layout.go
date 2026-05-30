@@ -44,9 +44,6 @@ const (
 
 	// Bottom sidebar height (agent list strip below the input zone).
 	constSidebarHeight = 1
-
-	// Number of raw stream lines to preview below activities
-	streamPreviewLines = 15
 )
 
 // layoutBounds holds the computed bounding rectangles for each zone.

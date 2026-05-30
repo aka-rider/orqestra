@@ -245,6 +245,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case animTickMsg:
 		if m.state == StatePipeline && m.pipelineScreen.active {
 			m.pipelineScreen.animFrame++
+			m.pipelineScreen.frameList.SetAnimFrame(m.pipelineScreen.animFrame)
 			return m, animTickCmd()
 		}
 		return m, nil

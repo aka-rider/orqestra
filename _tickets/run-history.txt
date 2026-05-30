@@ -1,0 +1,66 @@
+ The following is the screenshot of the run history.
+ There are multiple bugs.
+
+ 1. Left menu overflows without scrolling, so agents become invisible
+ 2. The right pane does not change when I select different agents
+ 3. The right pane is a wall of text while it must be divided horizontally on input and output
+
+See the screen below
+ 8<--- 
+
+ ✓  2026-05-19 11:28:08  233m32s  run
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+╭────────────────────────────────────────────────────────────────────╮│# Confirm no harness MCP types in harness
+│✓ researcher  7m42s                                                 ││grep -rn 'MCPToolCall|MCPToolOption|MCPAnswer|QuestionBridge|RunMCPServer' internal/harness/
+│Model: gemini-3.1-pro-preview (copilot-proxy)                       ││
+│↑ Consumed: 5,149    ↓ Produced: 17,736                             ││# Confirm no harness import in target files
+│Throughput: 38.4 tok/s                                              ││grep -n '"harness"' internal/orchestrator/events.go    # must be empty
+╰────────────────────────────────────────────────────────────────────╯│grep -n '"harness"' internal/agent/session.go          # must be empty (non-test)
+╭────────────────────────────────────────────────────────────────────╮│grep -n '"harness"' internal/tui/model.go             # must be empty
+│✓ architect  11m12s                                                 ││grep -n '"harness"' internal/tui/screen_pipeline.go   # must be empty
+│Model: claude-opus-4.5 (copilot-proxy)                              ││grep -n '"harness"' internal/tui/question.go          # must be empty
+│↑ Consumed: 55    ↓ Produced: 35,984                                ││grep -n '"harness"' internal/tui/messages.go          # must be empty
+│Throughput: 53.5 tok/s                                              ││
+╰────────────────────────────────────────────────────────────────────╯│# Confirm named types (no bare string literals for discriminants in production code)
+╭────────────────────────────────────────────────────────────────────╮│grep -n '"running"|"done"|"failed"|"gate"|"waiting"|"cancelled"' internal/tui/model.go internal/tui/screen_pipeline.go internal/tui/dashboard.go
+│✓ critic  10m23s                                                    ││grep -n '"you"|"architect"' internal/tui/screen_pipeline.go
+│Model: gemini-3.1-pro-preview (copilot-proxy)                       ││
+│↑ Consumed: 1,461    ↓ Produced: 32,701                             ││# Confirm HasUsage removed
+│Throughput: 52.5 tok/s                                              ││grep -rn 'HasUsage' internal/orchestrator/
+╰────────────────────────────────────────────────────────────────────╯│
+╭────────────────────────────────────────────────────────────────────╮│# Full race test
+│✓ architect  2m37s                                                  ││go test -race ./...
+│Model: claude-opus-4.5 (copilot-proxy)                              ││
+│↑ Consumed: 5    ↓ Produced: 10,071                                 ││# Lint
+│Throughput: 64.0 tok/s                                              ││make lint
+╰────────────────────────────────────────────────────────────────────╯│
+╭────────────────────────────────────────────────────────────────────╮│Assumptions
+│✓ architect  1m14s                                                  ││1harness.MCPAnswer field names (SelectedIndices, CustomTexts, FreeformText, Skipped) are identical to mcp.Answer — verified from question_bridge.go and mcp_server.
+│Model: claude-opus-4.5 (copilot-proxy)                              ││go.
+│↑ Consumed: 3    ↓ Produced: 3,465                                  ││2harness.MCPToolOption.Label and .Hint match mcp.ToolOption field names — verified from mcp_server.go:81-84.
+│Throughput: 46.4 tok/s                                              ││3The conversion goroutine in engine.Start() adds a second hop for stream events; the tick interval is 1 second and both channels are buffered (512), so no
+╰────────────────────────────────────────────────────────────────────╯│noticeable display latency.
+╭────────────────────────────────────────────────────────────────────╮│4No integration or e2e tests reference harness.StreamUpdate or harness.MCPToolCall by import outside the files already identified.
+│✓ architect  9m30s                                                  ││5harness.WithInlineMCPServer already accepts a socket path string — no signature change required.
+│Model: claude-opus-4.5 (copilot-proxy)                              ││
+│↑ Consumed: 14    ↓ Produced: 24,373                                ││Gotchas
+│Throughput: 42.7 tok/s                                              ││writeFrame/readFrame are unexported helpers shared by both mcp_server.go and question_bridge.go. Both move to internal/mcp; put shared helpers in mcp/frame.go.
+╰────────────────────────────────────────────────────────────────────╯│runWithStreamConsumer closes rawStream after the call returns; the conversion goroutine drains it via range rawStream before closing streamEntries via defer close —
+╭────────────────────────────────────────────────────────────────────╮│no double-close.
+│✓ worker  19m7s                                                     ││The old defer close(streamUpdates) in engine.go (line 113) must become defer close(rawStream) — the rename is in 3 explicit places (make, defer, e.run arg).
+│Model: claude-sonnet-4.6 (copilot-proxy)                            ││AgentRow.State changes from string to AgentState — switch row.State { case "running": } must be updated to use constants or it silently falls through.
+│↑ Consumed: 1,773    ↓ Produced: 59,547                             ││The mcp.Answer.CustomTexts map[int]string field: verify buildAnswer() in question.go constructs this with int keys, not string.
+│Throughput: 51.9 tok/s                                              ││app_test.go line 245-248 must update to newUserQuestion(mcp.ToolCall{...}, 80) — keep the newUserQuestion() constructor wrapper, only change the argument type.
+╰────────────────────────────────────────────────────────────────────╯│screen_run_detail.go still imports harness after this plan — noted in Constraints; expected and not a regression.
+╭────────────────────────────────────────────────────────────────────╮│
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  (log not found: 3aba1daa-f24e-4fc3-aeb3-201d0beb7415)
+
+
+
+
+
+
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ [↑↓] select/scroll | [Tab] focus | [Enter] view | [^E] open log | [^Y] history | [Esc] back  [plan]
