@@ -113,6 +113,7 @@ These are review blockers. If existing code contains one near the task, do not s
 - Catch-all packages: do not create `types`, `utils`, `helpers`, or `misc`. Put concepts in the package that owns the behavior.
 - Oversize source files: a Go source file over 500 lines is a code smell that must be eliminated before further work in that file ships. Split by entity into new files in the same package; do not let new feature work pile onto an already-oversize file.
 - Magic layout arithmetic: layout dimensions must come from measured components or named chrome constants, not unexplained offsets.
+- Sum type flattened into a product type: modeling mutually-exclusive states (screen modes, pipeline phases, variants) as one struct holding the union of every variant's fields plus a tag and/or `hasX`/awaiting booleans, instead of a single value whose type or constructor guarantees only the active variant's fields exist. Make illegal states unrepresentable. (TUI: a screen with N content modes holds one active sub-model, not every mode's fields as siblings — mirror `userQuestionModel`/`DashboardModel`, not `PipelineScreen`.)
 
 </banned_patterns>
 
