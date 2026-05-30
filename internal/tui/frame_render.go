@@ -122,10 +122,23 @@ func renderFrameBody(f *Frame, width int) string {
 		innerWidth = 10
 	}
 
+	// Count total tool parts to decide whether overflow applies.
+	toolCount := 0
+	for _, p := range f.Parts {
+		if !p.IsText {
+			toolCount++
+		}
+	}
+	hiddenTools := 0
+	if !f.ToolsExpanded && toolCount > toolPreviewLimit {
+		hiddenTools = toolCount - toolPreviewLimit
+	}
+
 	var b strings.Builder
+	toolsSeen := 0
+	indicatorEmitted := false
 	for _, part := range f.Parts {
 		if part.IsText {
-			// Render text lines, trimming trailing newline for the last entry
 			text := strings.TrimRight(part.Text, "\n")
 			lines := strings.Split(text, "\n")
 			for _, line := range lines {
@@ -136,12 +149,21 @@ func renderFrameBody(f *Frame, width int) string {
 				b.WriteByte('\n')
 			}
 		} else {
+			toolsSeen++
+			if hiddenTools > 0 && !indicatorEmitted && toolsSeen > hiddenTools {
+				indicator := fmt.Sprintf("⋯ +%d older tool calls", hiddenTools)
+				b.WriteString(toolOverflowStyle.Render(indicator))
+				b.WriteByte('\n')
+				indicatorEmitted = true
+			}
+			if toolsSeen <= hiddenTools {
+				continue
+			}
 			b.WriteString(renderToolBlock(part.Tool, innerWidth))
 			b.WriteByte('\n')
 		}
 	}
 
-	// Render partial line with cursor indicator
 	if f.Partial != "" {
 		partial := f.Partial
 		if len(partial) > innerWidth-2 {
@@ -151,7 +173,6 @@ func renderFrameBody(f *Frame, width int) string {
 		b.WriteByte('\n')
 	}
 
-	// Plan gate hint when awaiting decision
 	if f.Kind == PlanFrame && f.State == FrameInProgress {
 		b.WriteByte('\n')
 		b.WriteString(planHintStyle.Render("[^A] accept  [Enter] comment  [^E] edit  [^D] diff"))
@@ -232,7 +253,12 @@ func formatElapsed(d time.Duration) string {
 const (
 	frameSepStr           = "──"
 	framePartialIndicator = "▎"
+	toolPreviewLimit      = 15
 )
+
+var toolOverflowStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("240")).
+	Faint(true)
 
 // Frame border styles
 var (
