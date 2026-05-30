@@ -185,6 +185,16 @@ func (fl *FrameList) ToggleFocused() {
 	fl.dirty = true
 }
 
+// ToggleFocusedTools toggles the tool-history expansion of the focused frame.
+// Unlike ToggleFocused, this is allowed on InProgress frames.
+func (fl *FrameList) ToggleFocusedTools() {
+	if fl.focused < 0 || fl.focused >= len(fl.frames) {
+		return
+	}
+	fl.frames[fl.focused].ToolsExpanded = !fl.frames[fl.focused].ToolsExpanded
+	fl.dirty = true
+}
+
 // FocusedIndex returns the current focused frame index (-1 if none).
 func (fl *FrameList) FocusedIndex() int { return fl.focused }
 

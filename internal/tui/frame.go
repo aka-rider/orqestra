@@ -46,7 +46,8 @@ type Frame struct {
 	StartedAt    time.Time
 	InputTokens  int64
 	OutputTokens int64
-	Collapsed    bool          // when true, renders as a compact summary block; only valid on FrameFinished
+	Collapsed     bool          // when true, renders as a compact summary block; only valid on FrameFinished
+	ToolsExpanded bool          // when true, all tool blocks render; when false, only last toolPreviewLimit
 	Parts        []ContentPart // interleaved text + tools in insertion order
 	Partial      string        // current incomplete line not yet flushed to Parts
 }
