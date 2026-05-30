@@ -451,3 +451,17 @@ func TestFormatTokenCompact(t *testing.T) {
 		}
 	}
 }
+
+func TestSyncViewports_AutoFollow_Completion(t *testing.T) {
+	s := NewPipelineScreen("test")
+	s.contentVP.SetWidth(80)
+	s.contentVP.SetHeight(10)
+	s.content = ContentCompletion
+	s.frameList.AppendFrame(Frame{Kind: CompletionFrame, State: FrameFinished,
+		Parts: []ContentPart{{IsText: true, Text: strings.Repeat("line\n", 30)}}})
+	s.contentVP.GotoBottom()
+	s.SyncViewports()
+	if !s.contentVP.AtBottom() {
+		t.Error("expected viewport at bottom after SyncViewports with ContentCompletion")
+	}
+}

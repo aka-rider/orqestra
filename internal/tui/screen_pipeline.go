@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,6 +16,12 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
+
+var ansiEscRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+func stripAnsi(s string) string {
+	return ansiEscRe.ReplaceAllString(s, "")
+}
 
 // ChatRole identifies who authored a ChatEntry.
 type ChatRole string
@@ -53,7 +60,9 @@ type PipelineScreen struct {
 	history   *orchestrator.StreamHistoryStore
 
 	// Frame list — persistent store for scrollable frame rendering
-	frameList *FrameList
+	frameList         *FrameList
+	planFrameIdx      int // index of PlanFrame in frameList; set on EventGateRequest
+	planDiffLineOffset int // line offset of the diff separator within PlanFrame
 
 	// Plan review state
 	planComment    textarea.Model
@@ -68,8 +77,7 @@ type PipelineScreen struct {
 
 	// Conversation state during plan review
 	chatHistory     []ChatEntry
-	planDiff        string         // unified diff from git micro-repo
-	diffViewport    viewport.Model // paginated viewport for diff rendering
+	planDiff        string // unified diff from git micro-repo
 	reviewTokensIn  int64
 	reviewTokensOut int64
 
@@ -104,8 +112,7 @@ type PipelineScreen struct {
 	showDashboard  bool
 	showHelp       bool
 	ctrlCPending   bool // set by parent model when Ctrl+C time gate is active
-	active         bool // true while pipeline is running
-	streamExpanded bool // DEPRECATED: kept for legacy viewStreaming fallback
+	active bool // true while pipeline is running
 
 	// Animation state
 	animFrame int // incremented by animTickMsg for shimmer/pulse effects
@@ -159,13 +166,13 @@ func (s *PipelineScreen) Reset() {
 	s.streamBuf = nil
 	s.history = nil
 	s.frameList = NewFrameList(80)
+	s.planFrameIdx = 0
+	s.planDiffLineOffset = 0
 	s.hasPlanComment = false
 	s.editorRunning = false
 	s.awaitingPlanDecision = false
 	s.chatHistory = nil
 	s.planDiff = ""
-	s.diffViewport = viewport.New()
-	s.diffViewport.MouseWheelEnabled = true
 	s.reviewTokensIn = 0
 	s.reviewTokensOut = 0
 	s.focusedAgent = 0
@@ -185,7 +192,6 @@ func (s *PipelineScreen) Reset() {
 	s.liveInput = 0
 	s.liveOutput = 0
 	s.liveStart = time.Time{}
-	s.streamExpanded = false
 	s.contentVP.SetContent("")
 	s.contentVP.GotoTop()
 	s.dashboard = NewDashboardModel()
@@ -243,10 +249,6 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 func (s *PipelineScreen) SyncViewports() {
 	w := s.effectiveWidth()
 
-	// Keep diff viewport dimensions in sync
-	s.diffViewport.SetWidth(w)
-	s.diffViewport.SetHeight(max(1, s.contentVP.Height()-3))
-
 	if s.showDashboard {
 		// Feed live agent data to dashboard
 		s.dashboard.SetAgents(s.agents)
@@ -268,7 +270,7 @@ func (s *PipelineScreen) SyncViewports() {
 		}
 		atBottom := s.contentVP.AtBottom()
 		s.contentVP.SetContent(contentView)
-		if atBottom && (s.content == ContentStreaming || s.content == ContentPlanReview) {
+		if atBottom && (s.content == ContentStreaming || s.content == ContentPlanReview || s.content == ContentCompletion) {
 			s.contentVP.GotoBottom()
 		}
 	}
@@ -369,13 +371,11 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 		}
 
 	case orchestrator.EventGateRequest:
-		s.contentVP.GotoTop()
 		switch event.Gate.Type {
 		case orchestrator.GatePlanApproval:
 			s.planDiff = event.Gate.PlanDiff
 			s.planHistoryDir = event.Gate.PlanHistoryDir
 			s.planHistoryHeadSHA = event.Gate.PlanHistoryHeadSHA
-			s.diffViewport.SetContent(s.planDiff)
 			if len(s.chatHistory) > 0 && s.planDiff != "" {
 				s.chatHistory = append(s.chatHistory, ChatEntry{
 					Role: ChatRoleArchitect, Text: "(plan revised — see diff with [^D])", HasPlanChange: true,
@@ -394,12 +394,18 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 			s.planComment.CharLimit = 1024
 			s.planComment.Focus()
 			s.hasPlanComment = true
-			// Append plan frame to the frame list (InProgress until plan decision)
+			// Build plan text with optional inline diff
+			planText := event.Gate.FinalPlanMarkdown
+			if event.Gate.PlanDiff != "" {
+				s.planDiffLineOffset = strings.Count(event.Gate.FinalPlanMarkdown, "\n") + 2
+				planText += "\n── plan diff ──\n" + stripAnsi(event.Gate.PlanDiff)
+			}
 			s.frameList.AppendFrame(Frame{
 				Kind:  PlanFrame,
 				State: FrameInProgress,
-				Parts: []ContentPart{{IsText: true, Text: event.Gate.FinalPlanMarkdown}},
+				Parts: []ContentPart{{IsText: true, Text: planText}},
 			})
+			s.planFrameIdx = s.frameList.FrameCount() - 1
 		}
 
 	case orchestrator.EventPlanReady:
@@ -448,7 +454,6 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 	case orchestrator.EventComplete:
 		s.content = ContentCompletion
 		s.active = false
-		s.contentVP.GotoTop()
 		if event.WorkerValidation != "" {
 			s.workerValidation = event.WorkerValidation
 			s.hasValidation = true
@@ -472,7 +477,7 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		s.SyncViewports()
 		return s, nil
 	case "ctrl+d":
-		if s.content != ContentPlanReview && s.content != ContentPlanDiff && s.content != ContentUserQuestion {
+		if s.content != ContentPlanReview && s.content != ContentUserQuestion {
 			s.showDashboard = !s.showDashboard
 			s.SyncViewports()
 			return s, nil
@@ -486,6 +491,7 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		if s.showDashboard {
 			s.dashboard, cmd = s.dashboard.Update(msg)
 		} else {
+			s.frameList.ClearFocus()
 			s.contentVP, cmd = s.contentVP.Update(msg)
 		}
 		return s, cmd
@@ -553,8 +559,6 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		return s, cmd
 	case ContentPlanReview:
 		return s.handlePlanReviewKey(msg)
-	case ContentPlanDiff:
-		return s.handlePlanDiffKey(msg)
 	case ContentAgentHistory:
 		return s.handleAgentHistoryKey(msg)
 	case ContentCompletion:
@@ -665,10 +669,7 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 		return s, nil
 	case "ctrl+d":
 		if s.planDiff != "" {
-			s.content = ContentPlanDiff
-			s.hasPlanComment = false
-			s.contentVP.GotoTop()
-			s.SyncViewports()
+			s.contentVP.SetYOffset(s.frameList.FrameTopLine(s.planFrameIdx) + s.planDiffLineOffset)
 		}
 		return s, nil
 	case "ctrl+y":
@@ -708,34 +709,12 @@ func (s PipelineScreen) HandleCtrlCCancel() PipelineScreen {
 	return s
 }
 
-func (s PipelineScreen) handlePlanDiffKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
-	if msg.Code == tea.KeyEscape || msg.String() == "ctrl+d" {
-		s.content = ContentPlanReview
-		s.contentVP.GotoTop()
-		s.planComment = textarea.New()
-		s.planComment.Placeholder = "Ask a question or request changes..."
-		s.planComment.SetWidth(max(1, s.contentVP.Width()-4))
-		s.planComment.SetHeight(2)
-		s.planComment.CharLimit = 1024
-		s.planComment.Focus()
-		s.hasPlanComment = true
-		s.awaitingPlanDecision = true
-		s.SyncViewports()
-		return s, nil
-	}
-
-	// Pass navigation keys to the diff viewport
-	var cmd tea.Cmd
-	s.diffViewport, cmd = s.diffViewport.Update(msg)
-	return s, cmd
-}
-
 func (s PipelineScreen) handleAgentHistoryKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	switch msg.Code {
 	case tea.KeyEscape:
 		s.content = ContentStreaming
 		s.focusedAgent = 0
-		s.contentVP.GotoTop()
+		s.contentVP.GotoBottom()
 		s.SyncViewports()
 		return s, nil
 	}
@@ -743,6 +722,28 @@ func (s PipelineScreen) handleAgentHistoryKey(msg tea.KeyPressMsg) (PipelineScre
 }
 
 func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
+	if s.frameList.FrameCount() > 0 {
+		switch msg.Code {
+		case tea.KeyUp:
+			s.frameList.FocusPrev()
+			s.contentVP.SetYOffset(s.frameList.FrameTopLine(s.frameList.FocusedIndex()))
+			return s, nil
+		case tea.KeyDown:
+			s.frameList.FocusNext()
+			s.contentVP.SetYOffset(s.frameList.FrameTopLine(s.frameList.FocusedIndex()))
+			return s, nil
+		case tea.KeySpace:
+			s.frameList.ToggleFocused()
+			s.SyncViewports()
+			return s, nil
+		case tea.KeyEscape:
+			if s.frameList.FocusedIndex() >= 0 {
+				s.frameList.ClearFocus()
+				s.SyncViewports()
+				return s, nil
+			}
+		}
+	}
 	switch msg.String() {
 	case "ctrl+n":
 		if s.active {
@@ -756,6 +757,28 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 }
 
 func (s PipelineScreen) handleCompletionKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
+	if s.frameList.FrameCount() > 0 {
+		switch msg.Code {
+		case tea.KeyUp:
+			s.frameList.FocusPrev()
+			s.contentVP.SetYOffset(s.frameList.FrameTopLine(s.frameList.FocusedIndex()))
+			return s, nil
+		case tea.KeyDown:
+			s.frameList.FocusNext()
+			s.contentVP.SetYOffset(s.frameList.FrameTopLine(s.frameList.FocusedIndex()))
+			return s, nil
+		case tea.KeySpace:
+			s.frameList.ToggleFocused()
+			s.SyncViewports()
+			return s, nil
+		case tea.KeyEscape:
+			if s.frameList.FocusedIndex() >= 0 {
+				s.frameList.ClearFocus()
+				s.SyncViewports()
+				return s, nil
+			}
+		}
+	}
 	switch msg.String() {
 	case "ctrl+r":
 		s.PendingIntent = NavigateToRunsListIntent{}
@@ -983,8 +1006,6 @@ func (s PipelineScreen) viewContent(width int) string {
 		}
 	case ContentUserQuestion:
 		return s.question.View(width)
-	case ContentPlanDiff:
-		return s.viewPlanDiff(width)
 	case ContentMergeConflict:
 		return s.viewMergeConflict(width)
 	case ContentEditConfirm:
@@ -1107,20 +1128,6 @@ func (s PipelineScreen) viewPlanReview(width int) string {
 		b.WriteString("\n")
 	}
 	b.WriteString(renderMarkdown(s.finalPlan, width))
-	return b.String()
-}
-
-func (s PipelineScreen) viewPlanDiff(width int) string {
-	var b strings.Builder
-	b.WriteString(goalStyle.Render(" Plan Diff (last revision)"))
-	b.WriteString("\n")
-	b.WriteString(dividerStyle.Render(strings.Repeat("─", max(1, width-constContentInset))))
-	b.WriteString("\n")
-	if s.planDiff == "" {
-		b.WriteString(" No diff available.\n")
-	} else {
-		b.WriteString(s.diffViewport.View())
-	}
 	return b.String()
 }
 
@@ -1350,8 +1357,6 @@ func (s PipelineScreen) viewFooter() string {
 			return keyStyle.Render(" [Tab/Enter] save context | [Esc] discard                    [^H] help  ") + ctrlCHint
 		}
 		return keyStyle.Render(" [↑↓] navigate | [Tab] add context | [Enter] confirm | [Esc] discard  [^H] help  ") + ctrlCHint
-	case ContentPlanDiff:
-		return keyStyle.Render(" [Esc] return to plan | [^D] return to plan              [^H] help  ") + ctrlCHint
 	case ContentMergeConflict:
 		return keyStyle.Render(" [^A] abort merge | [Esc] continue                       [^H] help  ") + ctrlCHint
 	case ContentAgentHistory:

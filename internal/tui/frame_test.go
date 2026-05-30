@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -12,7 +13,7 @@ func TestRenderFrame_Init(t *testing.T) {
 		AgentID:    "Researcher",
 		AgentModel: "claude-sonnet-4-20250514",
 	}
-	got := renderFrame(&f, 60, 0)
+	got := renderFrame(&f, 60, 0, false)
 	if got == "" {
 		t.Fatal("renderFrame returned empty string for init frame")
 	}
@@ -32,7 +33,7 @@ func TestRenderFrame_InProgress(t *testing.T) {
 		},
 		Partial: "streaming text continues",
 	}
-	got := renderFrame(&f, 60, 0)
+	got := renderFrame(&f, 60, 0, false)
 	assertContains(t, got, "Architect")
 	assertContains(t, got, "·∘○∘·") // shimmer frame 0
 	assertContains(t, got, "Analyzing the codebase...")
@@ -45,8 +46,8 @@ func TestRenderFrame_InProgress_ShimmerCycles(t *testing.T) {
 		State:   FrameInProgress,
 		AgentID: "Worker",
 	}
-	got0 := renderFrame(&f, 60, 0)
-	got1 := renderFrame(&f, 60, 1)
+	got0 := renderFrame(&f, 60, 0, false)
+	got1 := renderFrame(&f, 60, 1, false)
 	assertContains(t, got0, "·∘○∘·")
 	assertContains(t, got1, "∘○∘·∘")
 }
@@ -64,7 +65,7 @@ func TestRenderFrame_Finished(t *testing.T) {
 			{IsText: true, Text: "The codebase uses pattern X.\n"},
 		},
 	}
-	got := renderFrame(&f, 60, 0)
+	got := renderFrame(&f, 60, 0, false)
 	assertContains(t, got, "Researcher")
 	assertContains(t, got, "✓")
 	assertContains(t, got, "12s")
@@ -83,7 +84,7 @@ func TestRenderFrame_WithToolBlocks(t *testing.T) {
 			{IsText: false, Tool: ToolBlock{Name: "Bash", Detail: "go test ./..."}},
 		},
 	}
-	got := renderFrame(&f, 60, 0)
+	got := renderFrame(&f, 60, 0, false)
 	assertContains(t, got, "Let me explore...")
 	assertContains(t, got, "Read")
 	assertContains(t, got, "internal/foo/bar.go")
@@ -100,7 +101,7 @@ func TestRenderFrame_PlanFrame(t *testing.T) {
 			{IsText: true, Text: "## Implementation Plan\n1. Create foo.go\n2. Modify bar.go\n"},
 		},
 	}
-	got := renderFrame(&f, 60, 0)
+	got := renderFrame(&f, 60, 0, false)
 	assertContains(t, got, "Plan")
 	assertContains(t, got, "## Implementation Plan")
 }
@@ -114,7 +115,7 @@ func TestRenderFrame_CompletionFrame(t *testing.T) {
 			{IsText: true, Text: "Pipeline complete. All steps passed.\n"},
 		},
 	}
-	got := renderFrame(&f, 60, 0)
+	got := renderFrame(&f, 60, 0, false)
 	assertContains(t, got, "Complete")
 	assertContains(t, got, "3m22s")
 }
@@ -384,6 +385,68 @@ func TestFrameList_PlanGateHintRemovedAfterFinish(t *testing.T) {
 	rendered := fl.Render()
 	if containsStr(rendered, "[^A] accept") {
 		t.Fatal("hint should not render after PlanFrame is finished")
+	}
+}
+
+func TestRenderFrame_Focused(t *testing.T) {
+	f := Frame{Kind: AgentFrame, State: FrameFinished, AgentID: "Worker", Elapsed: 5 * time.Second,
+		Parts: []ContentPart{{IsText: true, Text: "done\n"}}}
+	got := renderFrame(&f, 60, 0, true)
+	if got == "" {
+		t.Fatal("focused frame should not be empty")
+	}
+	assertContains(t, got, "Worker")
+	assertContains(t, got, "✓")
+}
+
+func TestRenderFrame_Collapsed(t *testing.T) {
+	f := Frame{Kind: AgentFrame, State: FrameFinished, AgentID: "Researcher", Elapsed: 3 * time.Second,
+		Collapsed: true,
+		Parts:     []ContentPart{{IsText: true, Text: "The codebase uses pattern X.\n"}}}
+	got := renderFrame(&f, 60, 0, false)
+	assertContains(t, got, "Researcher")
+	assertContains(t, got, "The codebase uses pattern X")
+	if strings.Count(got, "\n") > 5 {
+		t.Errorf("collapsed frame should be compact; got %d lines", strings.Count(got, "\n"))
+	}
+}
+
+func TestFrameList_NewFrameList_FocusedIsNegOne(t *testing.T) {
+	fl := NewFrameList(80)
+	if fl.FocusedIndex() != -1 {
+		t.Fatalf("expected -1, got %d", fl.FocusedIndex())
+	}
+}
+
+func TestFrameList_FocusNavigation(t *testing.T) {
+	fl := NewFrameList(60)
+	fl.AppendFrame(Frame{Kind: AgentFrame, State: FrameFinished, AgentID: "A"})
+	fl.AppendFrame(Frame{Kind: AgentFrame, State: FrameFinished, AgentID: "B"})
+
+	fl.FocusNext() // from -1 → 0
+	if fl.FocusedIndex() != 0 {
+		t.Fatalf("expected 0, got %d", fl.FocusedIndex())
+	}
+
+	fl.FocusPrev() // from 0 → 1 (wraps)
+	if fl.FocusedIndex() != 1 {
+		t.Fatalf("expected 1 (wrap), got %d", fl.FocusedIndex())
+	}
+
+	fl.ClearFocus()
+	fl.FocusPrev() // from -1 → 1 (last)
+	if fl.FocusedIndex() != 1 {
+		t.Fatalf("expected 1 (last), got %d", fl.FocusedIndex())
+	}
+}
+
+func TestFrameList_ToggleFocused_InProgress_NoOp(t *testing.T) {
+	fl := NewFrameList(60)
+	fl.AppendFrame(Frame{Kind: AgentFrame, State: FrameInProgress, AgentID: "W"})
+	fl.FocusFrame(0)
+	fl.ToggleFocused()
+	if fl.frames[0].Collapsed {
+		t.Fatal("ToggleFocused should not collapse InProgress frame")
 	}
 }
 

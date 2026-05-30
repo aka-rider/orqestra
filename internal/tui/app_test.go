@@ -1357,31 +1357,29 @@ func TestTUI_PlanDiffToggle(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentPlanReview
 	m.pipelineScreen.hasPlan = true
-	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nNew"
-	m.pipelineScreen.planDiff = "--- a/plan.md\n+++ b/plan.md\n@@ -1,4 +1,4 @@\n # Plan\n \n ## Goal\n-Old.\n+New.\n"
+	planText := "# Plan\n\n## Goal\nNew."
+	diffText := "--- a/plan.md\n+++ b/plan.md\n@@ -1,4 +1,4 @@\n # Plan\n \n ## Goal\n-Old.\n+New.\n"
+	m.pipelineScreen.planDiff = diffText
+	m.pipelineScreen.finalPlan = planText
 	m.pipelineScreen.awaitingPlanDecision = true
+	// Simulate what EventGateRequest would have done: PlanFrame with inlined diff
+	m.pipelineScreen.frameList.AppendFrame(Frame{
+		Kind:  PlanFrame,
+		State: FrameInProgress,
+		Parts: []ContentPart{{IsText: true, Text: planText + "\n── plan diff ──\n" + diffText}},
+	})
+	m.pipelineScreen.planFrameIdx = 0
+	m.pipelineScreen.planDiffLineOffset = strings.Count(planText, "\n") + 2
 	m.width = 120
 	m.height = 40
 	m.recalculateLayout()
+	m.pipelineScreen.SyncViewports()
 
-	// Press Ctrl+D to enter diff mode
+	// Ctrl+D no longer switches to ContentPlanDiff — it scrolls to the diff section
 	result, _ := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 	model := result.(Model)
-	if model.pipelineScreen.content != ContentPlanDiff {
-		t.Errorf("expected ContentPlanDiff, got %d", model.pipelineScreen.content)
-	}
-
-	// Verify diff renders
-	view := model.pipelineScreen.viewPlanDiff(100)
-	if !strings.Contains(view, "Plan Diff") {
-		t.Error("expected diff header in view")
-	}
-
-	// Press Esc to return
-	result2, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	model2 := result2.(Model)
-	if model2.pipelineScreen.content != ContentPlanReview {
-		t.Errorf("expected ContentPlanReview after Esc, got %d", model2.pipelineScreen.content)
+	if model.pipelineScreen.content != ContentPlanReview {
+		t.Errorf("expected ContentPlanReview after Ctrl+D (no mode switch), got %d", model.pipelineScreen.content)
 	}
 }
 
@@ -1421,27 +1419,6 @@ func TestTUI_ReviewTokenAccumulation(t *testing.T) {
 	}
 	if m.pipelineScreen.reviewTokensOut != 500 {
 		t.Errorf("reviewTokensOut = %d, want 500", m.pipelineScreen.reviewTokensOut)
-	}
-}
-
-func TestTUI_ViewPlanDiffViewport(t *testing.T) {
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentPlanDiff
-	m.pipelineScreen.planDiff = "diff --git a/plan.md b/plan.md\n# Plan\n-Old.\n+New.\n"
-	m.pipelineScreen.diffViewport.SetWidth(100)
-	m.pipelineScreen.diffViewport.SetHeight(20)
-	m.pipelineScreen.diffViewport.SetContent(m.pipelineScreen.planDiff)
-	m.width = 120
-	m.height = 40
-	m.recalculateLayout()
-
-	view := m.pipelineScreen.viewPlanDiff(100)
-	if !strings.Contains(view, "Plan Diff") {
-		t.Error("expected diff header")
-	}
-	if !strings.Contains(view, "-Old.") || !strings.Contains(view, "+New.") {
-		t.Error("expected viewport content in view")
 	}
 }
 

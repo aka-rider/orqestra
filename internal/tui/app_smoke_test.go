@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,15 +118,23 @@ func hydratedModels(t *testing.T) map[string]Model {
 		models["pipeline-plan-review-chat"] = m
 	}
 
-	// StatePipeline + ContentPlanDiff
+	// StatePipeline + ContentPlanReview with inlined plan diff
 	{
 		m := base()
 		m.state = StatePipeline
-		m.pipelineScreen.content = ContentPlanDiff
+		m.pipelineScreen.content = ContentPlanReview
 		m.pipelineScreen.hasPlan = true
-		m.pipelineScreen.planDiff = "--- a/plan.md\n+++ b/plan.md\n@@ -1,4 +1,4 @@\n # Plan\n \n ## Goal\n-Old.\n+New.\n"
-		m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nNew."
-		m.pipelineScreen.diffViewport.SetContent(m.pipelineScreen.planDiff)
+		planText := "# Plan\n\n## Goal\nNew."
+		diffText := "--- a/plan.md\n+++ b/plan.md\n@@ -1,4 +1,4 @@\n # Plan\n \n ## Goal\n-Old.\n+New.\n"
+		m.pipelineScreen.planDiff = diffText
+		m.pipelineScreen.finalPlan = planText
+		m.pipelineScreen.frameList.AppendFrame(Frame{
+			Kind:  PlanFrame,
+			State: FrameInProgress,
+			Parts: []ContentPart{{IsText: true, Text: planText + "\n── plan diff ──\n" + diffText}},
+		})
+		m.pipelineScreen.planFrameIdx = 0
+		m.pipelineScreen.planDiffLineOffset = strings.Count(planText, "\n") + 2
 		models["pipeline-plan-diff"] = m
 	}
 

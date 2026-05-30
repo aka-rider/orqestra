@@ -9,16 +9,27 @@ import (
 )
 
 // renderFrame renders a single frame with its border, header, and content.
-func renderFrame(f *Frame, width int, animFrame int) string {
+func renderFrame(f *Frame, width int, animFrame int, focused bool) string {
 	if width < 20 {
 		width = 20
+	}
+
+	// Collapsed finished frames: compact 3-line block with summary
+	if f.Collapsed && f.State == FrameFinished {
+		header := renderFrameHeader(f, animFrame)
+		innerWidth := width - 4
+		if innerWidth < 10 {
+			innerWidth = 10
+		}
+		rendered := frameStyle(f, focused).Width(innerWidth).Render(collapsedSummary(f, innerWidth))
+		return injectHeader(rendered, header, width)
 	}
 
 	header := renderFrameHeader(f, animFrame)
 	body := renderFrameBody(f, width)
 
 	// Use the appropriate border style based on frame state
-	style := frameStyle(f)
+	style := frameStyle(f, focused)
 	innerWidth := width - 4 // border (2) + padding (2)
 	if innerWidth < 10 {
 		innerWidth = 10
@@ -35,6 +46,35 @@ func renderFrame(f *Frame, width int, animFrame int) string {
 
 	// Replace the top border's first segment with the header
 	return injectHeader(rendered, header, width)
+}
+
+// collapsedSummary returns a single-line summary for a collapsed frame.
+func collapsedSummary(f *Frame, innerWidth int) string {
+	for _, part := range f.Parts {
+		if !part.IsText {
+			continue
+		}
+		for _, line := range strings.SplitN(part.Text, "\n", 5) {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if len(line) > innerWidth-1 {
+				return line[:innerWidth-1] + "…"
+			}
+			return line
+		}
+	}
+	switch f.Kind {
+	case PlanFrame:
+		return "Plan"
+	case CompletionFrame:
+		return "Complete"
+	case ErrorFrame:
+		return "Error"
+	default:
+		return f.AgentID
+	}
 }
 
 // renderFrameHeader builds the frame header string: "─ AgentID (model) ── status ─"
@@ -235,10 +275,16 @@ var (
 	planHintStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240")).
 			Faint(true)
+
+	// Focused frame border (yellow)
+	frameFocusedBorder = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("11")).
+				Padding(0, 1)
 )
 
 // frameStyle returns the appropriate border style for a frame.
-func frameStyle(f *Frame) lipgloss.Style {
+func frameStyle(f *Frame, focused bool) lipgloss.Style {
 	switch {
 	case f.Kind == ErrorFrame:
 		return frameErrorBorder
@@ -246,6 +292,8 @@ func frameStyle(f *Frame) lipgloss.Style {
 		return framePlanBorder
 	case f.State == FrameInProgress:
 		return frameActiveBorder
+	case focused:
+		return frameFocusedBorder
 	default:
 		return frameAgentBorder
 	}

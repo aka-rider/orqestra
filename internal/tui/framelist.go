@@ -10,11 +10,12 @@ type FrameList struct {
 	dirty      bool
 	lastRender string
 	animFrame  int
+	focused    int // index of the focused frame; -1 means no focus
 }
 
 // NewFrameList creates an empty frame list with the given width.
 func NewFrameList(width int) *FrameList {
-	return &FrameList{width: width, dirty: true}
+	return &FrameList{width: width, dirty: true, focused: -1}
 }
 
 // AppendFrame adds a new frame to the list and marks dirty.
@@ -130,9 +131,75 @@ func (fl *FrameList) render() string {
 	return string(buf)
 }
 
+// FocusFrame sets focus to the frame at idx, clamping to valid range.
+func (fl *FrameList) FocusFrame(idx int) {
+	if len(fl.frames) == 0 {
+		return
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(fl.frames) {
+		idx = len(fl.frames) - 1
+	}
+	fl.focused = idx
+	fl.dirty = true
+}
+
+// FocusNext advances focus to the next frame, wrapping around from -1 → 0.
+func (fl *FrameList) FocusNext() {
+	if len(fl.frames) == 0 {
+		return
+	}
+	if fl.focused < 0 {
+		fl.focused = 0
+	} else {
+		fl.focused = (fl.focused + 1) % len(fl.frames)
+	}
+	fl.dirty = true
+}
+
+// FocusPrev moves focus to the previous frame, wrapping from -1 → last.
+func (fl *FrameList) FocusPrev() {
+	if len(fl.frames) == 0 {
+		return
+	}
+	if fl.focused < 0 {
+		fl.focused = len(fl.frames) - 1
+	} else {
+		fl.focused = (fl.focused - 1 + len(fl.frames)) % len(fl.frames)
+	}
+	fl.dirty = true
+}
+
+// ToggleFocused collapses or expands the focused frame. No-op on InProgress frames.
+func (fl *FrameList) ToggleFocused() {
+	if fl.focused < 0 || fl.focused >= len(fl.frames) {
+		return
+	}
+	f := &fl.frames[fl.focused]
+	if f.State == FrameInProgress {
+		return
+	}
+	f.Collapsed = !f.Collapsed
+	fl.dirty = true
+}
+
+// FocusedIndex returns the current focused frame index (-1 if none).
+func (fl *FrameList) FocusedIndex() int { return fl.focused }
+
+// ClearFocus removes any current focus selection.
+func (fl *FrameList) ClearFocus() {
+	if fl.focused == -1 {
+		return
+	}
+	fl.focused = -1
+	fl.dirty = true
+}
+
 // renderSingleFrame renders one frame by index.
 func (fl *FrameList) renderSingleFrame(idx int) string {
-	return renderFrame(&fl.frames[idx], fl.width, fl.animFrame)
+	return renderFrame(&fl.frames[idx], fl.width, fl.animFrame, idx == fl.focused)
 }
 
 // countLines counts the number of newline-terminated lines in s.
