@@ -345,10 +345,10 @@ One can put Orqestra's agents system prompts into `~/.claude/agents/` and descri
 
 Yes, but.
 
-- Claude Code's default sandbox is weaker than Orqestra's strict, project-scoped sandbox.
-- Claude Code agents cannot run subagents, so the feature size has to be smaller.
 - In yolo flows, agents can periodically jump straight into implementation instead of preserving the pipeline. Orqestra explicitly prohibits `ExitPlanMode`.
-- Claude Code does not provide Orqestra's per-run token budget kill switch for a runaway agent stuck in a loop.
+- In Claude Code, agents cannot run subagents, so the feature size has to be smaller.
+- The sandbox is weaker than Orqestra's strict, project-scoped sandbox.
+- lack of token budget kill switch for a runaway agent stuck in a loop.
 - Claude Code does not allow to mix model providers
 
 </details>

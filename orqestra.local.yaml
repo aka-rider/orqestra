@@ -12,11 +12,18 @@ models:
   qwen:
     provider: llama-cpp
     model: qwen3.6
+  small:
+    provider: llama-cpp
+    model: qwen3.6
+
 
 researcher:
   model: qwen
 
 architect:
+  model: qwen
+
+critic:
   model: qwen
 
 worker:
