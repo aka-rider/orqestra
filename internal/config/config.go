@@ -17,6 +17,27 @@ import (
 //go:embed pipeline.yaml
 var embeddedPipeline []byte
 
+// Valid provider types. A provider must declare one of these types;
+// an empty or unknown type is a configuration error.
+const (
+	ProviderTypeNative    = "native"    // Native Claude CLI (no model override env vars). Must not have base_url.
+	ProviderTypeAnthropic = "anthropic" // Anthropic-compatible API (sets ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, etc.)
+	ProviderTypeOpenAI    = "openai"    // OpenAI-compatible API (same env vars, trailing slash trimmed from base URL)
+)
+
+// validProviderTypes is the set of recognized provider type strings.
+var validProviderTypes = map[string]struct{}{
+	ProviderTypeNative:    {},
+	ProviderTypeAnthropic: {},
+	ProviderTypeOpenAI:    {},
+}
+
+// IsProviderType reports whether the given type string is a recognized provider type.
+func IsProviderType(t string) bool {
+	_, ok := validProviderTypes[t]
+	return ok
+}
+
 // ProviderConfig defines a named LLM provider endpoint.
 type ProviderConfig struct {
 	BaseURL string `yaml:"base_url"`
@@ -339,6 +360,25 @@ func (c *Config) validate() error {
 			}
 		}
 	}
+
+	// Validate provider types: every provider must declare a known type.
+	// Empty or unknown types fail fast — they silently fall back to native
+	// Anthropic which causes expensive token spending for intended local runs.
+	for name, p := range c.Providers {
+		if p.Type == "" {
+			return fmt.Errorf("provider %q: type is required (valid: %q, %q, %q)", name, ProviderTypeNative, ProviderTypeAnthropic, ProviderTypeOpenAI)
+		}
+		if !IsProviderType(p.Type) {
+			return fmt.Errorf("provider %q: unknown type %q (valid: %q, %q, %q)", name, p.Type, ProviderTypeNative, ProviderTypeAnthropic, ProviderTypeOpenAI)
+		}
+		if p.Type == ProviderTypeNative && p.BaseURL != "" {
+			return fmt.Errorf("provider %q: type %q must not have base_url (it is ignored; use %q or %q to route to a remote endpoint)", name, ProviderTypeNative, ProviderTypeAnthropic, ProviderTypeOpenAI)
+		}
+		if p.Type != ProviderTypeNative && p.BaseURL == "" {
+			return fmt.Errorf("provider %q: type %q requires base_url", name, p.Type)
+		}
+	}
+
 	// Check for conflicting limits on the same underlying model
 	if _, err := c.ResolvedTokenLimits(); err != nil {
 		return err

@@ -228,7 +228,11 @@ func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (
 	args = append(args, c.buildFinalArgs()...)
 
 	cmd := exec.CommandContext(ctx, c.binary, args...)
-	cmd.Env = c.buildEnv()
+	env, err := c.buildEnv()
+	if err != nil {
+		return RunResult{}, err
+	}
+	cmd.Env = env
 	if c.workDir != "" {
 		cmd.Dir = c.workDir
 	}
@@ -268,7 +272,11 @@ func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt strin
 	args = append(args, c.buildFinalArgs()...)
 
 	cmd := exec.CommandContext(ctx, c.binary, args...)
-	cmd.Env = c.buildEnv()
+	env, err := c.buildEnv()
+	if err != nil {
+		return RunResult{}, err
+	}
+	cmd.Env = env
 	if c.workDir != "" {
 		cmd.Dir = c.workDir
 	}
@@ -325,7 +333,11 @@ func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, e
 	args = append(args, c.buildFinalArgs()...)
 
 	cmd := exec.CommandContext(ctx, c.binary, args...)
-	cmd.Env = c.buildEnv()
+	env, err := c.buildEnv()
+	if err != nil {
+		return RunResult{}, err
+	}
+	cmd.Env = env
 	if c.workDir != "" {
 		cmd.Dir = c.workDir
 	}
@@ -576,42 +588,52 @@ func streamEventsFrom(event streamEvent) []StreamUpdate {
 
 // BuildModelEnv returns the environment variables needed to route the claude binary
 // to the given model. Used by sandbox runners that exec claude inside a container.
-func BuildModelEnv(resolved config.ResolvedModel, utility *config.ResolvedModel) []string {
-	var env []string
+// Returns an error if the provider type is empty or unknown — no fallback to native.
+func BuildModelEnv(resolved config.ResolvedModel, utility *config.ResolvedModel) ([]string, error) {
 	switch resolved.Type {
-	case "native":
-		// no override
-	case "anthropic":
-		env = append(env,
-			"ANTHROPIC_BASE_URL="+resolved.BaseURL,
-			"ANTHROPIC_MODEL="+resolved.Model,
-			"ANTHROPIC_DEFAULT_SONNET_MODEL="+resolved.Model,
-		)
+	case config.ProviderTypeNative:
+		// no override — use native Claude CLI with logged-in credentials
+		return nil, nil
+	case config.ProviderTypeAnthropic:
+		env := []string{
+			"ANTHROPIC_BASE_URL=" + resolved.BaseURL,
+			"ANTHROPIC_MODEL=" + resolved.Model,
+			"ANTHROPIC_DEFAULT_SONNET_MODEL=" + resolved.Model,
+		}
 		if utility != nil {
 			env = append(env,
 				"ANTHROPIC_SMALL_FAST_MODEL="+utility.Model,
 				"ANTHROPIC_DEFAULT_HAIKU_MODEL="+utility.Model,
 			)
 		}
-	case "openai":
+		return env, nil
+	case config.ProviderTypeOpenAI:
 		baseURL := strings.TrimRight(resolved.BaseURL, "/")
-		env = append(env,
-			"ANTHROPIC_BASE_URL="+baseURL,
-			"ANTHROPIC_MODEL="+resolved.Model,
-			"ANTHROPIC_DEFAULT_SONNET_MODEL="+resolved.Model,
-		)
+		env := []string{
+			"ANTHROPIC_BASE_URL=" + baseURL,
+			"ANTHROPIC_MODEL=" + resolved.Model,
+			"ANTHROPIC_DEFAULT_SONNET_MODEL=" + resolved.Model,
+		}
 		if utility != nil {
 			env = append(env,
 				"ANTHROPIC_SMALL_FAST_MODEL="+utility.Model,
 				"ANTHROPIC_DEFAULT_HAIKU_MODEL="+utility.Model,
 			)
 		}
+		return env, nil
+	default:
+		return nil, fmt.Errorf("unknown provider type %q for model %q (valid: %q, %q, %q)",
+			resolved.Type, resolved.Model,
+			config.ProviderTypeNative, config.ProviderTypeAnthropic, config.ProviderTypeOpenAI)
 	}
-	return env
 }
 
 // buildEnv constructs the environment variables for the claude subprocess.
-func (c *ClaudeCLI) buildEnv() []string {
+func (c *ClaudeCLI) buildEnv() ([]string, error) {
+	modelEnv, err := BuildModelEnv(c.resolved, c.small)
+	if err != nil {
+		return nil, fmt.Errorf("build model env: %w", err)
+	}
 	// Filter out any existing ANTHROPIC_API_KEY from the parent environment
 	// to prevent leakage or conflicts with the runner's configured auth.
 	var clean []string
@@ -620,8 +642,7 @@ func (c *ClaudeCLI) buildEnv() []string {
 			clean = append(clean, kv)
 		}
 	}
-	env := append(clean, BuildModelEnv(c.resolved, c.small)...)
-	return env
+	return append(clean, modelEnv...), nil
 }
 
 // filterMCPConfig reads the user's ~/.claude.json MCP server definitions and

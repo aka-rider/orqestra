@@ -13,10 +13,13 @@ func TestBuildEnv_Anthropic(t *testing.T) {
 		BaseURL: "http://localhost:4141",
 		APIKey:  "test-key",
 		Model:   "claude-sonnet-4.6",
-		Type:    "anthropic",
+		Type:    config.ProviderTypeAnthropic,
 	})
 
-	env := cli.buildEnv()
+	env, err := cli.buildEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	assertEnvContains(t, env, "ANTHROPIC_BASE_URL=http://localhost:4141")
 	assertEnvContains(t, env, "ANTHROPIC_MODEL=claude-sonnet-4.6")
 	assertEnvContains(t, env, "ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4.6")
@@ -32,10 +35,13 @@ func TestBuildEnv_Anthropic_WithSmallModel(t *testing.T) {
 		BaseURL: "http://localhost:4141",
 		APIKey:  "key",
 		Model:   "claude-sonnet-4.6",
-		Type:    "anthropic",
+		Type:    config.ProviderTypeAnthropic,
 	}, WithSmallModel(small))
 
-	env := cli.buildEnv()
+	env, err := cli.buildEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	assertEnvContains(t, env, "ANTHROPIC_SMALL_FAST_MODEL=claude-haiku")
 	assertEnvContains(t, env, "ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku")
 }
@@ -45,10 +51,13 @@ func TestBuildEnv_OpenAI(t *testing.T) {
 		BaseURL: "http://192.168.50.212:11434",
 		APIKey:  "sk-test",
 		Model:   "qwen36",
-		Type:    "openai",
+		Type:    config.ProviderTypeOpenAI,
 	})
 
-	env := cli.buildEnv()
+	env, err := cli.buildEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	assertEnvContains(t, env, "ANTHROPIC_BASE_URL=http://192.168.50.212:11434")
 	assertEnvContains(t, env, "ANTHROPIC_MODEL=qwen36")
 	assertEnvContains(t, env, "ANTHROPIC_DEFAULT_SONNET_MODEL=qwen36")
@@ -61,10 +70,13 @@ func TestBuildEnv_OpenAI_WithSmallModel(t *testing.T) {
 	cli := NewClaudeCLI(config.ResolvedModel{
 		BaseURL: "http://192.168.50.212:11434",
 		Model:   "qwen36",
-		Type:    "openai",
+		Type:    config.ProviderTypeOpenAI,
 	}, WithSmallModel(small))
 
-	env := cli.buildEnv()
+	env, err := cli.buildEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	assertEnvContains(t, env, "ANTHROPIC_SMALL_FAST_MODEL=qwen36-fast")
 	assertEnvContains(t, env, "ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen36-fast")
 }
@@ -72,12 +84,72 @@ func TestBuildEnv_OpenAI_WithSmallModel(t *testing.T) {
 func TestBuildEnv_NoOperationalFlags(t *testing.T) {
 	cli := NewClaudeCLI(config.ResolvedModel{
 		BaseURL: "http://localhost",
-		Type:    "anthropic",
+		Type:    config.ProviderTypeAnthropic,
 	})
 
-	env := cli.buildEnv()
+	env, err := cli.buildEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	assertEnvNotContains(t, env, "DISABLE_NON_ESSENTIAL_MODEL_CALLS")
 	assertEnvNotContains(t, env, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+}
+
+func TestBuildEnv_EmptyType_Errors(t *testing.T) {
+	cli := NewClaudeCLI(config.ResolvedModel{
+		BaseURL: "http://localhost:11434",
+		Model:   "qwen36",
+		Type:    "",
+	})
+
+	_, err := cli.buildEnv()
+	if err == nil {
+		t.Fatal("expected error for empty provider type, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown provider type") {
+		t.Errorf("error = %q, want it to contain 'unknown provider type'", err)
+	}
+}
+
+func TestBuildEnv_UnknownType_Errors(t *testing.T) {
+	cli := NewClaudeCLI(config.ResolvedModel{
+		BaseURL: "http://localhost:11434",
+		Model:   "qwen36",
+		Type:    "copilot-proxy",
+	})
+
+	_, err := cli.buildEnv()
+	if err == nil {
+		t.Fatal("expected error for unknown provider type, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown provider type") {
+		t.Errorf("error = %q, want it to contain 'unknown provider type'", err)
+	}
+}
+
+func TestBuildModelEnv_Native_ReturnsNilEnv(t *testing.T) {
+	env, err := BuildModelEnv(config.ResolvedModel{
+		Model: "claude-sonnet-4-6",
+		Type:  config.ProviderTypeNative,
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if env != nil {
+		t.Errorf("native provider should return nil env, got %v", env)
+	}
+}
+
+func TestBuildModelEnv_OpenAI_TrimsTrailingSlash(t *testing.T) {
+	env, err := BuildModelEnv(config.ResolvedModel{
+		BaseURL: "http://localhost:11434/",
+		Model:   "qwen36",
+		Type:    config.ProviderTypeOpenAI,
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertEnvContains(t, env, "ANTHROPIC_BASE_URL=http://localhost:11434")
 }
 
 func TestNewClaudeCLIFromConfig_AppliesModelRuntimeOptions(t *testing.T) {
@@ -170,7 +242,7 @@ func assertEnvNotContains(t *testing.T, env []string, prefix string) {
 }
 
 func TestBuildFinalArgs_InlineOnly_NoStrictMCP(t *testing.T) {
-	cli := NewClaudeCLI(config.ResolvedModel{Type: "anthropic"},
+	cli := NewClaudeCLI(config.ResolvedModel{Type: config.ProviderTypeAnthropic},
 		WithInlineMCPServer("orqestra", "/usr/bin/orqestra", []string{"mcp-bridge"}),
 	)
 
@@ -205,7 +277,7 @@ func TestBuildFinalArgs_InlineOnly_NoStrictMCP(t *testing.T) {
 
 func TestBuildFinalArgs_InlineWithStrict_KeepsStrict(t *testing.T) {
 	// Simulate what WithMCPServers produces: --strict-mcp-config + --mcp-config with servers
-	cli := NewClaudeCLI(config.ResolvedModel{Type: "anthropic"},
+	cli := NewClaudeCLI(config.ResolvedModel{Type: config.ProviderTypeAnthropic},
 		WithExtraArgs("--strict-mcp-config", "--mcp-config", `{"mcpServers":{"context7":{"command":"npx","args":["context7"]}}}`),
 		WithInlineMCPServer("orqestra", "/usr/bin/orqestra", []string{"mcp-bridge"}),
 	)
@@ -319,7 +391,7 @@ func TestStreamEventsFrom(t *testing.T) {
 }
 
 func TestBuildFinalArgs_NoAutoDisallowAskUserQuestion(t *testing.T) {
-	cli := NewClaudeCLI(config.ResolvedModel{Type: "anthropic"},
+	cli := NewClaudeCLI(config.ResolvedModel{Type: config.ProviderTypeAnthropic},
 		WithDisallowedTools([]string{"ExitPlanMode"}),
 		WithInlineMCPServer("orqestra", "/usr/bin/orqestra", []string{"mcp-bridge"}),
 	)
@@ -337,7 +409,7 @@ func TestBuildFinalArgs_NoAutoDisallowAskUserQuestion(t *testing.T) {
 }
 
 func TestWithAppendSystemPrompt(t *testing.T) {
-	cli := NewClaudeCLI(config.ResolvedModel{Type: "anthropic"},
+	cli := NewClaudeCLI(config.ResolvedModel{Type: config.ProviderTypeAnthropic},
 		WithAppendSystemPrompt("Use the MCP tool for questions."),
 	)
 
@@ -378,7 +450,7 @@ func TestNoSystemPromptFlag(t *testing.T) {
 	// We cannot call RunPrint without a real binary, but we can verify the
 	// mergeAppendPrompts helper produces the right combined text and that
 	// buildFinalArgs never contains --system-prompt.
-	cli := NewClaudeCLI(config.ResolvedModel{Type: "anthropic"},
+	cli := NewClaudeCLI(config.ResolvedModel{Type: config.ProviderTypeAnthropic},
 		WithAppendSystemPrompt("bridge nudge"),
 		WithExtraArgs("--permission-mode", "plan"),
 	)
@@ -392,7 +464,7 @@ func TestNoSystemPromptFlag(t *testing.T) {
 }
 
 func TestWithAllowedTools_FlagName(t *testing.T) {
-	cli := NewClaudeCLI(config.ResolvedModel{Type: "anthropic"},
+	cli := NewClaudeCLI(config.ResolvedModel{Type: config.ProviderTypeAnthropic},
 		WithAllowedTools([]string{"Read", "mcp__orqestra__AskUserQuestion"}),
 	)
 
@@ -409,7 +481,7 @@ func TestWithAllowedTools_FlagName(t *testing.T) {
 }
 
 func TestWithDisallowedTools_FlagName(t *testing.T) {
-	cli := NewClaudeCLI(config.ResolvedModel{Type: "anthropic"},
+	cli := NewClaudeCLI(config.ResolvedModel{Type: config.ProviderTypeAnthropic},
 		WithDisallowedTools([]string{"AskUserQuestion", "ExitPlanMode"}),
 	)
 
@@ -433,7 +505,7 @@ func TestWithDisallowedTools_FlagName(t *testing.T) {
 //   - --strict-mcp-config controls which servers start (context window)
 //   - AllowedTools/DisallowedTools must be set even with --strict-mcp-config
 func TestPipeModeToolPreApproval(t *testing.T) {
-	resolved := config.ResolvedModel{Type: "anthropic"}
+	resolved := config.ResolvedModel{Type: config.ProviderTypeAnthropic}
 
 	tests := []struct {
 		name             string

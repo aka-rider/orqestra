@@ -916,3 +916,196 @@ func TestModelMeta_NotFound(t *testing.T) {
 		t.Error("ModelMeta(nonexistent) should return ok=false")
 	}
 }
+
+func TestValidate_ProviderType(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  *Config
+		wantErr string
+	}{
+		{
+			name: "empty provider type",
+			config: &Config{
+				Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Architect:  ArchitectConfig{BaseAgentConfig: BaseAgentConfig{Model: "large"}},
+				Worker:     WorkerConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Critic:     CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Providers: map[string]ProviderConfig{
+					"local": {BaseURL: "http://localhost:11434", Type: ""},
+				},
+				Models: map[string]ModelConfig{
+					"large":  {Provider: "local", Model: "qwen36"},
+					"medium": {Provider: "local", Model: "qwen36"},
+					"small":  {Provider: "local", Model: "qwen36"},
+				},
+			},
+			wantErr: `provider "local": type is required`,
+		},
+		{
+			name: "unknown provider type",
+			config: &Config{
+				Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Architect:  ArchitectConfig{BaseAgentConfig: BaseAgentConfig{Model: "large"}},
+				Worker:     WorkerConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Critic:     CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Providers: map[string]ProviderConfig{
+					"local": {BaseURL: "http://localhost:11434", Type: "copilot-proxy"},
+				},
+				Models: map[string]ModelConfig{
+					"large":  {Provider: "local", Model: "qwen36"},
+					"medium": {Provider: "local", Model: "qwen36"},
+					"small":  {Provider: "local", Model: "qwen36"},
+				},
+			},
+			wantErr: `provider "local": unknown type "copilot-proxy"`,
+		},
+		{
+			name: "native type with base_url",
+			config: &Config{
+				Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Architect:  ArchitectConfig{BaseAgentConfig: BaseAgentConfig{Model: "large"}},
+				Worker:     WorkerConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Critic:     CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Providers: map[string]ProviderConfig{
+					"proxy": {BaseURL: "http://127.0.0.1:4141", Type: ProviderTypeNative},
+				},
+				Models: map[string]ModelConfig{
+					"large":  {Provider: "proxy", Model: "claude-opus"},
+					"medium": {Provider: "proxy", Model: "claude-sonnet"},
+					"small":  {Provider: "proxy", Model: "claude-haiku"},
+				},
+			},
+			wantErr: `provider "proxy": type "native" must not have base_url`,
+		},
+		{
+			name: "anthropic type without base_url",
+			config: &Config{
+				Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Architect:  ArchitectConfig{BaseAgentConfig: BaseAgentConfig{Model: "large"}},
+				Worker:     WorkerConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Critic:     CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Providers: map[string]ProviderConfig{
+					"local": {Type: ProviderTypeAnthropic},
+				},
+				Models: map[string]ModelConfig{
+					"large":  {Provider: "local", Model: "qwen36"},
+					"medium": {Provider: "local", Model: "qwen36"},
+					"small":  {Provider: "local", Model: "qwen36"},
+				},
+			},
+			wantErr: `provider "local": type "anthropic" requires base_url`,
+		},
+		{
+			name: "openai type without base_url",
+			config: &Config{
+				Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Architect:  ArchitectConfig{BaseAgentConfig: BaseAgentConfig{Model: "large"}},
+				Worker:     WorkerConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Critic:     CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Providers: map[string]ProviderConfig{
+					"local": {Type: ProviderTypeOpenAI},
+				},
+				Models: map[string]ModelConfig{
+					"large":  {Provider: "local", Model: "qwen36"},
+					"medium": {Provider: "local", Model: "qwen36"},
+					"small":  {Provider: "local", Model: "qwen36"},
+				},
+			},
+			wantErr: `provider "local": type "openai" requires base_url`,
+		},
+		{
+			name: "valid native provider without base_url",
+			config: &Config{
+				Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Architect:  ArchitectConfig{BaseAgentConfig: BaseAgentConfig{Model: "large"}},
+				Worker:     WorkerConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Critic:     CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Providers: map[string]ProviderConfig{
+					"anthropic-native": {Type: ProviderTypeNative},
+				},
+				Models: map[string]ModelConfig{
+					"large":  {Provider: "anthropic-native", Model: "claude-opus-4"},
+					"medium": {Provider: "anthropic-native", Model: "claude-sonnet-4"},
+					"small":  {Provider: "anthropic-native", Model: "claude-haiku"},
+				},
+			},
+			wantErr: "",
+		},
+		{
+			name: "valid openai provider",
+			config: &Config{
+				Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Architect:  ArchitectConfig{BaseAgentConfig: BaseAgentConfig{Model: "large"}},
+				Worker:     WorkerConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Critic:     CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Providers: map[string]ProviderConfig{
+					"local": {BaseURL: "http://192.168.50.212:11434", Type: ProviderTypeOpenAI},
+				},
+				Models: map[string]ModelConfig{
+					"large":  {Provider: "local", Model: "qwen36"},
+					"medium": {Provider: "local", Model: "qwen36"},
+					"small":  {Provider: "local", Model: "qwen36"},
+				},
+			},
+			wantErr: "",
+		},
+		{
+			name: "valid anthropic provider",
+			config: &Config{
+				Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Architect:  ArchitectConfig{BaseAgentConfig: BaseAgentConfig{Model: "large"}},
+				Worker:     WorkerConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Critic:     CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Providers: map[string]ProviderConfig{
+					"local": {BaseURL: "http://localhost:4141", Type: ProviderTypeAnthropic},
+				},
+				Models: map[string]ModelConfig{
+					"large":  {Provider: "local", Model: "claude-sonnet"},
+					"medium": {Provider: "local", Model: "claude-sonnet"},
+					"small":  {Provider: "local", Model: "claude-haiku"},
+				},
+			},
+			wantErr: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.config.validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want it to contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestIsProviderType(t *testing.T) {
+	tests := []struct {
+		typ    string
+		expect bool
+	}{
+		{ProviderTypeNative, true},
+		{ProviderTypeAnthropic, true},
+		{ProviderTypeOpenAI, true},
+		{"", false},
+		{"copilot-proxy", false},
+		{"llama-cpp", false},
+		{"unknown", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.typ, func(t *testing.T) {
+			if got := IsProviderType(tt.typ); got != tt.expect {
+				t.Errorf("IsProviderType(%q) = %v, want %v", tt.typ, got, tt.expect)
+			}
+		})
+	}
+}
