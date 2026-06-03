@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -208,7 +209,7 @@ func TestEngine_MergeConflictFailsAndPreservesWorktree(t *testing.T) {
 		switch event.Type {
 		case EventMergeConflict:
 			mergeEvent = event
-			cancel()
+			channels.Decisions <- Decision{Type: DecisionMergeAbort}
 		case EventComplete:
 			complete = event
 		}
@@ -231,6 +232,48 @@ func TestEngine_MergeConflictFailsAndPreservesWorktree(t *testing.T) {
 	if !gitBranchExists(t, repo, mergeEvent.MergeConflict.WorktreeBranch) {
 		t.Fatalf("expected preserved conflict branch %q to exist", mergeEvent.MergeConflict.WorktreeBranch)
 	}
+}
+
+func TestEngine_WorkerFailurePreservesWorktree(t *testing.T) {
+	testutil.MustTempHome(t)
+	repo := initGitRepo(t)
+	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
+	engine.RepoPath = repo
+	engine.RunDirFactory = newSessionDirFactory(t)
+
+	var workerPath string
+	engine.WorktreeRunnerFactory = func(worktreePath string) harness.ContinuableRunner {
+		workerPath = worktreePath
+		return &testutil.FakeRunner{Calls: []testutil.FakeCall{
+			{Err: errors.New("simulated worker failure")},
+		}}
+	}
+
+	result, err := engine.Run(context.Background(), Input{Prompt: "Add feature X", AutoApprove: true}, nil)
+	if err == nil {
+		t.Fatal("expected worker error")
+	}
+	if result.Status != StatusFailed {
+		t.Fatalf("status = %q, want %q", result.Status, StatusFailed)
+	}
+	if workerPath == "" {
+		t.Fatal("expected worktree to be created")
+	}
+	if _, statErr := os.Stat(workerPath); statErr != nil {
+		t.Fatalf("expected preserved worktree path to exist: %v", statErr)
+	}
+	if !gitAnyWorktreeBranchExists(t, repo) {
+		t.Fatal("expected at least one orqestra-run-* branch to exist after worker failure")
+	}
+}
+
+func gitAnyWorktreeBranchExists(t *testing.T, repoPath string) bool {
+	t.Helper()
+	out, err := exec.Command("git", "-C", repoPath, "branch").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git branch: %v", err)
+	}
+	return strings.Contains(string(out), "orqestra-run-")
 }
 
 func TestEngine_PlanApprovalGate(t *testing.T) {

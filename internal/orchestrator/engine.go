@@ -1211,13 +1211,7 @@ planGate:
 	execPrompt := agent.BuildExecutionPromptFromPlan(finalPlanMarkdown)
 	workResult, execErr := runRunnerStreaming(ctx, workerRunner, execPrompt, "", stream, streamOut)
 
-	// Clean up worktree on failure or cancellation.
 	if execErr != nil {
-		if wt.Path != "" {
-			if rmErr := wt.Remove(context.Background(), true); rmErr != nil {
-				slog.Warn("worktree cleanup failed", "err", rmErr)
-			}
-		}
 		writeArtifactJSON(session, "worker_meta.json", agent.StepMeta{
 			AgentID: "worker", ModelRef: e.Config.Worker.Model, StartTime: workerStart, EndTime: time.Now(),
 			ModelDisplay: workMeta.ModelDisplay, Provider: workMeta.Provider, ContextWindow: workMeta.ContextWindow,
@@ -1441,11 +1435,6 @@ planGate:
 				if rmErr := wt.Remove(context.Background(), true); rmErr != nil {
 					slog.Warn("worktree cleanup failed", "err", rmErr)
 				}
-			}
-		} else {
-			// Nothing committed or commit failed — remove worktree fully
-			if rmErr := wt.Remove(context.Background(), true); rmErr != nil {
-				slog.Warn("worktree cleanup failed", "err", rmErr)
 			}
 		}
 	}
