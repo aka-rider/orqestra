@@ -1,6 +1,9 @@
 package tui
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // FrameList holds the ordered list of frames and manages dirty-flagged rendering.
 // Pointer semantics: owns growing slices mutated per-tick.
@@ -37,13 +40,25 @@ func (fl *FrameList) UpdateActive(fn func(*Frame)) {
 }
 
 // FinishActive marks the last InProgress frame as finished with final metrics.
-func (fl *FrameList) FinishActive(elapsed time.Duration, inputTok, outputTok int64) {
+// When width > 0, renders markdown for text parts and caches in MarkdownRendered.
+func (fl *FrameList) FinishActive(elapsed time.Duration, inputTok, outputTok int64, width int) {
 	for i := len(fl.frames) - 1; i >= 0; i-- {
 		if fl.frames[i].State == FrameInProgress {
 			fl.frames[i].State = FrameFinished
 			fl.frames[i].Elapsed = elapsed
 			fl.frames[i].InputTokens = inputTok
 			fl.frames[i].OutputTokens = outputTok
+			// Cache glamour-rendered markdown for finished text parts.
+			if width > 0 {
+				for j := range fl.frames[i].Parts {
+					if fl.frames[i].Parts[j].IsText {
+						text := strings.TrimRight(fl.frames[i].Parts[j].Text, "\n")
+						if text != "" {
+							fl.frames[i].Parts[j].MarkdownRendered = renderMarkdown(text, width)
+						}
+					}
+				}
+			}
 			fl.dirty = true
 			return
 		}
@@ -198,6 +213,16 @@ func (fl *FrameList) ToggleFocusedTools() {
 // FocusedIndex returns the current focused frame index (-1 if none).
 func (fl *FrameList) FocusedIndex() int { return fl.focused }
 
+// HasInProgressFrame reports whether any frame is currently in progress.
+func (fl *FrameList) HasInProgressFrame() bool {
+	for i := range fl.frames {
+		if fl.frames[i].State == FrameInProgress {
+			return true
+		}
+	}
+	return false
+}
+
 // ClearFocus removes any current focus selection.
 func (fl *FrameList) ClearFocus() {
 	if fl.focused == -1 {
@@ -210,6 +235,46 @@ func (fl *FrameList) ClearFocus() {
 // renderSingleFrame renders one frame by index.
 func (fl *FrameList) renderSingleFrame(idx int) string {
 	return renderFrame(&fl.frames[idx], fl.width, fl.animFrame, idx == fl.focused)
+}
+
+// RenderFinished renders only finished frames as static text (no borders, no lipgloss chrome).
+func (fl *FrameList) RenderFinished(width int) string {
+	if width < 20 {
+		width = 20
+	}
+	var total int
+	var parts []string
+	for i := range fl.frames {
+		if fl.frames[i].State != FrameFinished {
+			continue
+		}
+		parts = append(parts, renderFrameStatic(&fl.frames[i], width))
+		total += len(parts[len(parts)-1])
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	buf := make([]byte, 0, total+len(parts))
+	for i, p := range parts {
+		if i > 0 {
+			buf = append(buf, '\n')
+		}
+		buf = append(buf, p...)
+	}
+	return string(buf)
+}
+
+// RenderActive renders only the active (in-progress) frame with lipgloss borders.
+func (fl *FrameList) RenderActive(width int) string {
+	if width < 20 {
+		width = 20
+	}
+	for i := len(fl.frames) - 1; i >= 0; i-- {
+		if fl.frames[i].State == FrameInProgress {
+			return renderFrame(&fl.frames[i], width, fl.animFrame, false)
+		}
+	}
+	return ""
 }
 
 // countLines counts the number of newline-terminated lines in s.

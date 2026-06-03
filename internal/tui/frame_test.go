@@ -35,12 +35,12 @@ func TestRenderFrame_InProgress(t *testing.T) {
 	}
 	got := renderFrame(&f, 60, 0, false)
 	assertContains(t, got, "Architect")
-	assertContains(t, got, "·∘○∘·") // shimmer frame 0
+	assertContains(t, got, "✻") // spinning frame 0
 	assertContains(t, got, "Analyzing the codebase...")
 	assertContains(t, got, "▎streaming text continues")
 }
 
-func TestRenderFrame_InProgress_ShimmerCycles(t *testing.T) {
+func TestRenderFrame_InProgress_SpinningCycles(t *testing.T) {
 	f := Frame{
 		Kind:    AgentFrame,
 		State:   FrameInProgress,
@@ -48,8 +48,10 @@ func TestRenderFrame_InProgress_ShimmerCycles(t *testing.T) {
 	}
 	got0 := renderFrame(&f, 60, 0, false)
 	got1 := renderFrame(&f, 60, 1, false)
-	assertContains(t, got0, "·∘○∘·")
-	assertContains(t, got1, "∘○∘·∘")
+	got2 := renderFrame(&f, 60, 2, false)
+	assertContains(t, got0, "✻")
+	assertContains(t, got1, "*")
+	assertContains(t, got2, "※")
 }
 
 func TestRenderFrame_Finished(t *testing.T) {
@@ -380,7 +382,7 @@ func TestFrameList_PlanGateHintRemovedAfterFinish(t *testing.T) {
 		State: FrameInProgress,
 		Parts: []ContentPart{{IsText: true, Text: "Plan content\n"}},
 	})
-	fl.FinishActive(0, 0, 0)
+	fl.FinishActive(0, 0, 0, 60)
 
 	rendered := fl.Render()
 	if containsStr(rendered, "[^A] accept") {

@@ -123,6 +123,8 @@ func (e *Engine) Start(ctx context.Context, input Input) RunChannels {
 		for u := range rawStream {
 			var entry StreamEntry
 			switch {
+			case u.IsDelta:
+				entry = StreamEntry{Kind: EntryDelta, Text: u.Text}
 			case u.Text != "":
 				entry = StreamEntry{Kind: EntryText, Text: u.Text}
 			case u.Tool != "":

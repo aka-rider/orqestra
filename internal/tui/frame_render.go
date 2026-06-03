@@ -103,8 +103,8 @@ func renderFrameHeader(f *Frame, animFrame int) string {
 	case FrameInit:
 		indicator = "…"
 	case FrameInProgress:
-		if len(shimmerFrames) > 0 {
-			indicator = shimmerFrames[animFrame%len(shimmerFrames)]
+		if len(spinningFrames) > 0 {
+			indicator = spinningFrames[animFrame%len(spinningFrames)]
 		} else {
 			indicator = "···"
 		}
@@ -120,6 +120,24 @@ func renderFrameBody(f *Frame, width int) string {
 	innerWidth := width - 4 // border + padding
 	if innerWidth < 10 {
 		innerWidth = 10
+	}
+
+	// StreamingCollapsed: in-progress frames with ^O toggle show only header text.
+	if f.State == FrameInProgress && f.StreamingCollapsed {
+		for _, part := range f.Parts {
+			if !part.IsText {
+				continue
+			}
+			text := strings.TrimRight(part.Text, "\n")
+			lines := strings.Split(text, "\n")
+			for _, line := range lines {
+				if len(line) > innerWidth {
+					line = line[:innerWidth]
+				}
+				return line
+			}
+		}
+		return ""
 	}
 
 	// Count total tool parts to decide whether overflow applies.
@@ -139,6 +157,12 @@ func renderFrameBody(f *Frame, width int) string {
 	indicatorEmitted := false
 	for _, part := range f.Parts {
 		if part.IsText {
+			// Use cached glamour-rendered markdown when available.
+			if part.MarkdownRendered != "" {
+				b.WriteString(part.MarkdownRendered)
+				b.WriteByte('\n')
+				continue
+			}
 			text := strings.TrimRight(part.Text, "\n")
 			lines := strings.Split(text, "\n")
 			for _, line := range lines {
@@ -323,4 +347,81 @@ func frameStyle(f *Frame, focused bool) lipgloss.Style {
 	default:
 		return frameAgentBorder
 	}
+}
+
+// renderFrameStatic renders a finished frame as plain text without lipgloss borders.
+// Header: "⏺ AgentID (model)" prefix. Text parts use cached MarkdownRendered.
+// Tool blocks render as indented plain text, fully expanded (no toolPreviewLimit).
+func renderFrameStatic(f *Frame, width int) string {
+	if width < 20 {
+		width = 20
+	}
+	var b strings.Builder
+
+	// Header with icon prefix
+	var headerParts []string
+	switch f.Kind {
+	case AgentFrame:
+		headerParts = append(headerParts, f.AgentID)
+		if f.AgentModel != "" {
+			headerParts = append(headerParts, fmt.Sprintf("(%s)", f.AgentModel))
+		}
+	case PlanFrame:
+		headerParts = append(headerParts, "Plan")
+	case CompletionFrame:
+		headerParts = append(headerParts, "Complete")
+	case ErrorFrame:
+		headerParts = append(headerParts, "Error")
+	}
+
+	label := strings.Join(headerParts, " ")
+	b.WriteString("⏺ " + label)
+	b.WriteByte('\n')
+
+	// Body: text parts and tool blocks
+	for _, part := range f.Parts {
+		if part.IsText {
+			// Use cached glamour-rendered markdown when available.
+			if part.MarkdownRendered != "" {
+				b.WriteString(part.MarkdownRendered)
+				b.WriteByte('\n')
+				continue
+			}
+			// Fallback: raw text with line truncation.
+			text := strings.TrimRight(part.Text, "\n")
+			lines := strings.Split(text, "\n")
+			innerWidth := width - 2
+			for _, line := range lines {
+				if len(line) > innerWidth {
+					line = line[:innerWidth]
+				}
+				b.WriteString(line)
+				b.WriteByte('\n')
+			}
+		} else {
+			// Tool block: plain indented text, no borders, fully expanded.
+			b.WriteString(renderToolBlockStatic(part.Tool, width))
+			b.WriteByte('\n')
+		}
+	}
+
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderToolBlockStatic renders a tool block as plain indented text.
+// Format: "  <icon> <Name> <Detail>" — no lipgloss borders.
+func renderToolBlockStatic(tb ToolBlock, maxWidth int) string {
+	icon := tb.Icon
+	if icon == "" {
+		icon = IconForAction(tb.Name)
+	}
+	label := fmt.Sprintf("  %s %s", icon, tb.Name)
+	if tb.Detail != "" {
+		label += " " + tb.Detail
+	}
+	innerWidth := maxWidth - 2
+	if len(label) > innerWidth {
+		label = label[:innerWidth]
+	}
+	return label
 }

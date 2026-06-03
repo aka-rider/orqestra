@@ -9,6 +9,7 @@ type StreamUpdate struct {
 	Input      int64
 	Output     int64
 	UsageValid bool
+	IsDelta    bool // true for content_block_delta events (partial text)
 }
 
 const (

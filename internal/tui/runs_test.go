@@ -232,17 +232,17 @@ func TestTUI_CtrlR_FromPrompt(t *testing.T) {
 	}
 }
 
-func TestTUI_CtrlR_NotDuringPipeline(t *testing.T) {
+func TestTUI_CtrlR_DuringPipeline(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming // mid-pipeline
 
-	// Ctrl+R should be a no-op during active pipeline (no handler for it)
+	// Ctrl+R navigates to runs list during active pipeline
 	result, _ := sendCtrl(m, 'r')
 	model := result.(Model)
 
-	if model.state != StatePipeline {
-		t.Errorf("expected to stay in StatePipeline, got %d", model.state)
+	if model.state != StateRunsList {
+		t.Errorf("expected to navigate to StateRunsList, got %d", model.state)
 	}
 }
 

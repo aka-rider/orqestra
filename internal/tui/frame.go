@@ -31,25 +31,27 @@ type ToolBlock struct {
 // ContentPart is one segment of a frame's interleaved content.
 // Consecutive text lines are coalesced into a single part until a tool interrupts.
 type ContentPart struct {
-	IsText bool
-	Text   string    // when IsText: one or more completed lines joined by \n
-	Tool   ToolBlock // when !IsText
+	IsText           bool
+	Text             string    // when IsText: one or more completed lines joined by \n
+	MarkdownRendered string    // glamour-rendered markdown (non-empty when cached)
+	Tool             ToolBlock // when !IsText
 }
 
 // Frame holds all state for a single rendered frame in the scrollable list.
 type Frame struct {
-	Kind         FrameKind
-	State        FrameState
-	AgentID      string
-	AgentModel   string
-	Elapsed      time.Duration
-	StartedAt    time.Time
-	InputTokens  int64
-	OutputTokens int64
-	Collapsed     bool          // when true, renders as a compact summary block; only valid on FrameFinished
-	ToolsExpanded bool          // when true, all tool blocks render; when false, only last toolPreviewLimit
-	Parts        []ContentPart // interleaved text + tools in insertion order
-	Partial      string        // current incomplete line not yet flushed to Parts
+	Kind             FrameKind
+	State            FrameState
+	AgentID          string
+	AgentModel       string
+	Elapsed          time.Duration
+	StartedAt        time.Time
+	InputTokens      int64
+	OutputTokens     int64
+	Collapsed        bool          // when true, renders as a compact summary block; only valid on FrameFinished
+	StreamingCollapsed bool        // when true, collapses body of in-progress frame (for ^O toggle)
+	ToolsExpanded    bool          // when true, all tool blocks render; when false, only last toolPreviewLimit
+	Parts            []ContentPart // interleaved text + tools in insertion order
+	Partial          string        // current incomplete line not yet flushed to Parts
 }
 
 // AppendText coalesces text into the frame's content parts.

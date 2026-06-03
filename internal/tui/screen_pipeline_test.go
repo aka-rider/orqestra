@@ -465,3 +465,227 @@ func TestSyncViewports_AutoFollow_Completion(t *testing.T) {
 		t.Error("expected viewport at bottom after SyncViewports with ContentCompletion")
 	}
 }
+
+func TestDrainStreamUpdates_SkipsEmptyTool(t *testing.T) {
+	fl := NewFrameList(80)
+	s := PipelineScreen{
+		frameList: fl,
+		streamBuf: orchestrator.NewStreamRing(200),
+	}
+	// Start an in-progress frame so UpdateActive has something to mutate.
+	fl.AppendFrame(Frame{Kind: AgentFrame, State: FrameInProgress, AgentID: "test"})
+
+	updates := make(chan orchestrator.StreamEntry, 4)
+	updates <- orchestrator.StreamEntry{Kind: orchestrator.EntryToolUse, Tool: "Read", Detail: ""}
+	updates <- orchestrator.StreamEntry{Kind: orchestrator.EntryToolUse, Tool: "Bash", Detail: "ls -la"}
+	close(updates)
+
+	s.DrainStreamUpdates(updates)
+
+	// Only the tool with non-empty detail should be present.
+	if fl.FrameCount() != 1 {
+		t.Fatalf("expected 1 frame, got %d", fl.FrameCount())
+	}
+	frame := fl.frames[0]
+	toolCount := 0
+	for _, p := range frame.Parts {
+		if !p.IsText {
+			toolCount++
+		}
+	}
+	if toolCount != 1 {
+		t.Fatalf("expected 1 tool block, got %d", toolCount)
+	}
+	if frame.Parts[0].Tool.Name != "Bash" {
+		t.Fatalf("expected Bash tool, got %s", frame.Parts[0].Tool.Name)
+	}
+	if frame.Parts[0].Tool.Detail != "ls -la" {
+		t.Fatalf("expected 'ls -la' detail, got %q", frame.Parts[0].Tool.Detail)
+	}
+}
+
+func TestDrainStreamUpdates_AccumulatesDelta(t *testing.T) {
+	fl := NewFrameList(80)
+	s := PipelineScreen{
+		frameList: fl,
+		streamBuf: orchestrator.NewStreamRing(200),
+	}
+
+	// Start an in-progress frame.
+	fl.AppendFrame(Frame{Kind: AgentFrame, State: FrameInProgress, AgentID: "test"})
+
+	updates := make(chan orchestrator.StreamEntry, 4)
+	updates <- orchestrator.StreamEntry{Kind: orchestrator.EntryDelta, Text: "Hello"}
+	updates <- orchestrator.StreamEntry{Kind: orchestrator.EntryDelta, Text: " World"}
+	close(updates)
+
+	s.DrainStreamUpdates(updates)
+
+	frame := fl.frames[0]
+	if frame.Partial != "Hello World" {
+		t.Fatalf("expected partial 'Hello World', got %q", frame.Partial)
+	}
+}
+
+func TestDrainStreamUpdates_FlushesPartialOnEntryText(t *testing.T) {
+	fl := NewFrameList(80)
+	s := PipelineScreen{
+		frameList: fl,
+		streamBuf: orchestrator.NewStreamRing(200),
+	}
+
+	fl.AppendFrame(Frame{Kind: AgentFrame, State: FrameInProgress, AgentID: "test"})
+
+	updates := make(chan orchestrator.StreamEntry, 4)
+	updates <- orchestrator.StreamEntry{Kind: orchestrator.EntryDelta, Text: "partial"}
+	updates <- orchestrator.StreamEntry{Kind: orchestrator.EntryText, Text: "completed"}
+	close(updates)
+
+	s.DrainStreamUpdates(updates)
+
+	frame := fl.frames[0]
+	if frame.Partial != "" {
+		t.Fatalf("expected empty partial after EntryText, got %q", frame.Partial)
+	}
+	// The partial text should have been flushed before the EntryText.
+	// AppendText coalesces consecutive text parts, so we get a single part.
+	if len(frame.Parts) != 1 {
+		t.Fatalf("expected 1 text part, got %d", len(frame.Parts))
+	}
+	if !frame.Parts[0].IsText {
+		t.Fatal("expected text part")
+	}
+	// Should contain both the flushed partial and the new text.
+	if frame.Parts[0].Text != "partial\ncompleted\n" {
+		t.Fatalf("expected 'partial\\ncompleted\\n', got %q", frame.Parts[0].Text)
+	}
+}
+
+func TestPipelineScreen_StaticHeight(t *testing.T) {
+	s := PipelineScreen{
+		staticContent: "line1\nline2\nline3\n",
+	}
+	if got := s.StaticHeight(); got != 3 {
+		t.Fatalf("expected StaticHeight=3, got %d", got)
+	}
+
+	s.staticContent = ""
+	if got := s.StaticHeight(); got != 0 {
+		t.Fatalf("expected StaticHeight=0 for empty content, got %d", got)
+	}
+
+	s.staticContent = "single line"
+	if got := s.StaticHeight(); got != 1 {
+		t.Fatalf("expected StaticHeight=1 for single line, got %d", got)
+	}
+}
+
+func TestFrameList_RenderFinished(t *testing.T) {
+	fl := NewFrameList(80)
+	fl.AppendFrame(Frame{
+		Kind:         AgentFrame,
+		State:        FrameFinished,
+		AgentID:      "researcher",
+		AgentModel:   "qwen3.6",
+		Parts:        []ContentPart{{IsText: true, Text: "Research done\n"}},
+	})
+	fl.AppendFrame(Frame{
+		Kind:         AgentFrame,
+		State:        FrameInProgress,
+		AgentID:      "architect",
+		AgentModel:   "qwen3.6",
+		Parts:        []ContentPart{{IsText: true, Text: "Thinking...\n"}},
+	})
+
+	rendered := fl.RenderFinished(80)
+	if rendered == "" {
+		t.Fatal("expected non-empty RenderFinished output")
+	}
+	// Should contain the finished frame with icon prefix.
+	if !containsStr(rendered, "⏺") {
+		t.Fatal("expected '⏺' prefix in RenderFinished output")
+	}
+	// Should contain the agent ID.
+	if !containsStr(rendered, "researcher") {
+		t.Fatal("expected 'researcher' in RenderFinished output")
+	}
+}
+
+func TestFrameList_RenderActive(t *testing.T) {
+	fl := NewFrameList(80)
+	fl.AppendFrame(Frame{
+		Kind:    AgentFrame,
+		State:   FrameFinished,
+		AgentID: "researcher",
+		Parts:   []ContentPart{{IsText: true, Text: "Done\n"}},
+	})
+	fl.AppendFrame(Frame{
+		Kind:    AgentFrame,
+		State:   FrameInProgress,
+		AgentID: "architect",
+		Parts:   []ContentPart{{IsText: true, Text: "Working...\n"}},
+	})
+
+	rendered := fl.RenderActive(80)
+	if rendered == "" {
+		t.Fatal("expected non-empty RenderActive output")
+	}
+	// Should contain the in-progress frame.
+	if !containsStr(rendered, "architect") {
+		t.Fatal("expected 'architect' in RenderActive output")
+	}
+	// Should NOT contain the finished frame.
+	if containsStr(rendered, "researcher") {
+		t.Fatal("RenderActive should not include finished frames")
+	}
+}
+
+func TestFrameList_HasInProgressFrame(t *testing.T) {
+	fl := NewFrameList(80)
+	if fl.HasInProgressFrame() {
+		t.Fatal("expected no in-progress frame")
+	}
+
+	fl.AppendFrame(Frame{Kind: AgentFrame, State: FrameFinished, AgentID: "done"})
+	if fl.HasInProgressFrame() {
+		t.Fatal("expected no in-progress frame after adding finished frame")
+	}
+
+	fl.AppendFrame(Frame{Kind: AgentFrame, State: FrameInProgress, AgentID: "running"})
+	if !fl.HasInProgressFrame() {
+		t.Fatal("expected in-progress frame")
+	}
+}
+
+func TestFrameList_FinishActive_WithWidth(t *testing.T) {
+	fl := NewFrameList(80)
+	fl.AppendFrame(Frame{
+		Kind:  AgentFrame,
+		State: FrameInProgress,
+		AgentID: "test",
+		Parts: []ContentPart{
+			{IsText: true, Text: "# Header\n\nSome **bold** text\n"},
+		},
+	})
+
+	// Finish with width > 0 to trigger markdown rendering.
+	fl.FinishActive(5*time.Second, 100, 200, 80)
+
+	frame := fl.frames[0]
+	if frame.State != FrameFinished {
+		t.Fatalf("expected FrameFinished, got %v", frame.State)
+	}
+	if frame.Elapsed != 5*time.Second {
+		t.Fatalf("expected Elapsed=5s, got %v", frame.Elapsed)
+	}
+	if frame.InputTokens != 100 {
+		t.Fatalf("expected InputTokens=100, got %d", frame.InputTokens)
+	}
+	if frame.OutputTokens != 200 {
+		t.Fatalf("expected OutputTokens=200, got %d", frame.OutputTokens)
+	}
+	// MarkdownRendered should be set for text parts.
+	if frame.Parts[0].MarkdownRendered == "" {
+		t.Fatal("expected MarkdownRendered to be set after FinishActive with width")
+	}
+}

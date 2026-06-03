@@ -281,3 +281,82 @@ func TestStreamRing_RecordUsage_ConcurrentSafe(t *testing.T) {
 		t.Errorf("final usage = {%d, %d}, want {1000, 500}", in, out)
 	}
 }
+
+func TestStreamRing_AppendDelta_Accumulates(t *testing.T) {
+	r := NewStreamRing(100)
+	r.SetAgent("test")
+
+	r.AppendDelta("Hello")
+	r.AppendDelta(" ")
+	r.AppendDelta("World")
+
+	// Delta should be in partial, not in entries.
+	_, entries := r.Snapshot()
+	for _, e := range entries {
+		if e.Kind == EntryDelta {
+			t.Errorf("unexpected EntryDelta in entries: %+v", e)
+		}
+	}
+	// Check partial via FlushPartial.
+	r.FlushPartial()
+	_, entries = r.Snapshot()
+	var found bool
+	for _, e := range entries {
+		if e.Kind == EntryText && e.Text == "Hello World" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected EntryText{Hello World} after FlushPartial, got %v", entries)
+	}
+}
+
+func TestStreamRing_AppendDelta_FlushesOnAgentSwitch(t *testing.T) {
+	r := NewStreamRing(100)
+	r.SetAgent("test")
+
+	r.AppendDelta("partial")
+	r.AppendDelta(" text")
+	r.SetAgent("next") // Should flush partial into history
+
+	// Partial should be cleared.
+	if r.partial != "" {
+		t.Errorf("expected empty partial after SetAgent, got %q", r.partial)
+	}
+
+	// The flushed partial should be in the history for the "test" agent.
+	historyEntries := r.History().AgentEntries("test")
+	var found bool
+	for _, e := range historyEntries {
+		if e.Kind == EntryText && e.Text == "partial text" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected EntryText{partial text} in history for 'test', got %v", historyEntries)
+	}
+}
+
+func TestStreamRing_AppendText_SplitsOnNewline(t *testing.T) {
+	r := NewStreamRing(100)
+	r.SetAgent("test")
+
+	r.AppendText("line1\nline2\npartial")
+
+	_, entries := r.Snapshot()
+	var lines []string
+	for _, e := range entries {
+		if e.Kind == EntryText {
+			lines = append(lines, e.Text)
+		}
+	}
+	if len(lines) != 2 {
+		t.Fatalf("lines = %v, want [line1 line2]", lines)
+	}
+	if lines[0] != "line1" {
+		t.Errorf("lines[0] = %q, want line1", lines[0])
+	}
+	if lines[1] != "line2" {
+		t.Errorf("lines[1] = %q, want line2", lines[1])
+	}
+}

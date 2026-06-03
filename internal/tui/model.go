@@ -781,7 +781,13 @@ func (m *Model) recalculateLayout() {
 	usedHeight := inputHeight + constFooterHeight + constSidebarHeight
 	contentHeight := max(0, m.height-usedHeight)
 
-	// Pipeline viewports and bounds
+	// Pipeline viewports and bounds — subtract static text region height.
+	if m.state == StatePipeline {
+		staticH := m.pipelineScreen.StaticHeight()
+		if staticH > 0 {
+			contentHeight -= staticH
+		}
+	}
 	m.pipelineScreen.RecalculateLayout(m.width, contentHeight)
 	if m.pipelineScreen.content == ContentUserQuestion && m.pipelineScreen.hasQuestion {
 		m.pipelineScreen.question = m.pipelineScreen.question.SetWidth(m.width)

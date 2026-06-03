@@ -558,7 +558,7 @@ func streamEventsFrom(event streamEvent) []StreamUpdate {
 		}
 	case "content_block_delta":
 		if event.Delta.Text != "" {
-			out = append(out, StreamUpdate{Text: event.Delta.Text})
+			out = append(out, StreamUpdate{Text: event.Delta.Text, IsDelta: true})
 		}
 	case "content_block_start":
 		if name, args := event.extractToolUse(); name != "" {
@@ -579,7 +579,7 @@ func streamEventsFrom(event streamEvent) []StreamUpdate {
 			}
 		case "content_block_delta":
 			if inner.Delta.Text != "" {
-				out = append(out, StreamUpdate{Text: inner.Delta.Text})
+				out = append(out, StreamUpdate{Text: inner.Delta.Text, IsDelta: true})
 			}
 		}
 	}

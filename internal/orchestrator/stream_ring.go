@@ -21,6 +21,7 @@ type StreamEntryKind int
 
 const (
 	EntryText    StreamEntryKind = iota // completed text line
+	EntryDelta                          // partial text delta (content_block_delta)
 	EntryToolUse                        // tool invocation
 	EntryStats                          // token usage snapshot
 )
@@ -309,4 +310,22 @@ func (r *StreamRing) AppendActivity(tool, detail string) {
 // AppendStats adds a stats entry with token usage.
 func (r *StreamRing) AppendStats(input, output int64) {
 	r.Append(StreamEntry{Kind: EntryStats, Stats: StreamStats{Input: input, Output: output, Valid: true}})
+}
+
+// AppendDelta accumulates partial text without newline splitting.
+// Called for content_block_delta events to preserve whitespace verbatim.
+func (r *StreamRing) AppendDelta(text string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.partial += text
+}
+
+// FlushPartial promotes the current partial buffer to a completed EntryText.
+func (r *StreamRing) FlushPartial() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.partial != "" {
+		r.entries = append(r.entries, StreamEntry{Kind: EntryText, Text: r.partial})
+		r.partial = ""
+	}
 }

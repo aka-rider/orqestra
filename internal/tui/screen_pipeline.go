@@ -117,6 +117,10 @@ type PipelineScreen struct {
 	// Animation state
 	animFrame int // incremented by animTickMsg for shimmer/pulse effects
 
+	// Two-zone rendering: finished frames render as static text above the viewport.
+	staticContent     string // glamour-rendered static text for finished frames
+	staticContentDirty bool   // true when staticContent needs re-rendering
+
 	// Live streaming metrics (polled from StreamRing on tick)
 	liveInput  int64
 	liveOutput int64
@@ -163,6 +167,8 @@ func (s *PipelineScreen) Reset() {
 	s.hasPlan = false
 	s.workerValidation = ""
 	s.hasValidation = false
+	s.staticContent = ""
+	s.staticContentDirty = true
 	s.streamBuf = nil
 	s.history = nil
 	s.frameList = NewFrameList(80)
@@ -222,19 +228,26 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 			case orchestrator.EntryText:
 				s.streamBuf.AppendText(u.Text)
 				s.frameList.UpdateActive(func(f *Frame) {
+					f.FlushPartial()
 					if u.Text != "" {
 						f.AppendText(u.Text)
 					}
 				})
-			case orchestrator.EntryToolUse:
-				s.streamBuf.AppendActivity(u.Tool, u.Detail)
+			case orchestrator.EntryDelta:
 				s.frameList.UpdateActive(func(f *Frame) {
-					f.AppendTool(ToolBlock{
-						Icon:   IconForAction(u.Tool),
-						Name:   u.Tool,
-						Detail: u.Detail,
-					})
+					f.Partial += u.Text
 				})
+			case orchestrator.EntryToolUse:
+				if u.Detail != "" {
+					s.streamBuf.AppendActivity(u.Tool, u.Detail)
+					s.frameList.UpdateActive(func(f *Frame) {
+						f.AppendTool(ToolBlock{
+							Icon:   IconForAction(u.Tool),
+							Name:   u.Tool,
+							Detail: u.Detail,
+						})
+					})
+				}
 			case orchestrator.EntryStats:
 				s.streamBuf.RecordUsage(u.Stats.Input, u.Stats.Output)
 				s.streamBuf.AppendStats(u.Stats.Input, u.Stats.Output)
@@ -253,29 +266,33 @@ func (s *PipelineScreen) SyncViewports() {
 		// Feed live agent data to dashboard
 		s.dashboard.SetAgents(s.agents)
 	} else {
-		// When using frame list rendering, skip SetContent if nothing changed.
-		// FrameList.Render() returns cached content when not dirty.
-		frameListMode := (s.content == ContentStreaming || s.content == ContentPlanReview ||
-			s.content == ContentCompletion || s.content == ContentAgentHistory) &&
-			s.frameList.FrameCount() > 0
+		// Two-zone rendering: finished frames as static text, active frame in viewport.
+		if s.staticContentDirty && s.frameList.FrameCount() > 0 {
+			s.staticContent = s.frameList.RenderFinished(w)
+			s.staticContentDirty = false
+		}
 
 		var contentView string
 		if s.showHelp {
 			contentView = s.viewHelp()
-		} else if frameListMode && !s.frameList.IsDirty() {
-			// Frame list unchanged — skip SetContent to preserve scroll
-			goto pollMetrics
+		} else if s.content == ContentStreaming || s.content == ContentPlanReview ||
+			s.content == ContentCompletion || s.content == ContentAgentHistory {
+			// Render only the active (in-progress) frame in the viewport.
+			contentView = s.frameList.RenderActive(w)
+			if contentView == "" {
+				contentView = s.viewContent(w)
+			}
 		} else {
 			contentView = s.viewContent(w)
 		}
+
 		atBottom := s.contentVP.AtBottom()
 		s.contentVP.SetContent(contentView)
-		if atBottom && (s.content == ContentStreaming || s.content == ContentPlanReview || s.content == ContentCompletion) {
+		if atBottom {
 			s.contentVP.GotoBottom()
 		}
 	}
 
-pollMetrics:
 	// Poll live metrics from stream ring
 	if s.streamBuf != nil && s.active {
 		in, out, start := s.streamBuf.SnapshotUsage()
@@ -290,6 +307,11 @@ func (s PipelineScreen) effectiveWidth() int {
 		return s.contentVP.Width()
 	}
 	return minWidth
+}
+
+// StaticHeight returns the number of lines in the static content region.
+func (s PipelineScreen) StaticHeight() int {
+	return countLines(s.staticContent)
 }
 
 // RecalculateLayout updates viewport dimensions from parent-computed values.
@@ -352,7 +374,8 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 				break
 			}
 		}
-		s.frameList.FinishActive(agentElapsed, event.InputTokens, event.OutputTokens)
+		s.frameList.FinishActive(agentElapsed, event.InputTokens, event.OutputTokens, width)
+		s.staticContentDirty = true
 
 	case orchestrator.EventAgentFailed:
 		for i := range s.agents {
@@ -361,7 +384,8 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 			}
 		}
 		s.lastErr = event.Err
-		s.frameList.FinishActive(0, 0, 0)
+		s.frameList.FinishActive(0, 0, 0, width)
+		s.staticContentDirty = true
 
 	case orchestrator.EventAgentCancelled:
 		for i := range s.agents {
@@ -411,6 +435,7 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 	case orchestrator.EventPlanReady:
 		s.finalPlan = event.FinalPlan
 		s.hasPlan = true
+		s.staticContentDirty = true
 
 	case orchestrator.EventRunDirReady:
 		s.runDir = event.RunDir
@@ -465,6 +490,7 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 			Elapsed: time.Since(s.startTime),
 			Parts:   []ContentPart{{IsText: true, Text: s.buildCompletionSummary()}},
 		})
+		s.staticContentDirty = true
 	}
 }
 
@@ -663,7 +689,7 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 		s.awaitingPlanDecision = false
 		s.hasPlanComment = false
 		s.content = ContentStreaming
-		s.frameList.FinishActive(0, 0, 0) // seal the PlanFrame
+		s.frameList.FinishActive(0, 0, 0, s.contentVP.Width()) // seal the PlanFrame
 		s.SyncViewports()
 		s.PendingIntent = ApprovePlanIntent{}
 		return s, nil
@@ -753,6 +779,12 @@ func (s PipelineScreen) View(width, height int) string {
 	} else {
 		body = s.contentVP.View()
 	}
+
+	// Two-zone rendering: static text above the interactive viewport.
+	if s.staticContent != "" && !s.showDashboard {
+		return s.staticContent + "\n" + lipgloss.NewStyle().MaxHeight(contentHeight).Render(body) + "\n" + input + sidebar + footer
+	}
+
 	if contentHeight > 0 {
 		body = lipgloss.NewStyle().MaxHeight(contentHeight).Render(body)
 		return body + "\n" + input + sidebar + footer
@@ -766,6 +798,9 @@ func (s PipelineScreen) View(width, height int) string {
 
 // shimmerFrames are the 5-frame animation for the status bar tail.
 var shimmerFrames = []string{"·∘○∘·", "∘○∘·∘", "○∘·∘○", "∘·∘○∘", "·∘○∘·"}
+
+// spinningFrames are the 3-character animation for in-progress frame headers.
+var spinningFrames = []string{"✻", "*", "※"}
 
 // viewStatusLine renders the 1-line status bar with agent chain, live metrics,
 // and shimmer animation. Applies left-overflow truncation when width is tight.
