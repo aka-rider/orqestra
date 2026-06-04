@@ -228,7 +228,7 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 			case orchestrator.EntryText:
 				s.streamBuf.AppendText(u.Text)
 				s.frameList.UpdateActive(func(f *Frame) {
-					f.FlushPartial()
+					f.Partial = ""
 					if u.Text != "" {
 						f.AppendText(u.Text)
 					}
@@ -795,9 +795,6 @@ func (s PipelineScreen) View(width, height int) string {
 }
 
 // --- Status Bar (1-line replacement for the old 6-line sidebar) ---
-
-// shimmerFrames are the 5-frame animation for the status bar tail.
-var shimmerFrames = []string{"·∘○∘·", "∘○∘·∘", "○∘·∘○", "∘·∘○∘", "·∘○∘·"}
 
 // spinningFrames are the 3-character animation for in-progress frame headers.
 var spinningFrames = []string{"✻", "*", "※"}

@@ -1,9 +1,3 @@
-# Orqestra — Local Development Config (all qwen3.6 via llama-cpp)
-# Usage: orqestra --config local
-#
-# Fully offline. All models run on the local llama-server instance.
-# Suitable for development iterations and E2E testing of Orqestra itself.
-
 providers:
   llama-cpp:
     base_url: http://192.168.50.212:11434

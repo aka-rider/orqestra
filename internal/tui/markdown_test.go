@@ -17,7 +17,17 @@ func TestRenderMarkdown(t *testing.T) {
 }
 
 func TestRenderMarkdownFallback(t *testing.T) {
-	// Empty content should not panic
 	out := renderMarkdown("", 80)
-	_ = out // glamour may add whitespace to empty input — that's fine
+	_ = out
+}
+
+func TestRenderMarkdown_HasStyle(t *testing.T) {
+	md := "# Header\n\nSome text with **bold** and `code`.\n"
+	out := renderMarkdown(md, 80)
+	if !strings.Contains(out, "\x1b[") {
+		t.Error("expected ANSI escape codes in styled markdown output")
+	}
+	if !strings.Contains(out, "Header") {
+		t.Error("expected 'Header' in rendered output")
+	}
 }

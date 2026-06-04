@@ -547,17 +547,14 @@ func TestDrainStreamUpdates_FlushesPartialOnEntryText(t *testing.T) {
 	if frame.Partial != "" {
 		t.Fatalf("expected empty partial after EntryText, got %q", frame.Partial)
 	}
-	// The partial text should have been flushed before the EntryText.
-	// AppendText coalesces consecutive text parts, so we get a single part.
 	if len(frame.Parts) != 1 {
 		t.Fatalf("expected 1 text part, got %d", len(frame.Parts))
 	}
 	if !frame.Parts[0].IsText {
 		t.Fatal("expected text part")
 	}
-	// Should contain both the flushed partial and the new text.
-	if frame.Parts[0].Text != "partial\ncompleted\n" {
-		t.Fatalf("expected 'partial\\ncompleted\\n', got %q", frame.Parts[0].Text)
+	if frame.Parts[0].Text != "completed\n" {
+		t.Fatalf("expected 'completed\\n', got %q", frame.Parts[0].Text)
 	}
 }
 

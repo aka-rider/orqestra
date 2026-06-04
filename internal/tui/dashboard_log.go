@@ -53,9 +53,9 @@ func (l *LogViewerModel) syncContent() {
 	if len(l.lines) > 0 {
 		content = strings.Join(l.lines, "\n")
 	}
-	if l.isStreaming && len(shimmerFrames) > 0 {
-		shimmer := shimmerFrames[l.animFrame%len(shimmerFrames)]
-		content += "\n" + dimStyle.Render("── "+shimmer+" ──")
+	if l.isStreaming && len(spinningFrames) > 0 {
+		spin := spinningFrames[l.animFrame%len(spinningFrames)]
+		content += "\n" + dimStyle.Render("── "+spin+" ──")
 	}
 	atBottom := l.vp.AtBottom()
 	l.vp.SetContent(content)
@@ -89,5 +89,5 @@ func (l LogViewerModel) View() string {
 	return l.vp.View()
 }
 
-// Ensure dimStyle and shimmerFrames are accessible (they're defined in screen_pipeline.go)
+// Ensure dimStyle and spinningFrames are accessible (they're defined in screen_pipeline.go)
 var _ = lipgloss.NewStyle // ensure import used

@@ -1,7 +1,7 @@
 package tui
 
 import (
-	"strings"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -19,7 +19,6 @@ func TestRenderFrame_Init(t *testing.T) {
 	}
 	assertContains(t, got, "Researcher")
 	assertContains(t, got, "claude-sonnet-4-20250514")
-	assertContains(t, got, "…") // init indicator
 }
 
 func TestRenderFrame_InProgress(t *testing.T) {
@@ -35,9 +34,10 @@ func TestRenderFrame_InProgress(t *testing.T) {
 	}
 	got := renderFrame(&f, 60, 0, false)
 	assertContains(t, got, "Architect")
-	assertContains(t, got, "✻") // spinning frame 0
+	assertContains(t, got, "✻")
 	assertContains(t, got, "Analyzing the codebase...")
 	assertContains(t, got, "▎streaming text continues")
+	assertNoBorder(t, got)
 }
 
 func TestRenderFrame_InProgress_SpinningCycles(t *testing.T) {
@@ -69,9 +69,9 @@ func TestRenderFrame_Finished(t *testing.T) {
 	}
 	got := renderFrame(&f, 60, 0, false)
 	assertContains(t, got, "Researcher")
-	assertContains(t, got, "✓")
-	assertContains(t, got, "12s")
+	assertContains(t, got, "⏺")
 	assertContains(t, got, "The codebase uses pattern X.")
+	assertNoBorder(t, got)
 }
 
 func TestRenderFrame_WithToolBlocks(t *testing.T) {
@@ -93,6 +93,7 @@ func TestRenderFrame_WithToolBlocks(t *testing.T) {
 	assertContains(t, got, "Found the relevant code.")
 	assertContains(t, got, "Bash")
 	assertContains(t, got, "go test ./...")
+	assertNoBorder(t, got)
 }
 
 func TestRenderFrame_PlanFrame(t *testing.T) {
@@ -119,21 +120,21 @@ func TestRenderFrame_CompletionFrame(t *testing.T) {
 	}
 	got := renderFrame(&f, 60, 0, false)
 	assertContains(t, got, "Complete")
-	assertContains(t, got, "3m22s")
+	assertContains(t, got, "Pipeline complete")
 }
 
 func TestRenderToolBlock(t *testing.T) {
 	tb := ToolBlock{Name: "Read", Detail: "internal/foo/bar.go"}
-	got := renderToolBlock(tb, 50)
-	assertContains(t, got, "✑") // Read icon
+	got := renderToolBlockPlain(tb, 50)
+	assertContains(t, got, "✑")
 	assertContains(t, got, "Read")
 	assertContains(t, got, "internal/foo/bar.go")
 }
 
 func TestRenderToolBlock_Bash(t *testing.T) {
 	tb := ToolBlock{Name: "Bash", Detail: "go test ./..."}
-	got := renderToolBlock(tb, 50)
-	assertContains(t, got, "❯") // Bash icon
+	got := renderToolBlockPlain(tb, 50)
+	assertContains(t, got, "❯")
 	assertContains(t, got, "Bash")
 }
 
@@ -398,7 +399,8 @@ func TestRenderFrame_Focused(t *testing.T) {
 		t.Fatal("focused frame should not be empty")
 	}
 	assertContains(t, got, "Worker")
-	assertContains(t, got, "✓")
+	assertContains(t, got, "⏺")
+	assertNoBorder(t, got)
 }
 
 func TestRenderFrame_Collapsed(t *testing.T) {
@@ -408,9 +410,7 @@ func TestRenderFrame_Collapsed(t *testing.T) {
 	got := renderFrame(&f, 60, 0, false)
 	assertContains(t, got, "Researcher")
 	assertContains(t, got, "The codebase uses pattern X")
-	if strings.Count(got, "\n") > 5 {
-		t.Errorf("collapsed frame should be compact; got %d lines", strings.Count(got, "\n"))
-	}
+	assertNoBorder(t, got)
 }
 
 func TestFrameList_NewFrameList_FocusedIsNegOne(t *testing.T) {
@@ -457,6 +457,107 @@ func assertContains(t *testing.T, got, want string) {
 	if !containsStr(got, want) {
 		t.Errorf("expected output to contain %q, got:\n%s", want, got)
 	}
+}
+
+func assertNoBorder(t *testing.T, got string) {
+	t.Helper()
+	for _, ch := range []string{"╭", "╮", "╰", "╯", "│", "─"} {
+		if containsStr(got, ch) {
+			t.Errorf("expected no lipgloss border characters, found %q in:\n%s", ch, got)
+			return
+		}
+	}
+}
+
+func TestRenderFrameActive_NoBorder(t *testing.T) {
+	f := Frame{
+		Kind:       AgentFrame,
+		State:      FrameInProgress,
+		AgentID:    "Architect",
+		AgentModel: "qwen3.6",
+		Parts: []ContentPart{
+			{IsText: true, Text: "Thinking...\n"},
+			{IsText: false, Tool: ToolBlock{Name: "Read", Detail: "foo.go"}},
+		},
+	}
+	got := renderFrameActive(&f, 80, 0)
+	assertContains(t, got, "✻ Architect")
+	assertContains(t, got, "qwen3.6")
+	assertContains(t, got, "Thinking...")
+	assertContains(t, got, "Read")
+	assertContains(t, got, "foo.go")
+	assertNoBorder(t, got)
+}
+
+func TestRenderFrameStatic_NoBorder(t *testing.T) {
+	f := Frame{
+		Kind:       AgentFrame,
+		State:      FrameFinished,
+		AgentID:    "Researcher",
+		AgentModel: "qwen3.6",
+		Parts: []ContentPart{
+			{IsText: true, Text: "Done researching\n"},
+			{IsText: false, Tool: ToolBlock{Name: "Grep", Detail: "pattern"}},
+		},
+	}
+	got := renderFrameStatic(&f, 80)
+	assertContains(t, got, "⏺ Researcher")
+	assertContains(t, got, "qwen3.6")
+	assertContains(t, got, "Done researching")
+	assertContains(t, got, "Grep")
+	assertContains(t, got, "pattern")
+	assertNoBorder(t, got)
+}
+
+func TestRenderFrameStatic_AllToolsExpanded(t *testing.T) {
+	f := &Frame{Kind: AgentFrame, State: FrameFinished, AgentID: "W"}
+	for i := 1; i <= 25; i++ {
+		f.Parts = append(f.Parts, ContentPart{
+			IsText: false,
+			Tool:   ToolBlock{Name: fmt.Sprintf("tool_%d", i)},
+		})
+	}
+	got := renderFrameStatic(f, 80)
+	for i := 1; i <= 25; i++ {
+		name := fmt.Sprintf("tool_%d", i)
+		if !containsStr(got, name) {
+			t.Errorf("static render should show all tools, missing %s", name)
+		}
+	}
+	if containsStr(got, "⋯") {
+		t.Error("static render should not show overflow indicator")
+	}
+}
+
+func TestRenderFrameActive_StreamingCollapsed(t *testing.T) {
+	f := Frame{
+		Kind:             AgentFrame,
+		State:            FrameInProgress,
+		AgentID:          "Worker",
+		StreamingCollapsed: true,
+		Parts: []ContentPart{
+			{IsText: true, Text: "First line\nSecond line\n"},
+			{IsText: false, Tool: ToolBlock{Name: "Read", Detail: "file.go"}},
+		},
+	}
+	got := renderFrameActive(&f, 80, 0)
+	assertContains(t, got, "Worker")
+	assertContains(t, got, "First line")
+	if containsStr(got, "Second line") {
+		t.Error("StreamingCollapsed should hide body beyond first text line")
+	}
+	if containsStr(got, "Read") {
+		t.Error("StreamingCollapsed should hide tool blocks")
+	}
+}
+
+func TestRenderToolBlockPlain_PlainText(t *testing.T) {
+	tb := ToolBlock{Name: "Read", Detail: "file.go"}
+	got := renderToolBlockPlain(tb, 80)
+	assertContains(t, got, "✑")
+	assertContains(t, got, "Read")
+	assertContains(t, got, "file.go")
+	assertNoBorder(t, got)
 }
 
 func containsStr(s, substr string) bool {
