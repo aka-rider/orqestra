@@ -27,6 +27,7 @@ type SandboxCLIRunner struct {
 	worktreePath string // if set, worker runs in this worktree (repo stays read-only)
 	env          []string
 	writable     bool
+	binary       string // CLI binary to run; set via SandboxCLIRunnerConfig.Binary
 }
 
 // SandboxCLIRunnerConfig configures the seatbelt CLI runner.
@@ -37,6 +38,7 @@ type SandboxCLIRunnerConfig struct {
 	WorktreePath string   // optional worktree path; when set repo is read-only and worktree is read-write
 	Env          []string // harness env (model routing)
 	Writable     bool     // true for workers
+	Binary       string   // CLI binary to run; "claude" by existing caller convention
 }
 
 // NewSandboxCLIRunner creates a CLI runner backed by seatbelt.

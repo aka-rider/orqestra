@@ -1,5 +1,5 @@
 # binary
-orqestra
+/orqestra
 
 # Go
 *.test
@@ -9,7 +9,7 @@ coverage.txt
 # env / secrets
 .env
 *.env
-orqestra*yaml
+/orqestra*yaml
 
 
 # macOS
@@ -22,7 +22,6 @@ orqestra*yaml
 
 # local state
 .orqestra/
-node_modules/
 copilot-data
 .tmp-integration-test/
 .serena/
