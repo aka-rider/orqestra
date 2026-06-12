@@ -51,7 +51,7 @@ func (c *streamCapture) SetAgent(id string) {
 	c.liveStart = time.Now()
 }
 
-func (c *streamCapture) OnUpdate(ev harness.StreamUpdate) {
+func (c *streamCapture) OnUpdate(ev harness.Event) {
 	if c == nil {
 		return
 	}
@@ -62,7 +62,7 @@ func (c *streamCapture) OnUpdate(ev harness.StreamUpdate) {
 	if ev.Tool != "" {
 		c.entries = append(c.entries, StreamEntry{Kind: EntryToolUse, Tool: ev.Tool, Detail: ev.Detail})
 	}
-	if ev.UsageValid {
+	if ev.Kind == harness.EventUsage {
 		c.liveInput += ev.Input
 		c.liveOutput += ev.Output
 		c.entries = append(c.entries, StreamEntry{Kind: EntryStats, Stats: StreamStats{Input: ev.Input, Output: ev.Output, Valid: true}})

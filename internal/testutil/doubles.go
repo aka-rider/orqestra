@@ -11,39 +11,43 @@ import (
 	"github.com/xiii/orqestra/internal/harness"
 )
 
+// Ensure FakeRunner implements Runner.
+var _ harness.Runner = (*FakeRunner)(nil)
+
 // FakeCall defines the response for one FakeRunner invocation.
 type FakeCall struct {
-	Output       string
-	SessionID    string
-	PlanFilePath string
-	Usage        harness.TokenUsage
-	Err          error
-	OnCall       func(callIndex int) // called with the 0-based call index before returning
+	Output    string
+	SessionID string
+	Usage     harness.TokenUsage
+	Err       error
+	OnCall    func(callIndex int) // called with the 0-based call index before returning
 }
 
-// FakeRunner is a test double for harness.CLIRunner and harness.ContinuableRunner.
-// All three methods draw from Calls in order; the last entry is reused once exhausted.
+// FakeRunner is a test double for harness.Runner.
 type FakeRunner struct {
-	Calls []FakeCall
-	mu    sync.Mutex
-	n     int
+	Calls      []FakeCall
+	mu         sync.Mutex
+	n          int
+	events     chan harness.Event
+	done       bool
+	closed     bool
+	storedSID  string // SessionID returned by the last Post() call
+	// injected is the fan-out channel from SetEvents.
+	// A goroutine forwards events from events -> injected.
+	// Receive() always returns events, so the caller reads the source channel.
+	injected chan<- harness.Event
 }
 
 func (f *FakeRunner) next() FakeCall {
 	f.mu.Lock()
-	var call FakeCall
-	if len(f.Calls) == 0 {
-		f.mu.Unlock()
+	defer f.mu.Unlock()
+
+	if len(f.Calls) == 0 || f.n >= len(f.Calls) {
 		return FakeCall{}
 	}
 	idx := f.n
-	if idx >= len(f.Calls) {
-		idx = len(f.Calls) - 1
-	} else {
-		f.n++
-	}
-	call = f.Calls[idx]
-	f.mu.Unlock()
+	f.n++
+	call := f.Calls[idx]
 
 	if call.OnCall != nil {
 		call.OnCall(idx)
@@ -51,20 +55,102 @@ func (f *FakeRunner) next() FakeCall {
 	return call
 }
 
-func (f *FakeRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
+func (f *FakeRunner) Post(msg string) {
 	out := f.next()
-	return harness.RunResult{Output: out.Output, SessionID: out.SessionID, PlanFilePath: out.PlanFilePath, Usage: out.Usage}, out.Err
+	if f.events == nil {
+		return
+	}
+	f.mu.Lock()
+	if f.closed {
+		f.mu.Unlock()
+		return
+	}
+	// Store the SessionID from this call so SessionID() can return it.
+	sid := out.SessionID
+	injected := f.injected
+	f.mu.Unlock()
+
+	var events []harness.Event
+	if out.Err != nil {
+		events = []harness.Event{
+			{Kind: harness.EventError, Text: out.Err.Error(), IsError: true},
+		}
+	} else {
+		events = []harness.Event{
+			{Kind: harness.EventSessionStart, SessionID: out.SessionID},
+			{Kind: harness.EventChunk, Text: out.Output},
+			{Kind: harness.EventUsage, Input: out.Usage.Input, Output: out.Usage.Output},
+			{Kind: harness.EventSessionDone},
+		}
+	}
+	for _, ev := range events {
+		select {
+		case f.events <- ev:
+		default:
+		}
+		if injected != nil {
+			select {
+			case injected <- ev:
+			default:
+			}
+		}
+	}
+	// Close the channel after each Post() call so the for-range loop in
+	// runRunnerStreaming/runRunnerContinue can exit. The channel is replaced
+	// by SetEvents on the next invocation.
+	f.mu.Lock()
+	if !f.closed {
+		f.closed = true
+		f.storedSID = sid
+		close(f.events)
+	}
+	f.mu.Unlock()
 }
 
-func (f *FakeRunner) RunStreaming(_ context.Context, _, _ string, _ chan<- harness.StreamUpdate) (harness.RunResult, error) {
-	out := f.next()
-	return harness.RunResult{Output: out.Output, SessionID: out.SessionID, PlanFilePath: out.PlanFilePath, Usage: out.Usage}, out.Err
+func (f *FakeRunner) Receive() <-chan harness.Event {
+	return f.events
 }
 
-func (f *FakeRunner) RunContinue(_ context.Context, _, _ string, _ chan<- harness.StreamUpdate) (harness.RunResult, error) {
-	out := f.next()
-	return harness.RunResult{Output: out.Output, SessionID: out.SessionID, PlanFilePath: out.PlanFilePath, Usage: out.Usage}, out.Err
+func (f *FakeRunner) ExtractPlan(ctx context.Context) (string, error) {
+	sid := f.SessionID()
+	if sid == "" {
+		return "", fmt.Errorf("no session ID")
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		return "", fmt.Errorf("HOME not set")
+	}
+	planFile := filepath.Join(home, ".claude", "plans", sid+"-plan.md")
+	data, err := os.ReadFile(planFile)
+	if err != nil {
+		return "", fmt.Errorf("read plan file %s: %w", planFile, err)
+	}
+	return string(data), nil
 }
+
+func (f *FakeRunner) SetEvents(ch chan<- harness.Event) {
+	// Always create a new events channel for each SetEvents call so that
+	// each runRunnerStreaming/runRunnerContinue invocation gets its own
+	// channel that can be closed independently.
+	f.events = make(chan harness.Event, 256)
+	f.mu.Lock()
+	f.closed = false
+	f.injected = ch
+	f.mu.Unlock()
+}
+
+func (f *FakeRunner) SessionID() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.storedSID
+}
+
+func (f *FakeRunner) Cancel() error {
+	f.done = true
+	return nil
+}
+
+var _ harness.Runner = (*FakeRunner)(nil)
 
 // MustTempHome sets HOME to a fresh temp dir for the duration of the test.
 // Tests calling MustTempHome must NOT call t.Parallel() — HOME is process-wide.

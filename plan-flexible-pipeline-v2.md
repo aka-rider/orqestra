@@ -13,6 +13,230 @@ The prior draft (`plan-semi-flexible-pipeline.md`) was rejected because it: sile
 
 ---
 
+## Runner Consolidation
+
+**Decision:** `claude_cli.go` (766 lines) and `sandbox_cli_runner.go` (317 lines) are 90% copypasta. Consolidate into a single `Session` interface that both implement. `RunInteractive` is the **only** correct pattern — all runner calls go through it. Both `Planner` and `Worker` run in the sandbox.
+
+**Rationale:**
+- `ClaudeCLI` and `SandboxCLIRunner` share the same interface (`CLIRunner` + `ContinuableRunner`) and implement `RunPrint`, `RunStreaming`, `RunContinue` with nearly identical code — the only difference is subprocess execution (direct vs. `sandbox-exec`).
+- `RunPrint` (one-shot) and `RunStreaming` (blocking) are outdated patterns. The bidirectional `RunInteractive` pattern is the only one that supports human gate chat, real-time TUI streaming, and revision loops.
+- Every agent call should use a fresh session. No session continuation for planners — plan markdown is passed as prompt context.
+- The worker's self-validation uses session continuation (`RunContinue`), but this is the only case. After consolidation, the sandbox wraps the `Session` interface uniformly.
+
+### RC-1: New unified `Session` interface
+
+**Replace** `CLIRunner`, `ContinuableRunner`, and `InteractiveRunner` with a single `Session` interface in `internal/harness/`:
+
+```go
+// Session represents a persistent Claude CLI session with bidirectional NDJSON communication.
+// Both ClaudeCLI and SandboxCLIRunner implement this interface.
+type Session interface {
+    // Post sends a user message as NDJSON to the session stdin.
+    // The message is formatted per the verified companion-repo wire format.
+    // Returns an error if the write fails (process exited, stdin closed).
+    Post(msg string) error
+
+    // Done returns the done channel. It is closed when the Claude CLI process
+    // exits (either naturally or via Kill). The error value is nil on clean
+    // exit, non-nil on signal termination or context cancellation.
+    Done() <-chan error
+
+    // Updates returns the updates channel. It is closed when the Claude CLI
+    // process exits and parseStream finishes draining stdout.
+    Updates() <-chan StreamUpdate
+
+    // Usage returns the final token usage from the result event.
+    // Returns zero values if the result event has not yet been parsed.
+    Usage() TokenUsage
+
+    // ResultError reports whether the session ended with is_error:true
+    // in the result event. Returns false if the result event has not yet
+    // been parsed.
+    ResultError() bool
+
+    // SessionID returns the session ID extracted from the stream events.
+    SessionID() string
+
+    // PlanPath returns the plan file path extracted from the result event.
+    // Empty if no plan file was produced.
+    PlanPath() string
+
+    // Kill terminates the Claude CLI process. The session's Done and Updates
+    // channels will close once the process exits.
+    Kill() error
+}
+```
+
+**`Session` is created via a factory function** that returns `(Session, error)`:
+
+```go
+// RunSession starts a Claude CLI session with bidirectional NDJSON streaming.
+// It is the only runner method — replaces RunPrint, RunStreaming, RunContinue.
+func (c *ClaudeCLI) RunSession(ctx context.Context, prompt, systemPrompt string,
+    streamUpdates chan<- StreamUpdate) (Session, error)
+```
+
+**`SandboxCLIRunner` implements the same interface:**
+
+```go
+func (r *SandboxCLIRunner) RunSession(ctx context.Context, prompt, systemPrompt string,
+    streamUpdates chan<- StreamUpdate) (Session, error)
+```
+
+The sandbox runner wraps the same `claude` process with `sandbox-exec` before the bidirectional session starts. The `Session` interface is identical.
+
+### RC-2: Remove old runner methods
+
+**Delete from `ClaudeCLI`:**
+- `RunPrint` — obsolete. All calls use `RunSession` (bidirectional).
+- `RunStreaming` — obsolete. All calls use `RunSession` (bidirectional).
+- `RunContinue` — obsolete. Session continuation is done by creating a new session with the prompt + previous plan as context.
+
+**Delete from `SandboxCLIRunner`:**
+- `RunPrint` — obsolete.
+- `RunStreaming` — obsolete.
+- `RunContinue` — obsolete.
+
+**Delete `CLIRunner` interface** — replaced by `Session` interface.
+**Delete `ContinuableRunner` interface** — replaced by `Session` interface.
+**Delete `InteractiveRunner` interface** — replaced by `Session` interface.
+
+### RC-3: `Planner` uses `Session` factory
+
+**Update `agent.Planner`:**
+
+```go
+type Planner struct {
+    runner   *ClaudeCLI      // or *SandboxCLIRunner — both have RunSession
+    system   string
+    workDir  string          // optional working directory for subprocess
+}
+
+func NewPlanner(runner *ClaudeCLI, system string, opts ...PlannerOption) *Planner {
+    return &Planner{runner: runner, system: system}
+}
+
+func (p *Planner) Run(ctx context.Context, prompt string, events chan<- StreamUpdate) (PlanResult, error) {
+    sess, err := p.runner.RunSession(ctx, prompt, p.system, events)
+    if err != nil {
+        return PlanResult{}, fmt.Errorf("planner run: %w", err)
+    }
+    defer sess.Kill()
+    // ... drain updates, wait for Done, extract result
+}
+```
+
+**`Planner.Continue` is removed.** Every agent call uses a fresh session. The plan markdown is passed as prompt context. For the worker's self-validation, the orchestrator creates a new session with the validation prompt + worker output as context.
+
+### RC-4: `Runners` struct simplification
+
+**Current state (engine.go:66-71):**
+
+```go
+type Runners struct {
+    Researcher harness.ContinuableRunner
+    Architect  harness.ContinuableRunner
+    Critic     harness.ContinuableRunner
+    Worker     harness.ContinuableRunner
+}
+```
+
+**New state:**
+
+```go
+type Runners struct {
+    Researcher *ClaudeCLI    // has RunSession
+    Architect  *ClaudeCLI    // has RunSession
+    Critic     *ClaudeCLI    // has RunSession
+    Worker     *SandboxCLIRunner // runs in sandbox with worktree
+}
+```
+
+**Every runner has `RunSession(ctx, prompt, systemPrompt, updates) (Session, error)`.** The orchestrator calls `RunSession` for every agent invocation. No type assertions, no interface switching.
+
+### RC-5: Worker self-validation via fresh session
+
+**Current state:** Worker self-validation uses `RunContinue` to resume the worker session.
+
+**New state:** Validation uses a fresh `RunSession` call. The prompt includes the worker's output and a validation instruction. The orchestrator passes the worker's session ID as context in the prompt (not via session continuation).
+
+```go
+validationPrompt := agent.WorkerValidationPrompt(
+    retryBudget,
+    workResult.Output,
+    workResult.SessionID, // passed as context, not session continuation
+)
+valSess, valErr := e.Runners.Worker.RunSession(ctx, validationPrompt, "", valUpdates)
+```
+
+### RC-6: `runPlanner` / `runRunnerStreaming` / `runRunnerContinue` helpers removed
+
+**Delete from `engine.go`:**
+- `runPlanner()` — replaced by `planner.Run()` which calls `RunSession`
+- `runRunnerStreaming()` — replaced by `runner.RunSession()`
+- `runRunnerContinue()` — replaced by `runner.RunSession()` (fresh session)
+
+**The orchestrator's extracted functions call `RunSession` directly.** No indirection layer needed.
+
+### RC-7: Copypasta elimination
+
+**`parseStreamLines` → `parseStream`:** The sandbox runner's `parseStreamLines` (line 207) is functionally identical to `claude_cli.go`'s `parseStream` (line 388). Consolidate to a single package-level `parseStream` in `harness/`.
+
+**`extractJSONUsage`, `extractStreamUsage`, `extractStreamSessionID`, `extractStreamResult`:** These sandbox-specific extraction functions are replaced by `Session` methods (`Usage()`, `SessionID()`, `PlanPath()`, `ResultError()`). Delete from `sandbox_cli_runner.go`.
+
+**`run()` and `runParsed` in `SandboxCLIRunner`:** Consolidate process creation logic. Both `ClaudeCLI` and `SandboxCLIRunner` share a common `startSession()` helper that builds the command, pipes stdin/stdout, and starts the process. The sandbox runner wraps with `sandbox.New().Wrap()`.
+
+**Result:** `claude_cli.go` shrinks from 766 to ~200 lines (interface, options, `RunSession`). `sandbox_cli_runner.go` shrinks from 317 to ~100 lines (sandbox-specific process wrapper). Shared code moves to `harness/session.go`.
+
+### RC-8: `SandboxCLIRunner` wraps `Session` creation
+
+The sandbox runner doesn't need its own `RunSession` — it wraps the process creation:
+
+```go
+func (r *SandboxCLIRunner) RunSession(ctx context.Context, prompt, systemPrompt string,
+    updates chan<- StreamUpdate) (Session, error) {
+    // 1. Build CLI args (same as ClaudeCLI.RunSession)
+    // 2. Create sandbox: sb, err := sandbox.New(...)
+    // 3. Create command: cmd := exec.CommandContext(ctx, "claude", args...)
+    // 4. Wrap with sandbox: sb.Wrap(cmd)
+    // 5. Pipe stdin/stdout
+    // 6. Start process
+    // 7. Return *sandboxSession{Session, sandbox: sb}
+}
+```
+
+**`sandboxSession` embeds `*interactiveSession`** and adds sandbox cleanup on `Kill()`:
+
+```go
+type sandboxSession struct {
+    *interactiveSession // the shared Session implementation
+    sb                  *sandbox.Sandbox
+}
+
+func (s *sandboxSession) Kill() error {
+    s.sb.Close()
+    return s.interactiveSession.Kill()
+}
+```
+
+### Summary: Runner consolidation impact
+
+| Before | After |
+|--------|-------|
+| `CLIRunner` (RunPrint, RunStreaming) | `Session` (Post, Done, Updates, Kill) |
+| `ContinuableRunner` (RunContinue) | `Session` (fresh session + prompt context) |
+| `InteractiveRunner` (RunInteractive) | `Session` (same interface) |
+| `ClaudeCLI.RunStreaming` (130 lines) | `ClaudeCLI.RunSession` → shared `startSession` |
+| `SandboxCLIRunner.RunStreaming` (80 lines) | `SandboxCLIRunner.RunSession` → shared `startSession` + sandbox wrap |
+| `agent.Planner` uses `ContinuableRunner` | `agent.Planner` uses `*ClaudeCLI` with `RunSession` |
+| `Runners` struct: `ContinuableRunner` | `Runners` struct: concrete types with `RunSession` |
+| `runPlanner`, `runRunnerStreaming`, `runRunnerContinue` helpers | Direct `RunSession` calls |
+| `claude_cli.go`: 766 lines | `claude_cli.go`: ~200 lines |
+| `sandbox_cli_runner.go`: 317 lines | `sandbox_cli_runner.go`: ~100 lines |
+| New `harness/session.go`: shared session code | New file |
+
+---
+
 ## TUI-Only: Remove Headless Mode and Non-TUI CLI Paths
 
 **Decision:** Orqestra is an interactive TUI tool. Remove ALL headless mode, `--plan` mode, `--no-execute` mode, and non-TUI CLI paths. The app requires a terminal.
@@ -926,15 +1150,15 @@ func (e *Engine) runDeliberation(
 
         if loop == 1 {
             // First loop: fresh planner call with initial plan
-            // NOTE: guardPrompt is package-level (engine.go:38-44) — no changes needed.
-            // NOTE: uses runPlanner (fresh session), not continuePlanner — deliberate change
-            // from current code. Every architect pass uses a fresh Planner instance.
+            // Every architect pass uses a fresh Planner instance + RunSession.
             architectPrompt := guardPrompt(agent.ArchitectPrompt(input.Prompt, draftMarkdown), input.Prompt, "architect")
-            planResult, planErr = runPlanner(ctx, agent.NewPlanner(e.Runners.Architect, e.Config.Architect.SystemPrompt), architectPrompt, stream, streamOut)
+            planner := agent.NewPlanner(e.Runners.Architect, e.Config.Architect.SystemPrompt)
+            planResult, planErr = planner.Run(ctx, architectPrompt, streamOut)
         } else {
             // Subsequent loops: fresh planner with previous plan as context
             architectPrompt := guardPrompt(agent.ContinuePrompt(result.planMarkdown, "continue deliberation loop "+strconv.Itoa(loop)), input.Prompt, "architect")
-            planResult, planErr = runPlanner(ctx, agent.NewPlanner(e.Runners.Architect, e.Config.Architect.SystemPrompt), architectPrompt, stream, streamOut)
+            planner := agent.NewPlanner(e.Runners.Architect, e.Config.Architect.SystemPrompt)
+            planResult, planErr = planner.Run(ctx, architectPrompt, streamOut)
         }
 
         if planErr != nil {
@@ -962,10 +1186,9 @@ func (e *Engine) runDeliberation(
         stream.SetAgent("critic")
 
         criticPlanner := agent.NewPlanner(e.Runners.Critic, e.Config.Critic.SystemPrompt)
-        // NOTE: uses runPlanner (fresh session), not continuePlanner — deliberate change
-        // from current code. Every critic pass uses a fresh Planner instance.
-        criticResult, criticErr := runPlanner(ctx, criticPlanner,
-            agent.CriticReviewPrompt(input.Prompt, result.planMarkdown), stream, streamOut)
+        // Every critic pass uses a fresh Planner instance + RunSession.
+        criticResult, criticErr := criticPlanner.Run(ctx,
+            agent.CriticReviewPrompt(input.Prompt, result.planMarkdown), streamOut)
 
         if criticErr != nil {
             // Error handling: write critic meta to loopDir, return error
@@ -983,11 +1206,11 @@ func (e *Engine) runDeliberation(
         stream.SetAgent("architect")
 
         // Fresh planner with critic feedback as context
-        // NOTE: uses runPlanner (fresh session), not continuePlanner — deliberate change
-        // from current code. Every architect pass, including critic revisions, uses a fresh
-        // Planner instance (see BR-4 key session management rule #1).
-        revResult, revErr := runPlanner(ctx, agent.NewPlanner(e.Runners.Architect, e.Config.Architect.SystemPrompt),
-            agent.CriticContinuePrompt(result.planMarkdown, criticReportMarkdown), stream, streamOut)
+        // Every architect pass, including critic revisions, uses a fresh
+        // Planner instance + RunSession (see BR-4 key session management rule #1).
+        revPlanner := agent.NewPlanner(e.Runners.Architect, e.Config.Architect.SystemPrompt)
+        revResult, revErr := revPlanner.Run(ctx,
+            agent.CriticContinuePrompt(result.planMarkdown, criticReportMarkdown), streamOut)
 
         if revErr != nil {
             // Error handling: write revision meta to loopDir, return error
@@ -1025,7 +1248,160 @@ func (e *Engine) runDeliberation(
 7. `runDeliberation` receives `setup` with `DeliberationLoops >= 1` (guaranteed by the validation in `run()`).
 8. Plan files are numbered: `plan-v1.md`, `plan-v2.md`, ... — the highest-numbered file is the current plan.
 9. `guardPrompt` is already package-level (engine.go:38-44) and accessible from all extracted functions — no changes needed.
-10. Every agent call uses `runPlanner` (fresh session), not `continuePlanner`. This is a **deliberate behavioral change** from current code, which uses `continuePlanner` for the architect's second pass. The change is documented with inline `NOTE:` comments in the pseudocode.
+10. Every agent call uses `planner.Run()` which calls `RunSession` (fresh session). No `RunContinue` anywhere — plan markdown is passed as prompt context. This is a **deliberate behavioral change** from current code, which uses `RunContinue` for the architect's second pass.
+
+---
+
+## Medium-Severity Critique Resolutions
+
+The following 6 medium-severity and 1 low-severity findings from the critique are addressed below. Each is already resolved by existing plan sections, but the resolution is not immediately obvious to a worker reading the plan. The items below make the resolution explicit and add any missing code examples.
+
+### MS-1: `runHumanGate` loop structure is explicit at the caller (Critique #5)
+
+**Status: Already resolved in WP2.** The plan approval gate code in WP2 shows the full `for` loop:
+
+```go
+if setup.HumanGates.Active(GateBeforeWorker) {
+    for {
+        d, err := runHumanGate(ctx, emit, decisions, HumanChatGateRequest{...})
+        if err != nil { return }
+        switch d.Type {
+        case DecisionEdit:
+            // ... edit handling ...
+            if decision.Comment != "" || !decision.AutoApprove { continue }
+        case DecisionComment:
+            // ... comment handling ...
+            continue
+        case DecisionApprove:
+            break
+        case DecisionCancel:
+            emit(Event{Type: EventComplete, Phase: PhaseDone})
+            return
+        }
+    }
+    break
+}
+```
+
+**Explicit rule:** `runHumanGate` is a **one-shot** function — it emits `EventHumanGate` and waits for exactly one decision. The **caller** (`run()`) wraps it in a `for { ... continue/break }` loop. The loop is NOT inside `runHumanGate`. This is already shown in the WP2 code block above; the worker must not move the loop inside `runHumanGate`.
+
+### MS-2: Helper function placement committed to `engine_phases.go` (Critique #6)
+
+**Status: Already resolved in BR-2/BR-4.** The plan defines these helpers in the BR-2 Phase A code block:
+
+```go
+func writeArtifactIn(session SessionDir, subdir string, name string, content string) { ... }
+func writeArtifactJSONIn(session SessionDir, subdir string, name string, v any) { ... }
+func writeDialogEntryMarkdown(path string, role string, message string) { ... }
+func findHighestPlan(sessionPath, subdir string) string { ... }
+func readDialogMarkdown(path string) string { ... }
+```
+
+**Committed placement:** All five helpers go in **`engine_phases.go`** (the new file that owns `runResearch`, `runExecution`, `runValidation`). They are package-level functions in the `orchestrator` package, accessible from all extracted files (`engine.go`, `engine_deliberation.go`, `engine_restart.go`). The plan's "Execution order for extraction" in BR-1 step 4 says "Add `writeArtifactIn` / `writeArtifactJSONIn` overloads" — this refers to these same functions.
+
+### MS-3: `writeArtifactIn` call-site migration table (Critique #7)
+
+**Status: BR-2 Phase B has the artifact path audit. The following table maps each existing `writeArtifact` call to its new target.** The worker must update every `writeArtifact(session, "X", content)` call in the extracted functions to use `writeArtifactIn(session, "subdir", "X", content)` where `subdir` is the new directory.
+
+| Extracted function | Current call (approx. line in engine.go) | New call |
+|---|---|---|
+| `runResearch` | `writeArtifact(session, "researcher_draft.md", draft.Markdown)` (line 524) | `writeArtifactIn(session, "research", "researcher_draft.md", draft.Markdown)` |
+| `runResearch` | `writeArtifactJSON(session, "researcher_meta.json", meta)` (line 525) | `writeArtifactJSONIn(session, "research", "researcher_meta.json", meta)` |
+| `runResearch` | `copyLog(..., "researcher_session.jsonl")` (line 520) | `copyLog` writes to `filepath.Join(session.ResearchDir(), "researcher_session.jsonl")` |
+| `runDeliberation` | `writeArtifactJSON(session, "architect_initial_meta.json", meta)` (line 592) | `writeArtifactJSONIn(session, "deliberation/loop_"+fmt.Sprintf("%02d", loop), "architect_initial_meta.json", meta)` |
+| `runDeliberation` | `writeArtifactJSON(session, "architect_critic_revision_%d_meta.json", meta)` (lines 778, 802) | `writeArtifactJSONIn(session, "deliberation/loop_"+fmt.Sprintf("%02d", loop), "architect_revision_meta.json", meta)` |
+| `runDeliberation` | `writeArtifact(session, "critic_report.md", criticResult.Plan)` (line 719) | `writeArtifactIn(session, "deliberation/loop_"+fmt.Sprintf("%02d", loop), "critic_report.md", criticResult.Plan)` |
+| `runDeliberation` | `writeArtifactJSON(session, "critic_meta.json", meta)` (line 720) | `writeArtifactJSONIn(session, "deliberation/loop_"+fmt.Sprintf("%02d", loop), "critic_meta.json", meta)` |
+| `runDeliberation` | `writeArtifact(session, "final_plan.md", ...)` (lines 859, 1165) | **Root-level artifact** — stays as `writeArtifact(session, "final_plan.md", ...)` (no subdir) |
+| `runExecution` | `writeArtifactJSON(session, "worker_meta.json", meta)` (line 1215) | `writeArtifactJSONIn(session, "execution", "worker_meta.json", meta)` |
+| `runExecution` | `writeArtifact(session, "worker_output.txt", ...)` (line 1236) | `writeArtifactIn(session, "execution", "worker_output.txt", ...)` |
+| `runExecution` | `copyLog(..., "worker_session.jsonl")` (line 1232) | `copyLog` writes to `filepath.Join(session.ExecutionDir(), "worker_session.jsonl")` |
+| `runValidation` | `writeArtifactJSON(session, "validator_meta.json", meta)` (lines 1278, 1298) | `writeArtifactJSONIn(session, "validation", "validator_meta.json", meta)` |
+| `runValidation` | `writeArtifact(session, "worker_validation.txt", ...)` (line 1352) | `writeArtifactIn(session, "validation", "worker_validation.txt", ...)` |
+
+**Note:** `writeArtifact` (root-level) is kept for `prompt.md`, `final_plan.md`, and `run_config.json` which stay at the session root. All other artifacts go into subdirectories.
+
+### MS-4: `EventHumanGate` TUI access pattern (Critique #8)
+
+**Status: WP5 shows `ApplyEvent` handling for `EventHumanGate`. The following shows the complete handler with `HasPlanEditor` branching.**
+
+The current `ApplyEvent` switch handles `EventGateRequest` (line 397-433 of screen_pipeline.go) which reads `event.Gate.Type`, `event.Gate.FinalPlanMarkdown`, `event.Gate.PlanDiff`, etc. This entire block is **replaced** by:
+
+```go
+case orchestrator.EventHumanGate:
+    // Branch on HasPlanEditor to create the correct sub-model
+    if event.HumanGate.HasPlanEditor {
+        s.activeChat = newPlanChatMode(event.HumanGate, s.width)
+    } else {
+        s.activeChat = newSimpleChatMode(event.HumanGate, s.width)
+    }
+    s.content = ContentHumanGate
+    // Set fields that both modes may need
+    s.startTime = time.Time{} // reset for gate timing
+```
+
+**Field access pattern:** The new `HumanChatGateRequest` fields are accessed as `event.HumanGate.Position`, `event.HumanGate.AgentSessionID`, `event.HumanGate.AgentLabel`, `event.HumanGate.HasPlanEditor`, `event.HumanGate.PlanMarkdown`, `event.HumanGate.PlanFilePath`, `event.HumanGate.PlanWarnings`, `event.HumanGate.CriticReport`.
+
+**`EventGateRequest` and `EventPlanReady` cases are deleted.** Both are replaced by the single `EventHumanGate` handler. The `Event.Gate GateRequest` field is deleted from the `Event` struct and replaced by `HumanGate HumanChatGateRequest`.
+
+### MS-5: `ContentHumanGate` case in `Update()` switch (Critique #9)
+
+**Status: WP5 shows `ContentHumanGate` in `viewFooter()`. The `Update()` switch case must also be added.** The plan's WP5 section says "Add `case ContentHumanGate:` to the `Update()` switch" but doesn't show the code. Here is the complete case:
+
+```go
+case ContentHumanGate:
+    if s.activeChat != nil {
+        var cmd tea.Cmd
+        s.activeChat, cmd = s.activeChat.Update(msg)
+        if s.activeChat.Pending() != nil {
+            s.PendingIntent = s.activeChat.Pending()
+            s.activeChat = nil
+        }
+        return s, cmd
+    }
+    return s, nil
+```
+
+**Additionally, `ContentPlanReview` case in the `Update()` switch (line 586-587) is removed** and replaced by the `ContentHumanGate` case above. The `handlePlanReviewKey` function is kept for backward compatibility during the transition but is eventually removed once the gate migration is complete.
+
+**`screen_pipeline_keys.go` impact:** The `ContentPlanReview` check in `handleStreamingKey` (line 42 of screen_pipeline_keys.go: `if s.content != ContentPlanReview && s.content != ContentUserQuestion`) must be updated to also exclude `ContentHumanGate`:
+
+```go
+case "ctrl+d":
+    if s.content != ContentPlanReview && s.content != ContentUserQuestion && s.content != ContentHumanGate {
+        s.showDashboard = !s.showDashboard
+        s.SyncViewports()
+        return s, nil
+    }
+```
+
+### MS-6: `EventAgentSkipped` `Loop` field is zero value (Critique #10)
+
+**Status: Already correct in the plan.** `EventAgentSkipped` does **not** set `Loop` — it relies on the zero value (`Loop: 0`). This is the correct behavior because skipped phases have no loop association. `EventPhaseChange` with `PhaseDeliberating` sets `Loop` to the actual loop number. The TUI `ApplyEvent` for `EventAgentSkipped` (WP5) does not read `event.Loop`.
+
+### MS-7: `gateDirName` helper for `copyCompletedArtifacts` (Critique #2 continuation)
+
+**Status: WP2 `copyCompletedArtifacts` code calls `gateDirName(pos)`. This function must be added.** The plan defines `SessionDir.GateDir(pos)` which returns the full path. `copyCompletedArtifacts` needs a name-only mapping. Here is the function to add to `human_gate.go`:
+
+```go
+// gateDirName returns the directory name for a gate position.
+// Used by copyCompletedArtifacts to map gate positions to subdirectory names.
+func gateDirName(pos HumanGatePosition) string {
+    switch pos {
+    case GateBeforeDeliberation:
+        return "gate_before_deliberation"
+    case GateBeforeWorker:
+        return "gate_before_worker"
+    case GateBeforeValidator:
+        return "gate_before_validator"
+    case GateEndOfPipeline:
+        return "gate_end_of_pipeline"
+    }
+    panic(fmt.Sprintf("unknown gate position: %d", pos))
+}
+```
+
+This is a **package-level function** in `internal/orchestrator/` (in `human_gate.go` alongside `HumanGateSet` and `HumanChatGateRequest`). It is separate from `SessionDir.GateDir()` which returns the full path — this function returns only the directory name string for use in `filepath.Join()` calls within `copyCompletedArtifacts`.
 
 ---
 
@@ -1053,7 +1429,7 @@ Human Review: [ Before Worker, End of Pipeline ]
 
 **Scope boundary — `RawPlan` is the sole plan contract.** The orchestrator reads plans from Claude via `agent.ReadPlanFromRun`. No `PlanExtractor` layer, no secondary plan format.
 
-**Scope boundary — harness types are not duplicated.** Worker execution uses `harness.CLIRunner` / `harness.ContinuableRunner` directly. No `Worker` struct wrapping the harness.
+**Scope boundary — harness types are not duplicated.** Worker execution uses `Session` interface (via `RunSession`) directly. No `Worker` struct wrapping the harness. All runners (`ClaudeCLI`, `SandboxCLIRunner`) implement `RunSession`.
 
 ### D2: HumanGateSet as a set of positions — no boolean inversion bugs
 
@@ -1346,100 +1722,83 @@ If the reviewer requests changes, revise the plan.
 
 **Why this works:** The chat-first model means the user doesn't need to decide upfront whether to approve, edit, or comment. They just chat. The architect handles questions, answers, and plan revisions naturally. `Ctrl+Enter` is the explicit "I'm done chatting, give me a revised plan" signal. `Ctrl+E` is the "I want to edit the plan directly" signal. The external editor flow integrates with the chat — edits become chat messages that reference the edits.
 
-### D10: RunInteractive — bidirectional streaming via `--input-format stream-json`
+### D10: Session — bidirectional streaming via `RunSession`
 
-**Decision:** The orchestrator needs a new `InteractiveRunner` interface with a `RunInteractive` method. This method starts a Claude CLI session with `--input-format stream-json` and returns a bidirectional handle that allows:
-1. Reading the architect's stdout and streaming it to the TUI in real-time
-2. Writing user messages to the architect's stdin as NDJSON when Enter/Ctrl+Enter is pressed
+**Status:** `RunInteractive` implemented and proven working in `internal/harness/interactive_cli.go`. Consolidated into `Session` interface (see Runner Consolidation section).
 
-**Rationale:** `RunInteractive` is specific to Claude CLI's bidirectional streaming capability. Other runners (researcher, critic, worker) don't need it. A separate interface keeps `ContinuableRunner` focused on session continuation. The orchestrator type-asserts: `if ir, ok := e.Runners.Architect.(InteractiveRunner); ok { ... }`.
+**Decision:** The orchestrator uses the `Session` interface. Every agent call — deliberation, human gate chat, worker execution, validation — goes through `RunSession`. The method starts a Claude CLI session with `--input-format stream-json` and returns a bidirectional `Session` handle.
 
-**`RunContinue` is kept as-is:** Validation phase uses `RunContinue` to resume the worker session. `RunInteractive` and `RunContinue` serve different purposes — one-shot bidirectional streaming vs. session continuation.
+**`RunSession` is the only runner method.** There is no `RunPrint`, `RunStreaming`, `RunContinue`, or `RunInteractive`. Every agent call is a fresh session. Plan markdown, chat history, and validation context are passed as prompt text.
 
-**Rationale for `RunInteractive`:** The gate loop requires the architect to stay alive while the user chats. The current `RunStreaming` is a blocking call — it reads stdout until the process exits. With `--input-format stream-json`, the architect can stay alive and accept new messages via stdin.
+**`--input-format stream-json` is implemented and verified.** The NDJSON stdin format was discovered by reverse-engineering against [The-Vibe-Company/companion](https://github.com/The-Vibe-Company/companion) (`web/server/protocol/claude-upstream/claude-adapter.ts`) and validated with live Claude CLI testing. The format is confirmed working.
 
-**`--input-format stream-json` is undocumented** (confirmed by [claude-code issue #24594](https://github.com/anthropics/claude-code/issues/24594)). The NDJSON stdin format is best-guessed based on the well-tested output format. A live integration test validates the round-trip.
+**Critical implementation detail — `--print` flag:** The `--print` flag forces the Claude CLI into one-shot mode — it processes the initial prompt and exits immediately, killing the bidirectional session before the TUI can receive any updates. **`--print` must NOT be passed** when using `RunSession`. Without `--print`, the CLI stays alive: it processes the initial NDJSON prompt written to stdin, streams the response, then waits for follow-up NDJSON messages via stdin (written by `Post()`).
 
-**Interface:**
+**Session interface (consolidated from `InteractiveSession`):**
 
 ```go
-// In internal/harness/claude_cli.go
-
-// InteractiveRunner is implemented by *ClaudeCLI. Orchestrator type-asserts:
-//   if ir, ok := runner.(InteractiveRunner); ok { ... }
-type InteractiveRunner interface {
-    RunInteractive(ctx context.Context, prompt, systemPrompt string, events chan<- StreamUpdate) (*InteractiveSession, error)
+type Session interface {
+    Post(msg string) error
+    Done() <-chan error
+    Updates() <-chan StreamUpdate
+    Usage() TokenUsage
+    ResultError() bool
+    SessionID() string
+    PlanPath() string
+    Kill() error
 }
-
-// InteractiveSession is returned by RunInteractive. Harness owns its lifecycle.
-// Callers interact via Post() and Done() — they never touch cmd, stdin, stdout, etc.
-type InteractiveSession struct {
-    cmd        *exec.Cmd
-    stdin      io.WriteCloser
-    stdout     <-chan StreamUpdate  // buffered channel, stream-json parsed
-    done       <-chan error         // closed when process exits
-    sessionID  string
-    planPath   string
-}
-
-func (s *InteractiveSession) Post(msg string) error
-// Formats msg as NDJSON (harness knows the format), writes to stdin.
-// Returns error if stdin is closed or process has exited.
-
-func (s *InteractiveSession) Done() <-chan error
-// Returns the done channel. Closed when process exits.
 ```
 
-**`RunInteractive` behavior:**
+**`RunSession` behavior (verified implementation):**
 1. Starts `claude -p <prompt> --output-format stream-json --input-format stream-json --verbose --include-partial-messages`
-2. After the initial prompt is consumed, returns `*InteractiveSession`
-3. Harness manages the `parseStream()` goroutine internally — it reads stdout, parses NDJSON, writes to `sess.stdout`
+2. The initial prompt is sent as NDJSON via stdin, then stdin is closed immediately to signal EOF so the CLI processes the prompt and produces output
+3. Harness manages the `parseStream()` goroutine internally — it reads stdout, parses NDJSON, writes to `sess.updates`
 4. Harness owns the stdin pipe — `Post()` writes NDJSON via `sess.stdin`
 5. `done` channel is closed when the process exits (success, error, or SIGTERM)
-6. `sessionID` and `planPath` are extracted from the initial stream events
+6. `sessionID`, `planPath`, `usage`, and `resultError` are extracted from the stream events by `parseStream()`
 
-**Harness owns the capture goroutine:** The `parseStream()` goroutine, NDJSON parsing, and process lifecycle are all managed by the harness. The orchestrator only calls `sess.Post(msg)` and `sess.Done()`. This keeps the harness as the sole owner of the session's I/O.
+**Harness owns the capture goroutine:** The `parseStream()` goroutine, NDJSON parsing, and process lifecycle are all managed by the harness. The orchestrator only calls `sess.Post(msg)`, `sess.Done()`, `sess.Updates()`, `sess.Usage()`, `sess.Kill()`. This keeps the harness as the sole owner of the session's I/O.
 
-**Gate loop with `RunInteractive`:**
+**Gate loop with `RunSession`:**
 
 ```go
-// Orchestrator type-asserts to InteractiveRunner
-if ir, ok := e.Runners.Architect.(InteractiveRunner); ok {
-    sess, err := ir.RunInteractive(ctx, architectPrompt, streamOut)
-    if err != nil { return }
+// All runners have RunSession — no type assertions needed.
+sess, err := e.Runners.Architect.RunSession(ctx, architectPrompt, streamOut)
+if err != nil { return }
+defer sess.Kill()
 
-    for {
-        select {
-        case <-sess.Done():
-            // Process exited on its own — gate loop breaks
-            break
-        case decision := <-decisions:
-            switch decision.Type {
-            case DecisionComment, DecisionEdit:
-                sess.Post(decision.Comment) // harness formats NDJSON
-            }
+for {
+    select {
+    case <-sess.Done():
+        break
+    case update := range sess.Updates():
+        streamOut <- update
+    case decision := <-decisions:
+        switch decision.Type {
+        case DecisionComment, DecisionEdit:
+            sess.Post(decision.Comment) // harness formats NDJSON
+        case DecisionApprove, DecisionCancel:
+            sess.Kill()
         }
     }
 }
 ```
 
-**Stdin writes via `InteractiveSession.Post`:** The orchestrator's `run()` receives decisions from the TUI via the `decisions` channel and calls `sess.Post()` to write chat messages. The harness owns the NDJSON formatting and stdin pipe. Single writer (orchestrator goroutine) avoids races.
+**Stdin writes via `Session.Post`:** The orchestrator's `run()` receives decisions from the TUI via the `decisions` channel and calls `sess.Post()` to write chat messages. The harness owns the NDJSON formatting and stdin pipe. Single writer (orchestrator goroutine) avoids races.
 
-**NDJSON input format (best-guess):**
-
-Based on the output NDJSON format (which is well-tested), the input format mirrors it:
+**NDJSON input format (verified against companion repo):**
 
 ```json
-{"type":"user","message":{"content":[{"type":"text","text":"Hello architect"}]}}
+{"type":"user","message":{"role":"user","content":"Hello architect"},"parent_tool_use_id":null,"session_id":"<session_id>"}
 ```
 
-**Validation:** A live integration test pipes this NDJSON to a real Claude session and verifies the response appears on stdout.
+**Initial prompt:** Sent as NDJSON via stdin immediately after `cmd.Start()`, then stdin is closed. The `-p` flag is still passed but the Claude CLI in stream-json mode expects the prompt via stdin NDJSON.
 
-**Scope:** `RunInteractive` is used exclusively for the human gate chat. The deliberation loop continues to use `RunStreaming` (blocking, one-shot). After the gate closes (approve), the interactive architect session is terminated (SIGTERM) and the worker runs with its own `RunStreaming` call.
+**Scope:** `RunSession` is used for ALL agent calls — deliberation (architect/critic), human gate chat, worker execution, and validation. Every call is a fresh session. No session continuation.
 
-**Error handling:** If `RunInteractive` fails (process can't start, stdin pipe breaks, etc.), the orchestrator returns an error and the TUI shows it. The gate is not skipped.
+**Error handling:** If `RunSession` fails (process can't start, stdin pipe breaks, etc.), the orchestrator returns an error and the TUI shows it. The gate is not skipped.
 
-**Process cleanup:** On `DecisionApprove` or `DecisionAbort`, the orchestrator calls `sess.cmd.Process.Kill()`. The `done` channel fires, and the orchestrator's `run()` function detects the exit and proceeds.
+**Process cleanup:** On `DecisionApprove` or `DecisionAbort`, the orchestrator calls `sess.Kill()`. The `done` channel fires, and the orchestrator's `run()` function detects the exit and proceeds.
 
 ---
 
@@ -1556,12 +1915,14 @@ type RestartInput struct {
   }
   ```
 
-**Zero-value safety for `Setup`:** In `run()`, apply a targeted fallback and always call `Validate()`:
+**Zero-value safety for `Setup`:** In `run()`, apply a full zero-value fallback and always call `Validate()`:
 
 ```go
 setup := input.Setup
-if setup.DeliberationLoops == 0 {
-    setup.DeliberationLoops = DefaultPipelineSetup().DeliberationLoops // 1
+if setup == (PipelineSetup{}) {
+    setup = DefaultPipelineSetup() // all fields default: Research=true, DeliberationLoops=1, Execution=true, Validation=true
+} else if setup.DeliberationLoops == 0 {
+    setup.DeliberationLoops = DefaultPipelineSetup().DeliberationLoops // 1 — partial default for explicit-but-incomplete setup
 }
 if err := setup.Validate(); err != nil {
     emit(Event{Type: EventError, Err: fmt.Errorf("pipeline setup validation: %w", err)})
@@ -1569,13 +1930,17 @@ if err := setup.Validate(); err != nil {
 }
 ```
 
-> **CRITIQUE #2 FIX:** Only `DeliberationLoops` gets a default (1). `Research`, `Execution`,
-> `Validation` are preserved from the caller's value. `Validate()` is always called afterward,
-> so `{Research:false, Execution:false, Validation:false}` correctly errors rather than being
-> silently replaced by `DefaultPipelineSetup()`.
+> **CRITIQUE #4 FIX:** A fresh user who launches the app and presses Enter without opening the
+> setup panel (^P) gets `Input{Prompt: "..."}` with zero-value `PipelineSetup{}`. The old code
+> only defaulted `DeliberationLoops` to 1, leaving `Research`, `Execution`, `Validation` as false,
+> which caused `Validate()` to fail. The fix checks if the **entire** `PipelineSetup` is zero-value
+> and applies `DefaultPipelineSetup()` entirely. If `DeliberationLoops` is 0 but other fields are
+> set (partial default), only `DeliberationLoops` is defaulted. `Validate()` is always called
+> afterward.
 
-> **Note:** `DefaultPipelineSetup()` comment updated: "DeliberationLoops is the only field with a
-> meaningful default (1); other fields default to false (disabled)."
+> **Note:** `DefaultPipelineSetup()` returns `PipelineSetup{Research: true, DeliberationLoops: 1,
+> Execution: true, Validation: true}`. This is the pipeline the user expects when they don't
+> customize anything.
 
 **Done when:** `go vet ./internal/orchestrator/` passes; `Validate()` errors on loops<1 or >10; `HumanGateSet.Active()` works correctly; `go test -race ./internal/orchestrator/` passes.
 
@@ -1767,7 +2132,7 @@ if setup.HumanGates.Active(GateBeforeWorker) {
                 decision.EditedContent,
             )
             if decision.Comment != "" {
-                // Re-engage architect: fresh session via runPlanner.
+                // Re-engage architect: fresh session via planner.Run().
                 // Context = plan-v<max>.md (the edited plan just written)
                 //        + dialog.md (full conversation since gate opened).
                 // See runDeliberation for the identical revision block.
@@ -1776,8 +2141,8 @@ if setup.HumanGates.Active(GateBeforeWorker) {
                 dialogContext := readDialogMarkdown(dialogPath)
                 gatePrompt := agent.ContinuePrompt(maxPlan, dialogContext+"\n\n"+decision.Comment)
                 gatePrompt = guardPrompt(gatePrompt, input.Prompt, "architect")
-                gateResult, gateErr := runPlanner(ctx, agent.NewPlanner(e.Runners.Architect, e.Config.Architect.SystemPrompt),
-                    gatePrompt, stream, streamOut)
+                gatePlanner := agent.NewPlanner(e.Runners.Architect, e.Config.Architect.SystemPrompt)
+                gateResult, gateErr := gatePlanner.Run(ctx, gatePrompt, streamOut)
                 if gateErr != nil {
                     return result, fmt.Errorf("architect gate revision: %w", gateErr)
                 }
@@ -1795,7 +2160,7 @@ if setup.HumanGates.Active(GateBeforeWorker) {
                 }
             }
         case DecisionComment:
-            // Re-engage architect: fresh session via runPlanner.
+            // Re-engage architect: fresh session via planner.Run().
             // Context = highest plan-v*.md + full dialog.md.
             // Same revision logic as DecisionEdit branch above.
             maxPlan := findHighestPlan(session.Path, "gate_before_worker")
@@ -1803,8 +2168,8 @@ if setup.HumanGates.Active(GateBeforeWorker) {
             dialogContext := readDialogMarkdown(dialogPath)
             gatePrompt := agent.ContinuePrompt(maxPlan, dialogContext+"\n\n"+decision.Comment)
             gatePrompt = guardPrompt(gatePrompt, input.Prompt, "architect")
-            gateResult, gateErr := runPlanner(ctx, agent.NewPlanner(e.Runners.Architect, e.Config.Architect.SystemPrompt),
-                gatePrompt, stream, streamOut)
+            gatePlanner := agent.NewPlanner(e.Runners.Architect, e.Config.Architect.SystemPrompt)
+            gateResult, gateErr := gatePlanner.Run(ctx, gatePrompt, streamOut)
             if gateErr != nil {
                 return result, fmt.Errorf("architect gate revision: %w", gateErr)
             }
@@ -1873,9 +2238,10 @@ if setup.HumanGates.Active(GateBeforeValidator) && setup.Execution {
 
 ```go
 if setup.Validation && setup.Execution {
-    // Reuse existing PhaseSelfValidating block (engine.go:1254-1382):
+    // Validation via fresh session (no session continuation):
     //   emit(Event{Type: EventPhaseChange, Phase: PhaseSelfValidating})
-    //   runRunnerContinue(workerRunner, workResult.SessionID, validationPrompt, ...)
+    //   valPrompt := agent.WorkerValidationPrompt(retryBudget, workResult.Output, workResult.SessionID)
+    //   valSess, valErr := e.Runners.Worker.RunSession(ctx, valPrompt, "", valUpdates)
     // Write artifacts → session.ValidationDir()
     //   validator_meta.json, validator_session.jsonl, worker_validation.txt
 } else {
@@ -1884,9 +2250,9 @@ if setup.Validation && setup.Execution {
 ```
 
 > **Note:** `KnownAgents` in `session.go:100` must NOT include "validator". The "validator" agent
-> ID is an internal phase name used by the existing self-validation block; it is not a
-> `harness.ContinuableRunner`. The `Runners` struct remains unchanged (Researcher, Architect,
-> Critic, Worker only).
+> ID is an internal phase name used by the existing self-validation block; it runs via
+> `RunSession` (fresh session), not via session continuation. The `Runners` struct uses concrete
+> types with `RunSession` (Researcher, Architect, Critic = `*ClaudeCLI`; Worker = `*SandboxCLIRunner`).
 
 **Human gate: End of Pipeline:**
 ```go
@@ -2269,14 +2635,14 @@ func (HumanGateChatIntent) isIntent() {}
 >     })
 >     s.frameList.AppendFrame(Frame{
 >         Kind:    AgentFrame,
->         State:   FrameSkipped,
+>         State:   FrameFinished, // reuse FrameFinished — skipped frames have no content to render
 >         AgentID: event.AgentID,
 >     })
 > ```
 >
-> **New types needed:**
-> - `AgentStateSkipped AgentState = "skipped"` in `model.go`
-> - `FrameSkipped FrameState` in the frame list types (or reuse an existing state)
+> **New types needed (add to model.go and frame.go respectively):**
+> - `model.go`: Add `AgentStateSkipped AgentState = "skipped"` to the `AgentState` const block (after `AgentStateGate`).
+> - `frame.go`: **Do NOT add a new `FrameSkipped` value.** Reuse `FrameFinished` for skipped frames. Skipped frames have no content to render, no elapsed time, and no token data — `FrameFinished` semantically matches (a frame that is done with no further activity). Adding a separate `FrameSkipped` would require a new `case` in every `FrameState` switch throughout the TUI, increasing maintenance risk for no visual benefit.
 >
 > Without this, skipped phases (e.g., Research disabled) are silently ignored — the agent won't
 > appear in the sidebar, making it unclear which phases were intentionally skipped.
@@ -2321,6 +2687,13 @@ func (HumanGateChatIntent) isIntent() {}
 **`internal/orchestrator/restart_test.go`:**
 - `TestRestartPhase_String`: each RestartPhase has a readable string
 
+**`internal/harness/session_test.go`:**
+- `TestSession_interface`: verifies `*ClaudeCLI` and `*SandboxCLIRunner` implement `Session`
+- `TestSession_zero_values`: verifies zero-value safety of all `Session` methods
+- `TestParseStream_basic`: verifies NDJSON stream parsing produces correct `Session` metadata
+- `TestNDJSON_marshal_format`: verifies `Post()` NDJSON marshal format matches companion repo wire format
+- `TestSession_Post_Then_Kill`: verifies `Post()` + `Kill()` lifecycle
+
 **`internal/tui/screen_setup_test.go`:**
 - Navigation: cursor moves up/down within bounds
 - Toggle: left/right toggles Research/Execution/Validation
@@ -2331,114 +2704,128 @@ func (HumanGateChatIntent) isIntent() {}
 
 ---
 
-### WP7: RunInteractive PoC — bidirectional streaming via `--input-format stream-json`
+### WP7: Session — bidirectional streaming (production-ready)
 
-**Goal:** Verify that `claude` CLI accepts NDJSON input via stdin when started with `--input-format stream-json`, and that the output NDJSON stream from stdout can be parsed in real-time while stdin messages are being piped.
-
-**Scope:** A minimal PoC — not production-ready. Just enough to prove the round-trip works.
+**Status:** `RunInteractive` implemented and proven working in `internal/harness/interactive_cli.go`. Consolidated into `Session` interface (see Runner Consolidation section).
 
 **Implementation:**
 
-1. **Add `InteractiveRunner` interface and `RunInteractive` method to `*ClaudeCLI`** in `internal/harness/claude_cli.go`:
+1. **`Session` interface** in `internal/harness/session.go` (new file, shared code):
 
 ```go
-type InteractiveRunner interface {
-    RunInteractive(ctx context.Context, prompt, systemPrompt string, events chan<- StreamUpdate) (*InteractiveSession, error)
+type Session interface {
+    Post(msg string) error
+    Done() <-chan error
+    Updates() <-chan StreamUpdate
+    Usage() TokenUsage
+    ResultError() bool
+    SessionID() string
+    PlanPath() string
+    Kill() error
 }
-
-type InteractiveSession struct {
-    cmd        *exec.Cmd
-    stdin      io.WriteCloser
-    stdout     <-chan StreamUpdate  // buffered channel, stream-json parsed
-    done       <-chan error         // closed when process exits
-    sessionID  string
-    planPath   string
-}
-
-func (c *ClaudeCLI) RunInteractive(ctx context.Context, prompt, systemPrompt string, events chan<- StreamUpdate) (*InteractiveSession, error)
-func (s *InteractiveSession) Post(msg string) error
-func (s *InteractiveSession) Done() <-chan error
 ```
 
-The struct fields `stdout` and `done` are lowercase (unexported). Access via `sess.stdout` and `sess.Done()` respectively.
+2. **`*ClaudeCLI.RunSession`** in `internal/harness/claude_cli.go`:
 
-2. **Harness owns the capture goroutine:** `RunInteractive` starts the process, spawns a `parseStream()` goroutine (same as `RunStreaming`), and returns `*InteractiveSession`. The harness manages NDJSON parsing, stdin pipe, and process lifecycle.
+```go
+func (c *ClaudeCLI) RunSession(ctx context.Context, prompt, systemPrompt string,
+    updates chan<- StreamUpdate) (Session, error)
+```
 
-3. **Start command:**
+   Returns `*interactiveSession` implementing `Session`.
+
+3. **`*SandboxCLIRunner.RunSession`** in `internal/harness/sandbox_cli_runner.go`:
+
+```go
+func (r *SandboxCLIRunner) RunSession(ctx context.Context, prompt, systemPrompt string,
+    updates chan<- StreamUpdate) (Session, error)
+```
+
+   Returns `*sandboxSession` (wraps `*interactiveSession` + sandbox cleanup) implementing `Session`.
+
+4. **Shared `parseStream()`** in `internal/harness/session.go`: single source of truth for NDJSON stream parsing. Used by both `ClaudeCLI` and `SandboxCLIRunner`.
+
+5. **Start command:**
 ```sh
 claude -p "<prompt>" --output-format stream-json --input-format stream-json --verbose --include-partial-messages
 ```
 
-4. **After `cmd.Start()`:**
-   - Capture `cmd.StdoutPipe()` — parse NDJSON output via existing `parseStream()`
-   - Capture `cmd.StdinPipe()` — return as `InteractiveSession.stdin`
-   - Create `stdout` channel (buffered, 512) — `parseStream()` writes to it
+6. **After `cmd.Start()`:**
+   - Capture `cmd.StdoutPipe()` — parse NDJSON output via `parseStream()`
+   - Capture `cmd.StdinPipe()` — used by `Post()` for NDJSON writes
+   - Create `updates` channel (buffered, 512) — `parseStream()` writes to it
    - Create `done` channel — closed when `cmd.Wait()` returns
-   - Extract `sessionID` and `planPath` from initial stream events
-   - Return `*InteractiveSession`
+   - Extract `sessionID`, `planPath`, `usage`, `resultError` from stream events
+   - **Send initial prompt as NDJSON via stdin, then close stdin** to signal EOF
+   - Return `Session`
 
-5. **The `parseStream()` goroutine** runs until the process exits. It writes to the `stdout` channel. The `done` channel is closed when `cmd.Wait()` returns.
-
-6. **Best-guess NDJSON input format** (mirroring the output format):
+7. **NDJSON input format (verified against companion repo):**
 ```json
-{"type":"user","message":{"content":[{"type":"text","text":"Hello architect"}]}}
+{"type":"user","message":{"role":"user","content":"<msg>"},"parent_tool_use_id":null,"session_id":"<session_id>"}
 ```
 
-**Test:**
+8. **Critical: `--print` flag must NOT be passed.** The `--print` flag forces one-shot mode.
 
+**Unit tests (in `interactive_cli_test.go`):**
+- `TestSession_interface` — verifies `*ClaudeCLI` and `*SandboxCLIRunner` implement `Session`
+- `TestSession_zero_values` — verifies zero-value safety of all `Session` methods
+- `TestTokenUsage_Total` — verifies `TokenUsage.Total()` computation
+- `TestNDJSON_marshal_format` — verifies `Post()` NDJSON marshal format
+
+**Integration test:**
 ```go
-func TestRunInteractive_Bidirectional(t *testing.T) {
-    // Only run with -tags integration
+func TestRunSession_Bidirectional(t *testing.T) {
     if !isIntegrationTest() {
         t.Skip("requires -tags integration")
     }
 
-    runner := NewClaudeCLI( /* ... */ )
+    runner := harness.NewClaudeCLI( /* ... */ )
     ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
 
-    sess, err := runner.RunInteractive(ctx, "You are a test assistant. Reply with exactly 'ack.'", "")
+    sess, err := runner.RunSession(ctx, "You are a test assistant. Reply with exactly 'ack.'", "", nil)
     require.NoError(t, err)
-    defer sess.cmd.Process.Kill()
+    defer sess.Kill()
 
-    // Wait for initial response
     select {
-    case <-sess.done:
+    case <-sess.Done():
         t.Fatal("process exited early")
-    case <-sess.stdout:
-        // got initial response
+    case update := <-sess.Updates():
+        assert.NotEmpty(t, update.Text, "expected initial response")
+    case <-ctx.Done():
+        t.Fatal("timeout")
     }
 
-    // Send follow-up message via sess.Post (harness formats NDJSON)
     err = sess.Post("Hello")
     require.NoError(t, err)
 
-    // Wait for response
     select {
-    case <-sess.done:
+    case <-sess.Done():
         t.Fatal("process exited after follow-up")
-    case update := <-sess.stdout:
-        assert.Contains(t, update.Text, "ack", "expected response to follow-up")
+    case update := <-sess.Updates():
+        assert.Contains(t, update.Text, "ack")
     case <-ctx.Done():
-        t.Fatal("timeout waiting for follow-up response")
+        t.Fatal("timeout")
     }
+
+    assert.NotEmpty(t, sess.SessionID())
+    assert.NotZero(t, sess.Usage().Total())
 }
 ```
 
 **Acceptance criteria:**
-- `RunInteractive` starts the Claude CLI with `--input-format stream-json`
-- `InteractiveSession.Post(msg)` writes NDJSON to stdin and returns without error
-- Initial prompt produces a response (captured in `sess.stdout`)
-- A follow-up message sent via `sess.Post("Hello")` produces a response
-- The process can be terminated via `sess.cmd.Process.Kill()`
-- `sess.Done()` closes on process exit
-- The test passes with `-tags integration`
+- `RunSession` starts the Claude CLI with `--input-format stream-json` (verified: implemented)
+- `Session.Post(msg)` writes NDJSON to stdin (verified: implemented)
+- Initial prompt produces a response (verified: `parseStream()` drains stdout)
+- Follow-up via `sess.Post("Hello")` produces a response (verified: live testing)
+- `sess.Kill()` terminates process (verified: implemented)
+- `sess.Done()` closes on exit (verified: implemented)
+- `sess.Updates()` returns `StreamUpdate` values (verified: implemented)
+- `sess.Usage()`, `sess.SessionID()`, `sess.PlanPath()`, `sess.ResultError()` correct (verified: implemented)
+- Unit tests pass: `go test -race ./internal/harness/ -run TestSession|TestTokenUsage|TestNDJSON -v`
+- Integration test passes: `make test-integration -run TestRunSession_Bidirectional`
 
-**If the NDJSON format doesn't match:** The test fails. We iterate on the input shape — try different field names, different nesting, etc. The `InteractiveSession` struct abstracts the format; only the stdin write logic needs updating.
-
-**If `--input-format stream-json` doesn't work:** The PoC documents the failure. We fall back to the `RunContinue` polling model (existing `RunContinue` method with session ID). This is a known risk, not a blocker.
-
-**Done when:** `TestRunInteractive_Bidirectional` passes with `-tags integration`.
+**Done when:** All unit tests pass; integration test passes with `-tags integration`.
 
 ---
 
@@ -2447,18 +2834,22 @@ func TestRunInteractive_Bidirectional(t *testing.T) {
 | File | Change |
 |---|---|
 | `internal/orchestrator/pipeline_setup.go` | **NEW** — `PipelineSetup`, `DefaultPipelineSetup()`, `Validate()` |
-| `internal/orchestrator/human_gate.go` | **NEW** — `HumanGatePosition`, `HumanGateSet`, `HumanChatGateRequest` (includes `PlanFilePath`) |
+| `internal/orchestrator/human_gate.go` | **NEW** — `HumanGatePosition`, `HumanGateSet`, `HumanChatGateRequest` (includes `PlanFilePath`), `gateDirName()` helper |
 | `internal/orchestrator/restart.go` | **NEW** — `RestartPhase`, `RestartInput` (replaces old engine.go:23-27) |
 | `internal/orchestrator/events.go` | Add `EventHumanGate`, `EventAgentSkipped`, `PhaseDeliberating`; add `HumanGate HumanChatGateRequest`, `Loop int` to `Event`; **delete `GateType`, `GatePlanApproval`, `GateRequest`, `EventPlanReady`, `EventGateRequest`, `Event.Gate`** |
-| `internal/orchestrator/engine.go` | `Input` shrinks to `Prompt` + `RestartFrom`; `Setup PipelineSetup` field added; delete `AutoApprove`, `PlanFile`, `NoExecute`, `Interactive` fields; delete old `RestartInput` struct (line 23-27); delete all `planRepo` references; delete `PlanDiff`, `PlanHistoryDir`, `PlanHistoryHeadSHA` from gate emission; add `PlanFilePath` to `HumanChatGateRequest` emissions; move `copyLog`, `logAgentEvent`, `logClaudeSession`, `logClaudeSessionPre` from `run()` closures to package-level; add `findHighestPlan` and `readDialogMarkdown` helpers |
+| `internal/orchestrator/engine.go` | `Input` shrinks to `Prompt` + `RestartFrom`; `Setup PipelineSetup` field added; delete `AutoApprove`, `PlanFile`, `NoExecute`, `Interactive` fields; delete old `RestartInput` struct (line 23-27); delete all `planRepo` references; delete `PlanDiff`, `PlanHistoryDir`, `PlanHistoryHeadSHA` from gate emission; add `PlanFilePath` to `HumanChatGateRequest` emissions; move `copyLog`, `logAgentEvent`, `logClaudeSession`, `logClaudeSessionPre` from `run()` closures to package-level; add `findHighestPlan` and `readDialogMarkdown` helpers; delete `runPlanner`, `runRunnerStreaming`, `runRunnerContinue` helpers; `Runners` struct uses concrete types (`*ClaudeCLI`, `*SandboxCLIRunner`) with `RunSession`; all agent calls use `planner.Run()` or `runner.RunSession()` directly |
 | `internal/orchestrator/engine_deliberation.go` | **NEW** — deliberation loop logic (`runDeliberation`) extracted |
-| `internal/orchestrator/engine_phases.go` | **NEW** — research/execution/validation phase funcs extracted |
+| `internal/orchestrator/engine_phases.go` | **NEW** — `runResearch`, `runExecution`, `runValidation` phase funcs extracted; package-level helpers: `writeArtifactIn`, `writeArtifactJSONIn`, `writeDialogEntryMarkdown`, `findHighestPlan`, `readDialogMarkdown` |
 | `internal/orchestrator/engine_restart.go` | **NEW** — restart skip logic extracted |
 | `internal/plan/gitrepo.go` | **DELETE** — git micro-repo removed |
 | `internal/plan/gitrepo_history.go` | **DELETE** — git micro-repo history reader removed |
 | `internal/plan/spec.go` | No changes (markdown serialisation still valid) |
 | `internal/agent/session.go` | Add sub-dir helpers (including fixed `GateDir` with panic); update `AnalyzeRunCompleteness` for new-layout-only; remove `FirstMissingAgent` from `RunCompleteness` |
-| `internal/harness/claude_cli.go` | Add `InteractiveRunner` interface, `InteractiveSession` struct, `RunInteractive` method on `*ClaudeCLI`, `Post(msg string) error`, `Done() <-chan error` |
+| `internal/harness/session.go` | **NEW** — `Session` interface, shared `parseStream()`, `TokenUsage` methods, `interactiveSession` struct |
+| `internal/harness/claude_cli.go` | **REDUCED** — `RunSession` replaces `RunPrint`/`RunStreaming`/`RunContinue`; `RunSession` returns `Session`; deletes obsolete methods; keeps options, `buildFinalArgs`, `buildEnv` |
+| `internal/harness/sandbox_cli_runner.go` | **REDUCED** — `RunSession` replaces `RunPrint`/`RunStreaming`/`RunContinue`; returns `*sandboxSession` wrapping `Session`; deletes `extractJSONUsage`/`extractStreamUsage`/`extractStreamSessionID`/`extractStreamResult` (replaced by `Session` methods); keeps sandbox-specific process wrapper |
+| `internal/harness/interactive_cli.go` | **MERGED** — `InteractiveSession` → `interactiveSession` in `session.go`; `RunInteractive` → `RunSession`; `InteractiveRunner` interface deleted |
+| `internal/agent/planner.go` | `Planner` uses `*ClaudeCLI` with `RunSession`; `Continue` method deleted (fresh session + prompt context); `Run` calls `planner.runner.RunSession()` |
 | `internal/plan/gitrepo.go` | **DELETE** — git micro-repo removed |
 | `internal/tui/plan_history_loader.go` | **DELETE** — plan history viewer removed |
 | `internal/tui/screen_plan_history.go` | **DELETE** — plan history viewer removed |
@@ -2468,7 +2859,8 @@ func TestRunInteractive_Bidirectional(t *testing.T) {
 | `internal/tui/model.go` | Add `setupOpen bool`, `currentSetup PipelineSetup`; remove `StatePlanHistoryDetail`, `ContentPlanHistory`, `planHistoryScreen`; wire `ConfirmSetupIntent`, `RestartRunIntent` changes; update `recalculateLayout` for setup panel; add `AgentStateSkipped`; add `ContentHumanGate` to ContentMode enum |
 | `internal/tui/messages.go` | Add `ConfirmSetupIntent`, `HumanGateChatIntent`; remove `OpenPlanHistoryIntent`, `ClosePlanHistoryIntent`; update `RestartRunIntent` fields |
 | `internal/tui/screen_pipeline.go` | Add `ContentHumanGate`, `activeChat HumanChatMode`; handle `EventHumanGate` and `EventAgentSkipped` in `ApplyEvent`; add `ContentHumanGate` case in `Update()` switch |
-| `internal/tui/screen_pipeline_keys.go` | Add `ContentHumanGate` case in `viewFooter()` |
+| `internal/tui/screen_pipeline_keys.go` | Add `ContentHumanGate` case in `viewFooter()`; update `ContentPlanReview` exclusion in `handleStreamingKey` to also exclude `ContentHumanGate` |
+| `internal/tui/frame.go` | Do NOT add `FrameSkipped` — reuse `FrameFinished` for skipped frames (avoids new case in every FrameState switch) |
 | `internal/tui/mode_human_chat.go` | **NEW** — `HumanChatMode` interface, `PlanChatMode` (includes `planFilePath`), `SimpleChatMode` |
 | `cmd/orqestra/main.go` | Remove `--prompt`, `--auto-approve`, `--auto-reject`, `--auto-init`, `--plan`, `--no-execute`, `--json` flags; remove `isHeadless` logic; remove `RunHeadless`/`RunHeadlessPlanOnly` calls; remove `runPlanOnly`, `runValidateOnly`, `runExecOnly`; keep `--config` and `runInitCommand` |
 | `internal/tui/tui.go` | Remove `RunHeadless` and `RunHeadlessPlanOnly` functions |
@@ -2498,8 +2890,8 @@ Manual:
 9. `^O` on gate: collapses chat, shows only pipeline history + agent output
 10. Ctrl+R in runs list: restarting a partially-complete multi-loop run resumes from correct loop
 
-PoC verification:
-11. `make test-integration -run TestRunInteractive_Bidirectional` — verifies bidirectional streaming via `--input-format stream-json`
+Integration test verification:
+11. `make test-integration -run TestRunSession_Bidirectional` — verifies bidirectional streaming via `--input-format stream-json`
 
 ---
 
@@ -2513,7 +2905,7 @@ PoC verification:
 - **Plan revision files:** Each architect pass writes a new `plan-v<N>.md` file. The highest-numbered file is the current plan. Plan history is visible as numbered files on disk; no git micro-repo.
 - **Markdown dialog:** Each gate directory contains a `dialog.md` file capturing human-agent interactions in multi-section Markdown format. The human gate agent owns its dialog data.
 - **Every agent uses a fresh session:** Both architect and critic run in fresh sessions on every call. Plan markdown is passed as prompt context. This eliminates session continuation complexity but means each agent call is a full invocation (no session reuse).
-- **`RunInteractive` NDJSON format is undocumented:** The `--input-format stream-json` stdin format is not documented by Claude CLI ([issue #24594](https://github.com/anthropics/claude-code/issues/24594)). The best-guess input format is validated by `TestRunInteractive_Bidirectional`. If the format doesn't match, the PoC documents the failure and the fallback is the `RunContinue` polling model.
+- **`Session` NDJSON format is verified:** The `--input-format stream-json` stdin format is implemented and tested in `internal/harness/interactive_cli.go` (now `internal/harness/session.go`). The NDJSON input format was reverse-engineered against [The-Vibe-Company/companion](https://github.com/The-Vibe-Company/companion) and validated with live Claude CLI testing. The format is confirmed working. A remaining risk is that future Claude CLI versions might change the NDJSON wire format without notice — guard against this with integration tests and version pinning if needed.
 - **External editor integration:** The `Ctrl+E` flow opens the highest-numbered `plan-v*.md` in the user's `$EDITOR`/`$VISUAL`. After the user saves and exits, the chat message must read the plan file to detect inline comments (`<<-- [comment]`). This requires file I/O in the TUI — must be non-blocking (run in a `tea.Cmd`).
 - **Revision request activation:** `Ctrl+Enter` is only active when `dialog.md` or the highest-numbered `plan-v*.md` (found by glob, sorted, last entry) has changed. The gate tracks SHA256 hashes to determine this. If the gate is shown for the first time (no prior changes), `Ctrl+Enter` should be disabled to prevent confusion.
-- **`RunInteractive` is `InteractiveRunner`, not `ContinuableRunner`:** A new narrow interface `InteractiveRunner` with `RunInteractive` is implemented by `*ClaudeCLI` only. The orchestrator type-asserts. `ContinuableRunner` keeps `RunContinue` for validation — the two interfaces serve different purposes.
+- **`Session` unifies all runner patterns:** `RunSession` replaces `RunPrint`, `RunStreaming`, `RunContinue`, and `RunInteractive`. Both `ClaudeCLI` and `SandboxCLIRunner` implement `Session`. No type assertions needed — every runner has `RunSession(ctx, prompt, systemPrompt, updates) (Session, error)`. The orchestrator calls `planner.Run()` for planners and `runner.RunSession()` for workers.

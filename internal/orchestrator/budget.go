@@ -2,14 +2,9 @@ package orchestrator
 
 import (
 	"context"
-	"errors"
-	"fmt"
 
 	"github.com/xiii/orqestra/internal/harness"
 )
-
-// ErrBudgetExhausted is returned when a token budget is exceeded.
-var ErrBudgetExhausted = errors.New("token budget exhausted")
 
 // BudgetGuard enforces token budgets by reading from RunUsage.
 type BudgetGuard struct {
@@ -29,77 +24,63 @@ func (g *BudgetGuard) Check() error {
 		return nil
 	}
 	if g.usage.TotalUsed() >= limit {
-		return fmt.Errorf("%w: used %d of %d", ErrBudgetExhausted, g.usage.TotalUsed(), limit)
+		return harness.ErrBudgetExhausted
 	}
 	return nil
 }
 
-// WrapContinuable returns a ContinuableRunner that enforces the budget
+// Wrap returns a Runner that enforces the budget
 // before and after each call, recording usage under agentID.
-func (g *BudgetGuard) WrapContinuable(inner harness.ContinuableRunner, agentID string) harness.ContinuableRunner {
-	return &budgetedRunner{inner: inner, guard: g, agentID: agentID}
+func (g *BudgetGuard) Wrap(inner harness.Runner, agentID string) harness.Runner {
+	return &budgetedRunner{inner: inner, guard: g, agentID: agentID, usage: g.usage}
 }
 
-// budgetedRunner is a ContinuableRunner decorator that enforces token budgets.
+// budgetedRunner is a Runner decorator that enforces token budgets
+// and records per-agent usage under the orchestrator's RunUsage.
 type budgetedRunner struct {
-	inner   harness.ContinuableRunner
+	inner   harness.Runner
 	guard   *BudgetGuard
 	agentID string
+	usage   *RunUsage
 }
 
-func (r *budgetedRunner) RunPrint(ctx context.Context, prompt, systemPrompt string) (harness.RunResult, error) {
-	if err := r.guard.Check(); err != nil {
-		return harness.RunResult{}, err
-	}
-
-	result, innerErr := r.inner.RunPrint(ctx, prompt, systemPrompt)
-	r.record(result.Usage)
-
-	if innerErr != nil {
-		return result, innerErr
-	}
-	if err := r.guard.Check(); err != nil {
-		return result, err
-	}
-	return result, nil
+func (r *budgetedRunner) Post(msg string) {
+	r.inner.Post(msg)
 }
 
-func (r *budgetedRunner) RunStreaming(ctx context.Context, prompt, systemPrompt string, events chan<- harness.StreamUpdate) (harness.RunResult, error) {
-	if err := r.guard.Check(); err != nil {
-		return harness.RunResult{}, err
-	}
+func (r *budgetedRunner) Receive() <-chan harness.Event {
+	ch := make(chan harness.Event, 256)
+	inner := r.inner.Receive()
 
-	result, innerErr := r.inner.RunStreaming(ctx, prompt, systemPrompt, events)
-	r.record(result.Usage)
+	go func() {
+		defer close(ch)
+		for ev := range inner {
+			// Record per-agent usage for usage events.
+			if ev.Kind == harness.EventUsage {
+				r.usage.Record(r.agentID, ev.Input, ev.Output)
+			}
+			select {
+			case ch <- ev:
+			default:
+			}
+		}
+	}()
 
-	if innerErr != nil {
-		return result, innerErr
-	}
-	if err := r.guard.Check(); err != nil {
-		return result, err
-	}
-	return result, nil
+	return ch
 }
 
-func (r *budgetedRunner) RunContinue(ctx context.Context, sessionID, prompt string, events chan<- harness.StreamUpdate) (harness.RunResult, error) {
-	if err := r.guard.Check(); err != nil {
-		return harness.RunResult{}, err
-	}
-
-	result, innerErr := r.inner.RunContinue(ctx, sessionID, prompt, events)
-	r.record(result.Usage)
-
-	if innerErr != nil {
-		return result, innerErr
-	}
-	if err := r.guard.Check(); err != nil {
-		return result, err
-	}
-	return result, nil
+func (r *budgetedRunner) ExtractPlan(ctx context.Context) (string, error) {
+	return r.inner.ExtractPlan(ctx)
 }
 
-func (r *budgetedRunner) record(usage harness.TokenUsage) {
-	if usage.Total() > 0 {
-		r.guard.usage.Record(r.agentID, usage.Input, usage.Output)
-	}
+func (r *budgetedRunner) SetEvents(ch chan<- harness.Event) {
+	r.inner.SetEvents(ch)
+}
+
+func (r *budgetedRunner) SessionID() string {
+	return r.inner.SessionID()
+}
+
+func (r *budgetedRunner) Cancel() error {
+	return r.inner.Cancel()
 }

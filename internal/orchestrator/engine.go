@@ -64,10 +64,10 @@ type RunDirFactory func(slug string) (agent.SessionDir, error)
 
 // Runners holds all runners for each agent role.
 type Runners struct {
-	Researcher harness.ContinuableRunner
-	Architect  harness.ContinuableRunner
-	Critic     harness.ContinuableRunner
-	Worker     harness.ContinuableRunner
+	Researcher harness.Runner
+	Architect  harness.Runner
+	Critic     harness.Runner
+	Worker     harness.Runner
 }
 
 // resolveAgentMeta builds AgentMeta from the config for the given model ref.
@@ -96,9 +96,9 @@ type Engine struct {
 	RunDirFactory  RunDirFactory
 	QuestionBridge *mcp.QuestionBridge
 	// WorktreeRunnerFactory, when set, is called just before the worker phase to
-	// create a ContinuableRunner scoped to the worktree at the given path.
+	// create a Runner scoped to the worktree at the given path.
 	// If nil, the default Runners.Worker is used with repo write access.
-	WorktreeRunnerFactory func(worktreePath string) harness.ContinuableRunner
+	WorktreeRunnerFactory func(worktreePath string) harness.Runner
 }
 
 // RunChannels provides bidirectional communication between Engine and TUI.
@@ -113,7 +113,7 @@ type RunChannels struct {
 func (e *Engine) Start(ctx context.Context, input Input) RunChannels {
 	events := make(chan Event, 16)
 	decisions := make(chan Decision, 1)
-	rawStream := make(chan harness.StreamUpdate, 512)
+	rawStream := make(chan harness.Event, 512)
 	streamEntries := make(chan StreamEntry, 512)
 	history := NewStreamHistoryStore()
 	capture := newStreamCapture(history)
@@ -129,7 +129,7 @@ func (e *Engine) Start(ctx context.Context, input Input) RunChannels {
 				entry = StreamEntry{Kind: EntryText, Text: u.Text}
 			case u.Tool != "":
 				entry = StreamEntry{Kind: EntryToolUse, Tool: u.Tool, Detail: u.Detail}
-			case u.UsageValid:
+			case u.Kind == harness.EventUsage:
 				entry = StreamEntry{Kind: EntryStats, Stats: StreamStats{
 					Input: u.Input, Output: u.Output, Valid: true,
 				}}
@@ -197,15 +197,15 @@ func (e *Engine) SendAnswer(ans mcp.Answer) {
 }
 
 func runWithStreamConsumer[T any](
-	call func(events chan<- harness.StreamUpdate) (T, error),
+	call func(events chan<- harness.Event) (T, error),
 	capture *streamCapture,
-	out chan<- harness.StreamUpdate,
+	out chan<- harness.Event,
 ) (T, error) {
 	if capture == nil {
 		return call(nil)
 	}
 
-	events := make(chan harness.StreamUpdate, 256)
+	events := make(chan harness.Event, 256)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -226,31 +226,73 @@ func runWithStreamConsumer[T any](
 	return res, err
 }
 
-func runPlanner(ctx context.Context, planner *agent.Planner, prompt string, capture *streamCapture, out chan<- harness.StreamUpdate) (agent.PlanResult, error) {
-	return runWithStreamConsumer(func(events chan<- harness.StreamUpdate) (agent.PlanResult, error) {
+func runPlanner(ctx context.Context, planner *agent.Planner, prompt string, capture *streamCapture, out chan<- harness.Event) (agent.PlanResult, error) {
+	return runWithStreamConsumer(func(events chan<- harness.Event) (agent.PlanResult, error) {
 		return planner.Run(ctx, prompt, events)
 	}, capture, out)
 }
 
-func continuePlanner(ctx context.Context, planner *agent.Planner, sessionID, prompt string, capture *streamCapture, out chan<- harness.StreamUpdate) (agent.PlanResult, error) {
-	return runWithStreamConsumer(func(events chan<- harness.StreamUpdate) (agent.PlanResult, error) {
+func continuePlanner(ctx context.Context, planner *agent.Planner, sessionID, prompt string, capture *streamCapture, out chan<- harness.Event) (agent.PlanResult, error) {
+	return runWithStreamConsumer(func(events chan<- harness.Event) (agent.PlanResult, error) {
 		return planner.Continue(ctx, sessionID, prompt, events)
 	}, capture, out)
 }
 
-func runRunnerStreaming(ctx context.Context, runner harness.ContinuableRunner, prompt, systemPrompt string, capture *streamCapture, out chan<- harness.StreamUpdate) (harness.RunResult, error) {
-	return runWithStreamConsumer(func(events chan<- harness.StreamUpdate) (harness.RunResult, error) {
-		return runner.RunStreaming(ctx, prompt, systemPrompt, events)
+func runRunnerStreaming(ctx context.Context, runner harness.Runner, prompt, systemPrompt string, capture *streamCapture, out chan<- harness.Event) (harness.RunResult, error) {
+	return runWithStreamConsumer(func(events chan<- harness.Event) (harness.RunResult, error) {
+		runner.SetEvents(events)
+		if systemPrompt != "" {
+			// Send system prompt as initial message.
+			runner.Post(systemPrompt)
+		}
+		runner.Post(prompt)
+		// Wait for session to complete by reading from Receive().
+		// The result is extracted from the EventSessionDone or EventError events.
+		var result harness.RunResult
+		for ev := range runner.Receive() {
+			if ev.Kind == harness.EventError {
+				result.Output = ev.Text
+				result.Usage = harness.TokenUsage{Input: ev.Input, Output: ev.Output}
+				result.SessionID = ev.SessionID
+				return result, fmt.Errorf("runner error: %s", ev.Text)
+			}
+			if ev.Kind == harness.EventUsage {
+				result.Usage = harness.TokenUsage{Input: ev.Input, Output: ev.Output}
+			}
+			if ev.Kind == harness.EventChunk && ev.Text != "" {
+				result.Output += ev.Text
+			}
+		}
+		result.SessionID = runner.SessionID()
+		return result, nil
 	}, capture, out)
 }
 
-func runRunnerContinue(ctx context.Context, runner harness.ContinuableRunner, sessionID, prompt string, capture *streamCapture, out chan<- harness.StreamUpdate) (harness.RunResult, error) {
-	return runWithStreamConsumer(func(events chan<- harness.StreamUpdate) (harness.RunResult, error) {
-		return runner.RunContinue(ctx, sessionID, prompt, events)
+func runRunnerContinue(ctx context.Context, runner harness.Runner, sessionID, prompt string, capture *streamCapture, out chan<- harness.Event) (harness.RunResult, error) {
+	return runWithStreamConsumer(func(events chan<- harness.Event) (harness.RunResult, error) {
+		runner.SetEvents(events)
+		runner.Post(prompt)
+		var result harness.RunResult
+		for ev := range runner.Receive() {
+			if ev.Kind == harness.EventError {
+				result.Output = ev.Text
+				result.Usage = harness.TokenUsage{Input: ev.Input, Output: ev.Output}
+				result.SessionID = ev.SessionID
+				return result, fmt.Errorf("runner error: %s", ev.Text)
+			}
+			if ev.Kind == harness.EventUsage {
+				result.Usage = harness.TokenUsage{Input: ev.Input, Output: ev.Output}
+			}
+			if ev.Kind == harness.EventChunk && ev.Text != "" {
+				result.Output += ev.Text
+			}
+		}
+		result.SessionID = runner.SessionID()
+		return result, nil
 	}, capture, out)
 }
 
-func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, decisions <-chan Decision, stream *streamCapture, streamOut chan<- harness.StreamUpdate) {
+func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, decisions <-chan Decision, stream *streamCapture, streamOut chan<- harness.Event) {
 	emit := func(ev Event) {
 		select {
 		case events <- ev:
@@ -756,7 +798,7 @@ skipPlanning:
 		stream.SetAgent("architect")
 		revStart := time.Now()
 
-		critBaseline, critBaselineErr := agent.ReadPlanFromRun(harness.RunResult{SessionID: planSessionID})
+		critBaseline, critBaselineErr := architectPlanner.ExtractPlan(ctx)
 		if critBaselineErr != nil {
 			slog.Debug("could not snapshot plan file baseline before critic revision", "err", critBaselineErr)
 		}
@@ -924,7 +966,7 @@ planGate:
 						stream.SetAgent("architect")
 						revStart := time.Now()
 
-						editBaseline, editBaselineErr := agent.ReadPlanFromRun(harness.RunResult{SessionID: planSessionID})
+						editBaseline, editBaselineErr := architectPlanner.ExtractPlan(ctx)
 						if editBaselineErr != nil {
 							slog.Debug("could not snapshot plan file baseline before edit revision", "err", editBaselineErr)
 						}
@@ -1049,7 +1091,7 @@ planGate:
 					var err error
 
 					if planSessionID != "" {
-						commentBaseline, commentBaselineErr := agent.ReadPlanFromRun(harness.RunResult{SessionID: planSessionID})
+						commentBaseline, commentBaselineErr := architectPlanner.ExtractPlan(ctx)
 						if commentBaselineErr != nil {
 							slog.Debug("could not snapshot plan file baseline before comment revision", "err", commentBaselineErr)
 						}
@@ -1356,10 +1398,24 @@ planGate:
 	// commit and a session to continue.
 	semanticMsg := ""
 	if wt.Path != "" && lastSessionID != "" {
-		msgResult, msgErr := workerRunner.RunContinue(ctx, lastSessionID, agent.CommitMessagePrompt(), nil)
-		if msgErr != nil {
-			slog.Warn("commit message generation failed — using fallback", "err", msgErr)
-		} else {
+		workerRunner.SetEvents(nil)
+		workerRunner.Post(agent.CommitMessagePrompt())
+		var msgResult harness.RunResult
+		for ev := range workerRunner.Receive() {
+			if ev.Kind == harness.EventError {
+				msgErr := fmt.Errorf("commit message generation: %s", ev.Text)
+				slog.Warn("commit message generation failed — using fallback", "err", msgErr)
+				msgResult = harness.RunResult{Output: ev.Text}
+				break
+			}
+			if ev.Kind == harness.EventUsage {
+				msgResult.Usage = harness.TokenUsage{Input: ev.Input, Output: ev.Output}
+			}
+			if ev.Kind == harness.EventChunk && ev.Text != "" {
+				msgResult.Output += ev.Text
+			}
+		}
+		if msgResult.Output != "" {
 			parsed, parseErr := agent.ParseCommitMessage(msgResult.Output)
 			if parseErr != nil {
 				slog.Warn("commit message parse failed — using fallback", "err", parseErr)
@@ -1409,7 +1465,7 @@ planGate:
 				})
 			} else if !mergeResult.Merged {
 				mergeOutcomeFailed = true
-				// Conflicts — gate the user
+				// Conflicts — gate the user unless AutoApprove is set.
 				emit(Event{
 					Type: EventMergeConflict,
 					MergeConflict: MergeConflictInfo{
@@ -1421,14 +1477,16 @@ planGate:
 					MergeWorktreePath: wt.Path,
 				})
 				logger.Warn("merge_conflict", "worktree_branch", wt.Branch, "target_branch", targetBranch, "files", len(mergeResult.ConflictFiles))
-				select {
-				case decision := <-decisions:
-					if decision.Type == DecisionMergeAbort {
-						slog.Info("merge aborted by user", "branch", wt.Branch)
+				if !input.AutoApprove {
+					select {
+					case decision := <-decisions:
+						if decision.Type == DecisionMergeAbort {
+							slog.Info("merge aborted by user", "branch", wt.Branch)
+						}
+						// Any other decision: user resolved externally or accepted abort
+					case <-ctx.Done():
+						// Context cancelled — leave worktree branch and path as-is
 					}
-					// Any other decision: user resolved externally or accepted abort
-				case <-ctx.Done():
-					// Context cancelled — leave worktree branch and path as-is
 				}
 			} else {
 				// Merge succeeded — clean up worktree and branch

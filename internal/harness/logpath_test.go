@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func parseLogFileUpdates(t *testing.T, path string, maxLines int) []StreamUpdate {
+func parseLogFileUpdates(t *testing.T, path string, maxLines int) []Event {
 	t.Helper()
 	f, err := os.Open(path)
 	if err != nil {
@@ -58,7 +58,7 @@ func TestParseSessionLogStream_File_ToolUseAndText(t *testing.T) {
 
 	updates := parseLogFileUpdates(t, logPath, 100)
 
-	var entries []StreamUpdate
+	var entries []Event
 	for _, u := range updates {
 		if u.Tool != "" || u.Text != "" {
 			entries = append(entries, u)

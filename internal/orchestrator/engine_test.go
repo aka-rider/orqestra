@@ -103,7 +103,7 @@ func TestEngine_MergeErrorFailsAndPreservesWorktree(t *testing.T) {
 	engine.RunDirFactory = newSessionDirFactory(t)
 
 	var workerPath string
-	engine.WorktreeRunnerFactory = func(worktreePath string) harness.ContinuableRunner {
+	engine.WorktreeRunnerFactory = func(worktreePath string) harness.Runner {
 		workerPath = worktreePath
 		return &testutil.FakeRunner{Calls: []testutil.FakeCall{
 			{
@@ -123,6 +123,8 @@ func TestEngine_MergeErrorFailsAndPreservesWorktree(t *testing.T) {
 					if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("dirty repo change\n"), 0o644); err != nil {
 						t.Fatalf("write repo dirty change: %v", err)
 					}
+					runGit(t, repo, "add", "file.txt")
+					runGit(t, repo, "commit", "-m", "dirty repo change")
 				},
 			},
 		}}
@@ -130,7 +132,7 @@ func TestEngine_MergeErrorFailsAndPreservesWorktree(t *testing.T) {
 
 	var mergeEvent Event
 	result, err := engine.Run(context.Background(), Input{Prompt: "Add feature X"}, func(event Event) {
-		if event.Type == EventMergeError {
+		if event.Type == EventMergeConflict {
 			mergeEvent = event
 		}
 	})
@@ -140,11 +142,11 @@ func TestEngine_MergeErrorFailsAndPreservesWorktree(t *testing.T) {
 	if result.Status != StatusFailed {
 		t.Fatalf("status = %q, want %q", result.Status, StatusFailed)
 	}
-	if mergeEvent.MergeBranch == "" {
-		t.Fatal("expected merge branch on merge error event")
+	if mergeEvent.MergeConflict.WorktreeBranch == "" {
+		t.Fatal("expected merge branch on merge conflict event")
 	}
 	if mergeEvent.MergeWorktreePath == "" {
-		t.Fatal("expected preserved worktree path on merge error event")
+		t.Fatal("expected preserved worktree path on merge conflict event")
 	}
 	if mergeEvent.MergeWorktreePath != workerPath {
 		t.Fatalf("merge worktree path = %q, want %q", mergeEvent.MergeWorktreePath, workerPath)
@@ -152,8 +154,8 @@ func TestEngine_MergeErrorFailsAndPreservesWorktree(t *testing.T) {
 	if _, statErr := os.Stat(workerPath); statErr != nil {
 		t.Fatalf("expected preserved worktree path to exist: %v", statErr)
 	}
-	if !gitBranchExists(t, repo, mergeEvent.MergeBranch) {
-		t.Fatalf("expected preserved branch %q to exist", mergeEvent.MergeBranch)
+	if !gitBranchExists(t, repo, mergeEvent.MergeConflict.WorktreeBranch) {
+		t.Fatalf("expected preserved branch %q to exist", mergeEvent.MergeConflict.WorktreeBranch)
 	}
 	runLog, readErr := os.ReadFile(filepath.Join(result.RunDir, "run.log"))
 	if readErr != nil {
@@ -172,7 +174,7 @@ func TestEngine_MergeConflictFailsAndPreservesWorktree(t *testing.T) {
 	engine.RunDirFactory = newSessionDirFactory(t)
 
 	var workerPath string
-	engine.WorktreeRunnerFactory = func(worktreePath string) harness.ContinuableRunner {
+	engine.WorktreeRunnerFactory = func(worktreePath string) harness.Runner {
 		workerPath = worktreePath
 		return &testutil.FakeRunner{Calls: []testutil.FakeCall{
 			{
@@ -242,7 +244,7 @@ func TestEngine_WorkerFailurePreservesWorktree(t *testing.T) {
 	engine.RunDirFactory = newSessionDirFactory(t)
 
 	var workerPath string
-	engine.WorktreeRunnerFactory = func(worktreePath string) harness.ContinuableRunner {
+	engine.WorktreeRunnerFactory = func(worktreePath string) harness.Runner {
 		workerPath = worktreePath
 		return &testutil.FakeRunner{Calls: []testutil.FakeCall{
 			{Err: errors.New("simulated worker failure")},
@@ -547,12 +549,12 @@ func TestEngine_DecisionEdit(t *testing.T) {
 	}
 }
 
-// Contract: agent-instructions.md "Token Breaking" — ErrBudgetExhausted causes EventError and clean shutdown
+// Contract: agent-instructions.md "Token Breaking" — harness.ErrBudgetExhausted causes EventError and clean shutdown
 func TestEngine_BudgetExhausted(t *testing.T) {
 	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 	engine.Runners.Researcher = &testutil.FakeRunner{
 		Calls: []testutil.FakeCall{{
-			Err: fmt.Errorf("%w: used 100 of 50", ErrBudgetExhausted),
+			Err: fmt.Errorf("%w: used 100 of 50", harness.ErrBudgetExhausted),
 		}},
 	}
 

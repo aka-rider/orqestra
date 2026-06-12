@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -240,41 +241,29 @@ func runScenario(ctx context.Context, cfg *config.Config, selfBin string, s scen
 	}()
 
 	// Build the claude CLI runner with MCP bridge injected
-	runner, err := buildRunnerWithBridge(cfg, selfBin, socketPath)
+	runner, err := buildRunnerWithBridge(ctx, cfg, selfBin, socketPath)
 	if err != nil {
 		return scenarioResult{name: s.name, bridgeError: fmt.Sprintf("build runner: %v", err)}
 	}
 
-	// Run the model
+	// Run the model using Post + Receive pattern.
 	var outputBuf strings.Builder
-	updates := make(chan harness.StreamUpdate, 256)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for u := range updates {
-			if u.Text != "" {
-				_, _ = outputBuf.WriteString(u.Text)
-			}
-		}
-	}()
-	result, runErr := runner.RunStreaming(scenarioCtx, s.prompt, systemPrompt, updates)
-	close(updates)
-	<-done
-	elapsed := time.Since(start)
+	var inputTokens, outputTokens int64
+	updates := make(chan harness.Event, 256)
+	runner.SetEvents(updates)
+	if systemPrompt != "" {
+		runner.Post(systemPrompt)
+	}
+	runner.Post(s.prompt)
 
-	if runErr != nil {
-		// Check if tool was called despite error
-		called := false
-		select {
-		case c := <-toolCalled:
-			called = c
-		default:
+	elapsed := time.Since(start)
+	for ev := range runner.Receive() {
+		if ev.Kind == harness.EventUsage {
+			inputTokens += ev.Input
+			outputTokens += ev.Output
 		}
-		return scenarioResult{
-			name:        s.name,
-			toolCalled:  called,
-			bridgeError: fmt.Sprintf("run: %v", runErr),
-			duration:    elapsed,
+		if ev.Text != "" {
+			_, _ = outputBuf.WriteString(ev.Text)
 		}
 	}
 
@@ -285,7 +274,7 @@ func runScenario(ctx context.Context, cfg *config.Config, selfBin string, s scen
 	default:
 	}
 
-	pass, reason := s.judge(result.Output)
+	pass, reason := s.judge(outputBuf.String())
 
 	return scenarioResult{
 		name:         s.name,
@@ -293,27 +282,41 @@ func runScenario(ctx context.Context, cfg *config.Config, selfBin string, s scen
 		judgePass:    pass,
 		judgeReason:  reason,
 		duration:     elapsed,
-		inputTokens:  result.Usage.Input,
-		outputTokens: result.Usage.Output,
+		inputTokens:  inputTokens,
+		outputTokens: outputTokens,
 	}
 }
 
-func buildRunnerWithBridge(cfg *config.Config, selfBin, socketPath string) (harness.CLIRunner, error) {
+func buildRunnerWithBridge(ctx context.Context, cfg *config.Config, selfBin, socketPath string) (harness.Runner, error) {
 	resolved, err := cfg.ResolveModel("small")
 	if err != nil {
 		return nil, fmt.Errorf("resolve small model: %w", err)
 	}
 
-	// Build options matching the main binary's bridgeToolOpts path exactly.
+	// Build model spec from resolved model.
+	modelSpec := harness.ModelSpec{
+		Provider: resolved.Type,
+		Model:    resolved.Model,
+		BaseURL:  resolved.BaseURL,
+		APIKey:   resolved.APIKey,
+	}
+
+	// Build runner config matching the main binary's bridgeToolOpts path exactly.
 	// This validates the full flag combination end-to-end.
-	runner := harness.NewClaudeCLI(resolved,
-		harness.WithPermissionMode("plan"),
-		harness.WithExtraArgs("--strict-mcp-config"),
-		harness.WithInlineMCPServer("orqestra", selfBin, []string{"mcp-bridge", "--socket", socketPath}),
-		harness.WithAllowedTools([]string{"*", "mcp__*", "mcp__orqestra__AskUserQuestion"}),
-		harness.WithDisallowedTools([]string{"AskUserQuestion", "ExitPlanMode"}),
-		harness.WithSettings(`{"permissions":{"allow":["mcp__orqestra__*"]}}`),
-	)
+	runner, err := harness.NewRunner(harness.RunnerConfig{
+		Model: modelSpec,
+		InlineMCPServers: map[string]harness.InlineMCP{
+			"orqestra": {Command: selfBin, Args: []string{"mcp-bridge", "--socket", socketPath}},
+		},
+		PermissionMode:   "plan",
+		ExtraArgs:        []string{"--strict-mcp-config"},
+		AllowedTools:     []string{"*", "mcp__*", "mcp__orqestra__AskUserQuestion"},
+		DisallowedTools:  []string{"AskUserQuestion", "ExitPlanMode"},
+		Settings:         json.RawMessage(`{"permissions":{"allow":["mcp__orqestra__*"]}}`),
+	}, ctx)
+	if err != nil {
+		return nil, fmt.Errorf("build runner: %w", err)
+	}
 
 	return runner, nil
 }

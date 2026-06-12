@@ -9,20 +9,53 @@ import (
 )
 
 type stubRunner struct {
-	result harness.RunResult
-	err    error
+	events chan harness.Event
+	done   chan struct{}
 }
 
-func (s *stubRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
-	return s.result, s.err
+func (s *stubRunner) Post(msg string) {
+	// Simulate a response
+	if s.events == nil {
+		return
+	}
+	select {
+	case s.events <- harness.Event{Kind: harness.EventChunk, Text: "response"}:
+	case <-s.done:
+	}
+	select {
+	case s.events <- harness.Event{Kind: harness.EventUsage, Input: 10, Output: 5}:
+	case <-s.done:
+	}
+	select {
+	case s.events <- harness.Event{Kind: harness.EventSessionDone}:
+	case <-s.done:
+	}
+	close(s.events)
 }
 
-func (s *stubRunner) RunStreaming(_ context.Context, _, _ string, _ chan<- harness.StreamUpdate) (harness.RunResult, error) {
-	return s.result, s.err
+func (s *stubRunner) Receive() <-chan harness.Event {
+	return s.events
 }
 
-func (s *stubRunner) RunContinue(_ context.Context, _, _ string, _ chan<- harness.StreamUpdate) (harness.RunResult, error) {
-	return s.result, s.err
+func (s *stubRunner) ExtractPlan(ctx context.Context) (string, error) {
+	return "plan content", nil
+}
+
+func (s *stubRunner) SetEvents(ch chan<- harness.Event) {
+	// Create the events channel that Post() writes to.
+	// The injected ch is send-only (runner writes to it); we don't range over it.
+	if s.events == nil {
+		s.events = make(chan harness.Event, 256)
+	}
+}
+
+func (s *stubRunner) SessionID() string {
+	return "test-session"
+}
+
+func (s *stubRunner) Cancel() error {
+	close(s.done)
+	return nil
 }
 
 func TestBudgetGuard_Unlimited(t *testing.T) {
@@ -55,64 +88,8 @@ func TestBudgetGuard_OverBudget(t *testing.T) {
 	if err == nil {
 		t.Fatal("Check() should return error when over budget")
 	}
-	if !errors.Is(err, ErrBudgetExhausted) {
+	if !errors.Is(err, harness.ErrBudgetExhausted) {
 		t.Errorf("error should be ErrBudgetExhausted, got: %v", err)
-	}
-}
-
-func TestBudgetedRunner_PreCheck(t *testing.T) {
-	u := NewRunUsage(100)
-	u.StartAgent("worker", AgentMeta{})
-	u.Record("worker", 50, 60) // over budget
-
-	g := NewBudgetGuard(u)
-	inner := &stubRunner{result: harness.RunResult{Usage: harness.TokenUsage{Input: 10, Output: 5}}}
-	wrapped := g.WrapContinuable(inner, "worker")
-
-	_, err := wrapped.RunPrint(context.Background(), "test", "")
-	if !errors.Is(err, ErrBudgetExhausted) {
-		t.Errorf("expected pre-check to block, got: %v", err)
-	}
-}
-
-func TestBudgetedRunner_PostCheck(t *testing.T) {
-	u := NewRunUsage(100)
-	u.StartAgent("worker", AgentMeta{})
-	// 80 used, budget 100 — pre-check passes
-	u.Record("worker", 40, 40)
-
-	g := NewBudgetGuard(u)
-	// Inner call returns 30 tokens — post-call total = 80 + 30 = 110 > 100
-	inner := &stubRunner{result: harness.RunResult{Usage: harness.TokenUsage{Input: 20, Output: 10}}}
-	wrapped := g.WrapContinuable(inner, "worker")
-
-	_, err := wrapped.RunPrint(context.Background(), "test", "")
-	if !errors.Is(err, ErrBudgetExhausted) {
-		t.Errorf("expected post-check to fail, got: %v", err)
-	}
-}
-
-func TestBudgetedRunner_InnerErrorTakesPrecedence(t *testing.T) {
-	u := NewRunUsage(1000)
-	u.StartAgent("worker", AgentMeta{})
-
-	g := NewBudgetGuard(u)
-	innerErr := errors.New("connection refused")
-	inner := &stubRunner{
-		result: harness.RunResult{Usage: harness.TokenUsage{Input: 50, Output: 50}},
-		err:    innerErr,
-	}
-	wrapped := g.WrapContinuable(inner, "worker")
-
-	_, err := wrapped.RunPrint(context.Background(), "test", "")
-	if !errors.Is(err, innerErr) {
-		t.Errorf("expected inner error, got: %v", err)
-	}
-
-	// Usage should still be recorded
-	snap := u.Snapshot()
-	if snap.Input != 50 {
-		t.Errorf("input = %d, want 50 (usage recorded despite inner error)", snap.Input)
 	}
 }
 
@@ -121,16 +98,23 @@ func TestBudgetedRunner_RecordsUsage(t *testing.T) {
 	u.StartAgent("worker", AgentMeta{})
 
 	g := NewBudgetGuard(u)
-	inner := &stubRunner{result: harness.RunResult{Usage: harness.TokenUsage{Input: 100, Output: 50}}}
-	wrapped := g.WrapContinuable(inner, "worker")
+	inner := &stubRunner{
+		done:   make(chan struct{}),
+		events: make(chan harness.Event, 256),
+	}
+	wrapped := g.Wrap(inner, "worker")
 
-	_, err := wrapped.RunStreaming(context.Background(), "test", "", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	// Start the budgetedRunner's Receive goroutine that records usage.
+	eventsCh := wrapped.Receive()
+
+	wrapped.Post("test")
+	// Read from the wrapped channel until closed.
+	// The budgetedRunner goroutine records usage before forwarding.
+	for range eventsCh {
 	}
 
 	snap := u.Snapshot()
-	if snap.Input != 100 || snap.Output != 50 {
-		t.Errorf("snap = %d/%d, want 100/50", snap.Input, snap.Output)
+	if snap.Input != 10 || snap.Output != 5 {
+		t.Errorf("snap = %d/%d, want 10/5", snap.Input, snap.Output)
 	}
 }

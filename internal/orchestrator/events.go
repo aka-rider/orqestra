@@ -112,7 +112,7 @@ type Event struct {
 	Status           RunStatus // set on EventComplete
 	RunDir           string    // set on EventComplete
 
-	// Token usage from the agent's RunResult. Set on EventAgentDone.
+	// Token usage from the agent's streaming events. Set on EventAgentDone.
 	InputTokens  int64
 	OutputTokens int64
 

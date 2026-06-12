@@ -29,6 +29,13 @@ func TestClaudeCLI_InSandbox(t *testing.T) {
 		claudeBinary = bin
 	}
 
+	// Skip when ANTHROPIC_API_KEY is not set — the test requires API access
+	// and Claude CLI will fail with 401 otherwise. OAuth auth is harder to
+	// detect programmatically; CI/CD pipelines typically use API keys.
+	if os.Getenv("ANTHROPIC_API_KEY") == "" {
+		t.Skip("ANTHROPIC_API_KEY not set — sandbox Claude CLI tests require API key authentication")
+	}
+
 	workspace := t.TempDir()
 
 	// Build sandbox with API key if available
@@ -136,6 +143,11 @@ func TestClaudeCLI_InSandbox(t *testing.T) {
 
 // TestClaudeCLI_SandboxDeniesSSH verifies that claude cannot read .ssh even when instructed.
 func TestClaudeCLI_SandboxDeniesSSH(t *testing.T) {
+	// Skip when ANTHROPIC_API_KEY is not set — the test requires API access.
+	if os.Getenv("ANTHROPIC_API_KEY") == "" {
+		t.Skip("ANTHROPIC_API_KEY not set — sandbox Claude CLI tests require API key authentication")
+	}
+
 	claudeBinary := "claude"
 	if bin := os.Getenv("CLAUDE_BINARY"); bin != "" {
 		claudeBinary = bin

@@ -8,12 +8,12 @@ import (
 )
 
 // ParseSessionLogStream reads a Claude CLI JSONL session log from a reader
-// and returns extracted typed stream updates.
-func ParseSessionLogStream(r io.Reader) ([]StreamUpdate, error) {
+// and returns extracted typed events.
+func ParseSessionLogStream(r io.Reader) ([]Event, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, initialScanBufferBytes), maxJSONLLineBytes)
 
-	var events []StreamUpdate
+	var events []Event
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -29,7 +29,7 @@ func ParseSessionLogStream(r io.Reader) ([]StreamUpdate, error) {
 
 		events = append(events, streamEventsFrom(event)...)
 		if event.Usage != nil {
-			events = append(events, StreamUpdate{Input: event.Usage.InputTokens, Output: event.Usage.OutputTokens, UsageValid: true})
+			events = append(events, Event{Kind: EventUsage, Input: event.Usage.InputTokens, Output: event.Usage.OutputTokens})
 		}
 	}
 

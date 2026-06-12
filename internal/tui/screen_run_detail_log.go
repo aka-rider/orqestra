@@ -67,7 +67,7 @@ func (s *RunDetailScreen) LoadStepLog() {
 	s.logVP.GotoBottom()
 }
 
-func parseSessionLogFile(path string, maxLines int) ([]harness.StreamUpdate, error) {
+func parseSessionLogFile(path string, maxLines int) ([]harness.Event, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -84,17 +84,17 @@ func parseSessionLogFile(path string, maxLines int) ([]harness.StreamUpdate, err
 	return updates, nil
 }
 
-// formatLogUpdates converts parsed stream updates to styled display lines.
-func formatLogUpdates(updates []harness.StreamUpdate) []string {
+// formatLogUpdates converts parsed stream events to styled display lines.
+func formatLogUpdates(updates []harness.Event) []string {
 	lines := make([]string, 0, len(updates))
-	for _, update := range updates {
-		if update.Tool != "" {
-			line := "  " + activityToolStyle.Render(update.Tool) + " " + activityPathStyle.Render(update.Detail)
+	for _, ev := range updates {
+		if ev.Tool != "" {
+			line := "  " + activityToolStyle.Render(ev.Tool) + " " + activityPathStyle.Render(ev.Detail)
 			lines = append(lines, line)
 			continue
 		}
-		if update.Text != "" {
-			text := strings.TrimSpace(update.Text)
+		if ev.Text != "" {
+			text := strings.TrimSpace(ev.Text)
 			if text == "" {
 				continue
 			}

@@ -26,30 +26,50 @@ type PlanResult struct {
 	StreamFallback bool
 }
 
-// Planner is the unified plan-mode agent entity. It wraps a ContinuableRunner
+// Planner is the unified plan-mode agent entity. It wraps a Runner
 // and a system prompt, always reading its authoritative output from the plan file.
-// Worker execution does not use Planner — workers use ContinuableRunner directly.
+// Worker execution does not use Planner — workers use Runner directly.
 type Planner struct {
-	runner harness.ContinuableRunner
+	runner harness.Runner
 	system string
 }
 
-// NewPlanner creates a Planner backed by the given ContinuableRunner and system prompt.
-func NewPlanner(runner harness.ContinuableRunner, system string) *Planner {
+// NewPlanner creates a Planner backed by the given Runner and system prompt.
+func NewPlanner(runner harness.Runner, system string) *Planner {
 	return &Planner{runner: runner, system: system}
 }
 
+// ExtractPlan delegates to the underlying runner's ExtractPlan.
+// Used by the orchestrator to get a plan baseline before running the planner.
+func (p *Planner) ExtractPlan(ctx context.Context) (string, error) {
+	return p.runner.ExtractPlan(ctx)
+}
+
 // Run executes a new planning session with the given prompt. It reads authoritative
-// output from the plan file via ReadPlanFromRun. Falls back to the CLI stream result
+// output from the plan file via ExtractPlan. Falls back to the CLI stream result
 // text when the plan file is unreadable but the stream produced output. Returns a
 // hard error only when both the plan file and stream output are unavailable.
-func (p *Planner) Run(ctx context.Context, prompt string, events chan<- harness.StreamUpdate) (PlanResult, error) {
-	result, err := p.runner.RunStreaming(ctx, prompt, p.system, events)
-	if err != nil {
-		return PlanResult{}, fmt.Errorf("planner run: %w", err)
+func (p *Planner) Run(ctx context.Context, prompt string, events chan<- harness.Event) (PlanResult, error) {
+	p.runner.SetEvents(events)
+	p.runner.Post(prompt)
+
+	var result harness.RunResult
+	for ev := range p.runner.Receive() {
+		if ev.Kind == harness.EventError {
+			return PlanResult{}, fmt.Errorf("planner run: %s", ev.Text)
+		}
+		if ev.Kind == harness.EventUsage {
+			result.Usage = harness.TokenUsage{Input: ev.Input, Output: ev.Output}
+		}
+		if ev.Kind == harness.EventChunk && ev.Text != "" {
+			result.Output += ev.Text
+		}
+		if ev.Kind == harness.EventSessionStart {
+			result.SessionID = ev.SessionID
+		}
 	}
 
-	planContent, planErr := ReadPlanFromRun(result)
+	planContent, planErr := p.runner.ExtractPlan(ctx)
 	if planErr != nil {
 		streamText := strings.TrimSpace(result.Output)
 		if result.SessionID == "" || streamText == "" {
@@ -79,16 +99,30 @@ func (p *Planner) Run(ctx context.Context, prompt string, events chan<- harness.
 // Continue resumes a previous planning session with a follow-up prompt. It reads
 // authoritative output from the plan file, but TOLERATES plan-file read failure:
 // conversational continuations (gate Q&A) do not edit the plan, so the continuation
-// RunResult may lack a PlanFilePath. When the plan file is unreadable, Plan is
+// may lack a plan file. When the plan file is unreadable, Plan is
 // empty and Chat carries the model's response. Errors are returned only for runner
 // failures, never for plan-file-missing.
-func (p *Planner) Continue(ctx context.Context, sessionID, prompt string, events chan<- harness.StreamUpdate) (PlanResult, error) {
-	result, err := p.runner.RunContinue(ctx, sessionID, prompt, events)
-	if err != nil {
-		return PlanResult{}, fmt.Errorf("planner continue: %w", err)
+func (p *Planner) Continue(ctx context.Context, sessionID, prompt string, events chan<- harness.Event) (PlanResult, error) {
+	p.runner.SetEvents(events)
+	p.runner.Post(prompt)
+
+	var result harness.RunResult
+	for ev := range p.runner.Receive() {
+		if ev.Kind == harness.EventError {
+			return PlanResult{}, fmt.Errorf("planner continue: %s", ev.Text)
+		}
+		if ev.Kind == harness.EventUsage {
+			result.Usage = harness.TokenUsage{Input: ev.Input, Output: ev.Output}
+		}
+		if ev.Kind == harness.EventChunk && ev.Text != "" {
+			result.Output += ev.Text
+		}
+		if ev.Kind == harness.EventSessionStart {
+			result.SessionID = ev.SessionID
+		}
 	}
 
-	planContent, planErr := ReadPlanFromRun(result)
+	planContent, planErr := p.runner.ExtractPlan(ctx)
 	if planErr != nil {
 		slog.Debug("planner continue: plan file unreadable (chat-only continuation)",
 			"session_id", sessionID, "err", planErr)

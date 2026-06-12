@@ -235,4 +235,4 @@ func TestCheckPromptIntegrity_EmptyOriginalNoTrip(t *testing.T) {
 
 // --- Compile-time interface assertion ---
 
-var _ harness.ContinuableRunner = (*testutil.FakeRunner)(nil)
+var _ harness.Runner = (*testutil.FakeRunner)(nil)

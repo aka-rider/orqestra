@@ -20,7 +20,7 @@ func TestParseSessionLogStream_ExtractsActivitiesAndText(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	var activities []StreamUpdate
+	var activities []Event
 	var lines []string
 	for _, u := range updates {
 		if u.Tool != "" {
@@ -80,7 +80,7 @@ func TestParseSessionLogStream_AssistantMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	var activities []StreamUpdate
+	var activities []Event
 	var lines []string
 	for _, u := range updates {
 		if u.Tool != "" {

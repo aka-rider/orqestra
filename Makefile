@@ -1,5 +1,5 @@
 # 2026-05-11
-.PHONY: build run test test-unit test-integration lint clean e2e sandbox-image test-sandbox
+.PHONY: build run test test-unit test-integration lint clean e2e sandbox-image test-sandbox harness
 
 THIS_MAKEFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
 ORQESTRA := "$(dir $(THIS_MAKEFILE_PATH))orqestra"
@@ -39,4 +39,8 @@ test-all: test test-integration test-sandbox test-e2e lint
 
 clean:
 	rm -f $(BINARY)
+
+# Standalone interactive harness binary (PoC for bidirectional Claude CLI interaction).
+harness:
+	CGO_ENABLED=0 go build -ldflags "-s -w" -o ./bin/harness ./cmd/harness
 

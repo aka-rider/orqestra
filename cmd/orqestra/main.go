@@ -258,13 +258,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 				slog.Error("invalid model configuration", "err", modelEnvErr)
 				return exitInvalidInput
 			}
-			workerRunner := harness.NewSandboxCLIRunner(harness.SandboxCLIRunnerConfig{
-				Cfg:      cfg.Sandbox,
-				Profiles: sandboxProfiles,
-				RepoPath: repoPath,
-				Env:      modelEnv,
-				Writable: true,
-			})
+			workerRunner, err := harness.NewRunner(harness.RunnerConfig{
+				Sandbox: harness.SandboxConfig{
+					RepoPath:     repoPath,
+					WorktreePath: "",
+					Profiles:     sandboxProfiles,
+					Env:          modelEnv,
+					Writable:     true,
+				},
+			}, ctx)
+			if err != nil {
+				slog.Error("failed to create worker runner", "err", err)
+				return exitInvalidInput
+			}
 
 			var stdout io.Writer = stdout
 			if jsonOutput {
@@ -453,37 +459,51 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		slog.Error("invalid model configuration", "err", modelEnvErr)
 		os.Exit(exitInvalidInput)
 	}
-	sandboxRunner := harness.NewSandboxCLIRunner(harness.SandboxCLIRunnerConfig{
-		Cfg:      cfg.Sandbox,
-		Profiles: sandboxProfiles,
-		RepoPath: repoPath,
-		Env:      modelEnv,
-		Writable: true,
-	})
+	sandboxRunner, err := harness.NewRunner(harness.RunnerConfig{
+		Sandbox: harness.SandboxConfig{
+			RepoPath:     repoPath,
+			WorktreePath: "",
+			Profiles:     sandboxProfiles,
+			Env:          modelEnv,
+			Writable:     true,
+		},
+	}, context.Background())
+	if err != nil {
+		slog.Error("failed to create sandbox runner", "err", err)
+		os.Exit(exitInvalidInput)
+	}
 
 	// WorktreeRunnerFactory creates a read-only-repo runner scoped to a worktree.
 	// BudgetGuard wraps the worktree runner for token accounting.
-	sandboxRunnerCfg := harness.SandboxCLIRunnerConfig{
-		Cfg:      cfg.Sandbox,
-		Profiles: sandboxProfiles,
-		RepoPath: repoPath,
-		Env:      modelEnv,
-		Writable: false, // repo is read-only; worktree is read-write via WorktreePath
+	sandboxRunnerCfg := harness.SandboxConfig{
+		RepoPath:     repoPath,
+		Env:          modelEnv,
+		Writable:     false, // repo is read-only; worktree is read-write via WorktreePath
+		Profiles:     sandboxProfiles,
+		WorktreePath: "",    // set per-call
 	}
-	worktreeRunnerFactory := func(worktreePath string) harness.ContinuableRunner {
+	worktreeRunnerFactory := func(worktreePath string) harness.Runner {
 		wtCfg := sandboxRunnerCfg
 		wtCfg.WorktreePath = worktreePath
-		return guard.WrapContinuable(harness.NewSandboxCLIRunner(wtCfg), "worker")
+		r, err := harness.NewRunner(harness.RunnerConfig{
+			Sandbox: wtCfg,
+			Binary:  "claude",
+		}, context.Background())
+		if err != nil {
+			slog.Error("failed to create worktree runner", "err", err)
+			os.Exit(exitInvalidInput)
+		}
+		return guard.Wrap(r, "worker")
 	}
 
 	return &orchestrator.Engine{
 		Config:   cfg,
 		RepoPath: repoPath,
 		Runners: orchestrator.Runners{
-			Researcher: guard.WrapContinuable(researcherRunner, "researcher"),
-			Architect:  guard.WrapContinuable(architectRunner, "architect"),
-			Critic:     guard.WrapContinuable(criticRunner, "critic"),
-			Worker:     guard.WrapContinuable(sandboxRunner, "worker"),
+			Researcher: guard.Wrap(researcherRunner, "researcher"),
+			Architect:  guard.Wrap(architectRunner, "architect"),
+			Critic:     guard.Wrap(criticRunner, "critic"),
+			Worker:     guard.Wrap(sandboxRunner, "worker"),
 		},
 		RunDirFactory:         orchestrator.DefaultRunDirFactory(repoPath),
 		QuestionBridge:        bridge,
@@ -578,18 +598,24 @@ func runExecOnly(ctx context.Context, cfg *config.Config, sandboxProfiles []sand
 		slog.Error("invalid model configuration", "err", modelEnvErr)
 		os.Exit(exitInvalidInput)
 	}
-	workerRunner := harness.NewSandboxCLIRunner(harness.SandboxCLIRunnerConfig{
-		Cfg:      cfg.Sandbox,
-		Profiles: sandboxProfiles,
-		RepoPath: repoPath,
-		Env:      modelEnv,
-		Writable: true,
-	})
+	workerRunner, err := harness.NewRunner(harness.RunnerConfig{
+		Sandbox: harness.SandboxConfig{
+			RepoPath:     repoPath,
+			WorktreePath: "",
+			Profiles:     sandboxProfiles,
+			Env:          modelEnv,
+			Writable:     true,
+		},
+	}, ctx)
+	if err != nil {
+		slog.Error("failed to create worker runner", "err", err)
+		os.Exit(exitInvalidInput)
+	}
 
 	// Budget guard for exec-only mode
 	usage := orchestrator.NewRunUsage(cfg.Pipeline.TokenBudget)
 	guard := orchestrator.NewBudgetGuard(usage)
-	runner := guard.WrapContinuable(workerRunner, "worker")
+	runner := guard.Wrap(workerRunner, "worker")
 
 	var stdout io.Writer = os.Stdout
 	if jsonOutput {
@@ -620,15 +646,30 @@ func outputJSON(v any) {
 
 func runStreamingToWriter(
 	ctx context.Context,
-	runner harness.ContinuableRunner,
+	runner harness.Runner,
 	prompt, systemPrompt string,
 	w io.Writer,
 ) (harness.RunResult, error) {
 	if w == nil {
-		return runner.RunStreaming(ctx, prompt, systemPrompt, nil)
+		runner.SetEvents(nil)
+		runner.Post(systemPrompt)
+		runner.Post(prompt)
+		var result harness.RunResult
+		for ev := range runner.Receive() {
+			if ev.Kind == harness.EventError {
+				return result, fmt.Errorf("runner error: %s", ev.Text)
+			}
+			if ev.Kind == harness.EventUsage {
+				result.Usage = harness.TokenUsage{Input: ev.Input, Output: ev.Output}
+			}
+			if ev.Kind == harness.EventChunk && ev.Text != "" {
+				result.Output += ev.Text
+			}
+		}
+		return result, nil
 	}
 
-	updates := make(chan harness.StreamUpdate, 256)
+	updates := make(chan harness.Event, 256)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -639,10 +680,27 @@ func runStreamingToWriter(
 		}
 	}()
 
-	result, err := runner.RunStreaming(ctx, prompt, systemPrompt, updates)
+	runner.SetEvents(updates)
+	runner.Post(systemPrompt)
+	runner.Post(prompt)
+
+	var result harness.RunResult
+	for ev := range runner.Receive() {
+		if ev.Kind == harness.EventError {
+			close(updates)
+			<-done
+			return result, fmt.Errorf("runner error: %s", ev.Text)
+		}
+		if ev.Kind == harness.EventUsage {
+			result.Usage = harness.TokenUsage{Input: ev.Input, Output: ev.Output}
+		}
+		if ev.Kind == harness.EventChunk && ev.Text != "" {
+			result.Output += ev.Text
+		}
+	}
 	close(updates)
 	<-done
-	return result, err
+	return result, nil
 }
 
 func resolveConfigPath(name, repoPath string) (string, error) {

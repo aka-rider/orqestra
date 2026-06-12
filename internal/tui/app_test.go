@@ -16,20 +16,24 @@ import (
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
-// noopRunner is a no-op CLIRunner for tests that don't need real LLM calls.
+// noopRunner is a no-op Runner for tests that don't need real LLM calls.
 type noopRunner struct{}
 
-func (n *noopRunner) RunPrint(_ context.Context, _, _ string) (harness.RunResult, error) {
-	return harness.RunResult{Output: `{"verdict":"accept","brief":{"task":"t","end_state":"e","scope":[],"non_scope":[]},"questions":[],"confidence":0.9}`}, nil
+func (n *noopRunner) Post(msg string) {}
+
+func (n *noopRunner) Receive() <-chan harness.Event {
+	return nil
 }
 
-func (n *noopRunner) RunStreaming(_ context.Context, _, _ string, _ chan<- harness.StreamUpdate) (harness.RunResult, error) {
-	return harness.RunResult{Output: `{"verdict":"accept","brief":{"task":"t","end_state":"e","scope":[],"non_scope":[]},"questions":[],"confidence":0.9}`}, nil
+func (n *noopRunner) ExtractPlan(ctx context.Context) (string, error) {
+	return "plan content", nil
 }
 
-func (n *noopRunner) RunContinue(_ context.Context, _, _ string, _ chan<- harness.StreamUpdate) (harness.RunResult, error) {
-	return harness.RunResult{Output: "✓ all pass"}, nil
-}
+func (n *noopRunner) SetEvents(ch chan<- harness.Event) {}
+
+func (n *noopRunner) SessionID() string { return "test-session" }
+
+func (n *noopRunner) Cancel() error { return nil }
 
 // testModel creates a Model suitable for testing with a minimal mock engine.
 func testModel() Model {
