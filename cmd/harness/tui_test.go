@@ -3,7 +3,6 @@ package main
 import (
 	"strings"
 	"testing"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/harness"
@@ -229,51 +228,31 @@ func TestModelUpdateWindowResize(t *testing.T) {
 	_ = cmd
 }
 
-// TestStreamUpdateBridge verifies that StreamUpdate events are correctly
-// processed by the TUI model through the Bubble Tea message loop.
-// This exercises the full path: event → p.Send() → Update() → handleStreamUpdate().
+// TestStreamUpdateBridge verifies that harness.Event messages are correctly
+// routed through Update() and produce the expected model state.
 func TestStreamUpdateBridge(t *testing.T) {
-	// Create a channel that simulates sess.updates.
-	streamUpdates := make(chan harness.Event, 10)
-
-	// Create model.
 	m := NewModel()
 	m.height = 24
 	m.width = 80
 
-	// Run Bubble Tea program without renderer (no TTY needed).
-	p := tea.NewProgram(m, tea.WithoutRenderer(), tea.WithWindowSize(80, 24))
+	events := []harness.Event{
+		{Text: "hello", IsDelta: true},
+		{Text: "world"},
+		{Tool: "Read", Detail: "file.go"},
+		{Kind: harness.EventUsage, Input: 100, Output: 200},
+	}
 
-	// Bridge goroutine: reads from streamUpdates, sends to p.Send().
-	// This is the exact same pattern as the fix in main.go.
-	go func() {
-		for update := range streamUpdates {
-			p.Send(update)
-		}
-	}()
+	for _, ev := range events {
+		updated, _ := m.Update(ev)
+		m = updated.(Model)
+	}
 
-	// Send test events through the updates channel.
-	streamUpdates <- harness.Event{Text: "hello", IsDelta: true}
-	streamUpdates <- harness.Event{Text: "world"}
-	streamUpdates <- harness.Event{Tool: "Read", Detail: "file.go"}
-	streamUpdates <- harness.Event{Kind: harness.EventUsage, Input: 100, Output: 200}
-	close(streamUpdates)
-
-	// Run the program with a timeout. It should process all events and exit
-	// when the updates channel closes (no more messages to process).
-	done := make(chan struct{})
-	go func() {
-		p.Run()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// Program exited cleanly — the bridge goroutine finished
-		// because streamUpdates was closed, and p.Run() returned
-		// because no more messages arrived.
-	case <-time.After(3 * time.Second):
-		p.Kill()
-		t.Fatal("bridge test timed out — StreamUpdate events not reaching TUI message loop")
+	// 3 content blocks: text delta, text complete, tool use.
+	// Usage is tracked in liveInput/liveOutput, not in the output slice.
+	if len(m.output) != 3 {
+		t.Errorf("output blocks = %d, want 3", len(m.output))
+	}
+	if m.liveInput != 100 || m.liveOutput != 200 {
+		t.Errorf("usage = (%d in, %d out), want (100 in, 200 out)", m.liveInput, m.liveOutput)
 	}
 }

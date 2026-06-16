@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go test *)",
+      "Bash(make build *)",
+      "Bash(make lint *)",
+      "Bash(go doc *)",
+      "mcp__MCP_DOCKER__mcp-find",
+      "mcp__MCP_DOCKER__sequentialthinking",
+      "mcp__MCP_DOCKER__get-library-docs",
+      "WebSearch",
+      "Bash(make test-all *)",
+      "Bash(make test *)",
+      "Bash(make test-integration *)",
+      "Bash(make test-sandbox *)",
+      "Bash(go list *)"
+    ]
+  }
+}
