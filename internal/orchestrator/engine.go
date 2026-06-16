@@ -22,8 +22,8 @@ import (
 
 // RestartInput carries context for restarting a failed or incomplete run.
 type RestartInput struct {
-	RunPath           string // session directory of the original run
-	FirstMissingAgent string // first agent that needs re-execution
+	RunPath string            // session directory of the original run
+	Phase   RestartPhase      // which phase to restart from
 }
 
 // Input is the user's request to the orchestrator.
@@ -488,24 +488,21 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 			criticReportMarkdown = data
 		}
 
-		// Determine which phase to skip to based on the first missing agent.
-		skipTo := input.RestartFrom.FirstMissingAgent
-		switch skipTo {
-		case "researcher":
-			// No skip — run all phases from the beginning.
-		case "architect":
+		// Determine which phase to skip to based on the restart phase.
+		switch input.RestartFrom.Phase {
+		case RestartDeliberation:
 			// Research completed — skip to planning block.
 			goto skipPlanning
-		case "critic", "worker":
+		case RestartExecution, RestartValidation:
 			// Research + architect completed — skip to plan gate.
 			goto planGate
 		default:
-			// Unknown agent — run from the beginning.
+			// Unknown or empty phase — run from the beginning.
 		}
 	}
 
 	// --- Research ---
-	if !isRestart || input.RestartFrom.FirstMissingAgent == "researcher" {
+	if !isRestart || input.RestartFrom.Phase == RestartResearch {
 		emit(Event{Type: EventPhaseChange, Phase: PhaseResearching})
 		logger.Info("phase", "phase", string(PhaseResearching))
 		logAgentEvent("agent_started", "researcher", 1, harness.TokenUsage{}, nil)
@@ -588,7 +585,7 @@ func (e *Engine) run(ctx context.Context, input Input, events chan<- Event, deci
 	}
 
 	// --- Planning ---
-	if !isRestart || input.RestartFrom.FirstMissingAgent == "researcher" || input.RestartFrom.FirstMissingAgent == "architect" {
+	if !isRestart || input.RestartFrom.Phase == RestartResearch || input.RestartFrom.Phase == "" {
 		emit(Event{Type: EventPhaseChange, Phase: PhasePlanning})
 		logger.Info("phase", "phase", string(PhasePlanning))
 		architectAttempt++

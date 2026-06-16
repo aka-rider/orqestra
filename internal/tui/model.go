@@ -94,8 +94,8 @@ type Model struct {
 	lastErr       error // navigation-level errors (e.g. loading runs)
 
 	// Restart state: carries restart context from run detail to prompt screen.
-	lastRestartRunPath           string
-	lastRestartFirstMissingAgent string
+	lastRestartRunPath string
+	lastRestartPhase   orchestrator.RestartPhase
 }
 
 // NewModel creates the initial TUI model.
@@ -475,13 +475,13 @@ func (m Model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// If we have a restart context, start a restart pipeline instead.
 			if m.lastRestartRunPath != "" {
 				runPath := m.lastRestartRunPath
-				firstMissing := m.lastRestartFirstMissingAgent
+				phase := m.lastRestartPhase
 				m.lastRestartRunPath = ""
-				m.lastRestartFirstMissingAgent = ""
+				m.lastRestartPhase = ""
 				m.pipelineScreen.Start(i.Prompt)
 				m.state = StatePipeline
 				m.recalculateLayout()
-				pipelineCmd := m.startPipelineRestart(i.Prompt, runPath, firstMissing)
+				pipelineCmd := m.startPipelineRestart(i.Prompt, runPath, phase)
 				return m, tea.Batch(pipelineCmd, animTickCmd())
 			}
 			m.pipelineScreen.Start(i.Prompt)
@@ -640,12 +640,12 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 		return m, batch(cmd)
 	case RestartRunIntent:
 		m.lastRestartRunPath = i.RunPath
-		m.lastRestartFirstMissingAgent = i.FirstMissingAgent
+		m.lastRestartPhase = i.Phase
 		m.pipelineScreen.Reset()
 		m.state = StatePrompt
 		m.promptScreen.Reset()
 		// Pre-fill with a restart prompt that includes the missing agent context.
-		prompt := "Restart run from agent: " + i.FirstMissingAgent
+		prompt := "Restart run from phase: " + string(i.Phase)
 		m.promptScreen.SetValue(prompt)
 		return m, batch(nil)
 	case ClosePlanHistoryIntent:
@@ -697,7 +697,7 @@ func (m *Model) startPipeline(prompt string) tea.Cmd {
 
 // startPipelineRestart launches the orchestrator for a restart run and returns
 // a command to start listening. The restart context is passed through the Input.
-func (m *Model) startPipelineRestart(prompt, runPath, firstMissingAgent string) tea.Cmd {
+func (m *Model) startPipelineRestart(prompt, runPath string, phase orchestrator.RestartPhase) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 
@@ -706,7 +706,7 @@ func (m *Model) startPipelineRestart(prompt, runPath, firstMissingAgent string) 
 		AutoApprove: true,
 		RestartFrom: orchestrator.RestartInput{
 			RunPath:           runPath,
-			FirstMissingAgent: firstMissingAgent,
+			Phase: phase,
 		},
 	})
 	m.events = channels.Events

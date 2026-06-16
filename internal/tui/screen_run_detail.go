@@ -52,7 +52,7 @@ func NewRunDetailScreen() RunDetailScreen {
 // SetDetail assigns the run detail, analyzes completeness, and resets the step cursor.
 func (s *RunDetailScreen) SetDetail(detail agent.RunDetail) {
 	s.detail = detail
-	s.completeness = agent.AnalyzeRunCompleteness(detail.Path, detail)
+	s.completeness = agent.AnalyzeRunCompleteness(detail.Path)
 	s.stepCursor = 0
 	s.focus = RunDetailFocusMenu
 }

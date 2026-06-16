@@ -165,8 +165,8 @@ func (RevertPlanIntent) isIntent() {}
 
 // RestartRunIntent requests restarting a failed or incomplete historical run.
 type RestartRunIntent struct {
-	RunPath           string
-	FirstMissingAgent string
+	RunPath string
+	Phase   orchestrator.RestartPhase
 }
 
 func (RestartRunIntent) isIntent() {}

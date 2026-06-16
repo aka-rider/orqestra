@@ -279,3 +279,221 @@ func TestCopySessionLog_Success(t *testing.T) {
 		t.Error("copied file is empty")
 	}
 }
+
+func TestSessionDir_SubDir(t *testing.T) {
+	s := SessionDir{Path: "/tmp/session"}
+	tests := []struct {
+		name string
+		want string
+	}{
+		{"research", "/tmp/session/research"},
+		{"deliberation", "/tmp/session/deliberation"},
+		{"execution", "/tmp/session/execution"},
+		{"validation", "/tmp/session/validation"},
+		{"deep/nested", "/tmp/session/deep/nested"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := s.SubDir(tt.name); got != tt.want {
+				t.Errorf("SubDir(%q) = %q, want %q", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSessionDir_PhaseDirs(t *testing.T) {
+	s := SessionDir{Path: "/tmp/session"}
+	if got := s.ResearchDir(); got != "/tmp/session/research" {
+		t.Errorf("ResearchDir() = %q, want %q", got, "/tmp/session/research")
+	}
+	if got := s.DeliberationDir(); got != "/tmp/session/deliberation" {
+		t.Errorf("DeliberationDir() = %q, want %q", got, "/tmp/session/deliberation")
+	}
+	if got := s.ExecutionDir(); got != "/tmp/session/execution" {
+		t.Errorf("ExecutionDir() = %q, want %q", got, "/tmp/session/execution")
+	}
+	if got := s.ValidationDir(); got != "/tmp/session/validation" {
+		t.Errorf("ValidationDir() = %q, want %q", got, "/tmp/session/validation")
+	}
+}
+
+func TestMkdir(t *testing.T) {
+	tmp := t.TempDir()
+
+	// mkdir succeeds for a new directory.
+	err := mkdir(filepath.Join(tmp, "new"), 0o755)
+	if err != nil {
+		t.Fatalf("mkdir new dir: %v", err)
+	}
+
+	// mkdir fails with EEXIST on a pre-existing directory.
+	err = mkdir(filepath.Join(tmp, "new"), 0o755)
+	if err == nil {
+		t.Fatal("mkdir existing dir: expected error, got nil")
+	}
+	if !containsErr(err.Error(), "already exists") {
+		t.Logf("mkdir existing dir error: %v", err)
+	}
+
+	// mkdir fails on a read-only parent.
+	ro := filepath.Join(tmp, "readonly")
+	if err := os.Mkdir(ro, 0o555); err != nil {
+		t.Skipf("cannot create readonly dir: %v", err)
+	}
+	err = mkdir(filepath.Join(ro, "child"), 0o755)
+	if err == nil {
+		t.Fatal("mkdir in readonly dir: expected error, got nil")
+	}
+}
+
+func TestMkdirAll(t *testing.T) {
+	tmp := t.TempDir()
+
+	// mkdirAll creates nested directories.
+	path := filepath.Join(tmp, "a", "b", "c")
+	err := mkdirAll(path, 0o755)
+	if err != nil {
+		t.Fatalf("mkdirAll nested: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat nested dir: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatal("expected directory")
+	}
+
+	// mkdirAll is idempotent — no error on existing dir.
+	err = mkdirAll(path, 0o755)
+	if err != nil {
+		t.Fatalf("mkdirAll idempotent: %v", err)
+	}
+}
+
+func TestMkdirAll_NotADir(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Create a file with the same name as our target dir.
+	filePath := filepath.Join(tmp, "target")
+	if err := os.WriteFile(filePath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// mkdirAll should fail because the target is a file, not a directory.
+	err := mkdirAll(filePath, 0o755)
+	if err == nil {
+		t.Fatal("mkdirAll on file: expected error, got nil")
+	}
+}
+
+func containsErr(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+func TestAnalyzeRunCompleteness_NoConfig(t *testing.T) {
+	tmp := t.TempDir()
+	// No run_config.json — should be incomplete and unrestartable.
+	c := AnalyzeRunCompleteness(tmp)
+	if c.Complete {
+		t.Error("expected incomplete for run without run_config.json")
+	}
+	if c.RestartPhase != "" {
+		t.Errorf("expected empty RestartPhase, got %q", c.RestartPhase)
+	}
+}
+
+func TestAnalyzeRunCompleteness_FullRun(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Write run_config.json.
+	config := `{"research":true,"deliberation_loops":1,"execution":true,"validation":true}`
+	os.WriteFile(filepath.Join(tmp, "run_config.json"), []byte(config), 0o644)
+
+	// Create phase dirs with required artifacts.
+	researchDir := filepath.Join(tmp, "research")
+	os.MkdirAll(researchDir, 0o755)
+	os.WriteFile(filepath.Join(researchDir, "plan-v1.md"), []byte("research plan"), 0o644)
+
+	deliberationDir := filepath.Join(tmp, "deliberation")
+	os.MkdirAll(deliberationDir, 0o755)
+	os.WriteFile(filepath.Join(deliberationDir, "plan-v1.md"), []byte("deliberation plan"), 0o644)
+
+	executionDir := filepath.Join(tmp, "execution")
+	os.MkdirAll(executionDir, 0o755)
+	os.WriteFile(filepath.Join(executionDir, "output.txt"), []byte("worker output"), 0o644)
+
+	validationDir := filepath.Join(tmp, "validation")
+	os.MkdirAll(validationDir, 0o755)
+	os.WriteFile(filepath.Join(validationDir, "validation.txt"), []byte("validation pass"), 0o644)
+
+	c := AnalyzeRunCompleteness(tmp)
+	if !c.Complete {
+		t.Error("expected complete for full run")
+	}
+	if c.RestartPhase != "" {
+		t.Errorf("expected empty RestartPhase for complete run, got %q", c.RestartPhase)
+	}
+}
+
+func TestAnalyzeRunCompleteness_MissingDeliberation(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Write run_config.json.
+	config := `{"research":true,"deliberation_loops":1,"execution":true,"validation":true}`
+	os.WriteFile(filepath.Join(tmp, "run_config.json"), []byte(config), 0o644)
+
+	// Create research dir only.
+	researchDir := filepath.Join(tmp, "research")
+	os.MkdirAll(researchDir, 0o755)
+	os.WriteFile(filepath.Join(researchDir, "plan-v1.md"), []byte("research plan"), 0o644)
+
+	c := AnalyzeRunCompleteness(tmp)
+	if c.Complete {
+		t.Error("expected incomplete when deliberation is missing")
+	}
+	if c.RestartPhase != "deliberation" {
+		t.Errorf("expected RestartPhase='deliberation', got %q", c.RestartPhase)
+	}
+}
+
+func TestAnalyzeRunCompleteness_MissingExecution(t *testing.T) {
+	tmp := t.TempDir()
+
+	config := `{"research":true,"deliberation_loops":1,"execution":true,"validation":true}`
+	os.WriteFile(filepath.Join(tmp, "run_config.json"), []byte(config), 0o644)
+
+	researchDir := filepath.Join(tmp, "research")
+	os.MkdirAll(researchDir, 0o755)
+	os.WriteFile(filepath.Join(researchDir, "plan-v1.md"), []byte("research plan"), 0o644)
+
+	deliberationDir := filepath.Join(tmp, "deliberation")
+	os.MkdirAll(deliberationDir, 0o755)
+	os.WriteFile(filepath.Join(deliberationDir, "plan-v1.md"), []byte("deliberation plan"), 0o644)
+
+	// No execution dir.
+	c := AnalyzeRunCompleteness(tmp)
+	if c.Complete {
+		t.Error("expected incomplete when execution is missing")
+	}
+	if c.RestartPhase != "execution" {
+		t.Errorf("expected RestartPhase='execution', got %q", c.RestartPhase)
+	}
+}
+
+func TestAnalyzeRunCompleteness_InvalidConfig(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Write invalid JSON.
+	os.WriteFile(filepath.Join(tmp, "run_config.json"), []byte("{invalid"), 0o644)
+
+	c := AnalyzeRunCompleteness(tmp)
+	if c.Complete {
+		t.Error("expected incomplete for invalid run_config.json")
+	}
+}

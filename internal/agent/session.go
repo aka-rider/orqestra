@@ -15,6 +15,21 @@ type SessionDir struct {
 	Path string // absolute path to the session directory
 }
 
+// SubDir returns the path of a subdirectory under the session directory.
+func (s SessionDir) SubDir(name string) string { return filepath.Join(s.Path, name) }
+
+// ResearchDir returns the path of the research subdirectory.
+func (s SessionDir) ResearchDir() string { return s.SubDir("research") }
+
+// DeliberationDir returns the path of the deliberation subdirectory.
+func (s SessionDir) DeliberationDir() string { return s.SubDir("deliberation") }
+
+// ExecutionDir returns the path of the execution subdirectory.
+func (s SessionDir) ExecutionDir() string { return s.SubDir("execution") }
+
+// ValidationDir returns the path of the validation subdirectory.
+func (s SessionDir) ValidationDir() string { return s.SubDir("validation") }
+
 // NewSessionDir creates and returns a new session directory under .orqestra/sessions/.
 // The directory name includes a timestamp and optional slug for identification.
 func NewSessionDir(repoPath, slug string) (SessionDir, error) {
@@ -24,10 +39,48 @@ func NewSessionDir(repoPath, slug string) (SessionDir, error) {
 		name = ts + "-" + slug
 	}
 	dir := filepath.Join(repoPath, ".orqestra", "sessions", name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := mkdirAll(dir, 0o755); err != nil {
 		return SessionDir{}, fmt.Errorf("creating session dir %s: %w", dir, err)
 	}
 	return SessionDir{Path: dir}, nil
+}
+
+// mkdir creates a single directory (not nested). Returns ErrExist-wrapped error
+// if the directory already exists, or a wrapped permission error otherwise.
+func mkdir(path string, perm os.FileMode) error {
+	err := os.Mkdir(path, perm)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("directory already exists: %w", err)
+		}
+		return fmt.Errorf("mkdir %s: %w", path, err)
+	}
+	return nil
+}
+
+// mkdirAll creates a directory and all ancestors. If the leaf already exists
+// as a directory, it returns nil (no error). If the leaf exists as a file,
+// or if any other error occurs, it returns a wrapped error.
+func mkdirAll(dir string, perm os.FileMode) error {
+	// Fast path: if it already exists as a directory, we're done.
+	info, err := os.Stat(dir)
+	if err == nil && info.IsDir() {
+		return nil
+	}
+	// Otherwise use standard MkdirAll for the hierarchy, then verify leaf.
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return fmt.Errorf("mkdirAll %s: %w", dir, err)
+	}
+	// Verify the leaf is a directory (MkdirAll can succeed even if a file
+	// with the same name existed but was replaced by a symlink etc.).
+	info, err = os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("path exists but is not a directory: %s", dir)
+	}
+	return nil
 }
 
 // ArtifactPath returns the absolute path for a named artifact within the session.
@@ -107,12 +160,12 @@ type ArtifactRequirement struct {
 
 // RunCompleteness describes whether a historical run is complete or what is missing.
 type RunCompleteness struct {
-	Complete          bool
-	MissingAgents     []string
-	FailedAgents      []string
-	MissingArtifacts  []ArtifactRequirement
-	FirstMissingAgent string
-	Reason            string
+	Complete     bool
+	MissingAgents []string
+	FailedAgents  []string
+	MissingArtifacts []ArtifactRequirement
+	RestartPhase string            // "research"|"deliberation"|"execution"|"validation" or ""
+	Reason       string
 }
 
 // ListRuns scans .orqestra/sessions/ under repoPath and returns summaries sorted newest-first.
@@ -307,95 +360,97 @@ func deduplicate(sl []string) []string {
 	return out
 }
 
+// runPhases is a local struct for decoding run_config.json.
+// The agent package does not import orchestrator.
+type runPhases struct {
+	Research          bool `json:"research"`
+	DeliberationLoops int  `json:"deliberation_loops"`
+	Execution         bool `json:"execution"`
+	Validation        bool `json:"validation"`
+}
+
 // AnalyzeRunCompleteness inspects a session directory and returns a summary of
-// what is missing or failed. It does NOT modify RunDetail.
-func AnalyzeRunCompleteness(runPath string, detail RunDetail) RunCompleteness {
+// what is missing or failed. Returns RestartPhase for restartability.
+// The unified session layout stores phase artifacts in subdirectories.
+func AnalyzeRunCompleteness(runPath string) RunCompleteness {
 	var c RunCompleteness
 
-	// Build a map of agentID -> status from step metas.
-	agentStatus := map[string]string{}
-	for _, meta := range detail.Steps {
-		agentStatus[meta.AgentID] = meta.Status
+	// Try to decode run_config.json to get intended phases.
+	var intended runPhases
+	configPath := filepath.Join(runPath, "run_config.json")
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		// No run_config.json — old format, treat as incomplete/unrestartable.
+		c.Reason = "no run_config.json (old format run)"
+		return c
+	}
+	if err := json.Unmarshal(configData, &intended); err != nil {
+		c.Reason = "invalid run_config.json"
+		return c
 	}
 
-	// Check each known agent.
-	for _, agentID := range KnownAgents {
-		status, ok := agentStatus[agentID]
-		if !ok {
-			c.MissingAgents = append(c.MissingAgents, agentID)
+	// Check each intended phase's completion via unified layout.
+	// Research: research/plan-v*.md
+	if intended.Research {
+		if !dirHasPlans(runPath, "research") {
+			c.Complete = false
+			c.RestartPhase = "research"
+			c.Reason = "research phase incomplete (no research/plan-v*.md)"
+			return c
+		}
+	}
+
+	// Deliberation: deliberation/plan-v*.md
+	if intended.Research || true { // deliberation always runs if research did or not
+		if !dirHasPlans(runPath, "deliberation") {
+			c.Complete = false
+			c.RestartPhase = "deliberation"
+			c.Reason = "deliberation phase incomplete (no deliberation/plan-v*.md)"
+			return c
+		}
+	}
+
+	// Execution: execution/output.txt
+	if intended.Execution {
+		if !fileExists(filepath.Join(runPath, "execution", "output.txt")) {
+			c.Complete = false
+			c.RestartPhase = "execution"
+			c.Reason = "execution phase incomplete (no execution/output.txt)"
+			return c
+		}
+	}
+
+	// Validation: validation/validation.txt
+	if intended.Validation {
+		if !fileExists(filepath.Join(runPath, "validation", "validation.txt")) {
+			c.Complete = false
+			c.RestartPhase = "validation"
+			c.Reason = "validation phase incomplete (no validation/validation.txt)"
+			return c
+		}
+	}
+
+	c.Complete = true
+	return c
+}
+
+// dirHasPlans reports whether a phase subdirectory contains at least one plan-vN.md file.
+func dirHasPlans(runPath, phase string) bool {
+	dir := filepath.Join(runPath, phase)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
 			continue
 		}
-		if status == "failed" {
-			c.FailedAgents = append(c.FailedAgents, agentID)
+		name := entry.Name()
+		if strings.HasPrefix(name, "plan-v") && strings.HasSuffix(name, ".md") {
+			return true
 		}
 	}
-
-	// Check required artifacts.
-	requiredArtifacts := []ArtifactRequirement{
-		{Name: "researcher_draft.md", AgentID: "researcher"},
-		{Name: "architect_meta.json", AgentID: "architect"},
-		{Name: "final_plan.md", AgentID: "architect"},
-	}
-	// Critic artifacts are optional (critic may be nil).
-	if agentStatus["critic"] != "" {
-		requiredArtifacts = append(requiredArtifacts,
-			ArtifactRequirement{Name: "critic_report.md", AgentID: "critic"},
-		)
-	}
-	// Worker artifacts.
-	if agentStatus["worker"] != "" {
-		requiredArtifacts = append(requiredArtifacts,
-			ArtifactRequirement{Name: "worker_output.txt", AgentID: "worker"},
-		)
-	}
-
-	for _, art := range requiredArtifacts {
-		if !fileExists(filepath.Join(runPath, art.Name)) {
-			c.MissingArtifacts = append(c.MissingArtifacts, art)
-		}
-	}
-
-	// Determine first missing agent (pipeline order).
-	for _, agentID := range KnownAgents {
-		if contains(c.MissingAgents, agentID) || contains(c.FailedAgents, agentID) {
-			c.FirstMissingAgent = agentID
-			break
-		}
-	}
-
-	// Build reason string.
-	var reasons []string
-	if len(c.MissingAgents) > 0 {
-		reasons = append(reasons, fmt.Sprintf("agents never ran: %s", strings.Join(c.MissingAgents, ", ")))
-	}
-	if len(c.FailedAgents) > 0 {
-		reasons = append(reasons, fmt.Sprintf("agents failed: %s", strings.Join(c.FailedAgents, ", ")))
-	}
-	if len(c.MissingArtifacts) > 0 {
-		var names []string
-		for _, a := range c.MissingArtifacts {
-			names = append(names, a.Name)
-		}
-		reasons = append(reasons, fmt.Sprintf("missing artifacts: %s", strings.Join(names, ", ")))
-	}
-	if len(reasons) > 0 {
-		c.Reason = strings.Join(reasons, "; ")
-	}
-
-	// NoExecute path: stops at plan gate — not "incomplete" in a broken sense,
-	// but still not a full run.
-	if detail.Status == "noexecute" || detail.Status == "" {
-		// If we have a status but no agents ran, mark as incomplete.
-		if len(c.MissingAgents) > 0 && len(c.FailedAgents) == 0 {
-			c.Complete = false
-		}
-	}
-
-	c.Complete = len(c.MissingAgents) == 0 && len(c.FailedAgents) == 0 && len(c.MissingArtifacts) == 0
-	c.MissingAgents = deduplicate(c.MissingAgents)
-	c.FailedAgents = deduplicate(c.FailedAgents)
-
-	return c
+	return false
 }
 
 // fileExists reports whether the given path exists and is not a directory.

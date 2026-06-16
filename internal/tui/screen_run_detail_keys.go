@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
 // Update handles key events for the run detail screen.
@@ -29,7 +31,7 @@ func (s RunDetailScreen) Update(msg tea.Msg) (RunDetailScreen, tea.Cmd) {
 		if !s.completeness.Complete && s.detail.Path != "" {
 			s.PendingIntent = RestartRunIntent{
 				RunPath:           s.detail.Path,
-				FirstMissingAgent: s.completeness.FirstMissingAgent,
+				Phase: orchestrator.RestartPhase(s.completeness.RestartPhase),
 			}
 		}
 		return s, nil

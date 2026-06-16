@@ -12,6 +12,7 @@ const (
 	EventAgentFailed
 	EventAgentCancelled
 	EventAgentOutput
+	EventAgentSkipped // emitted when a phase is disabled
 	EventPlanReady
 	EventGateRequest
 	EventComplete
@@ -29,6 +30,7 @@ type Phase string
 const (
 	PhaseResearching    Phase = "researching"
 	PhasePlanning       Phase = "planning"
+	PhaseDeliberating   Phase = "deliberating"
 	PhaseCritiquing     Phase = "critiquing"
 	PhaseExecuting      Phase = "executing"
 	PhaseSelfValidating Phase = "self-validating"
@@ -44,6 +46,7 @@ const (
 
 // GateRequest is emitted when the pipeline needs user input.
 type GateRequest struct {
+	Position          HumanGatePosition // which gate is firing (v6 unified layout)
 	Type              GateType
 	FinalPlanMarkdown string // for GatePlanApproval
 	PlanFilePath      string // absolute path to plan.md on disk (for external editor)
