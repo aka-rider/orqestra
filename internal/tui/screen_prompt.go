@@ -101,6 +101,9 @@ func (s PromptScreen) Update(msg tea.Msg) (PromptScreen, tea.Cmd) {
 	case "ctrl+r":
 		s.PendingIntent = NavigateToRunsListIntent{}
 		return s, nil
+	case "ctrl+p":
+		s.PendingIntent = ToggleSetupIntent{}
+		return s, nil
 	}
 
 	switch keyMsg.Code {
@@ -138,7 +141,7 @@ func (s PromptScreen) View(width, height int) string {
 
 	// Footer (2 lines)
 	footer := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
-		keyStyle.Render(" [Enter] submit | [Shift+Enter] newline | [^R] runs  [^C] quit")
+		keyStyle.Render(" [Enter] submit | [Shift+Enter] newline | [^P] setup  [^R] runs  [^C] quit")
 
 	// Input zone (divider + instruction + textarea + newline)
 	input := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +

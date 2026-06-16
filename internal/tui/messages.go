@@ -159,3 +159,8 @@ type RestartRunIntent struct {
 
 func (RestartRunIntent) isIntent() {}
 
+// ToggleSetupIntent opens or closes the pipeline setup overlay.
+type ToggleSetupIntent struct{}
+
+func (ToggleSetupIntent) isIntent() {}
+

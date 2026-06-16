@@ -94,9 +94,9 @@ type Model struct {
 	lastRestartRunPath string
 	lastRestartPhase   orchestrator.RestartPhase
 
-	// Setup panel state (iteration 9)
-	setupOpen      bool
-	currentSetup   orchestrator.PipelineSetup
+	// Setup panel state.
+	setupScreen    setupModel
+	confirmedSetup orchestrator.PipelineSetup
 	activeChat     HumanChatMode
 	contentMode    ContentMode
 }
@@ -110,6 +110,8 @@ func NewModel(engine *orchestrator.Engine, configName string) Model {
 		engine:            engine,
 		runsListScreen:    NewRunsListScreen(),
 		runDetailScreen:   NewRunDetailScreen(),
+		setupScreen:       newSetupModel(),
+		confirmedSetup:    orchestrator.DefaultPipelineSetup(),
 	}
 }
 
@@ -417,6 +419,19 @@ func (m Model) handleRunDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // handlePromptKey delegates to PromptScreen and handles intents.
 func (m Model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// When the setup panel is open, route all keys to it.
+	if m.setupScreen.IsOpen() {
+		var cmd tea.Cmd
+		m.setupScreen, cmd = m.setupScreen.Update(msg)
+		if intent := m.setupScreen.PendingIntent; intent != nil {
+			m.setupScreen.PendingIntent = nil
+			if ci, ok := intent.(ConfirmSetupIntent); ok {
+				m.confirmedSetup = ci.Setup
+			}
+		}
+		return m, cmd
+	}
+
 	prevHeight := m.promptScreen.DesiredInputHeight(m.height)
 	var cmd tea.Cmd
 	m.promptScreen, cmd = m.promptScreen.Update(msg)
@@ -446,6 +461,13 @@ func (m Model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(pipelineCmd, animTickCmd())
 		case NavigateToRunsListIntent:
 			m.navigateToRunsList()
+			return m, nil
+		case ToggleSetupIntent:
+			if m.setupScreen.IsOpen() {
+				m.setupScreen.Close()
+			} else {
+				m.setupScreen.Open(m.confirmedSetup)
+			}
 			return m, nil
 		}
 	}
@@ -616,6 +638,7 @@ func (m *Model) startPipeline(prompt string) tea.Cmd {
 
 	channels := m.engine.Start(ctx, orchestrator.Input{
 		Prompt: prompt,
+		Setup:  m.confirmedSetup,
 	})
 	m.events = channels.Events
 	m.streamUpdates = channels.StreamUpdates
@@ -650,6 +673,14 @@ func (m *Model) startPipelineRestart(prompt, runPath string, phase orchestrator.
 
 // View renders the current screen.
 func (m Model) View() tea.View {
+	// Setup panel overlay takes over the entire screen when open.
+	if m.state == StatePrompt && m.setupScreen.IsOpen() {
+		v := tea.NewView(viewSetupOverlay(m.setupScreen, m.effectiveWidth(), m.height))
+		v.AltScreen = true
+		v.MouseMode = tea.MouseModeCellMotion
+		return v
+	}
+
 	var content string
 	switch m.state {
 	case StatePrompt:

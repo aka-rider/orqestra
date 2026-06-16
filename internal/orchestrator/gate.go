@@ -46,6 +46,18 @@ func (h HumanGateSet) Active(pos HumanGatePosition) bool {
 	return false
 }
 
+// Toggle returns a new set with pos added if absent, or removed if present.
+func (h HumanGateSet) Toggle(pos HumanGatePosition) HumanGateSet {
+	for i, p := range h {
+		if p == pos {
+			out := make(HumanGateSet, 0, len(h)-1)
+			out = append(out, h[:i]...)
+			return append(out, h[i+1:]...)
+		}
+	}
+	return append(append(HumanGateSet(nil), h...), pos)
+}
+
 // phaseDir returns the unified session subdirectory name for a gate position.
 func phaseDir(pos HumanGatePosition) string {
 	switch pos {
