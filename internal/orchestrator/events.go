@@ -37,30 +37,12 @@ const (
 	PhaseDone           Phase = "done"
 )
 
-// GateType identifies which interactive gate the pipeline is waiting at.
-type GateType int
-
-const (
-	GatePlanApproval GateType = iota
-)
-
 // GateRequest is emitted when the pipeline needs user input.
 type GateRequest struct {
 	Position          HumanGatePosition // which gate is firing (v6 unified layout)
-	Type              GateType
-	FinalPlanMarkdown string // for GatePlanApproval
+	FinalPlanMarkdown string // plan markdown for review
 	PlanFilePath      string // absolute path to plan.md on disk (for external editor)
-	PlanDiff          string // unified diff from git micro-repo (empty if no history)
 	PlanWarnings      []string
-	CriticReport      string // critic's review report, shown alongside the plan at gate
-
-	// PlanHistoryDir is the absolute path to the plan-history/ git micro-repo
-	// for this run, empty when no plan repo was created. Used by the TUI plan
-	// history viewer (Ctrl+Y) to browse and revert plan revisions.
-	PlanHistoryDir string
-	// PlanHistoryHeadSHA is the SHA of the current HEAD of plan-history. Empty
-	// when planRepo was nil or rev-parse failed.
-	PlanHistoryHeadSHA string
 }
 
 // DecisionType classifies user decisions at gates.

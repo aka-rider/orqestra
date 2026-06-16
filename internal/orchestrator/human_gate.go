@@ -68,14 +68,14 @@ func (e *Engine) runGateLoop(
 					writeArtifactJSONIn(session, phase, "gate_decision.json", map[string]string{
 						"Type":      "approve",
 						"Timestamp": time.Now().UTC().Format(time.RFC3339),
-						"Phase":     string(pos),
+						"Phase":     pos.String(),
 					})
 					return decision, planMarkdown, planSessionID, nil
 				case DecisionCancel:
 					writeArtifactJSONIn(session, phase, "gate_decision.json", map[string]string{
 						"Type":      "cancel",
 						"Timestamp": time.Now().UTC().Format(time.RFC3339),
-						"Phase":     string(pos),
+						"Phase":     pos.String(),
 					})
 					return decision, planMarkdown, planSessionID, errGateCancelled
 				case DecisionComment:
@@ -117,14 +117,14 @@ func (e *Engine) runGateLoop(
 				writeArtifactJSONIn(session, phase, "gate_decision.json", map[string]string{
 					"Type":      "cancel",
 					"Timestamp": time.Now().UTC().Format(time.RFC3339),
-					"Phase":     string(pos),
+					"Phase":     pos.String(),
 				})
 				return decision, planMarkdown, planSessionID, errGateCancelled
 			case DecisionApprove:
 				writeArtifactJSONIn(session, phase, "gate_decision.json", map[string]string{
 					"Type":      "approve",
 					"Timestamp": time.Now().UTC().Format(time.RFC3339),
-					"Phase":     string(pos),
+					"Phase":     pos.String(),
 				})
 				return decision, planMarkdown, planSessionID, nil
 			case DecisionEdit:

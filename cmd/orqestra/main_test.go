@@ -26,8 +26,8 @@ func TestRun_MissingConfig(t *testing.T) {
 	args := []string{"orqestra", "--config", "nonexistent-config.yaml", "usage"}
 
 	exitCode := run(args, outStream, errStream)
-	if exitCode != exitInvalidInput {
-		t.Fatalf("expected exitInvalidInput (2), got %d. stderr: %s", exitCode, errStream.String())
+	if exitCode != exitUserCancelled {
+		t.Fatalf("expected exitUserCancelled (130) for non-tty InitGate, got %d. stderr: %s", exitCode, errStream.String())
 	}
 }
 
@@ -37,8 +37,8 @@ func TestRun_Help(t *testing.T) {
 	args := []string{"orqestra"}
 
 	exitCode := run(args, outStream, errStream)
-	if exitCode != exitInvalidInput {
-		t.Fatalf("expected exitInvalidInput (2) for TUI requirement on non-tty, got %d", exitCode)
+	if exitCode != exitUserCancelled {
+		t.Fatalf("expected exitUserCancelled (130) for non-tty InitGate, got %d", exitCode)
 	}
 }
 

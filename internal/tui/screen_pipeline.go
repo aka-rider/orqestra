@@ -67,6 +67,9 @@ type PipelineScreen struct {
 	// Plan review state
 	planComment    textarea.Model
 	hasPlanComment bool
+
+	// Human chat mode (v6)
+	activeChat HumanChatMode
 	editorRunning  bool
 
 	// Edit confirmation state
@@ -177,6 +180,7 @@ func (s *PipelineScreen) Reset() {
 	s.hasPlanComment = false
 	s.editorRunning = false
 	s.awaitingPlanDecision = false
+	s.activeChat = nil
 	s.chatHistory = nil
 	s.planDiff = ""
 	s.reviewTokensIn = 0
@@ -276,7 +280,8 @@ func (s *PipelineScreen) SyncViewports() {
 		if s.showHelp {
 			contentView = s.viewHelp()
 		} else if s.content == ContentStreaming || s.content == ContentPlanReview ||
-			s.content == ContentCompletion || s.content == ContentAgentHistory {
+			s.content == ContentHumanGate || s.content == ContentCompletion ||
+			s.content == ContentAgentHistory {
 			// Render only the active (in-progress) frame in the viewport.
 			contentView = s.frameList.RenderActive(w)
 			if contentView == "" {
@@ -395,41 +400,26 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 		}
 
 	case orchestrator.EventGateRequest:
-		switch event.Gate.Type {
-		case orchestrator.GatePlanApproval:
-			s.planDiff = event.Gate.PlanDiff
-			s.planHistoryDir = event.Gate.PlanHistoryDir
-			s.planHistoryHeadSHA = event.Gate.PlanHistoryHeadSHA
-			if len(s.chatHistory) > 0 && s.planDiff != "" {
+		// Use Position to determine gate type (v6 unified layout).
+		if event.Gate.Position.IsPlanGate() {
+			if len(s.chatHistory) > 0 {
 				s.chatHistory = append(s.chatHistory, ChatEntry{
-					Role: ChatRoleArchitect, Text: "(plan revised — see diff with [^D])", HasPlanChange: true,
+					Role: ChatRoleArchitect, Text: "(plan ready for review)", HasPlanChange: false,
 				})
 			}
 			s.awaitingPlanDecision = true
-			s.content = ContentPlanReview
+			s.content = ContentHumanGate
 			s.finalPlan = event.Gate.FinalPlanMarkdown
 			s.hasPlan = true
 			s.planFilePath = event.Gate.PlanFilePath
-			contentWidth := max(1, width)
-			s.planComment = textarea.New()
-			s.planComment.Placeholder = "Ask a question or request changes..."
-			s.planComment.SetWidth(max(1, contentWidth-4))
-			s.planComment.SetHeight(2)
-			s.planComment.CharLimit = 1024
-			s.planComment.Focus()
-			s.hasPlanComment = true
-			// Build plan text with optional inline diff
-			planText := event.Gate.FinalPlanMarkdown
-			if event.Gate.PlanDiff != "" {
-				s.planDiffLineOffset = strings.Count(event.Gate.FinalPlanMarkdown, "\n") + 2
-				planText += "\n── plan diff ──\n" + stripAnsi(event.Gate.PlanDiff)
-			}
-			s.frameList.AppendFrame(Frame{
-				Kind:  PlanFrame,
-				State: FrameInProgress,
-				Parts: []ContentPart{{IsText: true, Text: planText}},
-			})
-			s.planFrameIdx = s.frameList.FrameCount() - 1
+			s.activeChat = newHumanChatMode(event.Gate, width)
+		} else {
+			// Pause gate — simple chat mode.
+			s.awaitingPlanDecision = true
+			s.content = ContentHumanGate
+			s.finalPlan = event.Gate.FinalPlanMarkdown
+			s.hasPlan = false
+			s.activeChat = newHumanChatMode(event.Gate, width)
 		}
 
 	case orchestrator.EventPlanReady:
@@ -583,6 +573,30 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 			s.SyncViewports()
 		}
 		return s, cmd
+	case ContentHumanGate:
+		if s.activeChat == nil {
+			return s, nil
+		}
+		var cmd tea.Cmd
+		s.activeChat, cmd = s.activeChat.Update(msg)
+		if pending := s.activeChat.Pending(); pending != nil {
+			s.activeChat = nil
+			s.content = ContentStreaming
+			s.awaitingPlanDecision = false
+			switch p := pending.(type) {
+			case *orchestrator.Decision:
+				switch p.Type {
+				case orchestrator.DecisionApprove:
+					s.PendingIntent = ApprovePlanIntent{}
+				case orchestrator.DecisionCancel:
+					s.PendingIntent = CancelPlanIntent{}
+				case orchestrator.DecisionComment:
+					s.PendingIntent = CommentPlanIntent{Comment: p.Comment}
+				}
+			}
+			s.SyncViewports()
+		}
+		return s, cmd
 	case ContentPlanReview:
 		return s.handlePlanReviewKey(msg)
 	case ContentAgentHistory:
@@ -698,15 +712,6 @@ func (s PipelineScreen) handlePlanReviewKey(msg tea.KeyPressMsg) (PipelineScreen
 			s.contentVP.SetYOffset(s.frameList.FrameTopLine(s.planFrameIdx) + s.planDiffLineOffset)
 		}
 		return s, nil
-	case "ctrl+y":
-		if s.planHistoryDir != "" {
-			s.PendingIntent = OpenPlanHistoryIntent{
-				HistoryDir: s.planHistoryDir,
-				HeadSHA:    s.planHistoryHeadSHA,
-				ReadOnly:   false,
-			}
-		}
-		return s, nil
 	}
 
 	return s, nil
@@ -720,6 +725,26 @@ func (s PipelineScreen) HandleCtrlCCancel() PipelineScreen {
 		s.awaitingPlanDecision = false
 		s.hasPlanComment = false
 		s.PendingIntent = CancelPlanIntent{}
+	case ContentHumanGate:
+		s.awaitingPlanDecision = false
+		if s.activeChat != nil {
+			s.activeChat, _ = s.activeChat.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+			if pending := s.activeChat.Pending(); pending != nil {
+				switch p := pending.(type) {
+				case *orchestrator.Decision:
+					switch p.Type {
+					case orchestrator.DecisionApprove:
+						s.PendingIntent = ApprovePlanIntent{}
+					case orchestrator.DecisionCancel:
+						s.PendingIntent = CancelPlanIntent{}
+					case orchestrator.DecisionComment:
+						s.PendingIntent = CommentPlanIntent{Comment: p.Comment}
+					}
+				}
+			}
+		} else {
+			s.PendingIntent = CancelPlanIntent{}
+		}
 	case ContentStreaming, ContentAgentHistory:
 		s.PendingIntent = CancelPipelineIntent{}
 	case ContentUserQuestion:
@@ -940,6 +965,11 @@ func (s PipelineScreen) viewInputZone() string {
 			agentName = s.agents[s.focusedAgent-1].ID
 		}
 		return keyStyle.Render(fmt.Sprintf(" viewing %s history (read-only)", agentName))
+	case ContentHumanGate:
+		if s.activeChat != nil {
+			return keyStyle.Render(s.activeChat.Footer())
+		}
+		return ""
 	case ContentCompletion:
 		if s.lastErr != nil {
 			return errorStyle.Render(fmt.Sprintf(" Error: %v", s.lastErr))
@@ -972,6 +1002,11 @@ func (s PipelineScreen) viewContent(width int) string {
 		return s.viewMergeConflict(width)
 	case ContentEditConfirm:
 		return s.viewEditConfirm(width)
+	case ContentHumanGate:
+		if s.activeChat != nil {
+			return s.activeChat.View(width)
+		}
+		return ""
 	}
 	return ""
 }

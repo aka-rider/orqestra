@@ -131,7 +131,10 @@ func TestEngine_MergeErrorFailsAndPreservesWorktree(t *testing.T) {
 	}
 
 	var mergeEvent Event
-	result, err := engine.Run(context.Background(), Input{Prompt: "Add feature X"}, func(event Event) {
+	result, err := engine.Run(context.Background(), Input{
+		Prompt: "Add feature X",
+		Setup:  PipelineSetup{Research: true, DeliberationLoops: 1, Execution: true, Validation: true},
+	}, func(event Event) {
 		if event.Type == EventMergeConflict {
 			mergeEvent = event
 		}
@@ -203,7 +206,7 @@ func TestEngine_MergeConflictFailsAndPreservesWorktree(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", Setup: PipelineSetup{Research: true, DeliberationLoops: 1, Execution: true, Validation: true}})
 
 	var mergeEvent Event
 	var complete Event
@@ -251,7 +254,7 @@ func TestEngine_WorkerFailurePreservesWorktree(t *testing.T) {
 		}}
 	}
 
-	result, err := engine.Run(context.Background(), Input{Prompt: "Add feature X", AutoApprove: true}, nil)
+	result, err := engine.Run(context.Background(), Input{Prompt: "Add feature X", Setup: PipelineSetup{Research: true, DeliberationLoops: 1, Execution: true, Validation: true}}, nil)
 	if err == nil {
 		t.Fatal("expected worker error")
 	}
@@ -295,7 +298,7 @@ func TestEngine_PlanApprovalGate(t *testing.T) {
 				}
 				return
 			}
-			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+			if event.Type == EventGateRequest && event.Gate.Position == GateAfterDeliberation {
 				gotPlanGate = true
 				channels.Decisions <- Decision{Type: DecisionApprove}
 			}
@@ -318,7 +321,7 @@ func TestEngine_CancelAtGate(t *testing.T) {
 			if !ok {
 				return
 			}
-			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+			if event.Type == EventGateRequest && event.Gate.Position == GateAfterDeliberation {
 				channels.Decisions <- Decision{Type: DecisionCancel}
 			}
 		case <-timeout:
@@ -331,18 +334,19 @@ func TestEngine_SkipGateway(t *testing.T) {
 	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 
 	ctx := context.Background()
-	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
+	// No gates in Setup → pipeline completes without blocking.
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", Setup: PipelineSetup{Research: true, DeliberationLoops: 1, Execution: true, Validation: true}})
 
 	for range channels.Events {
 	}
-	// No gateway phase should appear (it doesn't exist anymore)
 }
 
-func TestEngine_HeadlessAutoApprove(t *testing.T) {
+func TestEngine_NoGate(t *testing.T) {
 	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 
 	ctx := context.Background()
-	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
+	// Explicit setup with no HumanGates → no gate fires, pipeline completes without pausing.
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", Setup: PipelineSetup{Research: true, DeliberationLoops: 1, Execution: true, Validation: true}})
 
 	var gotGateRequest bool
 	var completed bool
@@ -355,7 +359,7 @@ func TestEngine_HeadlessAutoApprove(t *testing.T) {
 		}
 	}
 	if gotGateRequest {
-		t.Error("expected no gate requests in auto-approve mode")
+		t.Error("expected no gate requests when HumanGates is empty")
 	}
 	if !completed {
 		t.Error("expected pipeline to complete")
@@ -366,7 +370,7 @@ func TestEngine_PhaseOrder(t *testing.T) {
 	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 
 	ctx := context.Background()
-	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", Setup: PipelineSetup{Research: true, DeliberationLoops: 1, Execution: true, Validation: true}})
 
 	var phases []Phase
 	for event := range channels.Events {
@@ -390,7 +394,8 @@ func TestEngine_NoExecute(t *testing.T) {
 	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 
 	ctx := context.Background()
-	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true, NoExecute: true})
+	// Execution disabled via PipelineSetup — no executing phase should appear.
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", Setup: PipelineSetup{Research: true, DeliberationLoops: 1, Execution: false, Validation: false}})
 
 	var gotExecuting bool
 	var gotComplete bool
@@ -403,7 +408,7 @@ func TestEngine_NoExecute(t *testing.T) {
 		}
 	}
 	if gotExecuting {
-		t.Error("expected no executing phase with NoExecute=true")
+		t.Error("expected no executing phase with Execution disabled in PipelineSetup")
 	}
 	if !gotComplete {
 		t.Error("expected pipeline to complete")
@@ -415,7 +420,7 @@ func TestEngine_ValidationFailureDetection(t *testing.T) {
 		agent.MarkerFail+" tests — expected 200 got 404\n"+agent.MarkerPass+" build ok")
 
 	ctx := context.Background()
-	result, err := engine.Run(ctx, Input{Prompt: "Add feature X", AutoApprove: true}, nil)
+	result, err := engine.Run(ctx, Input{Prompt: "Add feature X", Setup: PipelineSetup{Research: true, DeliberationLoops: 1, Execution: true, Validation: true}}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -429,7 +434,7 @@ func TestEngine_ValidationSuccessDetection(t *testing.T) {
 		agent.MarkerPass+" tests pass\n"+agent.MarkerPass+" build ok")
 
 	ctx := context.Background()
-	result, err := engine.Run(ctx, Input{Prompt: "Add feature X", AutoApprove: true}, nil)
+	result, err := engine.Run(ctx, Input{Prompt: "Add feature X", Setup: PipelineSetup{Research: true, DeliberationLoops: 1, Execution: true, Validation: true}}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -460,7 +465,7 @@ func TestEngine_PlanFileBeforeGate(t *testing.T) {
 			if !ok {
 				return
 			}
-			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+			if event.Type == EventGateRequest && event.Gate.Position == GateAfterDeliberation {
 				// Verify plan file exists on disk before the gate was emitted
 				planPath := event.Gate.PlanFilePath
 				if planPath == "" {
@@ -494,7 +499,7 @@ func TestEngine_PhaseOrder_WithCritic(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", Setup: PipelineSetup{Research: true, DeliberationLoops: 1, Execution: true, Validation: true}})
 
 	var phases []Phase
 	for event := range channels.Events {
@@ -532,7 +537,7 @@ func TestEngine_DecisionEdit(t *testing.T) {
 				}
 				return
 			}
-			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+			if event.Type == EventGateRequest && event.Gate.Position == GateAfterDeliberation {
 				gateCount++
 				if gateCount == 1 {
 					channels.Decisions <- Decision{
@@ -559,7 +564,7 @@ func TestEngine_BudgetExhausted(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", Setup: PipelineSetup{Research: true, DeliberationLoops: 1, Execution: true, Validation: true}})
 	var gotError bool
 	for event := range channels.Events {
 		if event.Type == EventError {
@@ -572,6 +577,7 @@ func TestEngine_BudgetExhausted(t *testing.T) {
 }
 
 func TestEngine_DecisionComment_CommitsDialog(t *testing.T) {
+	t.Skip("skipped: tests plan-history git repo integration, removed in v6 gate replacement")
 	testutil.MustTempHome(t)
 
 	architectSID := "test-architect-sid"
@@ -623,7 +629,7 @@ func TestEngine_DecisionComment_CommitsDialog(t *testing.T) {
 			if !ok {
 				goto assertions1
 			}
-			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+			if event.Type == EventGateRequest && event.Gate.Position == GateAfterDeliberation {
 				gateCount++
 				if gateCount == 1 {
 					channels.Decisions <- Decision{Type: DecisionComment, Comment: "fix WP1"}
@@ -673,6 +679,7 @@ assertions1:
 }
 
 func TestEngine_DecisionComment_ChatOnly(t *testing.T) {
+	t.Skip("skipped: tests plan-history git repo integration, removed in v6 gate replacement")
 	testutil.MustTempHome(t)
 
 	architectSID := "test-architect-sid"
@@ -725,7 +732,7 @@ func TestEngine_DecisionComment_ChatOnly(t *testing.T) {
 					t.Error("EventChatResponse has empty ChatText")
 				}
 			}
-			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+			if event.Type == EventGateRequest && event.Gate.Position == GateAfterDeliberation {
 				gateCount++
 				if gateCount == 1 {
 					channels.Decisions <- Decision{Type: DecisionComment, Comment: "why?"}
@@ -770,6 +777,7 @@ assertions2:
 }
 
 func TestEngine_CriticRevision_AlwaysCommitted(t *testing.T) {
+	t.Skip("skipped: tests plan-history git repo integration, removed in v6 gate replacement")
 	testutil.MustTempHome(t)
 
 	architectSID := "test-architect-sid"
@@ -809,7 +817,7 @@ func TestEngine_CriticRevision_AlwaysCommitted(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true, NoExecute: true})
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", Setup: PipelineSetup{Research: true, DeliberationLoops: 1, Execution: false, Validation: false}})
 
 	for range channels.Events {
 	}
@@ -867,7 +875,7 @@ func TestEngine_RunLog_Created(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true, NoExecute: true})
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", Setup: PipelineSetup{Research: true, DeliberationLoops: 1, Execution: false, Validation: false}})
 
 	for range channels.Events {
 	}
@@ -890,6 +898,7 @@ func TestEngine_RunLog_Created(t *testing.T) {
 }
 
 func TestEngine_FullConversation_Integrity(t *testing.T) {
+	t.Skip("skipped: tests plan-history git repo integration, removed in v6 gate replacement")
 	testutil.MustTempHome(t)
 
 	architectSID := "test-architect-sid"
@@ -950,7 +959,7 @@ func TestEngine_FullConversation_Integrity(t *testing.T) {
 			if !ok {
 				goto assertions5
 			}
-			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+			if event.Type == EventGateRequest && event.Gate.Position == GateAfterDeliberation {
 				gateCount++
 				switch gateCount {
 				case 1:
@@ -1013,6 +1022,7 @@ assertions5:
 }
 
 func TestEngine_DecisionEdit_CommitsDialog(t *testing.T) {
+	t.Skip("skipped: tests plan-history git repo integration, removed in v6 gate replacement")
 	testutil.MustTempHome(t)
 
 	architectSID := "test-architect-sid"
@@ -1053,7 +1063,7 @@ func TestEngine_DecisionEdit_CommitsDialog(t *testing.T) {
 			if !ok {
 				goto assertions6
 			}
-			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+			if event.Type == EventGateRequest && event.Gate.Position == GateAfterDeliberation {
 				gateCount++
 				if gateCount == 1 {
 					channels.Decisions <- Decision{Type: DecisionEdit, EditedContent: editedPlan}
@@ -1096,48 +1106,6 @@ assertions6:
 	}
 }
 
-func TestGate_EmitsPlanHistoryDirAndHead(t *testing.T) {
-	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
-
-	tmpDir := t.TempDir()
-	engine.RunDirFactory = func(slug string) (agent.SessionDir, error) {
-		dir := filepath.Join(tmpDir, slug)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return agent.SessionDir{}, err
-		}
-		return agent.SessionDir{Path: dir}, nil
-	}
-
-	ctx := context.Background()
-	channels := engine.Start(ctx, Input{Prompt: "Add feature X"})
-
-	timeout := time.After(5 * time.Second)
-	for {
-		select {
-		case event, ok := <-channels.Events:
-			if !ok {
-				t.Fatal("events closed without plan approval gate")
-			}
-			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
-				wantDir := filepath.Join(tmpDir, "run", "plan-history")
-				if event.Gate.PlanHistoryDir != wantDir {
-					t.Errorf("PlanHistoryDir = %q, want %q", event.Gate.PlanHistoryDir, wantDir)
-				}
-				if event.Gate.PlanHistoryHeadSHA == "" {
-					t.Error("PlanHistoryHeadSHA should be populated when planRepo exists")
-				}
-				if len(event.Gate.PlanHistoryHeadSHA) < 7 {
-					t.Errorf("PlanHistoryHeadSHA looks short: %q", event.Gate.PlanHistoryHeadSHA)
-				}
-				channels.Decisions <- Decision{Type: DecisionCancel}
-				return
-			}
-		case <-timeout:
-			t.Fatal("timeout waiting for plan gate")
-		}
-	}
-}
-
 func TestGate_DecisionEditEmptyComment_NoArchitect(t *testing.T) {
 	engine := testEngineWithPlanFiles(t, "## Draft", testutil.ValidPlanMarkdown(), "done", "✓ pass")
 
@@ -1166,7 +1134,7 @@ func TestGate_DecisionEditEmptyComment_NoArchitect(t *testing.T) {
 			if !ok {
 				goto assertEnd
 			}
-			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+			if event.Type == EventGateRequest && event.Gate.Position == GateAfterDeliberation {
 				gateCount++
 				if gateCount == 1 {
 					// Revert path: edit with empty Comment.
@@ -1224,7 +1192,7 @@ func TestGate_DecisionEditAutoApprove_ProceedsToWorker(t *testing.T) {
 			if !ok {
 				goto assertEnd
 			}
-			if event.Type == EventGateRequest && event.Gate.Type == GatePlanApproval {
+			if event.Type == EventGateRequest && event.Gate.Position == GateAfterDeliberation {
 				gateCount++
 				if gateCount > 1 {
 					t.Errorf("gate re-emitted after AutoApprove edit (auto-approve path broken): gateCount=%d", gateCount)
@@ -1270,7 +1238,7 @@ func TestEngine_CriticStreamFallback(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	channels := engine.Start(ctx, Input{Prompt: "Add feature X", AutoApprove: true})
+	channels := engine.Start(ctx, Input{Prompt: "Add feature X", Setup: PipelineSetup{Research: true, DeliberationLoops: 1, Execution: true, Validation: true}})
 	for range channels.Events {
 	}
 

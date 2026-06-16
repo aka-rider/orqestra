@@ -243,6 +243,16 @@ func (d DashboardModel) View() string {
 	return topSection + "\n" + divider + "\n" + logView
 }
 
+// padRight pads s with spaces so its visible width equals w. If s is already
+// at least w chars wide (by lipgloss.Width), it is returned unchanged.
+func padRight(s string, w int) string {
+	visible := lipgloss.Width(s)
+	if visible >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-visible)
+}
+
 // truncateToWidth truncates a string to fit within maxWidth visible characters.
 func truncateToWidth(s string, maxWidth int) string {
 	if lipgloss.Width(s) <= maxWidth {
@@ -267,8 +277,7 @@ type AgentCard struct {
 	Elapsed        time.Duration
 	ContextWindow  int64
 	TokPerSec      float64
-	IsLive         bool
-	PlanHistoryDir string
+	IsLive bool
 }
 
 // agentRowToCard converts an AgentRow to an AgentCard for the dashboard menu.

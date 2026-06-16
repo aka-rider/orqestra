@@ -3,23 +3,17 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"strings"
 
-	"github.com/mattn/go-isatty"
-	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
-	"github.com/xiii/orqestra/internal/plan"
 	"github.com/xiii/orqestra/internal/project"
 	"github.com/xiii/orqestra/internal/sandbox"
 	"github.com/xiii/orqestra/internal/sandbox/detect"
@@ -52,36 +46,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// Global flags
-	var (
-		configPath  string
-		jsonOutput  bool
-		noExecute   bool
-		planPath    string
-		promptFlag  string
-		autoApprove bool
-		autoReject  bool
-		autoInit    bool
-	)
+	var configPath string
 
 	fs := flag.NewFlagSet("orqestra", flag.ContinueOnError)
 	fs.StringVar(&configPath, "config", "orqestra.yaml", "config file name or absolute path")
-	fs.BoolVar(&jsonOutput, "json", false, "output JSON instead of human-friendly text")
-	fs.BoolVar(&noExecute, "no-execute", false, "plan only, skip execution")
-	fs.StringVar(&planPath, "plan", "", "path to a plan markdown file; skips prompting and planning")
-	fs.StringVar(&promptFlag, "prompt", "", "non-interactive prompt; requires --auto-approve or --auto-reject for headless mode")
-	fs.BoolVar(&autoApprove, "auto-approve", false, "auto-approve all gates (headless mode, requires --prompt)")
-	fs.BoolVar(&autoReject, "auto-reject", false, "run pipeline through planning then stop (no worker execution; headless, requires --prompt)")
-	fs.BoolVar(&autoInit, "auto-init", false, "auto-initialize project in headless mode (creates .orqestra at git root)")
-
 	if err := fs.Parse(args[1:]); err != nil {
-		fmt.Fprintf(stderr, "Usage: orqestra [--config path|preset] [--json] [--no-execute] [--plan file.md]\n")
+		fmt.Fprintf(stderr, "Usage: orqestra [--config path|preset]\n")
 		return exitInvalidInput
 	}
 
 	cmdArgs := fs.Args()
 
-	// Project root detection and initialization gate — runs before config.
-	// The 'init' subcommand also needs this to work without orqestra.yaml.
+	// Project root detection and initialization gate.
 	baseDir, dirErr := os.Getwd()
 	if dirErr != nil {
 		fmt.Fprintf(stderr, "Error: cannot determine working directory: %v\n", dirErr)
@@ -97,33 +73,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	}
 
-	isHeadless := promptFlag != "" || planPath != ""
-
 	var repoPath string
-	if isHeadless {
-		// Headless mode: text errors to stderr.
-		var gateErr error
-		repoPath, gateErr = ensureProjectRoot(baseDir, true, autoInit, stderr)
-		if gateErr != nil {
-			fmt.Fprintf(stderr, "Error: %v\n", gateErr)
-			return exitInvalidInput
-		}
-	} else {
-		// TUI mode: need a real terminal.
-		if !isatty.IsTerminal(os.Stdin.Fd()) && !isatty.IsCygwinTerminal(os.Stdin.Fd()) {
-			fmt.Fprintf(stderr, "Error: orqestra requires an interactive terminal.\n")
-			fmt.Fprintf(stderr, "Usage: orqestra [flags]\n")
-			fmt.Fprintf(stderr, "       orqestra [flags] plan <prompt>\n")
-			fmt.Fprintf(stderr, "       orqestra --plan <file.md>\n")
-			return exitInvalidInput
-		}
-		// Render the project-root gate in the TUI.
-		switch tui.RunInitGate(baseDir) {
-		case tui.InitGateOK, tui.InitGateInitDone:
-			repoPath = baseDir
-		default:
-			return exitUserCancelled
-		}
+	switch tui.RunInitGate(baseDir) {
+	case tui.InitGateOK, tui.InitGateInitDone:
+		repoPath = baseDir
+	default:
+		return exitUserCancelled
 	}
 
 	configPath, err := resolveConfigPath(configPath, repoPath)
@@ -137,9 +92,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitInvalidInput
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer cancel()
-
 	// Detect seatbelt profiles at startup.
 	home := os.Getenv("HOME")
 	if home == "" {
@@ -150,146 +102,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if profileErr != nil {
 		fmt.Fprintf(stderr, "Error: sandbox profile detection failed: %v\n", profileErr)
 		return exitInvalidInput
-	}
-
-	// --prompt --auto-reject: headless plan-only mode (no worker execution).
-	if promptFlag != "" && autoReject {
-		if autoApprove {
-			fmt.Fprintf(stderr, "Error: --auto-approve and --auto-reject are mutually exclusive\n")
-			return exitInvalidInput
-		}
-		engine := buildEngine(cfg, sandboxProfiles, repoPath)
-		result, err := tui.RunHeadlessPlanOnly(ctx, engine, promptFlag)
-		if err != nil {
-			if jsonOutput {
-				outputJSON(map[string]any{"error": err.Error(), "stage": "headless-plan-only"})
-			} else {
-				slog.Error("headless plan-only failed", "err", err)
-			}
-			return exitProviderError
-		}
-		if jsonOutput {
-			outputJSON(map[string]any{"status": "plan_only", "prompt": promptFlag, "plan": result.FinalPlan, "run_dir": result.RunDir})
-		} else {
-			fmt.Fprintln(stdout, result.FinalPlan)
-		}
-		return exitOK
-	}
-
-	// --prompt --auto-approve: headless mode via orchestrator channels.
-	if promptFlag != "" && autoApprove {
-		engine := buildEngine(cfg, sandboxProfiles, repoPath)
-		if err := tui.RunHeadless(ctx, engine, promptFlag); err != nil {
-			if jsonOutput {
-				outputJSON(map[string]any{"error": err.Error(), "stage": "headless"})
-			} else {
-				slog.Error("headless execution failed", "err", err)
-			}
-			return exitProviderError
-		}
-		if jsonOutput {
-			outputJSON(map[string]any{"status": "done", "prompt": promptFlag})
-		} else {
-			fmt.Println("\nDone.")
-		}
-		return exitOK
-	}
-	if promptFlag != "" && !autoApprove {
-		fmt.Fprintf(stderr, "Error: --prompt requires --auto-approve or --auto-reject for headless execution\n")
-		return exitInvalidInput
-	}
-
-	// --plan: load a pre-written plan file and skip the researcher/architect phase.
-	if planPath != "" {
-		data, readErr := os.ReadFile(planPath)
-		if readErr != nil {
-			fmt.Fprintf(stderr, "error: cannot read plan file %s: %v\n", planPath, readErr)
-			return exitDomainFailure
-		}
-		content := strings.TrimSpace(string(data))
-
-		if agent.IsNewFormat(content) {
-			// New markdown format — pass directly to engine
-			engine := buildEngine(cfg, sandboxProfiles, repoPath)
-			channels := engine.Start(ctx, orchestrator.Input{
-				Prompt:      content,
-				AutoApprove: autoApprove || noExecute,
-				PlanFile:    content,
-				NoExecute:   noExecute,
-			})
-			for event := range channels.Events {
-				if event.Type == orchestrator.EventError {
-					slog.Error("pipeline error", "err", event.Err)
-					return exitProviderError
-				}
-			}
-			if !noExecute {
-				fmt.Println("\nDone.")
-			} else {
-				fmt.Println("\nPlan loaded (--no-execute). Exiting.")
-			}
-		} else {
-			// Legacy JSON format
-			ps, parseErr := plan.LoadFromFile(planPath)
-			if parseErr != nil {
-				fmt.Fprintf(stderr, "error: cannot parse plan file %s: %v\n", planPath, parseErr)
-				return exitDomainFailure
-			}
-			po := plan.ToPlanOutput(ps)
-			spec := po.Spec
-
-			if noExecute {
-				if jsonOutput {
-					outputJSON(map[string]any{"status": "plan_only", "spec": spec})
-				} else {
-					fmt.Println("\nPlan loaded (--no-execute). Exiting.")
-				}
-				return exitOK
-			}
-
-			// Execute legacy spec
-			resolved, resolveErr := cfg.ResolveModel(cfg.Worker.Model)
-			if resolveErr != nil {
-				slog.Error("failed to resolve worker model", "err", resolveErr)
-				return exitInvalidInput
-			}
-			modelEnv, modelEnvErr := harness.BuildModelEnv(resolved, cfg.ResolveUtilityModel())
-			if modelEnvErr != nil {
-				slog.Error("invalid model configuration", "err", modelEnvErr)
-				return exitInvalidInput
-			}
-			workerRunner, err := harness.NewRunner(harness.RunnerConfig{
-				Sandbox: harness.SandboxConfig{
-					RepoPath:     repoPath,
-					WorktreePath: "",
-					Profiles:     sandboxProfiles,
-					Env:          modelEnv,
-					Writable:     true,
-				},
-			}, ctx)
-			if err != nil {
-				slog.Error("failed to create worker runner", "err", err)
-				return exitInvalidInput
-			}
-
-			var stdout io.Writer = stdout
-			if jsonOutput {
-				stdout = io.Discard
-			}
-
-			result, execErr := runStreamingToWriter(ctx, workerRunner, agent.BuildExecutionPrompt(spec), "", stdout)
-			if execErr != nil {
-				slog.Error("execution failed", "err", execErr)
-				return exitProviderError
-			}
-
-			if jsonOutput {
-				outputJSON(map[string]any{"status": "done", "output": result.Output})
-			} else {
-				fmt.Println("\nDone.")
-			}
-		}
-		return exitOK
 	}
 
 	if len(cmdArgs) == 0 {
@@ -305,73 +117,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	}
 
-	// Route subcommands
-	switch cmdArgs[0] {
-	case "plan":
-		if len(cmdArgs) < 2 {
-			fmt.Fprintf(stderr, "Usage: orqestra plan <prompt>\n")
-			return exitInvalidInput
-		}
-		prompt := strings.Join(cmdArgs[1:], " ")
-		runPlanOnly(ctx, cfg, prompt, jsonOutput, repoPath)
-	case "validate":
-		if len(cmdArgs) < 2 {
-			fmt.Fprintf(stderr, "Usage: orqestra validate <plan-file.md>\n")
-			return exitInvalidInput
-		}
-		runValidateOnly(cmdArgs[1])
-	case "exec":
-		if len(cmdArgs) < 2 {
-			fmt.Fprintf(stderr, "Usage: orqestra exec <plan-file.md>\n")
-			return exitInvalidInput
-		}
-		runExecOnly(ctx, cfg, sandboxProfiles, cmdArgs[1], jsonOutput, repoPath)
-	default:
-		fmt.Fprintf(stderr, "Unknown command: %s\n", cmdArgs[0])
-		fmt.Fprintf(stderr, "Available commands: plan, validate, exec, init\n")
-		return exitInvalidInput
-	}
-	return exitOK
+	fmt.Fprintf(stderr, "Unknown command: %s\n", cmdArgs[0])
+	fmt.Fprintf(stderr, "Available commands: init\n")
+	return exitInvalidInput
 }
 
 func main() {
 	os.Exit(run(os.Args, os.Stdout, os.Stderr))
-}
-
-// ensureProjectRoot checks that cwd is a git project root and is initialized.
-// If not initialized, prompts (TUI) or requires --auto-init (headless).
-func ensureProjectRoot(cwd string, isHeadless, autoInit bool, stderr io.Writer) (string, error) {
-	if err := project.CheckGitRoot(cwd); err != nil {
-		return "", fmt.Errorf("orqestra must be run from the project root directory (no .git found in %s)", cwd)
-	}
-
-	if project.IsInitialized(cwd) {
-		return cwd, nil
-	}
-
-	// Not initialized — gate on init.
-	if !isHeadless {
-		fmt.Fprintf(stderr, "%s is not initialized.\nInitialize .orqestra? [Y/n] ", cwd)
-		var input string
-		fmt.Fscanln(os.Stdin, &input)
-		if input == "n" || input == "no" || input == "N" || input == "No" {
-			return "", fmt.Errorf("not initialized: run 'orqestra init' to set up the project")
-		}
-		if initErr := project.Init(cwd); initErr != nil {
-			return "", fmt.Errorf("failed to initialize project: %w", initErr)
-		}
-		fmt.Fprintf(stderr, "Initialized .orqestra in %s\n", cwd)
-		return cwd, nil
-	}
-
-	if autoInit {
-		if initErr := project.Init(cwd); initErr != nil {
-			return "", fmt.Errorf("failed to auto-initialize project: %w", initErr)
-		}
-		return cwd, nil
-	}
-
-	return "", fmt.Errorf("project %s not initialized: use --auto-init or run 'orqestra init' first", cwd)
 }
 
 // runInitCommand handles the 'orqestra init' subcommand.
@@ -508,139 +260,6 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		RunDirFactory:         orchestrator.DefaultRunDirFactory(repoPath),
 		QuestionBridge:        bridge,
 		WorktreeRunnerFactory: worktreeRunnerFactory,
-	}
-}
-
-func runPlanOnly(ctx context.Context, cfg *config.Config, prompt string, jsonOutput bool, repoPath string) {
-	// Researcher
-	researcherRunner, err := harness.NewClaudeCLIFromConfig(cfg, cfg.Researcher.Model,
-		append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Researcher.BaseAgentConfig)...)...)
-	if err != nil {
-		slog.Error("failed to create researcher runner", "err", err)
-		os.Exit(exitInvalidInput)
-	}
-	researcherPlanner := agent.NewPlanner(researcherRunner, cfg.Researcher.SystemPrompt)
-
-	researchPrompt, _ := agent.CheckPromptIntegrity(prompt, prompt)
-	researchResult, err := researcherPlanner.Run(ctx, researchPrompt, nil)
-	if err != nil {
-		slog.Error("research failed", "err", err)
-		os.Exit(exitProviderError)
-	}
-
-	// Architect
-	architectRunner, planErr := harness.NewClaudeCLIFromConfig(cfg, cfg.Architect.Model,
-		append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Architect.BaseAgentConfig)...)...)
-	if planErr != nil {
-		slog.Error("failed to create architect runner", "err", planErr)
-		os.Exit(exitInvalidInput)
-	}
-	architectPlanner := agent.NewPlanner(architectRunner, cfg.Architect.SystemPrompt)
-
-	archPrompt, _ := agent.CheckPromptIntegrity(agent.ArchitectPrompt(prompt, researchResult.Plan), prompt)
-	archResult, archErr := architectPlanner.Run(ctx, archPrompt, nil)
-	if archErr != nil {
-		slog.Error("planning failed", "err", archErr)
-		os.Exit(exitProviderError)
-	}
-
-	if jsonOutput {
-		outputJSON(map[string]any{"plan": archResult.Plan})
-	} else {
-		fmt.Println(archResult.Plan)
-	}
-}
-
-func runValidateOnly(planPath string) {
-	data, err := os.ReadFile(planPath)
-	if err != nil {
-		slog.Error("reading plan file", "err", err)
-		os.Exit(exitInvalidInput)
-	}
-
-	content := strings.TrimSpace(string(data))
-	if !agent.IsNewFormat(content) {
-		fmt.Fprintf(os.Stderr, "Plan file does not start with '# Plan' — not a valid v3 plan.\n")
-		os.Exit(exitDomainFailure)
-	}
-	if !strings.Contains(content, "## Work Packages") {
-		fmt.Fprintf(os.Stderr, "Plan file missing '## Work Packages' section.\n")
-		os.Exit(exitDomainFailure)
-	}
-	fmt.Println("Plan structure OK.")
-}
-
-func runExecOnly(ctx context.Context, cfg *config.Config, sandboxProfiles []sandbox.Snapshot, planPath string, jsonOutput bool, repoPath string) {
-	data, err := os.ReadFile(planPath)
-	if err != nil {
-		slog.Error("reading plan file", "err", err)
-		os.Exit(exitInvalidInput)
-	}
-
-	content := strings.TrimSpace(string(data))
-	var execPrompt string
-
-	if agent.IsNewFormat(content) {
-		execPrompt = agent.BuildExecutionPromptFromPlan(content)
-	} else {
-		// Legacy JSON spec
-		var spec agent.Specification
-		if err := json.Unmarshal(data, &spec); err != nil {
-			slog.Error("parsing plan file", "err", err)
-			os.Exit(exitInvalidInput)
-		}
-		execPrompt = agent.BuildExecutionPrompt(spec)
-	}
-
-	resolved, _ := cfg.ResolveModel(cfg.Worker.Model)
-	modelEnv, modelEnvErr := harness.BuildModelEnv(resolved, cfg.ResolveUtilityModel())
-	if modelEnvErr != nil {
-		slog.Error("invalid model configuration", "err", modelEnvErr)
-		os.Exit(exitInvalidInput)
-	}
-	workerRunner, err := harness.NewRunner(harness.RunnerConfig{
-		Sandbox: harness.SandboxConfig{
-			RepoPath:     repoPath,
-			WorktreePath: "",
-			Profiles:     sandboxProfiles,
-			Env:          modelEnv,
-			Writable:     true,
-		},
-	}, ctx)
-	if err != nil {
-		slog.Error("failed to create worker runner", "err", err)
-		os.Exit(exitInvalidInput)
-	}
-
-	// Budget guard for exec-only mode
-	usage := orchestrator.NewRunUsage(cfg.Pipeline.TokenBudget)
-	guard := orchestrator.NewBudgetGuard(usage)
-	runner := guard.Wrap(workerRunner, "worker")
-
-	var stdout io.Writer = os.Stdout
-	if jsonOutput {
-		stdout = io.Discard
-	}
-
-	result, execErr := runStreamingToWriter(ctx, runner, execPrompt, "", stdout)
-	if execErr != nil {
-		slog.Error("execution failed", "err", execErr)
-		os.Exit(exitProviderError)
-	}
-
-	if jsonOutput {
-		outputJSON(map[string]any{"status": "done", "output": result.Output})
-	} else {
-		fmt.Println("\nDone.")
-	}
-}
-
-func outputJSON(v any) {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(v); err != nil {
-		slog.Error("failed to write JSON output", "err", err)
-		os.Exit(exitDomainFailure)
 	}
 }
 

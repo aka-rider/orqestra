@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"path/filepath"
-
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/xiii/orqestra/internal/orchestrator"
@@ -19,14 +17,6 @@ func (s RunDetailScreen) Update(msg tea.Msg) (RunDetailScreen, tea.Cmd) {
 	switch keyMsg.String() {
 	case "ctrl+e":
 		return s.openStepLog()
-	case "ctrl+y":
-		if s.detail.Path != "" {
-			s.PendingIntent = OpenPlanHistoryIntent{
-				HistoryDir: filepath.Join(s.detail.Path, "plan-history"),
-				ReadOnly:   true,
-			}
-		}
-		return s, nil
 	case "ctrl+shift+r":
 		if !s.completeness.Complete && s.detail.Path != "" {
 			s.PendingIntent = RestartRunIntent{

@@ -127,13 +127,15 @@ func (s PipelineScreen) viewFooter() string {
 	switch s.content {
 	case ContentUserQuestion:
 		return keyStyle.Render(s.question.Footer()+"  [^H] help  ") + ctrlCHint
+	case ContentHumanGate:
+		if s.activeChat != nil {
+			return keyStyle.Render(s.activeChat.Footer()+"  [^H] help  ") + ctrlCHint
+		}
+		return keyStyle.Render(" [^H] help  ") + ctrlCHint
 	case ContentPlanReview:
 		footer := " [^A] accept | [^E] edit in editor | [Enter] comment | [Shift+Enter] newline"
 		if s.planDiff != "" {
 			footer += " | [^D] diff"
-		}
-		if s.planHistoryDir != "" {
-			footer += " | [^Y] history"
 		}
 		footer += "  " + ctrlCHint
 		if len(s.chatHistory) > 0 && (s.reviewTokensIn+s.reviewTokensOut > 0) {

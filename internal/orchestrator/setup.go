@@ -7,7 +7,7 @@ import (
 // PipelineSetup configures which pipeline phases run and which gates fire.
 type PipelineSetup struct {
 	Research          bool
-	DeliberationLoops int          // 1..10; 0 → 1
+	DeliberationLoops int // 1..10; 0 → 1
 	Execution         bool
 	Validation        bool
 	HumanGates        HumanGateSet
@@ -32,24 +32,27 @@ func (p PipelineSetup) Validate() error {
 	return nil
 }
 
+// isZeroSetup reports whether s is the zero value (no fields set by the caller).
+// Can't use == because HumanGateSet is a slice.
+func isZeroSetup(s PipelineSetup) bool {
+	return !s.Research && !s.Execution && !s.Validation &&
+		s.DeliberationLoops == 0 && len(s.HumanGates) == 0
+}
+
 // resolveSetup converts user Input into a PipelineSetup.
-// Zero-value fields fall back to defaults; DeliberationLoops of 0 → 1.
+// A zero-value Input.Setup falls back to DefaultPipelineSetup.
+// An explicitly-set Input.Setup is used as-is (with loop clamping), so callers
+// that want no gates pass HumanGates: nil and the gate does not fire.
 func resolveSetup(in Input) PipelineSetup {
-	def := DefaultPipelineSetup()
-	if in.NoExecute {
-		return PipelineSetup{
-			Research: true, DeliberationLoops: def.DeliberationLoops,
-			Execution: false, Validation: false, HumanGates: def.HumanGates,
-		}
+	if isZeroSetup(in.Setup) {
+		return DefaultPipelineSetup()
 	}
-	s := PipelineSetup{
-		Research:          true,
-		DeliberationLoops: def.DeliberationLoops,
-		Execution:         true,
-		Validation:        true,
-		HumanGates:        def.HumanGates,
+	s := in.Setup
+	if s.DeliberationLoops < 1 {
+		s.DeliberationLoops = 1
 	}
-	// Apply any explicit overrides from Input.Setup if present.
-	// (Input.Setup is populated by the TUI setup panel.)
+	if s.DeliberationLoops > 10 {
+		s.DeliberationLoops = 10
+	}
 	return s
 }
