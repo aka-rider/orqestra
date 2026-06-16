@@ -80,6 +80,83 @@ A screen with multiple mutually-exclusive modes is a sum type. Model it as one a
 
 </async_commands>
 
+<tui_debugging>
+
+## Debugging the TUI with ttyd + Playwright MCP
+
+When you need to visually observe or interact with the TUI — to verify a layout fix, test a key-binding, or reproduce a rendering bug — use `ttyd` to expose the running terminal in a browser and drive it with the Playwright MCP tools.
+
+### Prerequisites
+
+- `ttyd` is installed: `brew install ttyd` (already present in this dev environment).
+- Playwright MCP is active in Claude Code: if the `browser_*` tools are not available, add it with `mcp__MCP_DOCKER__mcp-add` (`name: "playwright"`).
+
+### Workflow
+
+**1. Build and start the TUI under ttyd**
+
+```sh
+make build
+ttyd -p 7681 ./bin/orqestra
+# or with a config:
+ttyd -p 7681 ./bin/orqestra --config orqestra.yaml
+```
+
+ttyd serves the terminal at `http://localhost:7681` via xterm.js. The process inherits your environment, so real Claude CLI credentials and config are available.
+
+**2. Open the terminal in the browser**
+
+```
+browser_navigate  { url: "http://localhost:7681" }
+browser_resize    { width: 1400, height: 900 }   # wide enough for Orqestra's layout
+```
+
+Set the viewport *before* taking any screenshot so terminal dimensions are stable. Orqestra's layout recalculates on every `tea.WindowSizeMsg`; a narrow viewport triggers the small-screen fallback.
+
+**3. Focus the terminal and observe**
+
+```
+browser_click          { target: "terminal" }     # focus xterm.js so key events land
+browser_take_screenshot { type: "png" }           # see current TUI state
+```
+
+xterm.js renders to a `<canvas>` by default. `browser_take_screenshot` is the primary observation tool; `browser_snapshot` returns the DOM accessibility tree, which is sparse for canvas-rendered terminals.
+
+**4. Send keystrokes**
+
+```
+browser_press_key { key: "ArrowDown" }
+browser_press_key { key: "ArrowUp" }
+browser_press_key { key: "Enter" }
+browser_press_key { key: "Escape" }
+browser_press_key { key: "Control+c" }
+browser_press_key { key: "Control+p" }    # ^P → pipeline setup panel
+```
+
+Key names follow the `KeyboardEvent.key` spec. Modifier combos use `+`: `"Control+c"`, `"Control+p"`, `"Shift+Tab"`.
+
+**5. Wait for state changes**
+
+```
+browser_wait_for { text: "Deliberation" }         # wait for a screen element to appear
+browser_wait_for { textGone: "Submitting" }       # wait for transient state to clear
+browser_wait_for { time: 0.5 }                    # fixed delay when text isn't stable
+```
+
+**6. Teardown**
+
+Kill the ttyd process with `Ctrl+C` where it was launched, or send `Control+c` via Playwright and call `browser_close`.
+
+### Tips
+
+- **Terminal size matters**: `Model.recalculateLayout()` fires on every `tea.WindowSizeMsg`. Use `browser_resize` to reproduce specific terminal sizes — `1400×900` ≈ 240×50 cols/rows at xterm.js defaults.
+- **Screenshot after every interaction**: xterm.js redraws asynchronously. Add `browser_wait_for { time: 0.3 }` before screenshots when the frame hasn't settled.
+- **Alt-screen mode hides stderr**: TUI stderr is suppressed. Check `.orqestra/sessions/<run>/` artifacts and `~/.claude/projects/` JSONL logs for model-side errors that won't appear in the screenshot.
+- **Editor and gate flows**: when the TUI opens `$EDITOR`, it suspends alt-screen and the browser goes blank. Bypass editor flows with `--auto-approve` or pre-approved configs.
+- **Port conflict**: if 7681 is taken, pick another port: `ttyd -p 7682 …` and adjust the `browser_navigate` URL.
+
+</tui_debugging>
+
 <testing_enforcement>
 
 ## Testing Enforcement
