@@ -243,23 +243,22 @@ type session struct {
 	mu          sync.Mutex
 }
 
-// Post sends a user message over NDJSON stdin.
-// For the first call on a new session, it starts the process and sends
-// the initial prompt as NDJSON. For subsequent calls, it sends follow-up
-// messages as NDJSON.
+// Post sends a user message. For the first call the prompt is already
+// delivered via the -p flag in startSession, so no stdin write is needed.
+// Subsequent calls send follow-up messages as NDJSON on stdin.
 func (c *ClaudeCLI) Post(msg string) {
 	sess := c.initSession()
 
-	// Start the process on first message.
 	sess.mu.Lock()
-	if sess.cmd == nil {
+	isFirst := sess.cmd == nil
+	if isFirst {
 		sess.mu.Unlock()
 		c.mu.Lock()
 		c.startSession(sess, msg)
 		c.mu.Unlock()
-	} else {
-		sess.mu.Unlock()
+		return // first prompt already delivered via -p; stdin write would double-send
 	}
+	sess.mu.Unlock()
 
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
@@ -438,10 +437,21 @@ func (c *ClaudeCLI) startSession(s *session, initialPrompt string) {
 	s.cmd = cmd
 	s.stdin = stdin
 
-	// Drain stdout in background.
+	// Drain stdout in background; capture session ID for ExtractPlan / multi-turn.
 	go func() {
-		parseStream(cmdStdout, s.events)
+		_, _, _, sid, _, _ := parseStream(cmdStdout, s.events)
+		if sid != "" {
+			s.mu.Lock()
+			s.sessionID = sid
+			s.mu.Unlock()
+		}
 		cmd.Wait()
+		// Reset cmd/stdin so the next Post() starts a fresh subprocess for
+		// the critic-revision loop or any subsequent continuation.
+		s.mu.Lock()
+		s.cmd = nil
+		s.stdin = nil
+		s.mu.Unlock()
 		close(s.events)
 	}()
 }
@@ -687,7 +697,7 @@ func parseStreamLines(src io.Reader, events chan<- Event) (string, error) {
 		}
 
 		if event.SessionID != "" && events != nil {
-			events <- Event{Kind: EventChunk, Text: "[session:" + event.SessionID + "]"}
+			events <- Event{Kind: EventSessionStart, SessionID: event.SessionID}
 		}
 
 		emitStreamEvents(event, events)
@@ -904,11 +914,26 @@ func (c *ClaudeCLI) buildEnv() ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build model env: %w", err)
 	}
-	// Filter out any existing ANTHROPIC_API_KEY from the parent environment
-	// to prevent leakage or conflicts with the runner's configured auth.
+	// Filter variables that would make the subprocess behave as a child session
+	// of the invoking Claude Code process. CLAUDE_CODE_SESSION_ID and
+	// CLAUDE_CODE_CHILD_SESSION cause claude 2.1+ to attempt parent-session IPC
+	// instead of starting an independent session, resulting in a hang.
+	// Also strip ANTHROPIC_API_KEY to prevent leakage or conflicts.
+	blocked := []string{
+		"ANTHROPIC_API_KEY=",
+		"CLAUDE_CODE_SESSION_ID=",
+		"CLAUDE_CODE_CHILD_SESSION=",
+	}
 	var clean []string
 	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
+		filtered := false
+		for _, prefix := range blocked {
+			if strings.HasPrefix(kv, prefix) {
+				filtered = true
+				break
+			}
+		}
+		if !filtered {
 			clean = append(clean, kv)
 		}
 	}

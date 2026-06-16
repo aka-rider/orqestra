@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"log/slog"
 	"os"
 	"time"
 
@@ -245,6 +246,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case OrchestratorEventMsg:
+		if m.events == nil {
+			slog.Error("BUG: m.events is nil in OrchestratorEventMsg handler", "event_type", msg.Event.Type)
+		}
 		prevContent := m.pipelineScreen.content
 		prevComment := m.pipelineScreen.hasPlanComment
 		m.pipelineScreen.ApplyEvent(msg.Event, m.width)

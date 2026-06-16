@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"image"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -329,8 +328,6 @@ func (s *PipelineScreen) RecalculateLayout(width, contentHeight int) {
 
 // ApplyEvent updates the screen based on a single orchestrator event.
 func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
-	slog.Debug("tui event", "type", event.Type, "phase", event.Phase, "agentID", event.AgentID)
-
 	switch event.Type {
 	case orchestrator.EventPhaseChange:
 		if !s.awaitingPlanDecision {
