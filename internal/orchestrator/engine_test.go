@@ -124,7 +124,8 @@ func defaultTestSteps() PipelineSteps {
 
 // driveGate waits for a gate at pos and submits dec.
 // Must be launched in a goroutine before RunPipeline is called.
-func driveGate(t *testing.T, obs *ObsStore, ctrl Control, pos HumanGatePosition, dec Decision, timeout time.Duration) {
+// cancel is called on timeout so that the RunPipeline call in the parent goroutine unblocks.
+func driveGate(t *testing.T, obs *ObsStore, ctrl Control, pos HumanGatePosition, dec Decision, timeout time.Duration, cancel context.CancelFunc) {
 	t.Helper()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -138,6 +139,7 @@ func driveGate(t *testing.T, obs *ObsStore, ctrl Control, pos HumanGatePosition,
 		case <-obs.NotifyCh():
 		case <-timer.C:
 			t.Errorf("driveGate timeout waiting for gate at position %v", pos)
+			cancel()
 			return
 		}
 	}
@@ -220,9 +222,11 @@ func TestEngine_PlanApprovalGate(t *testing.T) {
 	}
 	steps := defaultTestSteps()
 
-	go driveGate(t, obs, ctrl, GateAfterDeliberation, Decision{Type: DecisionApprove}, 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go driveGate(t, obs, ctrl, GateAfterDeliberation, Decision{Type: DecisionApprove}, 5*time.Second, cancel)
 
-	result, err := RunPipeline(context.Background(), setup, PipelineRunInput{Prompt: "Add feature X", RunID: "run-1"}, sc, steps)
+	result, err := RunPipeline(ctx, setup, PipelineRunInput{Prompt: "Add feature X", RunID: "run-1"}, sc, steps)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -242,9 +246,11 @@ func TestEngine_CancelAtGate(t *testing.T) {
 	}
 	steps := defaultTestSteps()
 
-	go driveGate(t, obs, ctrl, GateAfterDeliberation, Decision{Type: DecisionCancel}, 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go driveGate(t, obs, ctrl, GateAfterDeliberation, Decision{Type: DecisionCancel}, 5*time.Second, cancel)
 
-	result, err := RunPipeline(context.Background(), setup, PipelineRunInput{Prompt: "Add feature X", RunID: "run-1"}, sc, steps)
+	result, err := RunPipeline(ctx, setup, PipelineRunInput{Prompt: "Add feature X", RunID: "run-1"}, sc, steps)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -452,6 +458,9 @@ func TestEngine_DecisionEdit(t *testing.T) {
 
 	editedContent := "# Plan\n\n## Goal\nEdited.\n\n## Work Packages\n\n### 1. Do it\n\n**Steps:**\n1. Edit foo.go\n\n**Done when:**\n- Tests pass"
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	// First gate: send Edit; second gate: send Approve.
 	gateCount := 0
 	var gateMu sync.Mutex
@@ -470,15 +479,15 @@ func TestEngine_DecisionEdit(t *testing.T) {
 					return
 				}
 			}
-			// Wait for next notify or a small poll to avoid tight-loop.
 			select {
 			case <-obs.NotifyCh():
-			case <-time.After(10 * time.Millisecond):
+			case <-ctx.Done():
+				return
 			}
 		}
 	}()
 
-	result, err := RunPipeline(context.Background(), setup, PipelineRunInput{Prompt: "Add feature X", RunID: "run-1"}, sc, steps)
+	result, err := RunPipeline(ctx, setup, PipelineRunInput{Prompt: "Add feature X", RunID: "run-1"}, sc, steps)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

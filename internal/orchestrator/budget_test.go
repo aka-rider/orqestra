@@ -1,62 +1,11 @@
 package orchestrator
 
 import (
-	"context"
 	"errors"
 	"testing"
 
 	"github.com/xiii/orqestra/internal/harness"
 )
-
-type stubRunner struct {
-	events chan harness.Event
-	done   chan struct{}
-}
-
-func (s *stubRunner) Post(msg string) {
-	// Simulate a response
-	if s.events == nil {
-		return
-	}
-	select {
-	case s.events <- harness.Event{Kind: harness.EventChunk, Text: "response"}:
-	case <-s.done:
-	}
-	select {
-	case s.events <- harness.Event{Kind: harness.EventUsage, Input: 10, Output: 5}:
-	case <-s.done:
-	}
-	select {
-	case s.events <- harness.Event{Kind: harness.EventSessionDone}:
-	case <-s.done:
-	}
-	close(s.events)
-}
-
-func (s *stubRunner) Receive() <-chan harness.Event {
-	return s.events
-}
-
-func (s *stubRunner) ExtractPlan(ctx context.Context) (string, error) {
-	return "plan content", nil
-}
-
-func (s *stubRunner) SetEvents(ch chan<- harness.Event) {
-	// Create the events channel that Post() writes to.
-	// The injected ch is send-only (runner writes to it); we don't range over it.
-	if s.events == nil {
-		s.events = make(chan harness.Event, 256)
-	}
-}
-
-func (s *stubRunner) SessionID() string {
-	return "test-session"
-}
-
-func (s *stubRunner) Cancel() error {
-	close(s.done)
-	return nil
-}
 
 func TestBudgetGuard_Unlimited(t *testing.T) {
 	u := NewRunUsage(0)
