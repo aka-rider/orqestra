@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xiii/orqestra/internal/agent"
+	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
 func TestRunDetailScrollFollow(t *testing.T) {
 	s := NewRunDetailScreen()
-	steps := make([]agent.StepMeta, 10)
+	steps := make([]orchestrator.StepMeta, 10)
 	for i := range steps {
-		steps[i] = agent.StepMeta{
+		steps[i] = orchestrator.StepMeta{
 			AgentID:      fmt.Sprintf("agent-%d", i),
 			ModelDisplay: "test-model",
 			InputTokens:  100,
@@ -25,7 +25,7 @@ func TestRunDetailScrollFollow(t *testing.T) {
 			Status:       "done",
 		}
 	}
-	s.SetDetail(agent.RunDetail{Steps: steps})
+	s.SetDetail(orchestrator.RunDetail{Steps: steps})
 	s.stepsVP.SetWidth(40)
 	s.stepsVP.SetHeight(8) // small: fits ~1 card
 
@@ -86,8 +86,8 @@ func TestRunDetailPerStepContent(t *testing.T) {
 	s.stepsVP.SetHeight(20)
 	s.logVP.SetWidth(80)
 	s.logVP.SetHeight(8)
-	s.SetDetail(agent.RunDetail{
-		Steps: []agent.StepMeta{
+	s.SetDetail(orchestrator.RunDetail{
+		Steps: []orchestrator.StepMeta{
 			{AgentID: "a0", ClaudePlanFilePath: p0, Status: "done"},
 			{AgentID: "a1", ClaudePlanFilePath: p1, Status: "done"},
 		},

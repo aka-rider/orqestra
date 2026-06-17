@@ -20,23 +20,18 @@ type setupModel struct {
 
 // setupItem order mirrors the rendered list.
 const (
-	setupItemResearch    = 0
-	setupItemDelibLoops  = 1
-	setupItemExecution   = 2
-	setupItemValidation  = 3
-	setupItemGateFirst   = 4 // GateAfterDeliberation
-	setupItemGateSecond  = 5 // GateAfterResearch
-	setupItemGateThird   = 6 // GateAfterExecution
-	setupItemGateFourth  = 7 // GateAfterValidation
-	numSetupItems        = 8
+	setupItemResearch   = 0
+	setupItemExecution  = 1
+	setupItemValidation = 2
+	setupItemGateFirst  = 3 // GateAfterDeliberation
+	setupItemGateSecond = 4 // GateAfterResearch
+	numSetupItems       = 5
 )
 
-// gateAtCursor maps cursor positions 4-7 to HumanGatePosition values.
-var gateOrder = [4]orchestrator.HumanGatePosition{
+// gateOrder maps cursor positions 3-4 to HumanGatePosition values.
+var gateOrder = [2]orchestrator.HumanGatePosition{
 	orchestrator.GateAfterDeliberation,
 	orchestrator.GateAfterResearch,
-	orchestrator.GateAfterExecution,
-	orchestrator.GateAfterValidation,
 }
 
 func newSetupModel() setupModel {
@@ -91,16 +86,6 @@ func (s setupModel) changeValue(key string) setupModel {
 	switch s.cursor {
 	case setupItemResearch:
 		s.setup.Research = !s.setup.Research
-	case setupItemDelibLoops:
-		if key == "left" {
-			if s.setup.DeliberationLoops > 1 {
-				s.setup.DeliberationLoops--
-			}
-		} else {
-			if s.setup.DeliberationLoops < 10 {
-				s.setup.DeliberationLoops++
-			}
-		}
 	case setupItemExecution:
 		s.setup.Execution = !s.setup.Execution
 	case setupItemValidation:
@@ -159,28 +144,14 @@ func (s setupModel) View() string {
 	}
 
 	renderBool(setupItemResearch, "Research", s.setup.Research)
-
-	// DeliberationLoops stepper
-	cur := "  "
-	if s.cursor == setupItemDelibLoops {
-		cur = setupCursorStyle.Render("▶ ")
-	}
-	loops := s.setup.DeliberationLoops
-	if loops <= 0 {
-		loops = 1
-	}
-	b.WriteString(fmt.Sprintf("%s%-24s%s\n", cur, "Architect ↔ Critic:", setupValueStyle.Render(fmt.Sprintf("◁ %d ▷", loops))))
-
 	renderBool(setupItemExecution, "Execution", s.setup.Execution)
 	renderBool(setupItemValidation, "Validation", s.setup.Validation)
 
 	b.WriteString("\n" + setupDimStyle.Render("  Human Review:") + "\n")
 
-	gateLabels := [4]string{
+	gateLabels := [2]string{
 		"After Deliberation",
 		"After Research",
-		"After Execution",
-		"After Validation",
 	}
 	for i, gate := range gateOrder {
 		idx := setupItemGateFirst + i

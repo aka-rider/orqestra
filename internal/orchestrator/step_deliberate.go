@@ -63,7 +63,7 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 			s.writeArchMeta(sc, archRes.SessionID, archStart, "failed", err, harness.TokenUsage{})
 			return PlanOutput{}, fmt.Errorf("architect: %w", err)
 		}
-		planMarkdown, err = agent.ReadPlanFromRun(archRes)
+		planMarkdown, err = agent.ReadPlan(archRes.SessionID, archRes.PlanFilePath, sc.RepoPath)
 		if err != nil {
 			if attempt < maxArch {
 				sc.Log.Warn("architect plan extraction failed, retrying", "attempt", attempt, "err", err)
@@ -126,7 +126,7 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 			s.writeCriticMeta(sc, criticRes.SessionID, criticStart, "failed", err, harness.TokenUsage{})
 			return PlanOutput{}, fmt.Errorf("critic: %w", err)
 		}
-		criticMarkdown, err = agent.ReadPlanFromRun(criticRes)
+		criticMarkdown, err = agent.ReadPlan(criticRes.SessionID, criticRes.PlanFilePath, sc.RepoPath)
 		if err != nil {
 			// Critic report not in a plan file — fall back to stream output.
 			criticMarkdown = strings.TrimSpace(criticRes.Output)
@@ -165,7 +165,7 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 		return PlanOutput{}, fmt.Errorf("architect critic revision: %w", revErr)
 	}
 
-	revised, readErr := agent.ReadPlanFromRun(revRes)
+	revised, readErr := agent.ReadPlan(revRes.SessionID, revRes.PlanFilePath, sc.RepoPath)
 	if readErr != nil {
 		// Continuation may have been chat-only (no plan rewrite) — treat as no change.
 		sc.Log.Debug("architect critic revision: plan unchanged (chat continuation)", "err", readErr)
@@ -199,7 +199,7 @@ func (s *DeliberateStep) writeArchRevMeta(sc StepContext, sid string, start time
 }
 
 func writeMeta(sc StepContext, filename, agentID string, meta AgentMeta, sessionID string, start time.Time, status string, err error, usage harness.TokenUsage) {
-	m := agent.StepMeta{
+	m := StepMeta{
 		AgentID:         agentID,
 		ModelRef:        meta.ModelRef,
 		ModelDisplay:    meta.ModelDisplay,

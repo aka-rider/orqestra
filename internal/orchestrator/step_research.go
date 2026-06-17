@@ -50,7 +50,7 @@ func (s *ResearchStep) Run(ctx context.Context, in ResearchInput, sc StepContext
 			s.writeMeta(sc, res.SessionID, start, "failed", err, harness.TokenUsage{})
 			return ResearchOutput{}, fmt.Errorf("research: %w", err)
 		}
-		plan, err = agent.ReadPlanFromRun(res)
+		plan, err = agent.ReadPlan(res.SessionID, res.PlanFilePath, sc.RepoPath)
 		if err != nil {
 			if attempt < maxAttempts {
 				sc.Log.Warn("researcher plan extraction failed, retrying",
@@ -82,7 +82,7 @@ func (s *ResearchStep) Run(ctx context.Context, in ResearchInput, sc StepContext
 }
 
 func (s *ResearchStep) writeMeta(sc StepContext, sessionID string, start time.Time, status string, err error, usage harness.TokenUsage) {
-	meta := agent.StepMeta{
+	meta := StepMeta{
 		AgentID:         string(s.ID()),
 		ModelRef:        s.Meta.ModelRef,
 		ModelDisplay:    s.Meta.ModelDisplay,

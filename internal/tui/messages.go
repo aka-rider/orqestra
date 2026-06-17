@@ -9,9 +9,6 @@ import (
 
 // --- TUI Messages (tea.Msg types) ---
 
-// OrchestratorEventMsg wraps an orchestrator event for the TUI.
-type OrchestratorEventMsg struct{ Event orchestrator.Event }
-
 // tickMsg fires every second to refresh elapsed timers and live output.
 type tickMsg time.Time
 
@@ -100,11 +97,6 @@ type NavigateBackIntent struct{}
 
 func (NavigateBackIntent) isIntent() {}
 
-// ToggleDashboardIntent toggles the dashboard panel visibility.
-type ToggleDashboardIntent struct{}
-
-func (ToggleDashboardIntent) isIntent() {}
-
 // OpenExternalEditorIntent opens a file in the user's external editor.
 type OpenExternalEditorIntent struct {
 	FilePath string
@@ -124,11 +116,6 @@ type SubmitQuestionAnswerIntent struct {
 
 func (SubmitQuestionAnswerIntent) isIntent() {}
 
-// AbortMergeIntent aborts the post-run merge (user chose not to resolve conflicts).
-type AbortMergeIntent struct{}
-
-func (AbortMergeIntent) isIntent() {}
-
 // ConfirmEditIntent confirms a user's manual plan edit with an optional comment.
 type ConfirmEditIntent struct {
 	EditedContent string
@@ -140,16 +127,6 @@ func (ConfirmEditIntent) isIntent() {}
 
 // ctrlCTimeoutMsg resets the Ctrl+C pending-quit state after the time gate expires.
 type ctrlCTimeoutMsg struct{}
-
-// RevertPlanIntent reverts the live plan to a historical revision via a
-// forward DecisionEdit with empty Comment (non-destructive — the orchestrator
-// skips architect re-engagement when Comment is empty).
-type RevertPlanIntent struct {
-	Content  string
-	ShortSHA string
-}
-
-func (RevertPlanIntent) isIntent() {}
 
 // RestartRunIntent requests restarting a failed or incomplete historical run.
 type RestartRunIntent struct {

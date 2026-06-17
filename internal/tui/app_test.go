@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
@@ -116,15 +115,14 @@ func TestTUI_PlanApproval(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
 
-	event := orchestrator.Event{
-		Type: orchestrator.EventGateRequest,
+	snap := orchestrator.ObsSnapshot{
+		HasGate: true,
 		Gate: orchestrator.GateRequest{
 			Position:          orchestrator.GateAfterDeliberation,
 			FinalPlanMarkdown: "# Plan\n\n## Goal\nAdd feature X\n\n## Work Packages\n\n### 1. Step 1",
 		},
 	}
-
-	m.pipelineScreen.ApplyEvent(event, m.width)
+	m.pipelineScreen.ApplySnapshot(snap, m.width)
 
 	if m.pipelineScreen.content != ContentHumanGate {
 		t.Errorf("expected ContentHumanGate, got %d", m.pipelineScreen.content)
@@ -236,45 +234,6 @@ func TestTUI_UserQuestion_CtrlCSkipsWithDefault(t *testing.T) {
 	// HandleCtrlCCancel test in screen_pipeline_test.go.
 }
 
-func TestTUI_AgentNavigation(t *testing.T) {
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentStreaming
-	m.pipelineScreen.agents = []AgentRow{
-		{ID: "architect", State: AgentStateRunning},
-	}
-
-	// Press Alt+1 to view architect history
-	result, _ := sendAlt(m, '1')
-	model := result.(Model)
-
-	if model.pipelineScreen.content != ContentAgentHistory {
-		t.Errorf("expected ContentAgentHistory, got %d", model.pipelineScreen.content)
-	}
-	if model.pipelineScreen.focusedAgent != 1 {
-		t.Errorf("expected focusedAgent=1, got %d", model.pipelineScreen.focusedAgent)
-	}
-}
-
-func TestTUI_AgentNavBack(t *testing.T) {
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentAgentHistory
-	m.pipelineScreen.focusedAgent = 1
-	m.pipelineScreen.agents = []AgentRow{{ID: "architect", State: AgentStateDone}}
-
-	// Press Esc to go back
-	result, _ := sendKey(m, tea.KeyEscape)
-	model := result.(Model)
-
-	if model.pipelineScreen.content != ContentStreaming {
-		t.Errorf("expected ContentStreaming after Esc, got %d", model.pipelineScreen.content)
-	}
-	if model.pipelineScreen.focusedAgent != 0 {
-		t.Errorf("expected focusedAgent=0, got %d", model.pipelineScreen.focusedAgent)
-	}
-}
-
 func TestTUI_NewRun(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
@@ -321,55 +280,26 @@ func TestTUI_SidebarUpdates(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
 
-	// AgentStarted
-	m.pipelineScreen.ApplyEvent(orchestrator.Event{
-		Type:    orchestrator.EventAgentStarted,
-		AgentID: "researcher",
+	// Agent appears in snapshot as running.
+	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
+		Agents: []orchestrator.AgentSnapshot{
+			{AgentID: "researcher", Status: "running"},
+		},
 	}, m.width)
 
 	if len(m.pipelineScreen.agents) != 1 || m.pipelineScreen.agents[0].State != AgentStateRunning {
 		t.Errorf("expected 1 agent running, got %+v", m.pipelineScreen.agents)
 	}
 
-	// AgentDone
-	m.pipelineScreen.ApplyEvent(orchestrator.Event{
-		Type:    orchestrator.EventAgentDone,
-		AgentID: "researcher",
+	// Agent transitions to done.
+	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
+		Agents: []orchestrator.AgentSnapshot{
+			{AgentID: "researcher", Status: "done"},
+		},
 	}, m.width)
 
 	if m.pipelineScreen.agents[0].State != AgentStateDone {
 		t.Errorf("expected agent state 'done', got %q", m.pipelineScreen.agents[0].State)
-	}
-}
-
-func TestTUI_FullDashboard(t *testing.T) {
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentStreaming
-	m.pipelineScreen.agents = []AgentRow{
-		{ID: "architect", State: AgentStateRunning},
-	}
-
-	// Press Ctrl+D to toggle dashboard
-	result, _ := sendCtrl(m, 'd')
-	model := result.(Model)
-
-	if !model.pipelineScreen.showDashboard {
-		t.Error("expected showDashboard=true")
-	}
-
-	// View should contain dashboard content
-	view := viewString(model)
-	if !strings.Contains(view, "architect") {
-		t.Error("expected dashboard to show agent names")
-	}
-
-	// Press Esc to return
-	result2, _ := sendKey(model, tea.KeyEscape)
-	model2 := result2.(Model)
-
-	if model2.pipelineScreen.showDashboard {
-		t.Error("expected showDashboard=false after Esc")
 	}
 }
 
@@ -433,90 +363,20 @@ func TestTUI_CompletionValidation(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.active = true
 
-	event := orchestrator.Event{
-		Type:             orchestrator.EventComplete,
-		WorkerValidation: "✓ tests pass\n✓ build succeeds",
-	}
-
-	m.pipelineScreen.ApplyEvent(event, m.width)
+	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
+		Terminal: orchestrator.TerminalState{
+			Done:   true,
+			Result: orchestrator.Result{WorkerValidation: "✓ tests pass\n✓ build succeeds"},
+		},
+	}, m.width)
 
 	if m.pipelineScreen.content != ContentCompletion {
 		t.Errorf("expected ContentCompletion, got %d", m.pipelineScreen.content)
 	}
 	if !m.pipelineScreen.hasValidation {
 		t.Error("expected hasValidation=true")
-	}
-}
-
-func TestTUI_CompletionMergeFailureBanner(t *testing.T) {
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentStreaming
-
-	m.pipelineScreen.ApplyEvent(orchestrator.Event{
-		Type:              orchestrator.EventMergeError,
-		MergeError:        "worktree: merge \"orqestra-run-1\": exit status 2",
-		MergeBranch:       "orqestra-run-1",
-		MergeWorktreePath: "/tmp/orqestra/worktree",
-	}, m.width)
-	m.pipelineScreen.ApplyEvent(orchestrator.Event{
-		Type:             orchestrator.EventComplete,
-		WorkerValidation: "✓ tests pass",
-		Status:           orchestrator.StatusFailed,
-	}, m.width)
-
-	view := m.pipelineScreen.viewCompletion(m.width)
-	if !strings.Contains(view, "Merge failed — manual recovery required") {
-		t.Fatalf("completion view missing merge failure banner:\n%s", view)
-	}
-	if !strings.Contains(view, "Preserved branch: orqestra-run-1") {
-		t.Fatalf("completion view missing preserved branch:\n%s", view)
-	}
-	if !strings.Contains(view, "Preserved worktree: /tmp/orqestra/worktree") {
-		t.Fatalf("completion view missing preserved worktree:\n%s", view)
-	}
-	if !strings.Contains(view, "git merge orqestra-run-1") {
-		t.Fatalf("completion view missing manual merge command:\n%s", view)
-	}
-}
-
-func TestTUI_PgUpPgDown(t *testing.T) {
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentStreaming
-	m.pipelineScreen.goal = "test scroll"
-	// Initialize layout so viewports have dimensions
-	m.width = 120
-	m.height = 40
-	m.recalculateLayout()
-
-	// Set content taller than viewport to enable scrolling
-	var longContent strings.Builder
-	for i := 0; i < 100; i++ {
-		longContent.WriteString(fmt.Sprintf("line %d\n", i))
-	}
-	m.pipelineScreen.contentVP.SetContent(longContent.String())
-
-	// PgDown should change viewport offset
-	result, _ := sendKey(m, tea.KeyPgDown)
-	model := result.(Model)
-	if model.pipelineScreen.contentVP.YOffset() == 0 {
-		t.Error("expected viewport YOffset > 0 after PgDown")
-	}
-
-	// PgUp should return to top
-	result2, _ := sendKey(model, tea.KeyPgUp)
-	model2 := result2.(Model)
-	if model2.pipelineScreen.contentVP.YOffset() != 0 {
-		t.Errorf("expected YOffset=0 after PgUp from first page, got %d", model2.pipelineScreen.contentVP.YOffset())
-	}
-
-	// PgUp at 0 should stay at 0
-	result3, _ := sendKey(model2, tea.KeyPgUp)
-	model3 := result3.(Model)
-	if model3.pipelineScreen.contentVP.YOffset() != 0 {
-		t.Errorf("expected YOffset=0, got %d", model3.pipelineScreen.contentVP.YOffset())
 	}
 }
 
@@ -542,29 +402,6 @@ func TestTUI_SidebarTokens(t *testing.T) {
 	}
 	if !strings.Contains(view, "▶arch") {
 		t.Error("expected status bar to show running architect with ▶ icon")
-	}
-}
-
-func TestTUI_DashboardTokens(t *testing.T) {
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentStreaming
-	m.pipelineScreen.showDashboard = true
-	m.width = 120
-	m.height = 40
-	m.pipelineScreen.agents = []AgentRow{
-		{ID: "researcher", State: AgentStateDone, Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402, ModelDisplay: "claude-opus-4"},
-	}
-	m.recalculateLayout()
-	m.pipelineScreen.SyncViewports()
-
-	view := viewString(m)
-	// New dashboard shows agent cards with state icons and model names
-	if !strings.Contains(view, "researcher") {
-		t.Error("expected dashboard to show agent name 'researcher'")
-	}
-	if !strings.Contains(view, "✓") {
-		t.Error("expected dashboard to show done icon ✓")
 	}
 }
 
@@ -748,9 +585,6 @@ func TestTUI_NewRunClearsStaleState(t *testing.T) {
 	if model.pipelineScreen.hasValidation {
 		t.Error("expected hasValidation cleared")
 	}
-	if model.pipelineScreen.showDashboard {
-		t.Error("expected showDashboard cleared")
-	}
 	if model.pipelineScreen.finalPlan != "" {
 		t.Error("expected finalPlan cleared")
 	}
@@ -808,9 +642,9 @@ func TestTUI_PlanGateBlocksOverwrite(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
 
-	// Simulate gate event
-	m.pipelineScreen.ApplyEvent(orchestrator.Event{
-		Type: orchestrator.EventGateRequest,
+	// Snapshot with gate open
+	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
+		HasGate: true,
 		Gate: orchestrator.GateRequest{
 			Position:          orchestrator.GateAfterDeliberation,
 			FinalPlanMarkdown: "# Plan\n\n## Goal\nTest",
@@ -824,15 +658,19 @@ func TestTUI_PlanGateBlocksOverwrite(t *testing.T) {
 		t.Fatal("expected awaitingPlanDecision=true")
 	}
 
-	// Simulate a stale EventPhaseChange arriving after the gate
-	m.pipelineScreen.ApplyEvent(orchestrator.Event{
-		Type:  orchestrator.EventPhaseChange,
-		Phase: orchestrator.PhaseExecuting,
+	// Snapshot with a stale phase change but gate still open
+	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
+		Phase:   orchestrator.PhaseExecuting,
+		HasGate: true,
+		Gate: orchestrator.GateRequest{
+			Position:          orchestrator.GateAfterDeliberation,
+			FinalPlanMarkdown: "# Plan\n\n## Goal\nTest",
+		},
 	}, m.width)
 
 	// Gate must NOT be overwritten
 	if m.pipelineScreen.content != ContentHumanGate {
-		t.Errorf("gate was overwritten by stale EventPhaseChange: content=%d", m.pipelineScreen.content)
+		t.Errorf("gate was overwritten by stale phase change: content=%d", m.pipelineScreen.content)
 	}
 	// Phase should not be updated while gate is active
 	if m.pipelineScreen.phase == orchestrator.PhaseExecuting {
@@ -840,80 +678,7 @@ func TestTUI_PlanGateBlocksOverwrite(t *testing.T) {
 	}
 }
 
-func TestTUI_PlanReviewComment(t *testing.T) {
-	t.Skip("skipped: PlanReviewComment flow replaced by HumanChatMode in v6")
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentHumanGate
-	m.pipelineScreen.hasPlan = true
-	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest"
-	// channel removed — test checks state only
-
-	// Initialize comment textarea
-	m.pipelineScreen.planComment = textarea.New()
-	m.pipelineScreen.planComment.SetWidth(80)
-	m.pipelineScreen.planComment.SetHeight(2)
-	m.pipelineScreen.planComment.CharLimit = 1024
-	m.pipelineScreen.planComment.Focus()
-	m.pipelineScreen.hasPlanComment = true
-	m.pipelineScreen.planComment.SetValue("please add error handling")
-
-	// Press Enter to submit comment
-	result, cmd := sendKey(m, tea.KeyEnter)
-	model := result.(Model)
-
-	if model.pipelineScreen.content != ContentStreaming {
-		t.Errorf("expected ContentStreaming after comment submit, got %d", model.pipelineScreen.content)
-	}
-	if cmd == nil {
-		t.Error("expected non-nil cmd (waitForEvent)")
-	}
-}
-
-func TestTUI_PlanReviewExternalEditor(t *testing.T) {
-	t.Skip("skipped: External editor flow replaced by HumanChatMode in v6")
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentHumanGate
-	m.pipelineScreen.hasPlan = true
-	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest"
-	m.pipelineScreen.planFilePath = "/tmp/test-plan.md"
-	m.pipelineScreen.hasPlanComment = true
-	m.pipelineScreen.planComment = textarea.New()
-
-	// Press Ctrl+Shift+E to open external editor
-	result, cmd := sendCtrlShift(m, 'e')
-	model := result.(Model)
-
-	if !model.pipelineScreen.editorRunning {
-		t.Error("expected editorRunning=true after Ctrl+Shift+E")
-	}
-	if cmd == nil {
-		t.Error("expected non-nil cmd (ExecProcess)")
-	}
-}
-
-func TestTUI_PlanReviewGlamour(t *testing.T) {
-	t.Skip("skipped: PlanReviewGlamour flow replaced by HumanChatMode in v6")
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentHumanGate
-	m.pipelineScreen.hasPlan = true
-	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nAdd feature X.\n\n## Work Packages\n\n### 1. Step 1\n\n- item a\n- item b\n"
-	m.width = 120
-	m.height = 40
-
-	view := m.pipelineScreen.viewPlanReview(80)
-	if view == m.pipelineScreen.finalPlan {
-		t.Error("expected glamour to transform the markdown, got raw input back")
-	}
-	if !strings.Contains(view, "Plan") {
-		t.Error("expected rendered output to contain 'Plan'")
-	}
-}
-
 func TestTUI_EditorReturn(t *testing.T) {
-	t.Skip("skipped: EditorReturn flow replaced by HumanChatMode in v6")
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentHumanGate
@@ -1049,144 +814,6 @@ func TestTUI_DrainLoopChannelCloseAfterGate(t *testing.T) {
 	t.Skip("skipped: channel-close race not possible with ObsStore/Control gate blocking")
 }
 
-// TestTUI_PlanReviewTextareaGuard verifies that bare letter keys go to the
-// comment textarea and do NOT trigger action shortcuts when the textarea is focused.
-// Regression test for: typing in plan comment caused gate to skip.
-func TestTUI_PlanReviewTextareaGuard(t *testing.T) {
-	t.Skip("skipped: textarea guard replaced by HumanChatMode nil-guard in v6")
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentHumanGate
-	m.pipelineScreen.hasPlan = true
-	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest"
-	m.pipelineScreen.hasPlanComment = true
-	m.pipelineScreen.planComment = textarea.New()
-	m.pipelineScreen.planComment.SetWidth(80)
-	m.pipelineScreen.planComment.SetHeight(2)
-	m.pipelineScreen.planComment.Focus()
-	m.pipelineScreen.awaitingPlanDecision = true
-	// channel removed — test checks state only
-
-	// Type letters that used to be action shortcuts: a, e, s, d
-	for _, ch := range []string{"a", "e", "s", "d"} {
-		result, _ := sendRune(m, ch)
-		model := result.(Model)
-
-		if model.pipelineScreen.content != ContentHumanGate {
-			t.Errorf("typing %q switched content to %d — expected to stay in ContentHumanGate", ch, model.pipelineScreen.content)
-		}
-		if model.pipelineScreen.PendingIntent != nil {
-			t.Errorf("typing %q triggered intent %T — expected nil (key should go to textarea)", ch, model.pipelineScreen.PendingIntent)
-		}
-	}
-}
-
-// TestTUI_PlanReviewCtrlAApproves verifies Ctrl+A approves plan even when
-// comment textarea is focused.
-func TestTUI_PlanReviewCtrlAApproves(t *testing.T) {
-	t.Skip("skipped: Ctrl+A approve flow replaced by HumanChatMode in v6")
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentHumanGate
-	m.pipelineScreen.hasPlan = true
-	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest"
-	m.pipelineScreen.hasPlanComment = true
-	m.pipelineScreen.planComment = textarea.New()
-	m.pipelineScreen.planComment.SetWidth(80)
-	m.pipelineScreen.planComment.SetHeight(2)
-	m.pipelineScreen.planComment.Focus()
-	m.pipelineScreen.awaitingPlanDecision = true
-	// channel removed — test checks state only
-
-	// Ctrl+A should approve even with textarea active
-	result, _ := sendCtrl(m, 'a')
-	model := result.(Model)
-
-	if model.pipelineScreen.content != ContentStreaming {
-		t.Errorf("expected ContentStreaming after Ctrl+A approve, got %d", model.pipelineScreen.content)
-	}
-}
-
-// TestTUI_PlanReviewEscDismissesTextarea verifies Esc blurs the comment textarea
-// without cancelling the plan review.
-func TestTUI_PlanReviewEscDismissesTextarea(t *testing.T) {
-	t.Skip("skipped: Esc dismisses textarea flow replaced by HumanChatMode in v6")
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentHumanGate
-	m.pipelineScreen.hasPlan = true
-	m.pipelineScreen.hasPlanComment = true
-	m.pipelineScreen.planComment = textarea.New()
-	m.pipelineScreen.planComment.SetWidth(80)
-	m.pipelineScreen.planComment.SetHeight(2)
-	m.pipelineScreen.planComment.Focus()
-
-	result, _ := sendKey(m, tea.KeyEscape)
-	model := result.(Model)
-
-	if model.pipelineScreen.hasPlanComment {
-		t.Error("expected hasPlanComment=false after Esc")
-	}
-	if model.pipelineScreen.content != ContentHumanGate {
-		t.Errorf("expected ContentHumanGate after Esc, got %d", model.pipelineScreen.content)
-	}
-}
-
-// TestTUI_GlobalKeysBlockedInPlanReview ensures "d" and number keys
-// are routed to the comment textarea, not to global handlers.
-func TestTUI_GlobalKeysBlockedInPlanReview(t *testing.T) {
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentHumanGate
-	m.pipelineScreen.hasPlan = true
-	m.pipelineScreen.hasPlanComment = true
-	m.pipelineScreen.planComment = textarea.New()
-	m.pipelineScreen.planComment.SetWidth(80)
-	m.pipelineScreen.planComment.SetHeight(2)
-	m.pipelineScreen.planComment.Focus()
-	m.pipelineScreen.agents = []AgentRow{{ID: "architect", State: AgentStateDone}}
-
-	// Press "d" — must NOT toggle dashboard
-	result, _ := sendRune(m, "d")
-	model := result.(Model)
-
-	if model.pipelineScreen.showDashboard {
-		t.Error("pressing 'd' in ContentHumanGate toggled dashboard instead of typing in comment textarea")
-	}
-
-	// Press "1" — must NOT switch to agent history
-	result2, _ := sendRune(model, "1")
-	model2 := result2.(Model)
-
-	if model2.pipelineScreen.content != ContentHumanGate {
-		t.Errorf("pressing '1' in ContentHumanGate switched content to %d", model2.pipelineScreen.content)
-	}
-}
-
-// TestTUI_PlanReviewInputHeight verifies that the content height accounts
-// for the taller input zone in ContentHumanGate mode.
-func TestTUI_PlanReviewInputHeight(t *testing.T) {
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentHumanGate
-	m.pipelineScreen.hasPlan = true
-	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest\n\n## Work Packages\n\n### 1. Do thing"
-	m.width = 120
-	m.height = 40
-	m.pipelineScreen.hasPlanComment = true
-	m.pipelineScreen.planComment = textarea.New()
-	m.pipelineScreen.planComment.SetWidth(80)
-	m.pipelineScreen.planComment.SetHeight(2)
-
-	view := viewString(m)
-	lines := strings.Split(view, "\n")
-
-	// The view must not exceed the terminal height.
-	// Allow a 1-line tolerance for trailing newline.
-	if len(lines) > m.height+1 {
-		t.Errorf("plan review view exceeds terminal height: %d lines for %d-row terminal", len(lines), m.height)
-	}
-}
 
 func TestTUI_ShiftEnterNewline(t *testing.T) {
 	m := testModel()
@@ -1220,113 +847,26 @@ func TestTUI_ShiftEnterNewline(t *testing.T) {
 
 func TestTUI_ChatResponse(t *testing.T) {
 	t.Skip("skipped: ChatResponse flow replaced by HumanChatMode in v6")
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentHumanGate
-	m.pipelineScreen.hasPlan = true
-	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nOriginal"
-	m.pipelineScreen.hasPlanComment = true
-	m.pipelineScreen.planComment = textarea.New()
-	m.pipelineScreen.planComment.SetWidth(80)
-	m.pipelineScreen.planComment.SetHeight(2)
-	m.pipelineScreen.planComment.Focus()
-	m.width = 120
-	m.height = 40
-	m.recalculateLayout()
-
-	// Simulate EventChatResponse
-	m.pipelineScreen.ApplyEvent(orchestrator.Event{
-		Type:     orchestrator.EventChatResponse,
-		ChatText: "Step 3 initializes the config parser.",
-	}, m.width)
-
-	// Verify state
-	if m.pipelineScreen.content != ContentHumanGate {
-		t.Errorf("expected ContentHumanGate, got %d", m.pipelineScreen.content)
-	}
-	if len(m.pipelineScreen.chatHistory) != 1 {
-		t.Fatalf("expected 1 chat entry, got %d", len(m.pipelineScreen.chatHistory))
-	}
-	if m.pipelineScreen.chatHistory[0].Role != ChatRoleArchitect {
-		t.Errorf("expected architect role, got %q", m.pipelineScreen.chatHistory[0].Role)
-	}
-	if !m.pipelineScreen.hasPlanComment {
-		t.Error("expected comment textarea restored")
-	}
-	if m.pipelineScreen.finalPlan != "# Plan\n\n## Goal\nOriginal" {
-		t.Error("expected plan unchanged after chat-only response")
-	}
-
-	// Verify render includes chat history
-	view := m.pipelineScreen.viewPlanReview(100)
-	if !strings.Contains(view, "Architect:") {
-		t.Error("expected 'Architect:' prefix in rendered view")
-	}
-	if !strings.Contains(view, "config parser") {
-		t.Error("expected chat text in rendered view")
-	}
 }
 
-func TestTUI_PlanDiffToggle(t *testing.T) {
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentHumanGate
-	m.pipelineScreen.hasPlan = true
-	planText := "# Plan\n\n## Goal\nNew."
-	diffText := "--- a/plan.md\n+++ b/plan.md\n@@ -1,4 +1,4 @@\n # Plan\n \n ## Goal\n-Old.\n+New.\n"
-	m.pipelineScreen.planDiff = diffText
-	m.pipelineScreen.finalPlan = planText
-	m.pipelineScreen.awaitingPlanDecision = true
-	// Simulate what EventGateRequest would have done: PlanFrame with inlined diff
-	m.pipelineScreen.frameList.AppendFrame(Frame{
-		Kind:  PlanFrame,
-		State: FrameInProgress,
-		Parts: []ContentPart{{IsText: true, Text: planText + "\n── plan diff ──\n" + diffText}},
-	})
-	m.pipelineScreen.planFrameIdx = 0
-	m.pipelineScreen.planDiffLineOffset = strings.Count(planText, "\n") + 2
-	m.width = 120
-	m.height = 40
-	m.recalculateLayout()
-	m.pipelineScreen.SyncViewports()
-
-	// Ctrl+D no longer switches to ContentPlanDiff — it scrolls to the diff section
-	result, _ := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
-	model := result.(Model)
-	if model.pipelineScreen.content != ContentHumanGate {
-		t.Errorf("expected ContentHumanGate after Ctrl+D (no mode switch), got %d", model.pipelineScreen.content)
-	}
-}
-
-func TestTUI_PlanDiffIgnoredWithoutHistory(t *testing.T) {
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentHumanGate
-	m.pipelineScreen.hasPlan = true
-	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest"
-	m.pipelineScreen.planDiff = "" // no history (initial plan, no revisions)
-	m.width = 120
-	m.height = 40
-	m.recalculateLayout()
-
-	result, _ := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
-	model := result.(Model)
-	// Should stay in plan review — no diff available
-	if model.pipelineScreen.content != ContentHumanGate {
-		t.Errorf("expected ContentHumanGate (no diff available), got %d", model.pipelineScreen.content)
-	}
-}
 
 func TestTUI_ReviewTokenAccumulation(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.chatHistory = []ChatEntry{{Role: ChatRoleUser, Text: "q1"}}
 
-	m.pipelineScreen.ApplyEvent(orchestrator.Event{
-		Type:         orchestrator.EventAgentDone,
-		AgentID:      "architect",
-		InputTokens:  1000,
-		OutputTokens: 500,
+	// Architect appears running first (snapshot-based registration).
+	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
+		Agents: []orchestrator.AgentSnapshot{
+			{AgentID: "architect", Status: "running"},
+		},
+	}, m.width)
+
+	// Architect done — review tokens should accumulate because chatHistory is non-empty.
+	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
+		Agents: []orchestrator.AgentSnapshot{
+			{AgentID: "architect", Status: "done", Input: 1000, Output: 500},
+		},
 	}, m.width)
 
 	if m.pipelineScreen.reviewTokensIn != 1000 {
@@ -1337,40 +877,6 @@ func TestTUI_ReviewTokenAccumulation(t *testing.T) {
 	}
 }
 
-func TestTUI_ChatHistory_UserAndArchitect(t *testing.T) {
-	t.Skip("skipped: ChatHistory flow replaced by HumanChatMode in v6")
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentHumanGate
-	m.pipelineScreen.hasPlan = true
-	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest"
-	m.pipelineScreen.awaitingPlanDecision = true
-	// channel removed — test checks state only
-	m.pipelineScreen.hasPlanComment = true
-	m.pipelineScreen.planComment = textarea.New()
-	m.pipelineScreen.planComment.SetWidth(80)
-	m.pipelineScreen.planComment.SetHeight(2)
-	m.pipelineScreen.planComment.Focus()
-	m.pipelineScreen.planComment.SetValue("why this approach?")
-	m.width = 120
-	m.height = 40
-	m.recalculateLayout()
-
-	// Press Enter to submit comment
-	result, _ := sendKey(m, tea.KeyEnter)
-	model := result.(Model)
-
-	// Verify user's message was added to chat history
-	if len(model.pipelineScreen.chatHistory) != 1 {
-		t.Fatalf("expected 1 chat entry, got %d", len(model.pipelineScreen.chatHistory))
-	}
-	if model.pipelineScreen.chatHistory[0].Role != ChatRoleUser {
-		t.Errorf("expected 'you' role, got %q", model.pipelineScreen.chatHistory[0].Role)
-	}
-	if model.pipelineScreen.chatHistory[0].Text != "why this approach?" {
-		t.Errorf("expected 'why this approach?', got %q", model.pipelineScreen.chatHistory[0].Text)
-	}
-}
 
 // TestApplySnapshot_TerminalErrShowsInCompletion verifies that a pipeline failure
 // reported via obs.Finished is visible in the completion screen — the real path

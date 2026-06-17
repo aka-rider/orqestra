@@ -51,44 +51,32 @@ func setupPlanFile(t *testing.T, sessionID, planContent string) string {
 	return planFile
 }
 
-func TestReadPlanFromRun_Success(t *testing.T) {
-	sessionID := "test-extract-success"
-	planMD := "# Plan\n\n## Goal\nDo something.\n\n## Work Packages\n\n### 1. Do stuff"
-	setupPlanFile(t, sessionID, planMD)
 
-	result := harness.RunResult{SessionID: sessionID}
-	content, err := ReadPlanFromRun(result)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if content != planMD {
-		t.Errorf("content mismatch:\ngot:  %s\nwant: %s", content, planMD)
-	}
-}
-
-func TestReadPlanFromRun_NoSessionID(t *testing.T) {
-	result := harness.RunResult{}
-	_, err := ReadPlanFromRun(result)
+func TestReadPlan_NoSessionID(t *testing.T) {
+	_, err := ReadPlan("", "", "")
 	if err == nil {
 		t.Fatal("expected error for missing session ID")
 	}
-	if got := err.Error(); got != "no session ID in run result" {
+	if got := err.Error(); got != "no session ID" {
 		t.Errorf("unexpected error: %s", got)
 	}
 }
 
-func TestReadPlanFromRun_MissingJSONL(t *testing.T) {
+func TestReadPlan_MissingJSONL(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	result := harness.RunResult{SessionID: "nonexistent-session"}
-	_, err := ReadPlanFromRun(result)
+	_, err = ReadPlan("nonexistent-session", "", cwd)
 	if err == nil {
 		t.Fatal("expected error for missing JSONL")
 	}
 }
 
-func TestReadPlanFromRun_SecurityGate(t *testing.T) {
+func TestReadPlan_SecurityGate(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
@@ -123,25 +111,27 @@ func TestReadPlanFromRun_SecurityGate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result := harness.RunResult{SessionID: sessionID}
-	_, err = ReadPlanFromRun(result)
+	_, err = ReadPlan(sessionID, "", cwd)
 	if err == nil {
 		t.Fatal("expected error for out-of-bounds plan file")
 	}
 }
 
-func TestReadPlanFromRun_EmptyPlanFile(t *testing.T) {
+func TestReadPlan_EmptyPlanFile(t *testing.T) {
 	sessionID := "test-empty"
 	setupPlanFile(t, sessionID, "")
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	result := harness.RunResult{SessionID: sessionID}
-	_, err := ReadPlanFromRun(result)
+	_, err = ReadPlan(sessionID, "", cwd)
 	if err == nil {
 		t.Fatal("expected error for empty plan file")
 	}
 }
 
-func TestReadPlanFromRun_UsesStreamPlanFilePath(t *testing.T) {
+func TestReadPlan_UsesStreamPlanFilePath(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
@@ -156,12 +146,8 @@ func TestReadPlanFromRun_UsesStreamPlanFilePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Provide PlanFilePath directly — no JSONL needed
-	result := harness.RunResult{
-		SessionID:    "some-session",
-		PlanFilePath: planFile,
-	}
-	content, err := ReadPlanFromRun(result)
+	// Provide planFilePath directly — repoCWD is not needed for this path.
+	content, err := ReadPlan("some-session", planFile, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -170,7 +156,7 @@ func TestReadPlanFromRun_UsesStreamPlanFilePath(t *testing.T) {
 	}
 }
 
-func TestReadPlanFromRun_PlanFileNeverWritten(t *testing.T) {
+func TestReadPlan_PlanFileNeverWritten(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
@@ -202,8 +188,7 @@ func TestReadPlanFromRun_PlanFileNeverWritten(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result := harness.RunResult{SessionID: sessionID}
-	_, err = ReadPlanFromRun(result)
+	_, err = ReadPlan(sessionID, "", cwd)
 	if err == nil {
 		t.Fatal("expected error for plan file that was never written")
 	}

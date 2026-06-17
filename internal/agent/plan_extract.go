@@ -11,55 +11,59 @@ import (
 	"github.com/xiii/orqestra/internal/harness"
 )
 
-// ReadPlanFromRun reads the plan content written by Claude CLI's plan mode.
-// It locates the plan file via the session JSONL's plan_mode attachment, or
-// falls back to scanning ~/.claude/plans/ for recently modified files.
-// The returned content is normalized (# Plan header prepended if missing).
-func ReadPlanFromRun(result harness.RunResult) (string, error) {
-	if result.SessionID == "" {
-		return "", fmt.Errorf("no session ID in run result")
+// ReadPlan reads the plan content written by Claude CLI's plan mode.
+// It locates the plan file via planFilePath (from the run result stream), the
+// session JSONL's plan_mode attachment, or falls back to scanning ~/.claude/plans/.
+// repoCWD is the repository root used to resolve the session JSONL path.
+func ReadPlan(sessionID, planFilePath, repoCWD string) (string, error) {
+	if sessionID == "" {
+		return "", fmt.Errorf("no session ID")
 	}
 
 	// If the stream captured the plan file path directly, use it.
-	if result.PlanFilePath != "" {
-		content, err := readSecurePlanFile(result.PlanFilePath)
+	if planFilePath != "" {
+		content, err := readSecurePlanFile(planFilePath)
 		if err == nil {
 			return strings.TrimSpace(content), nil
 		}
 		slog.Debug("plan file path from stream invalid, falling back to JSONL scan",
-			"path", result.PlanFilePath, "err", err)
+			"path", planFilePath, "err", err)
 	}
 
 	// Resolve session JSONL and extract plan file path from plan_mode attachment.
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("get cwd: %w", err)
+	cwd := repoCWD
+	if cwd == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("get cwd: %w", err)
+		}
 	}
 
-	jsonlPath, err := harness.ResolveSessionLogPath(cwd, result.SessionID)
+	jsonlPath, err := harness.ResolveSessionLogPath(cwd, sessionID)
 	if err != nil {
-		return "", fmt.Errorf("resolve session log for %s: %w", result.SessionID, err)
+		return "", fmt.Errorf("resolve session log for %s: %w", sessionID, err)
 	}
 
-	planFilePath, err := harness.ExtractPlanFilePath(jsonlPath)
+	jsonlPlanPath, err := harness.ExtractPlanFilePath(jsonlPath)
 	if err != nil {
 		// Fallback: scan ~/.claude/plans/ for recently modified .md files.
 		slog.Debug("no plan_mode attachment in JSONL, scanning plans directory",
-			"session_id", result.SessionID, "err", err)
+			"session_id", sessionID, "err", err)
 		fallbackContent, fbErr := scanPlansDirectory()
 		if fbErr != nil {
-			return "", fmt.Errorf("extract plan for session %s: JSONL scan failed (%w), plans dir scan failed (%w)", result.SessionID, err, fbErr)
+			return "", fmt.Errorf("extract plan for session %s: JSONL scan failed (%w), plans dir scan failed (%w)", sessionID, err, fbErr)
 		}
 		return strings.TrimSpace(fallbackContent), nil
 	}
 
-	content, err := readSecurePlanFile(planFilePath)
+	content, err := readSecurePlanFile(jsonlPlanPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("model session %s completed but did not write a plan file (%s); "+
-				"the model may have exhausted its context window during exploration", result.SessionID, planFilePath)
+				"the model may have exhausted its context window during exploration", sessionID, jsonlPlanPath)
 		}
-		return "", fmt.Errorf("read plan file for session %s: %w", result.SessionID, err)
+		return "", fmt.Errorf("read plan file for session %s: %w", sessionID, err)
 	}
 	return strings.TrimSpace(content), nil
 }

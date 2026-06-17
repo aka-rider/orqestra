@@ -99,7 +99,7 @@ func appendDialog(dir, role, message string) {
 	turn := fmt.Sprintf("## %s\n%s\n\n---\n", role, message)
 
 	// Read existing content, if any.
-	existing, _ := os.ReadFile(path)
+	existing, _ := os.ReadFile(path) // fire-and-forget: file may not exist yet on first write
 	existingStr := string(existing)
 
 	// If the file already ends with "---\n", don't add another separator.

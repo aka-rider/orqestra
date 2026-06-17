@@ -14,8 +14,7 @@ func (e *Engine) Start(ctx context.Context, input Input) RunHandle {
 }
 
 // Run executes the pipeline synchronously and blocks until it finishes.
-// The emit callback is a no-op shim retained for test compatibility.
-func (e *Engine) Run(ctx context.Context, input Input, _ func(Event)) (Result, error) {
+func (e *Engine) Run(ctx context.Context, input Input) (Result, error) {
 	handle := e.Start(ctx, input)
 	for {
 		snap := handle.Obs.Snapshot()

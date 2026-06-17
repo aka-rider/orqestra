@@ -6,12 +6,12 @@ import (
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
-	"github.com/xiii/orqestra/internal/agent"
+	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
 // RunsListScreen manages the historical runs list view.
 type RunsListScreen struct {
-	runs          []agent.RunSummary
+	runs          []orchestrator.RunSummary
 	cursor        int
 	viewport      viewport.Model
 	PendingIntent tea.Msg // set by Update, consumed by parent
@@ -25,17 +25,17 @@ func NewRunsListScreen() RunsListScreen {
 }
 
 // SetRuns assigns the runs list and resets the cursor.
-func (s *RunsListScreen) SetRuns(runs []agent.RunSummary) {
+func (s *RunsListScreen) SetRuns(runs []orchestrator.RunSummary) {
 	s.runs = runs
 	s.cursor = 0
 }
 
 // SelectedRun returns the currently selected run, if any.
-func (s RunsListScreen) SelectedRun() (agent.RunSummary, bool) {
+func (s RunsListScreen) SelectedRun() (orchestrator.RunSummary, bool) {
 	if s.cursor >= 0 && s.cursor < len(s.runs) {
 		return s.runs[s.cursor], true
 	}
-	return agent.RunSummary{}, false
+	return orchestrator.RunSummary{}, false
 }
 
 // SyncViewport updates the viewport content from current screen state.

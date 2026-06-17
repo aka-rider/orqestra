@@ -9,9 +9,6 @@ func TestDefaultPipelineSetup(t *testing.T) {
 	if !def.Research {
 		t.Error("Research should be true")
 	}
-	if def.DeliberationLoops != 1 {
-		t.Errorf("DeliberationLoops should be 1, got %d", def.DeliberationLoops)
-	}
 	if !def.Execution {
 		t.Error("Execution should be true")
 	}
@@ -35,48 +32,23 @@ func TestPipelineSetup_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "loops zero is invalid",
-			setup:   PipelineSetup{Research: true, DeliberationLoops: 0, Execution: true},
-			wantErr: true,
-		},
-		{
-			name:    "loops one is valid",
-			setup:   PipelineSetup{Research: true, DeliberationLoops: 1, Execution: true},
-			wantErr: false,
-		},
-		{
-			name:    "loops ten is valid",
-			setup:   PipelineSetup{Research: true, DeliberationLoops: 10, Execution: true},
-			wantErr: false,
-		},
-		{
-			name:    "loops eleven is invalid",
-			setup:   PipelineSetup{Research: true, DeliberationLoops: 11, Execution: true},
-			wantErr: true,
-		},
-		{
-			name:    "loops negative is invalid",
-			setup:   PipelineSetup{Research: true, DeliberationLoops: -1, Execution: true},
-			wantErr: true,
-		},
-		{
 			name:    "all disabled is invalid",
 			setup:   PipelineSetup{Research: false, Execution: false, Validation: false},
 			wantErr: true,
 		},
 		{
 			name:    "research only is valid",
-			setup:   PipelineSetup{Research: true, DeliberationLoops: 1, Execution: false, Validation: false},
+			setup:   PipelineSetup{Research: true, Execution: false, Validation: false},
 			wantErr: false,
 		},
 		{
 			name:    "execution only is valid",
-			setup:   PipelineSetup{Research: false, DeliberationLoops: 1, Execution: true, Validation: false},
+			setup:   PipelineSetup{Research: false, Execution: true, Validation: false},
 			wantErr: false,
 		},
 		{
 			name:    "validation only is valid",
-			setup:   PipelineSetup{Research: false, DeliberationLoops: 1, Execution: false, Validation: true},
+			setup:   PipelineSetup{Research: false, Execution: false, Validation: true},
 			wantErr: false,
 		},
 	}
@@ -93,47 +65,40 @@ func TestPipelineSetup_Validate(t *testing.T) {
 
 func TestResolveSetup(t *testing.T) {
 	tests := []struct {
-		name      string
-		input     Input
-		wantLoops int
-		wantExec  bool
-		wantGate  bool
+		name     string
+		input    Input
+		wantExec bool
+		wantGate bool
 	}{
 		{
-			name:      "zero input uses defaults",
-			input:     Input{},
-			wantLoops: 1,
-			wantExec:  true,
-			wantGate:  true,
+			name:     "zero input uses defaults",
+			input:    Input{},
+			wantExec: true,
+			wantGate: true,
 		},
 		{
 			name: "explicit setup with no gates",
 			input: Input{Setup: PipelineSetup{
-				Research: true, DeliberationLoops: 1, Execution: true, Validation: true,
+				Research: true, Execution: true, Validation: true,
 				HumanGates: HumanGateSet{},
 			}},
-			wantLoops: 1,
-			wantExec:  true,
-			wantGate:  false,
+			wantExec: true,
+			wantGate: false,
 		},
 		{
 			name: "explicit setup disables execution",
 			input: Input{Setup: PipelineSetup{
-				Research: true, DeliberationLoops: 1, Execution: false, Validation: false,
+				Research: true, Execution: false, Validation: false,
 				HumanGates: HumanGateSet{},
 			}},
-			wantLoops: 1,
-			wantExec:  false,
-			wantGate:  false,
+			wantExec: false,
+			wantGate: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := resolveSetup(tt.input)
-			if s.DeliberationLoops != tt.wantLoops {
-				t.Errorf("DeliberationLoops = %d, want %d", s.DeliberationLoops, tt.wantLoops)
-			}
 			if s.Execution != tt.wantExec {
 				t.Errorf("Execution = %v, want %v", s.Execution, tt.wantExec)
 			}

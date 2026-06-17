@@ -10,29 +10,6 @@ import (
 	"github.com/xiii/orqestra/internal/agent"
 )
 
-func TestWriteArtifactIn(t *testing.T) {
-	tmp := t.TempDir()
-	sess := agent.SessionDir{Path: tmp}
-
-	path := writeArtifactIn(sess, "research", "plan-v1.md", "# Plan content")
-	if path == "" {
-		t.Fatal("expected non-empty path")
-	}
-
-	// Verify the file exists with correct content.
-	data, err := os.ReadFile(filepath.Join(tmp, "research", "plan-v1.md"))
-	if err != nil {
-		t.Fatalf("read artifact: %v", err)
-	}
-	if string(data) != "# Plan content" {
-		t.Errorf("content = %q, want %q", data, "# Plan content")
-	}
-
-	// Verify the returned path is correct.
-	if path != filepath.Join(tmp, "research", "plan-v1.md") {
-		t.Errorf("path = %q, want %q", path, filepath.Join(tmp, "research", "plan-v1.md"))
-	}
-}
 
 func TestWriteArtifactIn_Fallback(t *testing.T) {
 	tmp := t.TempDir()

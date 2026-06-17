@@ -63,42 +63,6 @@ func TestSetupModel_ToggleBool(t *testing.T) {
 	}
 }
 
-func TestSetupModel_DelibLoopsStepper(t *testing.T) {
-	m := newSetupModel()
-	m.Open(orchestrator.DefaultPipelineSetup())
-	// Move to DeliberationLoops (cursor=1)
-	m, _ = m.Update(pressKey(tea.KeyDown))
-
-	if m.setup.DeliberationLoops != 1 {
-		t.Fatalf("start loops = %d, want 1", m.setup.DeliberationLoops)
-	}
-
-	// Right increments
-	m, _ = m.Update(pressKey(tea.KeyRight))
-	if m.setup.DeliberationLoops != 2 {
-		t.Errorf("after Right: loops = %d, want 2", m.setup.DeliberationLoops)
-	}
-
-	// Left decrements
-	m, _ = m.Update(pressKey(tea.KeyLeft))
-	if m.setup.DeliberationLoops != 1 {
-		t.Errorf("after Left: loops = %d, want 1", m.setup.DeliberationLoops)
-	}
-
-	// Clamp at 1
-	m, _ = m.Update(pressKey(tea.KeyLeft))
-	if m.setup.DeliberationLoops != 1 {
-		t.Errorf("clamped at 1: loops = %d", m.setup.DeliberationLoops)
-	}
-
-	// Clamp at 10
-	for i := 0; i < 10; i++ {
-		m, _ = m.Update(pressKey(tea.KeyRight))
-	}
-	if m.setup.DeliberationLoops != 10 {
-		t.Errorf("clamped at 10: loops = %d", m.setup.DeliberationLoops)
-	}
-}
 
 func TestSetupModel_GateToggle(t *testing.T) {
 	m := newSetupModel()

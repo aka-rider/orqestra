@@ -217,7 +217,7 @@ func TestEngine_PlanApprovalGate(t *testing.T) {
 	sc := testStepContext(obs, ctrl)
 
 	setup := PipelineSetup{
-		Research: true, DeliberationLoops: 1, Execution: true, Validation: true,
+		Research: true, Execution: true, Validation: true,
 		HumanGates: HumanGateSet{GateAfterDeliberation},
 	}
 	steps := defaultTestSteps()
@@ -241,7 +241,7 @@ func TestEngine_CancelAtGate(t *testing.T) {
 	sc := testStepContext(obs, ctrl)
 
 	setup := PipelineSetup{
-		Research: true, DeliberationLoops: 1, Execution: true, Validation: true,
+		Research: true, Execution: true, Validation: true,
 		HumanGates: HumanGateSet{GateAfterDeliberation},
 	}
 	steps := defaultTestSteps()
@@ -262,7 +262,7 @@ func TestEngine_CancelAtGate(t *testing.T) {
 func TestEngine_SkipGateway(t *testing.T) {
 	// No gates in setup → pipeline completes without blocking.
 	setup := PipelineSetup{
-		Research: true, DeliberationLoops: 1, Execution: true, Validation: true,
+		Research: true, Execution: true, Validation: true,
 		HumanGates: nil,
 	}
 	result, err := runPipelineSync(context.Background(), setup, defaultTestSteps())
@@ -281,7 +281,7 @@ func TestEngine_NoGate(t *testing.T) {
 	sc := testStepContext(obs, ctrl)
 
 	setup := PipelineSetup{
-		Research: true, DeliberationLoops: 1, Execution: true, Validation: true,
+		Research: true, Execution: true, Validation: true,
 		HumanGates: nil,
 	}
 
@@ -323,7 +323,7 @@ func TestEngine_PhaseOrder(t *testing.T) {
 	}
 
 	setup := PipelineSetup{
-		Research: true, DeliberationLoops: 1, Execution: true, Validation: true,
+		Research: true, Execution: true, Validation: true,
 		HumanGates: nil,
 	}
 
@@ -381,7 +381,7 @@ func TestEngine_NoExecute(t *testing.T) {
 	}
 
 	setup := PipelineSetup{
-		Research: true, DeliberationLoops: 1, Execution: false, Validation: false,
+		Research: true, Execution: false, Validation: false,
 		HumanGates: nil,
 	}
 
@@ -410,7 +410,7 @@ func TestEngine_ValidationFailureDetection(t *testing.T) {
 	steps.Validate = fakeValidateStep(agent.MarkerFail + " tests failed")
 
 	setup := PipelineSetup{
-		Research: true, DeliberationLoops: 1, Execution: true, Validation: true,
+		Research: true, Execution: true, Validation: true,
 		HumanGates: nil,
 	}
 
@@ -429,7 +429,7 @@ func TestEngine_ValidationSuccessDetection(t *testing.T) {
 	steps.Validate = fakeValidateStep(agent.MarkerPass + " tests pass\n" + agent.MarkerPass + " build ok")
 
 	setup := PipelineSetup{
-		Research: true, DeliberationLoops: 1, Execution: true, Validation: true,
+		Research: true, Execution: true, Validation: true,
 		HumanGates: nil,
 	}
 
@@ -451,7 +451,7 @@ func TestEngine_DecisionEdit(t *testing.T) {
 	sc := testStepContext(obs, ctrl)
 
 	setup := PipelineSetup{
-		Research: true, DeliberationLoops: 1, Execution: true, Validation: true,
+		Research: true, Execution: true, Validation: true,
 		HumanGates: HumanGateSet{GateAfterDeliberation},
 	}
 	steps := defaultTestSteps()
@@ -507,7 +507,7 @@ func TestEngine_BudgetExhausted(t *testing.T) {
 	steps.Research = fakeResearchStepErr(budgetErr)
 
 	setup := PipelineSetup{
-		Research: true, DeliberationLoops: 1, Execution: true, Validation: true,
+		Research: true, Execution: true, Validation: true,
 		HumanGates: nil,
 	}
 
@@ -538,7 +538,7 @@ func TestEngine_Run_NoGate(t *testing.T) {
 	// We can't test end-to-end without the binary, so just verify Start returns a handle.
 	handle := engine.Start(ctx, Input{
 		Prompt: "test",
-		Setup:  PipelineSetup{Research: false, DeliberationLoops: 1, Execution: false, Validation: false},
+		Setup:  PipelineSetup{Research: false, Execution: false, Validation: false},
 	})
 	if handle.Obs == nil {
 		t.Fatal("Start returned nil ObsStore")
@@ -560,6 +560,91 @@ func TestEngine_MergeConflictFailsAndPreservesWorktree(t *testing.T) {
 
 func TestEngine_WorkerFailurePreservesWorktree(t *testing.T) {
 	t.Skip("needs rewrite for ProcessSpec path — requires real git repo and worktree operations")
+}
+
+// --- No-dead-knobs invariant tests ---
+// Each test asserts that a surfaced PipelineSetup knob actually changes pipeline behavior.
+
+func TestNoDeadKnob_ResearchFalse_NoResearchPhase(t *testing.T) {
+	researchCalled := false
+	steps := defaultTestSteps()
+	steps.Research = &fakeStep[ResearchInput, ResearchOutput]{
+		agentID: "researcher",
+		fn: func(_ context.Context, _ ResearchInput, _ StepContext) (ResearchOutput, error) {
+			researchCalled = true
+			return ResearchOutput{DraftMarkdown: "draft"}, nil
+		},
+	}
+
+	setup := PipelineSetup{Research: false, Execution: false, Validation: false, HumanGates: nil}
+	result, err := runPipelineSync(context.Background(), setup, steps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != StatusSuccess {
+		t.Errorf("status = %q, want success", result.Status)
+	}
+	if researchCalled {
+		t.Error("Research:false must not invoke the research step")
+	}
+}
+
+func TestNoDeadKnob_ValidationFalse_NoValidationPhase(t *testing.T) {
+	validateCalled := false
+	steps := defaultTestSteps()
+	steps.Validate = &fakeStep[ValidateInput, ValidateOutput]{
+		agentID: "validator",
+		fn: func(_ context.Context, _ ValidateInput, _ StepContext) (ValidateOutput, error) {
+			validateCalled = true
+			return ValidateOutput{Output: "pass"}, nil
+		},
+	}
+
+	setup := PipelineSetup{Research: true, Execution: true, Validation: false, HumanGates: nil}
+	_, err := runPipelineSync(context.Background(), setup, steps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if validateCalled {
+		t.Error("Validation:false must not invoke the validate step")
+	}
+}
+
+func TestNoDeadKnob_GateAfterDeliberation_FiresWhenEnabled(t *testing.T) {
+	obs := NewObsStore()
+	ctrl := NewControl(obs)
+
+	setup := PipelineSetup{
+		Research: false, Execution: false, Validation: false,
+		HumanGates: HumanGateSet{GateAfterDeliberation},
+	}
+	sc := testStepContext(obs, ctrl)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go driveGate(t, obs, ctrl, GateAfterDeliberation, Decision{Type: DecisionApprove}, 3*time.Second, cancel)
+
+	_, err := RunPipeline(ctx, setup, PipelineRunInput{Prompt: "test"}, sc, defaultTestSteps())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNoDeadKnob_GateAfterDeliberation_SkippedWhenDisabled(t *testing.T) {
+	// With no gates in HumanGates, the pipeline should complete without waiting.
+	setup := PipelineSetup{
+		Research: false, Execution: false, Validation: false,
+		HumanGates: nil,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, err := runPipelineSync(ctx, setup, defaultTestSteps())
+	if err != nil {
+		t.Fatalf("unexpected error (gate fired when disabled?): %v", err)
+	}
 }
 
 func TestEngine_PlanFileBeforeGate(t *testing.T) {

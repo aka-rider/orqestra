@@ -10,8 +10,6 @@ type HumanGatePosition int
 const (
 	GateAfterResearch     HumanGatePosition = iota
 	GateAfterDeliberation
-	GateAfterExecution
-	GateAfterValidation
 )
 
 // IsPlanGate reports whether this gate position requires plan review (rich gate).
@@ -24,10 +22,6 @@ func (p HumanGatePosition) String() string {
 		return "after research"
 	case GateAfterDeliberation:
 		return "after deliberation"
-	case GateAfterExecution:
-		return "after execution"
-	case GateAfterValidation:
-		return "after validation"
 	default:
 		return fmt.Sprintf("gate position %d", int(p))
 	}
@@ -56,22 +50,6 @@ func (h HumanGateSet) Toggle(pos HumanGatePosition) HumanGateSet {
 		}
 	}
 	return append(append(HumanGateSet(nil), h...), pos)
-}
-
-// phaseDir returns the unified session subdirectory name for a gate position.
-func phaseDir(pos HumanGatePosition) string {
-	switch pos {
-	case GateAfterResearch:
-		return "research"
-	case GateAfterDeliberation:
-		return "deliberation"
-	case GateAfterExecution:
-		return "execution"
-	case GateAfterValidation:
-		return "validation"
-	default:
-		panic(fmt.Sprintf("orchestrator: unknown gate position %d", int(pos)))
-	}
 }
 
 // RestartPhase identifies which phase to restart from.

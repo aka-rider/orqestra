@@ -94,6 +94,7 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 			Control:   ctrl,
 			Sessions:  session,
 			Log:       logger,
+			RepoPath:  e.RepoPath,
 		}
 
 		// Build pipeline steps.

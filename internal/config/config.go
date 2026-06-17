@@ -136,7 +136,6 @@ type Config struct {
 	Critic         CriticConfig              `yaml:"critic"`
 	Worker         WorkerConfig              `yaml:"worker"`
 	Retry          RetryConfig               `yaml:"retry"`
-	ExecutionGraph ExecutionGraphConfig      `yaml:"execution_graph"`
 	Sandbox        SandboxConfig             `yaml:"sandbox"`
 }
 
@@ -189,43 +188,6 @@ type RetryConfig struct {
 // Duration wraps time.Duration for YAML unmarshaling.
 type Duration struct {
 	time.Duration
-}
-
-// ExecutionGraphConfig defines the DAG of agents for multi-agent orchestration.
-type ExecutionGraphConfig struct {
-	Agents      []AgentNodeConfig `yaml:"agents"`
-	Concurrency int               `yaml:"concurrency"`
-}
-
-// AgentNodeConfig defines an agent within the execution graph.
-type AgentNodeConfig struct {
-	ID               string               `yaml:"id"`
-	Role             string               `yaml:"role"`
-	Kind             string               `yaml:"kind"`
-	Model            string               `yaml:"model"`
-	ModelRef         string               `yaml:"model_ref"`
-	SmallModel       string               `yaml:"small_model"`
-	SmallModelRef    string               `yaml:"small_model_ref"`
-	PromptFile       string               `yaml:"prompt_file"`
-	SystemPromptFile string               `yaml:"system_prompt_file"`
-	DependsOn        []string             `yaml:"depends_on"`
-	InputsFrom       []string             `yaml:"inputs_from"`
-	Permissions      string               `yaml:"permissions"`
-	Timeout          Duration             `yaml:"timeout"`
-	MaxAttempts      int                  `yaml:"max_attempts"`
-	OnFailure        string               `yaml:"on_failure"`
-	Validator        *ValidatorNodeConfig `yaml:"validator"`
-	Sandbox          *SandboxConfig       `yaml:"sandbox"` // per-agent sandbox override
-}
-
-// ValidatorNodeConfig defines a validator attached to an agent.
-type ValidatorNodeConfig struct {
-	ID               string `yaml:"id"`
-	Role             string `yaml:"role"`
-	ModelRef         string `yaml:"model_ref"`
-	Model            string `yaml:"model"`
-	PromptFile       string `yaml:"prompt_file"`
-	SystemPromptFile string `yaml:"system_prompt_file"`
 }
 
 // PipelineConfig controls global pipeline behavior.
@@ -383,60 +345,8 @@ func (c *Config) validate() error {
 	if _, err := c.ResolvedTokenLimits(); err != nil {
 		return err
 	}
-	for _, node := range c.ExecutionGraph.Agents {
-		if node.ID == "" && node.Role == "" {
-			return fmt.Errorf("execution graph agent missing mandatory id or role parameter")
-		}
-		if node.ModelRef != "" {
-			if _, key := c.lookupModel(node.ModelRef); key == "" {
-				return &ModelNotFoundError{
-					Name:      node.ModelRef,
-					Available: c.modelNames(),
-					Context:   fmt.Sprintf("execution graph node %q model_ref", node.identity()),
-				}
-			}
-		}
-		if node.SmallModelRef != "" {
-			if _, key := c.lookupModel(node.SmallModelRef); key == "" {
-				return &ModelNotFoundError{
-					Name:      node.SmallModelRef,
-					Available: c.modelNames(),
-					Context:   fmt.Sprintf("execution graph node %q small_model_ref", node.identity()),
-				}
-			}
-		}
-		if node.Validator != nil && node.Validator.ModelRef != "" {
-			if _, key := c.lookupModel(node.Validator.ModelRef); key == "" {
-				return &ModelNotFoundError{
-					Name:      node.Validator.ModelRef,
-					Available: c.modelNames(),
-					Context:   fmt.Sprintf("execution graph validator %q model_ref", node.Validator.identity()),
-				}
-			}
-		}
-	}
 
 	return nil
-}
-
-func (n AgentNodeConfig) identity() string {
-	if n.ID != "" {
-		return n.ID
-	}
-	if n.Role != "" {
-		return n.Role
-	}
-	return "<unnamed>"
-}
-
-func (n ValidatorNodeConfig) identity() string {
-	if n.ID != "" {
-		return n.ID
-	}
-	if n.Role != "" {
-		return n.Role
-	}
-	return "<unnamed>"
 }
 
 // envVarPattern matches ${VAR_NAME} for environment variable interpolation.

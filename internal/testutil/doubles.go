@@ -9,6 +9,37 @@ import (
 	"github.com/xiii/orqestra/internal/harness"
 )
 
+// RepoRoot walks upward from the test's working directory to find go.mod and
+// returns that directory. Fails the test if go.mod is not found.
+func RepoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("go.mod not found — is this test running inside the module?")
+		}
+		dir = parent
+	}
+}
+
+// TranscriptFixturePath returns the path to a file inside testdata/transcripts/<scenario>/.
+// Use RepoRoot to locate the module root; the fixture must be committed under testdata/.
+func TranscriptFixturePath(t *testing.T, scenario, file string) string {
+	t.Helper()
+	p := filepath.Join(RepoRoot(t), "testdata", "transcripts", scenario, file)
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("transcript fixture missing: %s (err: %v)", p, err)
+	}
+	return p
+}
+
 // MustTempHome sets HOME to a fresh temp dir for the duration of the test.
 // Tests calling MustTempHome must NOT call t.Parallel() — HOME is process-wide.
 func MustTempHome(t *testing.T) string {

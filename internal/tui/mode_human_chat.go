@@ -29,7 +29,7 @@ type PlanChatMode struct {
 	pending      tea.Msg
 }
 
-// SimpleChatMode handles pause gates (GateAfterExecution, GateAfterValidation).
+// SimpleChatMode handles non-plan gates that present a plain chat prompt.
 type SimpleChatMode struct {
 	chatHistory []ChatEntry
 	pending     tea.Msg

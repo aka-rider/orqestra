@@ -138,59 +138,6 @@ func TestTab_ReopensEditorWithPriorValue(t *testing.T) {
 	}
 }
 
-// ---------- Bug #2 (typing-lag) — rendering refresh through cached contentVP ----------
-
-func newPipelineScreenWithFreeform(t *testing.T) PipelineScreen {
-	t.Helper()
-	s := NewPipelineScreen("test")
-	s.content = ContentUserQuestion
-	s.question = newUserQuestion(freeformQ(), 80)
-	s.hasQuestion = true
-	s.RecalculateLayout(80, 20)
-	s.SyncViewports()
-	return s
-}
-
-func TestKeystrokeRefreshesContentVPCache(t *testing.T) {
-	s := newPipelineScreenWithFreeform(t)
-	letters := []string{"a", "b", "c"}
-	cumulative := ""
-	for _, ch := range letters {
-		var sNew PipelineScreen
-		sNew, _ = s.Update(tea.KeyPressMsg{Text: ch})
-		s = sNew
-		cumulative += ch
-		if !strings.Contains(s.contentVP.View(), cumulative) {
-			t.Fatalf("after typing %q, expected contentVP.View() to contain %q, got:\n%s",
-				ch, cumulative, s.contentVP.View())
-		}
-	}
-}
-
-func TestUpdateSubModel_RefreshesContentVPCache(t *testing.T) {
-	s := newPipelineScreenWithFreeform(t)
-	s, _ = s.UpdateSubModel(tea.KeyPressMsg{Text: "q"})
-	if !strings.Contains(s.contentVP.View(), "q") {
-		t.Errorf("expected contentVP.View() to contain 'q' after UpdateSubModel, got:\n%s",
-			s.contentVP.View())
-	}
-}
-
-func TestInlineEditor_KeystrokeRefreshesContentVPCache(t *testing.T) {
-	s := NewPipelineScreen("test")
-	s.content = ContentUserQuestion
-	s.question = newUserQuestion(singleQ(), 80)
-	s.hasQuestion = true
-	s.RecalculateLayout(80, 20)
-	s.SyncViewports()
-
-	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	s, _ = s.Update(tea.KeyPressMsg{Text: "z"})
-	if !strings.Contains(s.contentVP.View(), "z") {
-		t.Errorf("expected contentVP.View() to contain 'z' after typing in inline editor, got:\n%s",
-			s.contentVP.View())
-	}
-}
 
 // ---------- Selection / confirmation ----------
 

@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"image"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -17,9 +16,6 @@ const (
 	// Pipeline mode: divider + status line (the separator "\n" between body
 	// and input is the body zone's line terminator, not chrome).
 	constPipelineInputHeight = 2
-
-	// Plan review mode: divider + 2-line comment textarea + padding
-	constPlanReviewInputHeight = 4
 
 	// Prompt mode: divider + instruction label + 3-line textarea
 	constPromptInputHeight = 5
@@ -45,13 +41,6 @@ const (
 	// Bottom sidebar height (agent list strip below the input zone).
 	constSidebarHeight = 1
 )
-
-// layoutBounds holds the computed bounding rectangles for each zone.
-type layoutBounds struct {
-	content  image.Rectangle
-	sidebar  image.Rectangle
-	textarea image.Rectangle
-}
 
 // renderPrefixedText hard-wraps text into the available width, applying style
 // per segment. The first segment is prefixed with prefix; continuations are

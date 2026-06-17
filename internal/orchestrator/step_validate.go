@@ -60,7 +60,7 @@ func (s *ValidateStep) Run(ctx context.Context, in ValidateInput, sc StepContext
 func (s *ValidateStep) writeMeta(sc StepContext, sid string, start time.Time, status string, err error, usage harness.TokenUsage) {
 	if err != nil {
 		// best-effort: don't let meta write block
-		meta := agent.StepMeta{
+		meta := StepMeta{
 			AgentID:         string(s.ID()),
 			ModelRef:        s.Meta.ModelRef,
 			ClaudeSessionID: sid,
@@ -76,7 +76,7 @@ func (s *ValidateStep) writeMeta(sc StepContext, sid string, start time.Time, st
 		sc.Artifacts.WriteBestEffort("validator_meta.json", data)
 		return
 	}
-	meta := agent.StepMeta{
+	meta := StepMeta{
 		AgentID:         string(s.ID()),
 		ModelRef:        s.Meta.ModelRef,
 		ModelDisplay:    s.Meta.ModelDisplay,

@@ -532,44 +532,6 @@ func TestResolveUtilityModel(t *testing.T) {
 	}
 }
 
-func TestLoad_ValidationAtLoadTime_InvalidGraphModelRef(t *testing.T) {
-	content := `
-providers:
-  local:
-    base_url: http://localhost
-    type: openai
-models:
-  medium:
-    provider: local
-    model: big
-  small:
-    provider: local
-    model: small
-researcher:
-  model: medium
-architect:
-  model: medium
-worker:
-  model: medium
-execution_graph:
-  agents:
-    - id: implement
-      role: implementer
-      model_ref: missing
-`
-	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.WriteString(content)
-	f.Close()
-
-	_, err = Load(f.Name())
-	if err == nil {
-		t.Fatal("expected validation error for missing graph model_ref")
-	}
-}
-
 func TestParseTokenLimit(t *testing.T) {
 	tests := []struct {
 		input   string
@@ -809,7 +771,7 @@ worker:
 	}
 }
 
-func TestLoad_SandboxPerAgentOverride(t *testing.T) {
+func TestLoad_SandboxGlobalConfig(t *testing.T) {
 	yaml := `
 providers:
   test:
@@ -835,15 +797,6 @@ sandbox:
   max_lifetime: 1h
   allow_exec:
     - /opt/homebrew/bin
-execution_graph:
-  agents:
-    - id: worker-1
-      role: worker
-      model_ref: medium
-      sandbox:
-        max_lifetime: 30m
-        allow_write:
-          - /tmp/worker-cache
 `
 	f := filepath.Join(t.TempDir(), "cfg.yaml")
 	os.WriteFile(f, []byte(yaml), 0644)
@@ -856,19 +809,8 @@ execution_graph:
 	if cfg.Sandbox.MaxLifetime.Duration != 1*time.Hour {
 		t.Errorf("global max_lifetime = %v, want 1h", cfg.Sandbox.MaxLifetime.Duration)
 	}
-
-	if len(cfg.ExecutionGraph.Agents) == 0 {
-		t.Fatal("expected at least one agent in execution_graph")
-	}
-	agent := cfg.ExecutionGraph.Agents[0]
-	if agent.Sandbox == nil {
-		t.Fatal("agent sandbox override is nil")
-	}
-	if agent.Sandbox.MaxLifetime.Duration != 30*time.Minute {
-		t.Errorf("agent max_lifetime = %v, want 30m", agent.Sandbox.MaxLifetime.Duration)
-	}
-	if len(agent.Sandbox.AllowWrite) != 1 || agent.Sandbox.AllowWrite[0] != "/tmp/worker-cache" {
-		t.Errorf("agent allow_write = %v, want [/tmp/worker-cache]", agent.Sandbox.AllowWrite)
+	if len(cfg.Sandbox.AllowExec) != 1 || cfg.Sandbox.AllowExec[0] != "/opt/homebrew/bin" {
+		t.Errorf("allow_exec = %v, want [/opt/homebrew/bin]", cfg.Sandbox.AllowExec)
 	}
 }
 

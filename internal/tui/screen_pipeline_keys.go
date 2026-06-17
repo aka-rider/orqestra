@@ -2,35 +2,14 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
+	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 )
 
 func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
-	// Up/Down arrows scroll the viewport by 1 line in streaming mode.
-	switch msg.Code {
-	case tea.KeyUp:
-		if s.contentVP.YOffset() > 0 {
-			s.contentVP.SetYOffset(s.contentVP.YOffset() - 1)
-		}
-		s.SyncViewports()
-		return s, nil
-	case tea.KeyDown:
-		s.contentVP.SetYOffset(s.contentVP.YOffset() + 1)
-		s.SyncViewports()
-		return s, nil
-	}
-
 	switch msg.String() {
-	case "ctrl+o":
-		// Expand/collapse the active streaming block.
-		if s.frameList.FrameCount() > 0 {
-			s.frameList.UpdateActive(func(f *Frame) {
-				f.StreamingCollapsed = !f.StreamingCollapsed
-			})
-		}
-		s.SyncViewports()
-		return s, nil
 	case "ctrl+n":
 		if s.active {
 			s.PendingIntent = ConfirmNewRunIntent{}
@@ -38,12 +17,6 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 		}
 		s.PendingIntent = NavigateToPromptIntent{PreFillGoal: s.goal}
 		return s, nil
-	case "ctrl+d":
-		if s.content != ContentPlanReview && s.content != ContentUserQuestion {
-			s.showDashboard = !s.showDashboard
-			s.SyncViewports()
-			return s, nil
-		}
 	case "ctrl+r":
 		s.PendingIntent = NavigateToRunsListIntent{}
 		return s, nil
@@ -52,20 +25,6 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 }
 
 func (s PipelineScreen) handleCompletionKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
-	// Up/Down arrows scroll the viewport by 1 line.
-	switch msg.Code {
-	case tea.KeyUp:
-		if s.contentVP.YOffset() > 0 {
-			s.contentVP.SetYOffset(s.contentVP.YOffset() - 1)
-		}
-		s.SyncViewports()
-		return s, nil
-	case tea.KeyDown:
-		s.contentVP.SetYOffset(s.contentVP.YOffset() + 1)
-		s.SyncViewports()
-		return s, nil
-	}
-
 	switch msg.String() {
 	case "ctrl+r":
 		s.PendingIntent = NavigateToRunsListIntent{}
@@ -79,49 +38,103 @@ func (s PipelineScreen) handleCompletionKey(msg tea.KeyPressMsg) (PipelineScreen
 	return s, nil
 }
 
-func (s PipelineScreen) viewHelp() string {
-	return ` Orqestra Keybindings
-─────────────────────────────────
- [Enter]       Submit prompt / confirm
- [PgUp/PgDn]   Scroll content
- [↑/↓]         Scroll content
- [^O]          Expand/collapse streaming block
- [Ctrl+A]      Accept plan / abort merge
- [Ctrl+E]      Edit plan in external editor
- [Ctrl+D]      Run details
- [Ctrl+N]      New run
- [Ctrl+R]      Historical runs
- [Ctrl+Q]      Quit (at completion)
- [Ctrl+H]      Toggle this help
- [Ctrl+Y]      Plan history viewer
- [Alt+1-9]     View agent output
- [Ctrl+C]      Cancel → exit (time-gated)
- [Esc]         Back / dismiss
-`
+func (s PipelineScreen) handleEditConfirmKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
+	if s.hasEditComment {
+		switch msg.Code {
+		case tea.KeyTab:
+			s.hasEditComment = false
+			return s, nil
+		case tea.KeyEscape:
+			s.editConfirmComment.Reset()
+			s.hasEditComment = false
+			return s, nil
+		case tea.KeyEnter:
+			if msg.Mod.Contains(tea.ModShift) || msg.Mod.Contains(tea.ModAlt) {
+				s.editConfirmComment.InsertString("\n")
+				return s, nil
+			}
+			comment := strings.TrimSpace(s.editConfirmComment.Value())
+			s.PendingIntent = ConfirmEditIntent{
+				EditedContent: s.pendingEditContent,
+				Comment:       comment,
+				AutoApprove:   comment == "",
+			}
+			s.pendingEditContent = ""
+			s.hasEditComment = false
+			s.awaitingPlanDecision = false
+			s.content = ContentStreaming
+			return s, nil
+		}
+		if !msg.Mod.Contains(tea.ModCtrl) && !msg.Mod.Contains(tea.ModAlt) && !msg.Mod.Contains(tea.ModMeta) {
+			var cmd tea.Cmd
+			s.editConfirmComment, cmd = s.editConfirmComment.Update(msg)
+			return s, cmd
+		}
+		return s, nil
+	}
+
+	switch msg.Code {
+	case tea.KeyUp:
+		if s.editConfirmCursor > 0 {
+			s.editConfirmCursor--
+		}
+		return s, nil
+	case tea.KeyDown:
+		if s.editConfirmCursor < 1 {
+			s.editConfirmCursor++
+		}
+		return s, nil
+	case tea.KeyTab:
+		if s.editConfirmCursor == 0 {
+			ta := textarea.New()
+			ta.Placeholder = "Describe your changes..."
+			ta.SetWidth(max(1, 80-6))
+			ta.SetHeight(2)
+			ta.CharLimit = 1024
+			ta.Focus()
+			s.editConfirmComment = ta
+			s.hasEditComment = true
+			return s, nil
+		}
+		return s, nil
+	case tea.KeyEnter:
+		if s.editConfirmCursor == 0 {
+			comment := ""
+			if s.hasEditComment {
+				comment = strings.TrimSpace(s.editConfirmComment.Value())
+			}
+			s.PendingIntent = ConfirmEditIntent{
+				EditedContent: s.pendingEditContent,
+				Comment:       comment,
+				AutoApprove:   comment == "",
+			}
+			s.pendingEditContent = ""
+			s.hasEditComment = false
+			s.awaitingPlanDecision = false
+			s.content = ContentStreaming
+			return s, nil
+		}
+		// "No" — discard edit, return to gate
+		s.pendingEditContent = ""
+		s.hasEditComment = false
+		s.content = ContentHumanGate
+		s.awaitingPlanDecision = true
+		return s, nil
+	case tea.KeyEscape:
+		// Same as "No"
+		s.pendingEditContent = ""
+		s.hasEditComment = false
+		s.content = ContentHumanGate
+		s.awaitingPlanDecision = true
+		return s, nil
+	}
+	return s, nil
 }
 
 func (s PipelineScreen) viewFooter() string {
 	ctrlCHint := "[^C] cancel"
 	if s.ctrlCPending {
 		ctrlCHint = warnStyle.Render("[^C] EXIT")
-	}
-
-	// Dashboard overlay uses its own footer
-	if s.showDashboard {
-		return keyStyle.Render(" [Esc] return | [Tab] cycle | [PgUp/Dn] scroll              [^H] help  ") + ctrlCHint
-	}
-
-	var inProgressHint string
-	if s.frameList.HasInProgressFrame() {
-		var collapsed bool
-		s.frameList.UpdateActive(func(f *Frame) {
-			collapsed = f.StreamingCollapsed
-		})
-		if collapsed {
-			inProgressHint = " [^O] expand"
-		} else {
-			inProgressHint = " [^O] collapse"
-		}
 	}
 
 	switch s.content {
@@ -132,37 +145,18 @@ func (s PipelineScreen) viewFooter() string {
 			return keyStyle.Render(s.activeChat.Footer()+"  [^H] help  ") + ctrlCHint
 		}
 		return keyStyle.Render(" [^H] help  ") + ctrlCHint
-	case ContentPlanReview:
-		footer := " [^A] accept | [^E] edit in editor | [Enter] comment | [Shift+Enter] newline"
-		if s.planDiff != "" {
-			footer += " | [^D] diff"
-		}
-		footer += "  " + ctrlCHint
-		if len(s.chatHistory) > 0 && (s.reviewTokensIn+s.reviewTokensOut > 0) {
-			footer += dimStyle.Render(fmt.Sprintf("  Review: %s", formatTokens(s.reviewTokensIn+s.reviewTokensOut)))
-		}
-		return keyStyle.Render(footer)
 	case ContentEditConfirm:
 		if s.hasEditComment {
 			return keyStyle.Render(" [Tab/Enter] save context | [Esc] discard                    [^H] help  ") + ctrlCHint
 		}
 		return keyStyle.Render(" [↑↓] navigate | [Tab] add context | [Enter] confirm | [Esc] discard  [^H] help  ") + ctrlCHint
-	case ContentMergeConflict:
-		return keyStyle.Render(" [^A] abort merge | [Esc] continue                       [^H] help  ") + ctrlCHint
-	case ContentAgentHistory:
-		return keyStyle.Render(" [Esc] back to live  [^D] details  [^R] runs  [^N] new  [^H] help  ") + ctrlCHint
 	case ContentCompletion:
-		hint := " [^N] new run  [^R] runs  [^Q] quit  [^H] help"
-		if s.frameList.FocusedIndex() >= 0 {
-			hint = " [↑↓] scroll  [PgUp/PgDn] page  [^D] details  [^R] runs  [^Q] quit  [^H] help"
+		hint := " [^N] new run  [^R] runs  [^Q] quit"
+		if s.reviewTokensIn+s.reviewTokensOut > 0 {
+			hint += dimStyle.Render(fmt.Sprintf("  Review: %s", formatTokens(s.reviewTokensIn+s.reviewTokensOut)))
 		}
 		return keyStyle.Render(hint) + ctrlCHint
 	default:
-		hint := " [^N] new run  [^D] details  [^R] runs  [^H] help"
-		if s.frameList.HasInProgressFrame() {
-			hint += inProgressHint
-		}
-		hint += "  " + ctrlCHint
-		return keyStyle.Render(hint)
+		return keyStyle.Render(" [^N] new run  [^R] runs  ") + ctrlCHint
 	}
 }

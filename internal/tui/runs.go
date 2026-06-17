@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/xiii/orqestra/internal/agent"
+	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
 // statusIcon returns a display icon for a step/run status.
@@ -38,7 +38,7 @@ func (m *Model) navigateToRunsList() {
 		m.lastErr = fmt.Errorf("get cwd: %w", err)
 		return
 	}
-	runs, err := agent.ListRuns(cwd)
+	runs, err := orchestrator.ListRuns(cwd)
 	if err != nil {
 		m.lastErr = fmt.Errorf("list runs: %w", err)
 		return

@@ -25,6 +25,7 @@ type StepContext struct {
 	Control   Control             // P5: gate request/response + live Post handle
 	Sessions  agent.SessionDir    // session artifact directory
 	Log       *slog.Logger
+	RepoPath  string              // absolute path to the repository root; forwarded to ReadPlan
 }
 
 // SinkFromObserver returns a harness.Sink that forwards all events to Observer.Stream.

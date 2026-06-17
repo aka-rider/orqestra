@@ -2,11 +2,9 @@ package tui
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
-	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
@@ -24,39 +22,15 @@ func hydratedModels(t *testing.T) map[string]Model {
 
 	models := make(map[string]Model)
 
-	// StatePipeline + ContentPlanReview
+	// StatePipeline + ContentHumanGate
 	{
 		m := base()
 		m.state = StatePipeline
-		m.pipelineScreen.content = ContentPlanReview
+		m.pipelineScreen.content = ContentHumanGate
 		m.pipelineScreen.hasPlan = true
 		m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nDo the thing."
-		m.pipelineScreen.hasPlanComment = true
-		m.pipelineScreen.planComment = textarea.New()
-		m.pipelineScreen.planComment.SetWidth(80)
-		m.pipelineScreen.planComment.SetHeight(2)
-		m.pipelineScreen.planComment.CharLimit = 1024
-		m.pipelineScreen.planComment.Focus()
-		models["pipeline-plan-review"] = m
-	}
-
-	// StatePipeline + ContentAgentHistory
-	{
-		m := base()
-		m.state = StatePipeline
-		m.pipelineScreen.content = ContentAgentHistory
-		m.pipelineScreen.agents = []AgentRow{
-			{ID: "researcher", State: AgentStateRunning, Elapsed: 30 * time.Second, StartedAt: time.Now().Add(-30 * time.Second), InputTokens: 2000, OutputTokens: 1000},
-		}
-		m.pipelineScreen.focusedAgent = 1
-
-		sb := orchestrator.NewStreamRing(50)
-		sb.SetAgent("researcher")
-		sb.AppendActivity("Read", "file.go")
-		sb.SetAgent("architect") // snaps "researcher"
-		m.pipelineScreen.SetStreamBuf(sb)
-
-		models["pipeline-agent-history"] = m
+		m.pipelineScreen.awaitingPlanDecision = true
+		models["pipeline-human-gate"] = m
 	}
 
 	// StatePipeline + ContentCompletion
@@ -96,46 +70,6 @@ func hydratedModels(t *testing.T) map[string]Model {
 		m.runDetailScreen.SetDetail(testRunDetail())
 		m.runDetailScreen.logLines = []string{"line1", "line2"}
 		models["run-detail"] = m
-	}
-
-	// StatePipeline + ContentPlanReview with chat history
-	{
-		m := base()
-		m.state = StatePipeline
-		m.pipelineScreen.content = ContentPlanReview
-		m.pipelineScreen.hasPlan = true
-		m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nDo the thing."
-		m.pipelineScreen.chatHistory = []ChatEntry{
-			{Role: ChatRoleUser, Text: "Why step 3 before step 4?"},
-			{Role: ChatRoleArchitect, Text: "Because config parser must init first."},
-		}
-		m.pipelineScreen.hasPlanComment = true
-		m.pipelineScreen.planComment = textarea.New()
-		m.pipelineScreen.planComment.SetWidth(80)
-		m.pipelineScreen.planComment.SetHeight(2)
-		m.pipelineScreen.planComment.CharLimit = 1024
-		m.pipelineScreen.planComment.Focus()
-		models["pipeline-plan-review-chat"] = m
-	}
-
-	// StatePipeline + ContentPlanReview with inlined plan diff
-	{
-		m := base()
-		m.state = StatePipeline
-		m.pipelineScreen.content = ContentPlanReview
-		m.pipelineScreen.hasPlan = true
-		planText := "# Plan\n\n## Goal\nNew."
-		diffText := "--- a/plan.md\n+++ b/plan.md\n@@ -1,4 +1,4 @@\n # Plan\n \n ## Goal\n-Old.\n+New.\n"
-		m.pipelineScreen.planDiff = diffText
-		m.pipelineScreen.finalPlan = planText
-		m.pipelineScreen.frameList.AppendFrame(Frame{
-			Kind:  PlanFrame,
-			State: FrameInProgress,
-			Parts: []ContentPart{{IsText: true, Text: planText + "\n── plan diff ──\n" + diffText}},
-		})
-		m.pipelineScreen.planFrameIdx = 0
-		m.pipelineScreen.planDiffLineOffset = strings.Count(planText, "\n") + 2
-		models["pipeline-plan-diff"] = m
 	}
 
 	return models
@@ -199,7 +133,7 @@ func TestLayout_CtrlCAlwaysQuits(t *testing.T) {
 func TestLayout_EditorReturnError(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.pipelineScreen.content = ContentPlanReview
+	m.pipelineScreen.content = ContentStreaming
 	m.pipelineScreen.hasPlan = true
 	m.pipelineScreen.finalPlan = "# Plan"
 	m.pipelineScreen.editorRunning = true

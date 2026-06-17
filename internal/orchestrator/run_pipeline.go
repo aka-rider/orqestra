@@ -106,24 +106,31 @@ func RunPipeline(ctx context.Context, setup PipelineSetup, in PipelineRunInput,
 	sc StepContext, steps PipelineSteps) (Result, error) {
 
 	// --- Research ---
-	sc.Obs.PhaseChanged(PhaseResearching)
-	draft, err := steps.Research.Run(ctx, ResearchInput{Prompt: in.Prompt}, sc)
-	if err != nil {
-		return Result{Status: StatusFailed}, fmt.Errorf("research: %w", err)
-	}
+	var draft ResearchOutput
+	if setup.Research {
+		sc.Obs.PhaseChanged(PhaseResearching)
+		var err error
+		draft, err = steps.Research.Run(ctx, ResearchInput{Prompt: in.Prompt}, sc)
+		if err != nil {
+			return Result{Status: StatusFailed}, fmt.Errorf("research: %w", err)
+		}
 
-	// --- Optional gate after research ---
-	if setup.HumanGates.Active(GateAfterResearch) {
-		dec, gateErr := sc.Control.Gate(ctx, GateRequest{
-			Position:          GateAfterResearch,
-			FinalPlanMarkdown: draft.DraftMarkdown,
-		})
-		if gateErr != nil {
-			return Result{Status: StatusFailed}, fmt.Errorf("gate-after-research: %w", gateErr)
+		// --- Optional gate after research ---
+		if setup.HumanGates.Active(GateAfterResearch) {
+			dec, gateErr := sc.Control.Gate(ctx, GateRequest{
+				Position:          GateAfterResearch,
+				FinalPlanMarkdown: draft.DraftMarkdown,
+			})
+			if gateErr != nil {
+				return Result{Status: StatusFailed}, fmt.Errorf("gate-after-research: %w", gateErr)
+			}
+			if dec.Type == DecisionCancel {
+				return Result{Status: StatusCancelled}, nil
+			}
 		}
-		if dec.Type == DecisionCancel {
-			return Result{Status: StatusCancelled}, nil
-		}
+	} else {
+		// Research skipped: pass the prompt directly as the draft for deliberation.
+		draft = ResearchOutput{DraftMarkdown: in.Prompt}
 	}
 
 	// --- Deliberation (architect + critic) ---
@@ -184,9 +191,9 @@ func RunPipeline(ctx context.Context, setup PipelineSetup, in PipelineRunInput,
 
 	// --- Validation (advisory) ---
 	var valOutput string
-	if steps.Validate != nil {
+	if setup.Validation && steps.Validate != nil {
 		sc.Obs.PhaseChanged(PhaseSelfValidating)
-		val, _ := steps.Validate.Run(ctx, ValidateInput{
+		val, _ := steps.Validate.Run(ctx, ValidateInput{ // fire-and-forget: validation is advisory; failure does not block merge
 			WorkerSessionID: exec.SessionID,
 			FinalPlan:       plan.Markdown,
 		}, sc)

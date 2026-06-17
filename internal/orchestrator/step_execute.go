@@ -80,7 +80,7 @@ func (s *ExecuteStep) Run(ctx context.Context, in ExecuteInput, sc StepContext) 
 }
 
 func (s *ExecuteStep) writeMeta(sc StepContext, sid string, start time.Time, status string, err error, usage harness.TokenUsage) {
-	meta := agent.StepMeta{
+	meta := StepMeta{
 		AgentID:         string(s.ID()),
 		ModelRef:        s.Meta.ModelRef,
 		ModelDisplay:    s.Meta.ModelDisplay,
