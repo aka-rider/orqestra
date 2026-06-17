@@ -1,5 +1,9 @@
 # Orqestra - TUI Instructions
 
+Routed companion to `.github/copilot-instructions.md` — read it first for the error two-way-door
+and the universal Go rules. This file owns `internal/tui/` (Bubble Tea MVU). TUI errors are
+user-visible truth: store them in model state until rendered; never rely on suppressed stderr.
+
 <tui_architecture>
 
 ## Current TUI Architecture
@@ -97,9 +101,9 @@ When you need to visually observe or interact with the TUI — to verify a layou
 
 ```sh
 make build
-ttyd -p 7681 ./bin/orqestra
+ttyd -p 7681 ./orqestra
 # or with a config:
-ttyd -p 7681 ./bin/orqestra --config orqestra.yaml
+ttyd -p 7681 ./orqestra --config orqestra.yaml
 ```
 
 ttyd serves the terminal at `http://localhost:7681` via xterm.js. The process inherits your environment, so real Claude CLI credentials and config are available.

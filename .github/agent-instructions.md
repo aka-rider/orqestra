@@ -1,107 +1,132 @@
-# Orqestra - Agent, Sandbox, Harness, And Pipeline Instructions
+# Orqestra — Agent / Sandbox / Harness / Pipeline Instructions
 
-[How to build/test/run](../Makefile)
+Routed companion to `.github/copilot-instructions.md` — read that first; it owns the error
+two-way-door, the integrity-vs-best-effort rule, and the universal Go rules. This file is the deep
+dive for `internal/{agent,harness,sandbox,orchestrator,plan}/`. Build/test: see `../Makefile`.
 
-<current_architecture>
+## Architecture facts
 
-## Current Architecture Facts
+- Active orchestration is `internal/orchestrator/`, not `internal/scheduler/`.
+- Pipeline: Research → Deliberate (Architect ↔ Critic) → human plan gate (with Revise) → sandboxed
+  Worker → worker self-validation → optional worktree commit/merge. Phase order lives in
+  `internal/orchestrator/run_pipeline.go`.
+- Researcher/Architect/Critic are in `internal/agent/` and run through the Claude harness
+  (`harness.ClaudeCLI`).
+- Plan contract is `agent.RawPlan`: raw markdown from Claude plan files via `agent.ReadPlanFromRun`.
+- `agent.Specification`, `agent.PlanOutput`, `agent.ProjectPlan`, `WorkPackage`, and markdown
+  frontmatter are legacy/secondary — touch only when the task targets legacy plan loading,
+  `internal/plan/`, or `internal/scheduler/`.
+- Token budgets: checks/recording in `internal/orchestrator/budget.go`; exhaustion is
+  `harness.ErrBudgetExhausted`.
 
-- The active orchestration path lives in `internal/orchestrator/`, not `internal/scheduler/`.
-- The active pipeline is: Researcher -> Architect <-> Critic <-> human plan gate -> sandboxed Worker -> worker self-validation -> optional worktree commit/merge.
-- Researcher, Architect, and Critic are in `internal/agent/` and run through `harness.CLIRunner` or `harness.ContinuableRunner`.
-- The active plan contract is `agent.RawPlan`: raw markdown read from Claude plan files using `agent.ReadPlanFromRun`.
-- `agent.Specification`, `agent.PlanOutput`, `agent.ProjectPlan`, `WorkPackage`, and markdown artifact frontmatter are legacy or secondary paths unless the task explicitly targets legacy plan loading, `internal/plan/`, or `internal/scheduler/`.
-- `internal/harness/` owns Claude CLI invocation, stream parsing, MCP bridge wiring, session IDs, plan-file paths, and token usage.
-- `internal/sandbox/` owns macOS seatbelt profile generation, environment scrubbing, path validation, command wrapping, and process-group cleanup.
-- `internal/tokenlimit/` owns budget storage and runner decoration. Budget exhaustion is returned as `tokenlimit.ErrBudgetExhausted`.
+## Package ownership
 
-</current_architecture>
+- `internal/agent/`: raw plan handling, researcher/architect/critic wrappers, `CheckPlanHealth`,
+  validation-output parsing, legacy work-package helpers, session-artifact helpers.
+- `internal/harness/`: Claude CLI subprocess (`harness.ClaudeCLI`), stream JSON parsing, MCP
+  AskUserQuestion bridge, model-environment construction, session-log parsing, `harness.RunResult`.
+- `internal/orchestrator/`: phase ordering, retries, event emission, gates, budget checks, session
+  artifact writes, question-bridge lifecycle, worker handoff, validation parsing, worktree
+  commit/merge.
+- `internal/sandbox/`: seatbelt config validation, SBPL profile building, env scrub, sandbox-exec
+  wrapping, process-group cleanup.
+- `internal/plan/`: markdown/spec persistence adapters, frontmatter utilities, plan-history git
+  micro-repo.
+- `internal/scheduler/`: experimental DAG support — separate from the active pipeline.
 
-<routing_and_ownership>
+## Plan & artifact integrity
 
-## Package Ownership
+- Plans come from Claude plan files, not stdout. Use `ReadPlanFromRun`; preserve its boundary under
+  `~/.claude/plans/`.
+- Missing session IDs, missing JSONL logs, unsafe plan paths, unreadable or empty plan files are
+  integrity failures — return errors with session ID and path context.
+- Directory-scan fallback is allowed only after JSONL extraction fails, and must log enough context
+  to debug why the primary source failed.
+- `CheckPlanHealth` warnings are advisory: show them, but they don't prove a plan is correct.
+- Validation text is advisory: preserve raw output, parse marker lines defensively, never convert
+  parser success into proof that work passed without command/artifact evidence.
+- Legacy `Specification`/frontmatter paths validate structured input with typed parsers and hash
+  checks — don't string-slice a structured artifact when a parser exists.
 
-- `internal/agent/`: raw plan handling, researcher/architect/critic wrappers, plan health checks, validation-output parsing, legacy work-package helpers, session artifact helpers.
-- `internal/harness/`: CLI runner interfaces, Claude CLI subprocesses, stream JSON parsing, MCP AskUserQuestion bridge, model environment construction, session-log parsing.
-- `internal/orchestrator/`: phase ordering, retries, event emission, gates, session artifact writes, question bridge lifecycle, worker handoff, validation parsing, worktree commit/merge flow.
-- `internal/sandbox/`: seatbelt config validation, SBPL profile building, env policy, sandbox-exec wrapping, cancellation cleanup.
-- `internal/plan/`: markdown/spec persistence adapters, artifact frontmatter utilities, and the plan-history git micro-repo.
-- `internal/tokenlimit/`: model budget checks, usage recording, status reporting, and `LimitedRunner` wrappers.
-- `internal/scheduler/`: experimental DAG support. Treat as separate from the active pipeline unless explicitly wiring it.
+## Sandbox & execution
 
-</routing_and_ownership>
+- Worker execution, validation continuations, and merge-producing work go through the seatbelt
+  sandbox (`internal/sandbox/`) or a test double — never a raw shell.
+- `sandbox.New` failures are fatal for sandboxed execution: missing HOME, missing `sandbox-exec`,
+  invalid repo/worktree/session paths, invalid proxy env, profile-build failures must not fall back
+  silently.
+- Worktree isolation is preferred for repo writes. If worktree creation or branch detection fails,
+  the fallback to writable-repo execution must be explicit, tested, and user-visible.
+- `RepoWritable` is high-risk: justify it by execution mode; test read-only repo + writable worktree
+  when worktree mode is involved.
+- Process cancellation must kill the process group — keep `Setpgid` + negative-PID kill covered by
+  tests when touching sandbox/harness subprocess code.
 
-<plan_integrity>
+## Harness & streaming
 
-## Plan And Artifact Integrity
+- Claude stream parsing uses bounded scanner buffers large enough for JSONL events and checks
+  `scanner.Err()`.
+- Non-JSON stream lines may be displayed/logged for diagnostics, but result, session ID, usage, and
+  plan-file path come from typed parsed events.
+- `harness.RunResult` carries execution metadata (`Usage`, `SessionID`, `PlanFilePath`); agent
+  domain structs must not grow those fields.
+- Runner factories that can fail return `(runner, error)` — never a nil runner to mean
+  disabled/misconfigured.
+- MCP bridge failures are classified: startup failure degrades question support; malformed model
+  tool calls return MCP errors; bridge IO errors include socket + operation context.
 
-- Plans come from Claude plan files, not stdout. Use `ReadPlanFromRun` and preserve its security boundary under `~/.claude/plans/`.
-- Missing session IDs, missing JSONL logs, unsafe plan paths, unreadable plan files, and empty plan files are integrity failures. Return errors with session ID and path context.
-- Directory-scan fallback is allowed only as an explicit fallback after JSONL plan-file extraction fails, and it must log enough context to debug why the primary source failed.
-- `CheckPlanHealth` warnings are advisory. They may be shown to the user, but they do not prove a plan is correct.
-- LLM validation text is advisory. Preserve raw output, parse marker lines defensively, and do not convert parser success into proof that work passed without command or artifact evidence.
-- Legacy `Specification`/frontmatter paths must validate structured input with typed parsers and hash checks. Do not parse structured artifacts with string slicing when a parser exists.
+## Orchestrator boundaries
 
-</plan_integrity>
+- Integrity failures return, emit `EventError`, or gate the user. Best-effort diagnostics may warn
+  and continue only when user-visible state stays truthful (the error two-way-door applies here).
+- Retries emit accurate phase/agent state and preserve metadata for failed attempts.
+- Plan-history failures may disable diffs, but the gate must still show the current plan and say
+  diffing is unavailable when that matters.
+- Worker self-validation failure cannot be presented as success: if execution continues, artifacts
+  and events must show validator status and raw text.
+- Merge conflicts surface through `EventMergeConflict` — never hidden behind a completion event.
 
-<sandbox_and_execution>
+## Legacy & scheduler
 
-## Sandbox And Execution Rules
+- `internal/scheduler/` passes `spec any` and mutates status from goroutines. New scheduler work
+  needs typed payload boundaries or adapters, race-safe status/events, unknown-dependency checks,
+  cycle tests, and `go test -race` coverage.
+- Legacy project-plan dependency helpers reject empty packages, duplicate IDs, unknown deps,
+  self-deps, and cycles as a class.
 
-- Worker execution, worker validation continuations, and merge-producing work must go through `harness.SandboxCLIRunner` or a test double.
-- `sandbox.New` failures are fatal for sandboxed execution: missing HOME, missing `sandbox-exec`, invalid repo/worktree/session paths, invalid proxy env, and profile build failures must not fall back silently.
-- Worktree isolation is preferred for repo writes. If worktree creation or branch detection fails, the fallback to writable repo execution must be explicit, tested, and user-visible.
-- `RepoWritable` is a high-risk switch. It must be justified by the execution mode, and tests must cover read-only repo plus writable worktree behavior when worktree mode is involved.
-- Do not execute commands, paths, JSON, YAML, or markdown emitted by an LLM without parsing and boundary validation.
-- Process cancellation must kill the process group. Keep `Setpgid` and negative-PID kill behavior covered by tests when touching sandbox or harness subprocess code.
+## Testing enforcement
 
-</sandbox_and_execution>
+Run the narrowest package after changes; add `-race` when touching streaming, goroutines,
+scheduler, sandbox, harness, or orchestrator state.
 
-<harness_streaming>
+- Plan extraction: missing session ID, missing JSONL, invalid plan path, path outside
+  `~/.claude/plans/`, empty plan, large/truncated markdown, fallback logging.
+- Harness streaming: malformed JSONL, large lines, scanner errors, result error events, usage +
+  session ID + plan-file path extraction for initial runs and continuations.
+- Sandbox: missing HOME, missing sandbox-exec, invalid symlinks, env scrub, proxy env validation,
+  process-group cleanup, repo read-only mode, writable worktree mode.
+- Orchestrator: phase ordering, retry exhaustion, gate re-entry, cancellation, question-bridge
+  degradation, artifact-status truth, validation verdict parsing, worktree fallback visibility,
+  merge-conflict surfacing.
+- Budgets: pre-call exhaustion, post-call recording exhaustion, zero usage meaning unreported,
+  status reporting, wrapped-runner behavior for continuations.
+- Scheduler / dependency graphs: unknown deps, duplicate roles/IDs, cycles, parallel wave ordering,
+  cancellation, race safety.
 
-## Harness And Streaming Rules
+## Debugging headless / TUI runs via Claude CLI logs
 
-- Claude stream parsing must use bounded scanner buffers large enough for JSONL events and must check `scanner.Err()`.
-- Non-JSON stream lines may be displayed and logged for diagnostics, but result, session ID, usage, and plan-file path must come from typed parsed events.
-- `harness.RunResult` may carry execution metadata (`Usage`, `SessionID`, `PlanFilePath`). Agent domain structs must not grow those fields.
-- CLI runner factories that can fail return `(runner, error)`. Never use a nil runner to mean disabled or misconfigured.
-- MCP bridge failures must be classified: startup failure affects question support; malformed model tool calls return MCP errors; bridge IO errors should include socket and operation context.
+TUI mode silences ordinary stderr; Claude's on-disk logs are often the ground truth when a run
+hangs or errors opaquely.
 
-</harness_streaming>
+| Path | Contents |
+| --- | --- |
+| `~/.claude/sessions/` | Active process metadata: PID, session ID, cwd, CLI version (one JSON per running `claude`). |
+| `~/.claude/projects/-Users-<user>-Developer-orqestra/` | Per-session JSONL conversation logs; filename is the session UUID. |
+| `~/.claude/debug/latest` | Symlink to the most recent debug trace, when debug mode was on. |
 
-<orchestrator_boundaries>
-
-## Orchestrator Boundaries
-
-- Integrity failures return, emit `EventError`, or gate the user. Best-effort diagnostics may warn and continue only when user-visible state remains truthful.
-- Retries must emit accurate phase/agent state and preserve useful metadata for failed attempts.
-- Plan-history failures may disable diffs, but the gate must still show the current plan and state that diffing is unavailable if that matters to the user.
-- Worker self-validation failure cannot be presented as success. If execution continues, artifacts and events must show the validator status and raw validation text.
-- Merge conflict state must be surfaced through `EventMergeConflict`; do not hide conflicts behind a successful completion event.
-
-</orchestrator_boundaries>
-
-<legacy_and_scheduler>
-
-## Legacy And Scheduler Rules
-
-- `internal/scheduler/` currently passes `spec any` and mutates status from goroutines. Any new scheduler work needs typed payload boundaries or adapters, race-safe status/event handling, unknown-dependency checks, cycle tests, and `go test -race` coverage.
-- Legacy project-plan dependency helpers must reject empty packages, duplicate IDs, unknown dependencies, self-dependencies, and cycles as a class.
-- Do not resurrect removed concepts such as `PlanValidator`, `agent.Gate`, `GatewayResult`, `internal/agent/pm.go`, or `stripCodeFences` unless the task explicitly reintroduces them with tests and migration notes.
-
-</legacy_and_scheduler>
-
-<testing_enforcement>
-
-## Testing Enforcement
-
-Run the narrowest relevant package test after changes; broaden to race tests when touching streaming, goroutines, scheduler, sandbox, harness, or orchestrator state.
-
-- Plan extraction: missing session ID, missing JSONL, invalid plan path, path outside `~/.claude/plans/`, empty plan, large/truncated markdown, and fallback logging.
-- Harness streaming: malformed JSONL, large lines, scanner errors, result error events, usage extraction, session ID extraction, and plan-file path extraction for both initial runs and continuations.
-- Sandbox: missing HOME, missing sandbox-exec, invalid symlinks, env scrub, proxy env validation, process-group cleanup, repo read-only mode, and writable worktree mode.
-- Orchestrator: phase ordering, retry exhaustion, gate re-entry, cancellation, question bridge degradation, artifact status truth, validation verdict parsing, worktree fallback visibility, and merge conflict surfacing.
-- Token limits: pre-call budget exhaustion, post-call recording exhaustion, zero usage meaning unreported, status reporting, and wrapped runner behavior for continuations.
-- Scheduler or dependency graphs: unknown dependencies, duplicate roles/IDs, cycles, parallel wave ordering, cancellation, and race safety.
-
-</testing_enforcement>
+- `ls -lt ~/.claude/projects/-Users-*-Developer-orqestra/*.jsonl | head -5` finds recent sessions.
+- JSONL event fields: `"type":"user"` (prompt sent by the harness), `"type":"assistant"` (response;
+  check `message.content[].text`), `"isApiErrorMessage":true` (model didn't run — read the text for
+  provider/connection errors), `"error":"unknown"` (transport failure, not a refusal).
+- Classify `ConnectionRefused` / timeout / rate-limit / auth as infrastructure until code evidence
+  says otherwise. Cross-reference the session UUID with `~/.claude/sessions/<pid>.json`.
