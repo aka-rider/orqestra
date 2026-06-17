@@ -161,11 +161,14 @@ func (s *ObsStore) AgentDone(id AgentID, usage harness.TokenUsage) {
 	s.poke()
 }
 
-func (s *ObsStore) AgentFailed(id AgentID, _ error) {
+func (s *ObsStore) AgentFailed(id AgentID, err error) {
 	s.mu.Lock()
 	if e, ok := s.agents[id]; ok {
 		e.snapshot.Status = "failed"
 		e.snapshot.EndTime = time.Now()
+		if err != nil {
+			e.snapshot.Error = err.Error()
+		}
 	}
 	s.rev++
 	s.mu.Unlock()

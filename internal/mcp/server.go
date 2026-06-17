@@ -294,7 +294,14 @@ func FormatAnswer(toolCall ToolCall, answer Answer) string {
 }
 
 func respondMCP(id json.RawMessage, result any) *jsonRPCResponse {
-	data, _ := json.Marshal(result)
+	data, err := json.Marshal(result)
+	if err != nil {
+		return &jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      id,
+			Error:   &jsonRPCError{Code: -32603, Message: fmt.Sprintf("marshal result: %v", err)},
+		}
+	}
 	return &jsonRPCResponse{
 		JSONRPC: "2.0",
 		ID:      id,
@@ -310,7 +317,14 @@ func respondMCPToolResult(id json.RawMessage, isError bool, text string) *jsonRP
 	if isError {
 		result["isError"] = true
 	}
-	data, _ := json.Marshal(result)
+	data, err := json.Marshal(result)
+	if err != nil {
+		return &jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      id,
+			Error:   &jsonRPCError{Code: -32603, Message: fmt.Sprintf("marshal tool result: %v", err)},
+		}
+	}
 	return &jsonRPCResponse{
 		JSONRPC: "2.0",
 		ID:      id,

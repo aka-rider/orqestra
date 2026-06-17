@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"os"
@@ -548,6 +549,9 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 						s.agents[i].State = AgentStateFailed
 					}
 				}
+				if a.Error != "" {
+					s.lastErr = errors.New(a.Error)
+				}
 				s.frameList.FinishActive(0, 0, 0, width)
 				s.staticContentDirty = true
 			}
@@ -597,6 +601,9 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 	if snap.Terminal.Done && s.active && !s.awaitingPlanDecision {
 		s.content = ContentCompletion
 		s.active = false
+		if snap.Terminal.Err != nil {
+			s.lastErr = snap.Terminal.Err
+		}
 		if snap.Terminal.Result.WorkerValidation != "" {
 			s.workerValidation = snap.Terminal.Result.WorkerValidation
 			s.hasValidation = true

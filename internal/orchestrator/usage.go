@@ -25,6 +25,7 @@ type AgentSnapshot struct {
 	StartTime time.Time `json:"start_time"`
 	EndTime   time.Time `json:"end_time,omitempty"`
 	Status    string    `json:"status"` // "running", "done", "failed", "cancelled"
+	Error     string    `json:"error,omitempty"`
 }
 
 // RunSnapshot is the universal data shape consumed by both the live dashboard

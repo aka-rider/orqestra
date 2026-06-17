@@ -76,9 +76,9 @@ func writeArtifactJSONIn(s agent.SessionDir, subdir, name string, v any) string 
 
 // writeArtifactJSONFallback writes JSON-marshaled v to the session root.
 func writeArtifactJSONFallback(s agent.SessionDir, name string, v any) string {
-	data, _ := json.MarshalIndent(v, "", "  ")
+	data, _ := json.MarshalIndent(v, "", "  ") // fire-and-forget: last-ditch fallback after the primary marshal+write already failed
 	path := s.ArtifactPath(name)
-	_ = os.WriteFile(path, data, 0o644) // fire-and-forget
+	_ = os.WriteFile(path, data, 0o644) // fire-and-forget: best-effort diagnostic artifact
 	return path
 }
 

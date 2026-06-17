@@ -69,7 +69,10 @@ func (s *ValidateStep) writeMeta(sc StepContext, sid string, start time.Time, st
 			Status:          status,
 			Error:           fmt.Sprintf("%v", err),
 		}
-		data, _ := json.MarshalIndent(meta, "", "  ")
+		data, jsonErr := json.MarshalIndent(meta, "", "  ")
+		if jsonErr != nil {
+			return
+		}
 		sc.Artifacts.WriteBestEffort("validator_meta.json", data)
 		return
 	}

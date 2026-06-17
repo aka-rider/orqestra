@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -1368,5 +1369,64 @@ func TestTUI_ChatHistory_UserAndArchitect(t *testing.T) {
 	}
 	if model.pipelineScreen.chatHistory[0].Text != "why this approach?" {
 		t.Errorf("expected 'why this approach?', got %q", model.pipelineScreen.chatHistory[0].Text)
+	}
+}
+
+// TestApplySnapshot_TerminalErrShowsInCompletion verifies that a pipeline failure
+// reported via obs.Finished is visible in the completion screen — the real path
+// through obsNotifyMsg → ApplySnapshot (not ApplyEvent, which is never called).
+func TestApplySnapshot_TerminalErrShowsInCompletion(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.active = true
+
+	obs := orchestrator.NewObsStore()
+	m.obs = obs
+	m.ctrl = orchestrator.NewControl(obs)
+
+	runErr := errors.New("research: read plan: model session x completed but did not write a plan file")
+	obs.Finished(orchestrator.Result{Status: orchestrator.StatusFailed}, runErr)
+	result, _ := m.Update(obsNotifyMsg{})
+	model := result.(Model)
+
+	if model.pipelineScreen.lastErr == nil {
+		t.Fatal("lastErr is nil after failed pipeline; ApplySnapshot must copy snap.Terminal.Err")
+	}
+	out := model.pipelineScreen.viewCompletion(80)
+	if !strings.Contains(out, "Error:") {
+		t.Errorf("viewCompletion missing 'Error:' line:\n%s", out)
+	}
+	if !strings.Contains(model.pipelineScreen.lastErr.Error(), "did not write a plan file") {
+		t.Errorf("unexpected lastErr content: %v", model.pipelineScreen.lastErr)
+	}
+}
+
+// TestApplySnapshot_AgentFailedErrShowsInCompletion verifies that an agent
+// failure error stored in AgentSnapshot.Error reaches s.lastErr via ApplySnapshot.
+func TestApplySnapshot_AgentFailedErrShowsInCompletion(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.active = true
+
+	obs := orchestrator.NewObsStore()
+	m.obs = obs
+	m.ctrl = orchestrator.NewControl(obs)
+
+	agentErr := errors.New("research: read plan: model did not write a plan file")
+	obs.AgentStarted("researcher", orchestrator.AgentMeta{ModelRef: "test"})
+	// First tick: registers agent in knownAgents as "running".
+	result, _ := m.Update(obsNotifyMsg{})
+	m = result.(Model)
+
+	obs.AgentFailed("researcher", agentErr)
+	// Second tick: "running" → "failed" transition sets lastErr.
+	result, _ = m.Update(obsNotifyMsg{})
+	model := result.(Model)
+
+	if model.pipelineScreen.lastErr == nil {
+		t.Fatal("lastErr is nil after agent failure; AgentSnapshot.Error must propagate through ApplySnapshot")
+	}
+	if !strings.Contains(model.pipelineScreen.lastErr.Error(), "did not write a plan file") {
+		t.Errorf("unexpected lastErr: %v", model.pipelineScreen.lastErr)
 	}
 }
