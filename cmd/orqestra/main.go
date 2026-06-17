@@ -2,7 +2,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -146,12 +145,8 @@ func runInitCommand(baseDir string, stderr io.Writer) error {
 	return nil
 }
 
-// buildEngine constructs the full Engine with all runners.
+// buildEngine constructs the Engine with ProcessSpecs for the RunPipeline path.
 func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPath string) *orchestrator.Engine {
-	// Budget guard from pipeline config
-	usage := orchestrator.NewRunUsage(cfg.Pipeline.TokenBudget)
-	guard := orchestrator.NewBudgetGuard(usage)
-
 	// Question bridge for AskUserQuestion MCP tool
 	socketPath := filepath.Join("/tmp", fmt.Sprintf("orqestra-q-%d.sock", os.Getpid()))
 	bridge := mcp.NewQuestionBridge(socketPath)
@@ -161,46 +156,27 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		slog.Warn("cannot determine self path for MCP bridge, questions disabled", "err", selfErr)
 	}
 
-	// bridgeOpt injects the orqestra MCP server into each runner
+	// bridgeOpt injects the orqestra MCP server into each agent
 	var bridgeOpt harness.ClaudeCLIOption
 	if selfErr == nil {
 		bridgeOpt = harness.WithInlineMCPServer("orqestra", selfBin, []string{"mcp-bridge", "--socket", socketPath})
 	}
 
-	// Researcher
+	// Build per-agent ClaudeCLIOptions for BuildProcessSpec.
 	resOpts := append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Researcher.BaseAgentConfig)...)
 	if bridgeOpt != nil {
 		resOpts = append(resOpts, bridgeOpt)
 	}
-	researcherRunner, err := harness.NewClaudeCLIFromConfig(cfg, cfg.Researcher.Model, resOpts...)
-	if err != nil {
-		slog.Error("failed to create researcher runner", "err", err)
-		os.Exit(exitInvalidInput)
-	}
-
-	// Architect
 	plnOpts := append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Architect.BaseAgentConfig)...)
 	if bridgeOpt != nil {
 		plnOpts = append(plnOpts, bridgeOpt)
 	}
-	architectRunner, err := harness.NewClaudeCLIFromConfig(cfg, cfg.Architect.Model, plnOpts...)
-	if err != nil {
-		slog.Error("failed to create architect runner", "err", err)
-		os.Exit(exitInvalidInput)
-	}
-
-	// Critic
 	criticOpts := append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Critic.BaseAgentConfig)...)
 	if bridgeOpt != nil {
 		criticOpts = append(criticOpts, bridgeOpt)
 	}
-	criticRunner, err := harness.NewClaudeCLIFromConfig(cfg, cfg.Critic.Model, criticOpts...)
-	if err != nil {
-		slog.Error("failed to create critic runner", "err", err)
-		os.Exit(exitInvalidInput)
-	}
 
-	// Worker (sandboxed) — no bridge, workers don't ask questions
+	// Worker sandbox environment (model-specific env vars for API keys etc.)
 	resolved, resolveErr := cfg.ResolveModel(cfg.Worker.Model)
 	if resolveErr != nil {
 		slog.Error("failed to resolve worker model", "err", resolveErr)
@@ -211,116 +187,70 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		slog.Error("invalid model configuration", "err", modelEnvErr)
 		os.Exit(exitInvalidInput)
 	}
-	sandboxRunner, err := harness.NewRunner(harness.RunnerConfig{
-		Sandbox: harness.SandboxConfig{
-			RepoPath:     repoPath,
-			WorktreePath: "",
-			Profiles:     sandboxProfiles,
-			Env:          modelEnv,
-			Writable:     true,
-		},
-	}, context.Background())
-	if err != nil {
-		slog.Error("failed to create sandbox runner", "err", err)
+
+	workerSandboxCfg := harness.SandboxConfig{
+		RepoPath: repoPath,
+		Profiles: sandboxProfiles,
+		Env:      modelEnv,
+		Writable: true,
+	}
+	worktreeSandboxCfg := harness.SandboxConfig{
+		RepoPath: repoPath,
+		Profiles: sandboxProfiles,
+		Env:      modelEnv,
+		Writable: false,
+	}
+
+	// BuildProcessSpec inherits all options already set in resOpts/plnOpts/criticOpts
+	// (including AppendSystemPrompt from bridgeToolOpts). Do NOT add an extra
+	// WithAppendSystemPrompt here — that would overwrite the one bridgeToolOpts set
+	// with the wrong field (BaseAgentConfig.SystemPrompt ≠ AppendSystemPrompt).
+	resSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Researcher.Model, harness.SandboxConfig{}, resOpts...)
+	if specErr != nil {
+		slog.Error("failed to build researcher spec", "err", specErr)
+		os.Exit(exitInvalidInput)
+	}
+	archSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Architect.Model, harness.SandboxConfig{}, plnOpts...)
+	if specErr != nil {
+		slog.Error("failed to build architect spec", "err", specErr)
+		os.Exit(exitInvalidInput)
+	}
+	criticSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Critic.Model, harness.SandboxConfig{}, criticOpts...)
+	if specErr != nil {
+		slog.Error("failed to build critic spec", "err", specErr)
+		os.Exit(exitInvalidInput)
+	}
+	workerSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Worker.Model, workerSandboxCfg,
+		harness.WithWorkDir(repoPath))
+	if specErr != nil {
+		slog.Error("failed to build worker spec", "err", specErr)
 		os.Exit(exitInvalidInput)
 	}
 
-	// WorktreeRunnerFactory creates a read-only-repo runner scoped to a worktree.
-	// BudgetGuard wraps the worktree runner for token accounting.
-	sandboxRunnerCfg := harness.SandboxConfig{
-		RepoPath:     repoPath,
-		Env:          modelEnv,
-		Writable:     false, // repo is read-only; worktree is read-write via WorktreePath
-		Profiles:     sandboxProfiles,
-		WorktreePath: "",    // set per-call
-	}
-	worktreeRunnerFactory := func(worktreePath string) harness.Runner {
-		wtCfg := sandboxRunnerCfg
-		wtCfg.WorktreePath = worktreePath
-		r, err := harness.NewRunner(harness.RunnerConfig{
-			Sandbox: wtCfg,
-			Binary:  "claude",
-		}, context.Background())
-		if err != nil {
-			slog.Error("failed to create worktree runner", "err", err)
-			os.Exit(exitInvalidInput)
-		}
-		return guard.Wrap(r, "worker")
+	wtSpecFn := func(wtPath string) harness.ProcessSpec {
+		spec := workerSpec
+		sc := worktreeSandboxCfg
+		sc.WorktreePath = wtPath
+		spec.Sandbox = sc
+		spec.WorkDir = wtPath
+		return spec
 	}
 
 	return &orchestrator.Engine{
 		Config:   cfg,
 		RepoPath: repoPath,
-		Runners: orchestrator.Runners{
-			Researcher: guard.Wrap(researcherRunner, "researcher"),
-			Architect:  guard.Wrap(architectRunner, "architect"),
-			Critic:     guard.Wrap(criticRunner, "critic"),
-			Worker:     guard.Wrap(sandboxRunner, "worker"),
+		Specs: orchestrator.ProcessSpecs{
+			Researcher:     resSpec,
+			Architect:      archSpec,
+			Critic:         criticSpec,
+			Worker:         workerSpec,
+			WorktreeSpecFn: wtSpecFn,
 		},
-		RunDirFactory:         orchestrator.DefaultRunDirFactory(repoPath),
-		QuestionBridge:        bridge,
-		WorktreeRunnerFactory: worktreeRunnerFactory,
+		RunDirFactory:  orchestrator.DefaultRunDirFactory(repoPath),
+		QuestionBridge: bridge,
 	}
 }
 
-func runStreamingToWriter(
-	ctx context.Context,
-	runner harness.Runner,
-	prompt, systemPrompt string,
-	w io.Writer,
-) (harness.RunResult, error) {
-	if w == nil {
-		runner.SetEvents(nil)
-		runner.Post(systemPrompt)
-		runner.Post(prompt)
-		var result harness.RunResult
-		for ev := range runner.Receive() {
-			if ev.Kind == harness.EventError {
-				return result, fmt.Errorf("runner error: %s", ev.Text)
-			}
-			if ev.Kind == harness.EventUsage {
-				result.Usage = harness.TokenUsage{Input: ev.Input, Output: ev.Output}
-			}
-			if ev.Kind == harness.EventChunk && ev.Text != "" {
-				result.Output += ev.Text
-			}
-		}
-		return result, nil
-	}
-
-	updates := make(chan harness.Event, 256)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for u := range updates {
-			if u.Text != "" {
-				_, _ = io.WriteString(w, u.Text)
-			}
-		}
-	}()
-
-	runner.SetEvents(updates)
-	runner.Post(systemPrompt)
-	runner.Post(prompt)
-
-	var result harness.RunResult
-	for ev := range runner.Receive() {
-		if ev.Kind == harness.EventError {
-			close(updates)
-			<-done
-			return result, fmt.Errorf("runner error: %s", ev.Text)
-		}
-		if ev.Kind == harness.EventUsage {
-			result.Usage = harness.TokenUsage{Input: ev.Input, Output: ev.Output}
-		}
-		if ev.Kind == harness.EventChunk && ev.Text != "" {
-			result.Output += ev.Text
-		}
-	}
-	close(updates)
-	<-done
-	return result, nil
-}
 
 func resolveConfigPath(name, repoPath string) (string, error) {
 	if filepath.IsAbs(name) {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"image"
-	"log/slog"
 	"os"
 	"time"
 
@@ -71,11 +70,11 @@ type Model struct {
 	width  int
 	height int
 
-	// Pipeline communication (domain side-effects stay on root)
-	events        <-chan orchestrator.Event
-	streamUpdates <-chan orchestrator.StreamEntry
-	decisions     chan<- orchestrator.Decision
-	cancel        context.CancelFunc
+	// Pipeline observation + control (ObsStore polling path)
+	obs     *orchestrator.ObsStore
+	ctrl    orchestrator.Control
+	lastRev uint64
+	cancel  context.CancelFunc
 
 	// Engine
 	engine *orchestrator.Engine
@@ -138,19 +137,16 @@ func animTickCmd() tea.Cmd {
 	})
 }
 
-// waitForEvent returns a tea.Cmd that waits for the next pipeline event.
-func waitForEvent(events <-chan orchestrator.Event) tea.Cmd {
+// notifyCmd returns a tea.Cmd that waits for the next ObsStore notify signal.
+func notifyCmd(ch <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
-		event, ok := <-events
-		if !ok {
-			return pipelineClosedMsg{}
-		}
-		return OrchestratorEventMsg{Event: event}
+		<-ch
+		return obsNotifyMsg{}
 	}
 }
 
-// pipelineClosedMsg signals the events channel was closed.
-type pipelineClosedMsg struct{}
+// obsNotifyMsg fires when ObsStore has an updated snapshot for the TUI to consume.
+type obsNotifyMsg struct{}
 
 // Update handles messages and returns the updated model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -227,8 +223,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		if m.state == StatePipeline {
-			m.pipelineScreen.DrainStreamUpdates(m.streamUpdates)
-				m.pipelineScreen.SyncViewports()
+			if m.obs != nil {
+				m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
+			}
+			m.pipelineScreen.SyncViewports()
 			return m, tickCmd()
 		}
 		return m, nil
@@ -245,53 +243,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ctrlCPending = false
 		return m, nil
 
-	case OrchestratorEventMsg:
-		if m.events == nil {
-			slog.Error("BUG: m.events is nil in OrchestratorEventMsg handler", "event_type", msg.Event.Type)
+	case obsNotifyMsg:
+		if m.obs == nil {
+			return m, nil
 		}
+		snap := m.obs.Snapshot()
 		prevContent := m.pipelineScreen.content
 		prevComment := m.pipelineScreen.hasPlanComment
-		m.pipelineScreen.ApplyEvent(msg.Event, m.width)
-		for {
-			select {
-			case ev, ok := <-m.events:
-				if !ok {
-					if !m.pipelineScreen.awaitingPlanDecision && m.pipelineScreen.content != ContentCompletion {
-						m.pipelineScreen.content = ContentCompletion
-					}
-					if m.state == StatePipeline {
-						if inputHeightChanged(prevContent, m.pipelineScreen.content, prevComment, m.pipelineScreen.hasPlanComment) {
-							m.recalculateLayout()
-						}
-						m.pipelineScreen.SyncViewports()
-					}
-					return m, nil
-				}
-				m.pipelineScreen.ApplyEvent(ev, m.width)
-			default:
-				if m.state == StatePipeline {
-					if inputHeightChanged(prevContent, m.pipelineScreen.content, prevComment, m.pipelineScreen.hasPlanComment) {
-						m.recalculateLayout()
-					}
-					m.pipelineScreen.SyncViewports()
-				}
-				return m, waitForEvent(m.events)
-			}
-		}
-
-	case pipelineClosedMsg:
-		prevContent := m.pipelineScreen.content
-		prevComment := m.pipelineScreen.hasPlanComment
-		if !m.pipelineScreen.awaitingPlanDecision && m.pipelineScreen.content != ContentCompletion {
-			m.pipelineScreen.content = ContentCompletion
-		}
+		m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
+		m.pipelineScreen.ApplySnapshot(snap, m.width)
+		m.lastRev = snap.Rev
 		if m.state == StatePipeline {
 			if inputHeightChanged(prevContent, m.pipelineScreen.content, prevComment, m.pipelineScreen.hasPlanComment) {
 				m.recalculateLayout()
 			}
 			m.pipelineScreen.SyncViewports()
 		}
-		return m, nil
+		if snap.Terminal.Done {
+			return m, nil
+		}
+		return m, notifyCmd(m.obs.NotifyCh())
 	}
 
 	// Pass non-key messages to focused sub-models
@@ -533,43 +504,33 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 		}
 		return m, batch(nil)
 	case ApprovePlanIntent:
-		if m.decisions != nil {
-			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionApprove}
-		}
+		m.ctrl.Submit(orchestrator.Decision{Type: orchestrator.DecisionApprove})
 		return m, batch(nil)
 	case ConfirmEditIntent:
-		if m.decisions != nil {
-			m.decisions <- orchestrator.Decision{
-				Type:          orchestrator.DecisionEdit,
-				EditedContent: i.EditedContent,
-				Comment:       i.Comment,
-				AutoApprove:   i.AutoApprove,
-			}
-		}
+		m.ctrl.Submit(orchestrator.Decision{
+			Type:          orchestrator.DecisionEdit,
+			EditedContent: i.EditedContent,
+			Comment:       i.Comment,
+			AutoApprove:   i.AutoApprove,
+		})
 		m.pipelineScreen.awaitingPlanDecision = false
 		m.pipelineScreen.content = ContentStreaming
 		m.pipelineScreen.SyncViewports()
-		return m, batch(waitForEvent(m.events))
+		return m, batch(nil)
 	case EditPlanIntent:
-		if m.decisions != nil {
-			m.decisions <- orchestrator.Decision{
-				Type:          orchestrator.DecisionEdit,
-				EditedContent: i.ModifiedMarkdown,
-			}
-		}
+		m.ctrl.Submit(orchestrator.Decision{
+			Type:          orchestrator.DecisionEdit,
+			EditedContent: i.ModifiedMarkdown,
+		})
 		return m, batch(nil)
 	case CommentPlanIntent:
-		if m.decisions != nil {
-			m.decisions <- orchestrator.Decision{
-				Type:    orchestrator.DecisionComment,
-				Comment: i.Comment,
-			}
-		}
-		return m, batch(waitForEvent(m.events))
+		m.ctrl.Submit(orchestrator.Decision{
+			Type:    orchestrator.DecisionComment,
+			Comment: i.Comment,
+		})
+		return m, batch(nil)
 	case CancelPlanIntent:
-		if m.decisions != nil {
-			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionCancel}
-		}
+		m.ctrl.Submit(orchestrator.Decision{Type: orchestrator.DecisionCancel})
 		return m, batch(nil)
 	case CancelPipelineIntent:
 		if m.cancel != nil {
@@ -602,9 +563,7 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 	case OpenExternalEditorIntent:
 		return m, batch(openExternalEditor(i.FilePath))
 	case AbortMergeIntent:
-		if m.decisions != nil {
-			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionMergeAbort}
-		}
+		m.ctrl.Submit(orchestrator.Decision{Type: orchestrator.DecisionMergeAbort})
 		return m, batch(nil)
 	case RestartRunIntent:
 		m.lastRestartRunPath = i.RunPath
@@ -620,17 +579,15 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 		// Comment intentionally empty; AutoApprove intentionally false: revert
 		// must re-show the gate so the user reviews the historical revision
 		// before approving. See `DecisionEdit` branch in orchestrator.go.
-		if m.decisions != nil {
-			m.decisions <- orchestrator.Decision{
-				Type:          orchestrator.DecisionEdit,
-				EditedContent: i.Content,
-			}
-		}
+		m.ctrl.Submit(orchestrator.Decision{
+			Type:          orchestrator.DecisionEdit,
+			EditedContent: i.Content,
+		})
 		m.pipelineScreen.content = ContentStreaming
 		m.pipelineScreen.awaitingPlanDecision = false
 		m.recalculateLayout()
 		m.pipelineScreen.SyncViewports()
-		return m, batch(waitForEvent(m.events))
+		return m, batch(nil)
 	}
 	return m, batch(nil)
 }
@@ -640,17 +597,17 @@ func (m *Model) startPipeline(prompt string) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 
-	channels := m.engine.Start(ctx, orchestrator.Input{
+	handle := m.engine.Start(ctx, orchestrator.Input{
 		Prompt: prompt,
 		Setup:  m.confirmedSetup,
 	})
-	m.events = channels.Events
-	m.streamUpdates = channels.StreamUpdates
-	m.decisions = channels.Decisions
+	m.obs = handle.Obs
+	m.ctrl = handle.Ctrl
+	m.lastRev = 0
 	m.pipelineScreen.SetStreamBuf(orchestrator.NewStreamRing(200))
-	m.pipelineScreen.SetHistoryStore(channels.History)
+	m.pipelineScreen.SetHistoryStore(handle.Obs.Ring().History())
 
-	return tea.Batch(waitForEvent(channels.Events), tickCmd())
+	return tea.Batch(notifyCmd(handle.Obs.NotifyCh()), tickCmd())
 }
 
 // startPipelineRestart launches the orchestrator for a restart run and returns
@@ -659,20 +616,20 @@ func (m *Model) startPipelineRestart(prompt, runPath string, phase orchestrator.
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 
-	channels := m.engine.Start(ctx, orchestrator.Input{
+	handle := m.engine.Start(ctx, orchestrator.Input{
 		Prompt: prompt,
 		RestartFrom: orchestrator.RestartInput{
 			RunPath: runPath,
 			Phase:   phase,
 		},
 	})
-	m.events = channels.Events
-	m.streamUpdates = channels.StreamUpdates
-	m.decisions = channels.Decisions
+	m.obs = handle.Obs
+	m.ctrl = handle.Ctrl
+	m.lastRev = 0
 	m.pipelineScreen.SetStreamBuf(orchestrator.NewStreamRing(200))
-	m.pipelineScreen.SetHistoryStore(channels.History)
+	m.pipelineScreen.SetHistoryStore(handle.Obs.Ring().History())
 
-	return tea.Batch(waitForEvent(channels.Events), tickCmd())
+	return tea.Batch(notifyCmd(handle.Obs.NotifyCh()), tickCmd())
 }
 
 // View renders the current screen.

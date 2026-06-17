@@ -97,6 +97,11 @@ type PipelineScreen struct {
 
 	awaitingPlanDecision bool
 
+	// ObsStore-path: tracks the last seen gate markdown to detect new gate openings.
+	seenGateMarkdown string
+	// knownAgents maps agentID → last observed status for transition detection.
+	knownAgents map[string]string
+
 	// User question state (MCP AskUserQuestion bridge)
 	question    userQuestionModel
 	hasQuestion bool
@@ -142,10 +147,11 @@ func NewPipelineScreen(configName string) PipelineScreen {
 	cvp.MouseWheelEnabled = true
 
 	return PipelineScreen{
-		configName: configName,
-		contentVP:  cvp,
-		dashboard:  NewDashboardModel(),
-		frameList:  NewFrameList(80),
+		configName:  configName,
+		contentVP:   cvp,
+		dashboard:   NewDashboardModel(),
+		frameList:   NewFrameList(80),
+		knownAgents: make(map[string]string),
 	}
 }
 
@@ -179,6 +185,8 @@ func (s *PipelineScreen) Reset() {
 	s.hasPlanComment = false
 	s.editorRunning = false
 	s.awaitingPlanDecision = false
+	s.seenGateMarkdown = ""
+	s.knownAgents = make(map[string]string)
 	s.activeChat = nil
 	s.chatHistory = nil
 	s.planDiff = ""
@@ -481,6 +489,128 @@ func (s *PipelineScreen) ApplyEvent(event orchestrator.Event, width int) {
 	}
 }
 
+// ApplySnapshot updates the screen from an ObsStore snapshot, detecting state
+// transitions (new agent, agent done/failed, gate open, question, terminal).
+// knownAgents is updated in place to track agent status across calls.
+func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int) {
+	// Phase (only update when not in human-gate mode)
+	if !s.awaitingPlanDecision {
+		s.phase = snap.Phase
+	}
+
+	// Agent transitions: new agents or status changes.
+	for _, a := range snap.Agents {
+		prev, seen := s.knownAgents[a.AgentID]
+		curr := a.Status
+		if !seen {
+			// Agent just started.
+			if s.streamBuf != nil {
+				s.streamBuf.SetAgent(a.AgentID)
+			}
+			s.agents = append(s.agents, AgentRow{
+				ID:            a.AgentID,
+				State:         AgentStateRunning,
+				StartedAt:     a.StartTime,
+				ModelRef:      a.Meta.ModelRef,
+				ModelDisplay:  a.Meta.ModelDisplay,
+				Provider:      a.Meta.Provider,
+				ContextWindow: a.Meta.ContextWindow,
+			})
+			s.frameList.AppendFrame(Frame{
+				Kind:       AgentFrame,
+				State:      FrameInProgress,
+				AgentID:    a.AgentID,
+				AgentModel: a.Meta.ModelDisplay,
+				StartedAt:  a.StartTime,
+			})
+			s.knownAgents[a.AgentID] = curr
+		} else if prev != curr {
+			switch curr {
+			case "done":
+				elapsed := a.EndTime.Sub(a.StartTime)
+				for i := range s.agents {
+					if s.agents[i].ID == a.AgentID {
+						s.agents[i].State = AgentStateDone
+						s.agents[i].Elapsed = elapsed
+						s.agents[i].InputTokens = a.Input
+						s.agents[i].OutputTokens = a.Output
+					}
+				}
+				if a.AgentID == "architect" && len(s.chatHistory) > 0 {
+					s.reviewTokensIn += a.Input
+					s.reviewTokensOut += a.Output
+				}
+				s.frameList.FinishActive(elapsed, a.Input, a.Output, width)
+				s.staticContentDirty = true
+			case "failed":
+				for i := range s.agents {
+					if s.agents[i].ID == a.AgentID {
+						s.agents[i].State = AgentStateFailed
+					}
+				}
+				s.frameList.FinishActive(0, 0, 0, width)
+				s.staticContentDirty = true
+			}
+			s.knownAgents[a.AgentID] = curr
+		}
+	}
+
+	// Gate: open or update when gate markdown changes.
+	if snap.HasGate && snap.Gate.FinalPlanMarkdown != s.seenGateMarkdown {
+		s.seenGateMarkdown = snap.Gate.FinalPlanMarkdown
+		if !s.awaitingPlanDecision {
+			// Gate just opened.
+			if snap.Gate.Position.IsPlanGate() {
+				if len(s.chatHistory) > 0 {
+					s.chatHistory = append(s.chatHistory, ChatEntry{
+						Role: ChatRoleArchitect, Text: "(plan ready for review)",
+					})
+				}
+				s.awaitingPlanDecision = true
+				s.content = ContentHumanGate
+				s.finalPlan = snap.Gate.FinalPlanMarkdown
+				s.hasPlan = true
+				s.planFilePath = snap.Gate.PlanFilePath
+				s.activeChat = newHumanChatMode(snap.Gate, width)
+			} else {
+				s.awaitingPlanDecision = true
+				s.content = ContentHumanGate
+				s.finalPlan = snap.Gate.FinalPlanMarkdown
+				s.hasPlan = false
+				s.activeChat = newHumanChatMode(snap.Gate, width)
+			}
+		} else {
+			// Plan revised — update content without reopening gate.
+			s.finalPlan = snap.Gate.FinalPlanMarkdown
+		}
+	}
+
+	// UserQuestion: show once per question arrival.
+	if snap.HasQuestion && !s.hasQuestion {
+		s.content = ContentUserQuestion
+		s.question = newUserQuestion(snap.UserQuestion, width)
+		s.hasQuestion = true
+		s.contentVP.GotoTop()
+	}
+
+	// Terminal: pipeline finished.
+	if snap.Terminal.Done && s.active && !s.awaitingPlanDecision {
+		s.content = ContentCompletion
+		s.active = false
+		if snap.Terminal.Result.WorkerValidation != "" {
+			s.workerValidation = snap.Terminal.Result.WorkerValidation
+			s.hasValidation = true
+		}
+		s.frameList.AppendFrame(Frame{
+			Kind:    CompletionFrame,
+			State:   FrameFinished,
+			Elapsed: time.Since(s.startTime),
+			Parts:   []ContentPart{{IsText: true, Text: s.buildCompletionSummary()}},
+		})
+		s.staticContentDirty = true
+	}
+}
+
 // Update handles key events for the pipeline screen.
 func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	// Global pipeline keys first
@@ -580,6 +710,7 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 			s.activeChat = nil
 			s.content = ContentStreaming
 			s.awaitingPlanDecision = false
+			s.seenGateMarkdown = "" // allow next gate to re-trigger
 			switch p := pending.(type) {
 			case *orchestrator.Decision:
 				switch p.Type {

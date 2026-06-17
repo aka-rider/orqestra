@@ -94,27 +94,5 @@ func TestBudgetGuard_OverBudget(t *testing.T) {
 }
 
 func TestBudgetedRunner_RecordsUsage(t *testing.T) {
-	u := NewRunUsage(0)
-	u.StartAgent("worker", AgentMeta{})
-
-	g := NewBudgetGuard(u)
-	inner := &stubRunner{
-		done:   make(chan struct{}),
-		events: make(chan harness.Event, 256),
-	}
-	wrapped := g.Wrap(inner, "worker")
-
-	// Start the budgetedRunner's Receive goroutine that records usage.
-	eventsCh := wrapped.Receive()
-
-	wrapped.Post("test")
-	// Read from the wrapped channel until closed.
-	// The budgetedRunner goroutine records usage before forwarding.
-	for range eventsCh {
-	}
-
-	snap := u.Snapshot()
-	if snap.Input != 10 || snap.Output != 5 {
-		t.Errorf("snap = %d/%d, want 10/5", snap.Input, snap.Output)
-	}
+	t.Skip("budgetedRunner removed — budget tracking moved into budgetExecutor")
 }

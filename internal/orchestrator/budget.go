@@ -6,6 +6,42 @@ import (
 	"github.com/xiii/orqestra/internal/harness"
 )
 
+// budgetExecutor wraps a harness.Executor and enforces a token budget.
+// Unlike budgetedRunner, it records usage from RunResult.Usage post-hoc —
+// no forwarding goroutine, no lossy event drop.
+type budgetExecutor struct {
+	inner   harness.Executor
+	guard   *BudgetGuard
+	agentID string
+	usage   *RunUsage
+}
+
+// NewBudgetExecutor returns an Executor that enforces the budget before and
+// after each Run call, recording usage from res.Usage (no goroutine needed).
+func NewBudgetExecutor(inner harness.Executor, guard *BudgetGuard, agentID string) harness.Executor {
+	return &budgetExecutor{inner: inner, guard: guard, agentID: agentID, usage: guard.usage}
+}
+
+func (b *budgetExecutor) Run(ctx context.Context, spec harness.ProcessSpec, in <-chan harness.Message, sink harness.Sink) (harness.RunResult, error) {
+	if err := b.guard.Check(); err != nil {
+		return harness.RunResult{}, err
+	}
+
+	res, err := b.inner.Run(ctx, spec, in, sink)
+
+	// Record usage post-hoc from the returned value — no forwarding goroutine.
+	if res.Usage.Input > 0 || res.Usage.Output > 0 {
+		b.usage.Record(b.agentID, res.Usage.Input, res.Usage.Output)
+	}
+
+	// Check budget after — if now exhausted, preserve the result and wrap error.
+	if checkErr := b.guard.Check(); checkErr != nil && err == nil {
+		return res, checkErr
+	}
+
+	return res, err
+}
+
 // BudgetGuard enforces token budgets by reading from RunUsage.
 type BudgetGuard struct {
 	usage *RunUsage
@@ -29,58 +65,3 @@ func (g *BudgetGuard) Check() error {
 	return nil
 }
 
-// Wrap returns a Runner that enforces the budget
-// before and after each call, recording usage under agentID.
-func (g *BudgetGuard) Wrap(inner harness.Runner, agentID string) harness.Runner {
-	return &budgetedRunner{inner: inner, guard: g, agentID: agentID, usage: g.usage}
-}
-
-// budgetedRunner is a Runner decorator that enforces token budgets
-// and records per-agent usage under the orchestrator's RunUsage.
-type budgetedRunner struct {
-	inner   harness.Runner
-	guard   *BudgetGuard
-	agentID string
-	usage   *RunUsage
-}
-
-func (r *budgetedRunner) Post(msg string) {
-	r.inner.Post(msg)
-}
-
-func (r *budgetedRunner) Receive() <-chan harness.Event {
-	ch := make(chan harness.Event, 256)
-	inner := r.inner.Receive()
-
-	go func() {
-		defer close(ch)
-		for ev := range inner {
-			// Record per-agent usage for usage events.
-			if ev.Kind == harness.EventUsage {
-				r.usage.Record(r.agentID, ev.Input, ev.Output)
-			}
-			select {
-			case ch <- ev:
-			default:
-			}
-		}
-	}()
-
-	return ch
-}
-
-func (r *budgetedRunner) ExtractPlan(ctx context.Context) (string, error) {
-	return r.inner.ExtractPlan(ctx)
-}
-
-func (r *budgetedRunner) SetEvents(ch chan<- harness.Event) {
-	r.inner.SetEvents(ch)
-}
-
-func (r *budgetedRunner) SessionID() string {
-	return r.inner.SessionID()
-}
-
-func (r *budgetedRunner) Cancel() error {
-	return r.inner.Cancel()
-}

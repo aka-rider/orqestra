@@ -167,13 +167,9 @@ func TestNewClaudeCLIFromConfig_AppliesModelRuntimeOptions(t *testing.T) {
 		},
 	}
 
-	runner, err := NewClaudeCLIFromConfig(cfg, "worker", WithExtraArgs("--verbose-mode"))
+	cli, err := NewClaudeCLIFromConfig(cfg, "worker", WithExtraArgs("--verbose-mode"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	cli, ok := runner.(*ClaudeCLI)
-	if !ok {
-		t.Fatalf("runner = %T, want *ClaudeCLI", runner)
 	}
 	if cli.binary != "claude-test" {
 		t.Errorf("binary = %q, want claude-test", cli.binary)
