@@ -61,9 +61,10 @@ type AgentRow struct {
 
 // Model is the top-level Bubble Tea model for the Orqestra TUI.
 type Model struct {
-	state  AppState
-	width  int
-	height int
+	state     AppState
+	prevState AppState // state to return to when leaving the runs list (set on entry)
+	width     int
+	height    int
 
 	// Pipeline observation + control (ObsStore polling path)
 	obs     *orchestrator.ObsStore
@@ -216,18 +217,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case tickMsg:
-		if m.state == StatePipeline {
+		// Keep the tick loop alive while the pipeline screen is visible OR a run
+		// is still active in the background (user navigated to runs list). This
+		// keeps the stream ring fresh so returning shows live state, and avoids
+		// spawning duplicate loops on re-entry.
+		switch {
+		case m.state == StatePipeline:
 			if m.obs != nil {
 				m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
 			}
 			m.pipelineScreen.SyncViewports()
 			return m, tickCmd()
+		case m.pipelineScreen.active:
+			if m.obs != nil {
+				m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
+			}
+			return m, tickCmd()
 		}
 		return m, nil
 
 	case animTickMsg:
-		if m.state == StatePipeline && m.pipelineScreen.active {
-			m.pipelineScreen.animFrame++
+		if m.pipelineScreen.active {
+			if m.state == StatePipeline {
+				m.pipelineScreen.animFrame++
+			}
 			return m, animTickCmd()
 		}
 		return m, nil
@@ -243,7 +256,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		snap := m.obs.Snapshot()
 		prevContent := m.pipelineScreen.content
 		m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
-		flushCmds := m.pipelineScreen.FlushCmds()
 		m.pipelineScreen.ApplySnapshot(snap, m.width)
 		m.lastRev = snap.Rev
 		if m.state == StatePipeline {
@@ -252,15 +264,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.pipelineScreen.SyncViewports()
 		}
-		var notifyCmdResult tea.Cmd
 		if !snap.Terminal.Done {
-			notifyCmdResult = notifyCmd(m.obs.NotifyCh())
+			return m, notifyCmd(m.obs.NotifyCh())
 		}
-		if len(flushCmds) > 0 {
-			all := append(flushCmds, notifyCmdResult)
-			return m, tea.Batch(all...)
-		}
-		return m, notifyCmdResult
+		return m, nil
 	}
 
 	// Pass non-key messages to focused sub-models
@@ -282,10 +289,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleMouse routes mouse events to the active screen.
+// handleMouse routes mouse (wheel) events to the active screen's viewport so
+// scrollback works with the mouse. Without this the program captures the wheel
+// (MouseModeCellMotion) and the terminal's own scroll is dead.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	_ = msg
-	return m, nil
+	var cmd tea.Cmd
+	switch m.state {
+	case StatePipeline:
+		m.pipelineScreen, cmd = m.pipelineScreen.HandleMouse(msg)
+	case StateRunsList:
+		m.runsListScreen, cmd = m.runsListScreen.HandleMouse(msg)
+	case StateRunDetail:
+		m.runDetailScreen, cmd = m.runDetailScreen.HandleMouse(msg)
+	}
+	return m, cmd
 }
 
 // handleKey processes key events.
@@ -343,6 +360,14 @@ func (m Model) handleRunsListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.runsListScreen.PendingIntent = nil
 		switch i := intent.(type) {
 		case NavigateBackIntent:
+			// Return to where we came from. If a pipeline is still live, go back
+			// to its view (the tick/anim loops stayed alive while we were away).
+			if m.prevState == StatePipeline && (m.pipelineScreen.active || m.obs != nil) {
+				m.state = StatePipeline
+				m.recalculateLayout()
+				m.pipelineScreen.SyncViewports()
+				return m, nil
+			}
 			m.state = StatePrompt
 			m.recalculateLayout()
 			return m, nil
@@ -619,6 +644,7 @@ func (m Model) View() tea.View {
 		content = m.runDetailScreen.View(m.effectiveWidth(), m.height)
 	}
 	v := tea.NewView(content)
+	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }

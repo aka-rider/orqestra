@@ -15,34 +15,36 @@ import (
 // It locates the plan file via planFilePath (from the run result stream), the
 // session JSONL's plan_mode attachment, or falls back to scanning ~/.claude/plans/.
 // repoCWD is the repository root used to resolve the session JSONL path.
-func ReadPlan(sessionID, planFilePath, repoCWD string) (string, error) {
+// outputText is the raw session stream output used as a last-resort tier-4 fallback
+// when no plan file was written; pass "" to disable. fromFallback=true signals that
+// the model disobeyed the plan-writing instruction — callers should log this as a canary.
+func ReadPlan(sessionID, planFilePath, repoCWD, outputText string) (content string, fromFallback bool, err error) {
 	if sessionID == "" {
-		return "", fmt.Errorf("no session ID")
+		return "", false, fmt.Errorf("no session ID")
 	}
 
 	// If the stream captured the plan file path directly, use it.
 	if planFilePath != "" {
-		content, err := readSecurePlanFile(planFilePath)
-		if err == nil {
-			return strings.TrimSpace(content), nil
+		c, readErr := readSecurePlanFile(planFilePath)
+		if readErr == nil {
+			return strings.TrimSpace(c), false, nil
 		}
 		slog.Debug("plan file path from stream invalid, falling back to JSONL scan",
-			"path", planFilePath, "err", err)
+			"path", planFilePath, "err", readErr)
 	}
 
 	// Resolve session JSONL and extract plan file path from plan_mode attachment.
 	cwd := repoCWD
 	if cwd == "" {
-		var err error
 		cwd, err = os.Getwd()
 		if err != nil {
-			return "", fmt.Errorf("get cwd: %w", err)
+			return "", false, fmt.Errorf("get cwd: %w", err)
 		}
 	}
 
 	jsonlPath, err := harness.ResolveSessionLogPath(cwd, sessionID)
 	if err != nil {
-		return "", fmt.Errorf("resolve session log for %s: %w", sessionID, err)
+		return "", false, fmt.Errorf("resolve session log for %s: %w", sessionID, err)
 	}
 
 	jsonlPlanPath, err := harness.ExtractPlanFilePath(jsonlPath)
@@ -52,20 +54,27 @@ func ReadPlan(sessionID, planFilePath, repoCWD string) (string, error) {
 			"session_id", sessionID, "err", err)
 		fallbackContent, fbErr := scanPlansDirectory()
 		if fbErr != nil {
-			return "", fmt.Errorf("extract plan for session %s: JSONL scan failed (%w), plans dir scan failed (%w)", sessionID, err, fbErr)
+			return "", false, fmt.Errorf("extract plan for session %s: JSONL scan failed (%w), plans dir scan failed (%w)", sessionID, err, fbErr)
 		}
-		return strings.TrimSpace(fallbackContent), nil
+		return strings.TrimSpace(fallbackContent), false, nil
 	}
 
-	content, err := readSecurePlanFile(jsonlPlanPath)
+	c, err := readSecurePlanFile(jsonlPlanPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("model session %s completed but did not write a plan file (%s); "+
-				"the model may have exhausted its context window during exploration", sessionID, jsonlPlanPath)
+			// Tier 4: model produced text output instead of writing to the plan file path.
+			// This is a canary — the model did not follow the plan-writing instruction.
+			if t := strings.TrimSpace(outputText); t != "" {
+				slog.Warn("plan resolved from session stream output — model did not write to plan file",
+					"session_id", sessionID, "expected_path", jsonlPlanPath)
+				return t, true, nil
+			}
+			return "", false, fmt.Errorf("model session %s completed but did not write a plan file (%s); "+
+				"the model may have produced text output without writing to the plan file path", sessionID, jsonlPlanPath)
 		}
-		return "", fmt.Errorf("read plan file for session %s: %w", sessionID, err)
+		return "", false, fmt.Errorf("read plan file for session %s: %w", sessionID, err)
 	}
-	return strings.TrimSpace(content), nil
+	return strings.TrimSpace(c), false, nil
 }
 
 // readSecurePlanFile reads a plan file after verifying it resides under ~/.claude/plans/.
@@ -139,10 +148,3 @@ func scanPlansDirectory() (string, error) {
 	return content, nil
 }
 
-// truncateRaw limits a raw string for error messages.
-func truncateRaw(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}

@@ -246,6 +246,47 @@ func TestTUI_CtrlR_DuringPipeline(t *testing.T) {
 	}
 }
 
+// TestTUI_CtrlR_EscReturnsToLivePipeline guards the re-entry round trip: leaving
+// a live run via Ctrl+R and pressing Esc must return to the running view, not
+// drop to the prompt screen (the one-way-door regression).
+func TestTUI_CtrlR_EscReturnsToLivePipeline(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.active = true
+
+	res, _ := sendCtrl(m, 'r')
+	m = res.(Model)
+	if m.state != StateRunsList {
+		t.Fatalf("expected StateRunsList after Ctrl+R, got %d", m.state)
+	}
+
+	res, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = res.(Model)
+	if m.state != StatePipeline {
+		t.Fatalf("expected to return to StatePipeline on Esc while a run is live, got %d", m.state)
+	}
+}
+
+// TestTUI_CtrlR_EscFromPromptReturnsToPrompt confirms the non-live path still
+// lands on the prompt screen.
+func TestTUI_CtrlR_EscFromPromptReturnsToPrompt(t *testing.T) {
+	m := testModel()
+	m.state = StatePrompt
+
+	res, _ := sendCtrl(m, 'r')
+	m = res.(Model)
+	if m.state != StateRunsList {
+		t.Fatalf("expected StateRunsList after Ctrl+R, got %d", m.state)
+	}
+
+	res, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = res.(Model)
+	if m.state != StatePrompt {
+		t.Fatalf("expected to return to StatePrompt on Esc with no live run, got %d", m.state)
+	}
+}
+
 func TestTUI_RunsListEmpty(t *testing.T) {
 	m := testModel()
 	m.state = StateRunsList

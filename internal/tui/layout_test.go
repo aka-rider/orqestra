@@ -68,8 +68,8 @@ func TestLayout_HeightInvariant(t *testing.T) {
 				m := layoutTestModel(sz[0], sz[1], st.state)
 				view := m.View().Content
 				got := lipgloss.Height(view)
-				// Inline mode: view sits at the terminal bottom and does not fill
-				// the full height. Only verify it does not overflow.
+				// Alt-screen: the view owns the screen and fills up to the full
+				// height. Verify it does not overflow.
 				if got > sz[1] {
 					t.Errorf("lipgloss.Height(View()) = %d, overflows %d", got, sz[1])
 				}
@@ -105,6 +105,22 @@ func TestLayout_HeightInvariant_ErrorStateCompletion(t *testing.T) {
 	got := lipgloss.Height(view)
 	if got > 40 {
 		t.Errorf("ContentCompletion+lastErr: lipgloss.Height = %d, overflows 40", got)
+	}
+}
+
+// TestLayout_AltScreenEnabled guards the alt-screen invariant. The in-app
+// content viewport requires owning the screen; without alt-screen the program
+// runs inline and scrolling is dead.
+func TestLayout_AltScreenEnabled(t *testing.T) {
+	states := []AppState{StatePrompt, StatePipeline, StateRunsList, StateRunDetail}
+	for _, st := range states {
+		m := layoutTestModel(120, 40, st)
+		if st == StatePipeline {
+			m.pipelineScreen.content = ContentStreaming
+		}
+		if !m.View().AltScreen {
+			t.Errorf("expected AltScreen=true for state %d", st)
+		}
 	}
 }
 

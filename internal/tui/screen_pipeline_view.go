@@ -35,6 +35,13 @@ func (s PipelineScreen) View(width, height int) string {
 	chromeH := constFooterHeight + constPipelineInputHeight + constSidebarHeight
 	contentH := max(0, height-chromeH)
 
+	// Streaming and completion render through the scrollable content viewport,
+	// whose content is built in SyncViewports (Update path). View stays pure.
+	switch s.content {
+	case ContentStreaming, ContentCompletion:
+		return s.contentVP.View() + "\n" + input + sidebar + footer
+	}
+
 	var body string
 	switch s.content {
 	case ContentHumanGate:
@@ -45,10 +52,6 @@ func (s PipelineScreen) View(width, height int) string {
 		body = s.question.View(w)
 	case ContentEditConfirm:
 		body = s.viewEditConfirm(w)
-	case ContentCompletion:
-		body = s.viewCompletion(w)
-	case ContentStreaming:
-		body = s.viewStreaming(w)
 	}
 
 	if contentH > 0 && body != "" {
@@ -208,7 +211,9 @@ func (s PipelineScreen) viewStreaming(width int) string {
 	b.WriteString("\n\n")
 
 	if len(activities) > 0 {
-		b.WriteString(renderActivityLog(activities, width, s.cwd, 20))
+		// Full activity log goes into the viewport; the viewport, not a slice,
+		// decides what is visible. Bounded by the stream ring capacity.
+		b.WriteString(renderActivityLog(activities, width, s.cwd, len(activities)))
 	}
 
 	if len(completedLines) > 0 || partial != "" {
@@ -219,13 +224,9 @@ func (s PipelineScreen) viewStreaming(width int) string {
 		innerWidth := max(1, width-constContentInset-4)
 		unique := deduplicateLines(completedLines)
 
-		const previewMax = 15
-		start := 0
-		if len(unique) > previewMax {
-			start = len(unique) - previewMax
-		}
+		// Full stream history goes into the viewport (scrollable). No preview cap.
 		var contentLines []string
-		contentLines = append(contentLines, unique[start:]...)
+		contentLines = append(contentLines, unique...)
 
 		if partial != "" {
 			display := partial

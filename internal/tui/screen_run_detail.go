@@ -108,6 +108,20 @@ func (s *RunDetailScreen) SyncViewports() {
 	}
 }
 
+// HandleMouse routes mouse (wheel) events to the currently focused pane's viewport.
+func (s RunDetailScreen) HandleMouse(msg tea.MouseMsg) (RunDetailScreen, tea.Cmd) {
+	var cmd tea.Cmd
+	switch s.focus {
+	case RunDetailFocusMenu:
+		s.stepsVP, cmd = s.stepsVP.Update(msg)
+	case RunDetailFocusContent:
+		s.detailVP, cmd = s.detailVP.Update(msg)
+	case RunDetailFocusLog:
+		s.logVP, cmd = s.logVP.Update(msg)
+	}
+	return s, cmd
+}
+
 // View renders the run detail screen.
 func (s RunDetailScreen) View(width, height int) string {
 	if height < minHeight {

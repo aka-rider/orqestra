@@ -50,7 +50,12 @@ func (s *ResearchStep) Run(ctx context.Context, in ResearchInput, sc StepContext
 			s.writeMeta(sc, res.SessionID, start, "failed", err, harness.TokenUsage{})
 			return ResearchOutput{}, fmt.Errorf("research: %w", err)
 		}
-		plan, err = agent.ReadPlan(res.SessionID, res.PlanFilePath, sc.RepoPath)
+		var usedFallback bool
+		plan, usedFallback, err = agent.ReadPlan(res.SessionID, res.PlanFilePath, sc.RepoPath, res.Output)
+		if usedFallback {
+			sc.Log.Warn("researcher: model produced text output instead of writing plan file; "+
+				"model may have disobeyed plan-writing instructions", "session_id", res.SessionID)
+		}
 		if err != nil {
 			if attempt < maxAttempts {
 				sc.Log.Warn("researcher plan extraction failed, retrying",

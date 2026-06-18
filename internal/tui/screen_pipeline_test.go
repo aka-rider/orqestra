@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,71 @@ import (
 	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
+
+// seedStreamingModel returns a Model in a live streaming state with n stream
+// lines already buffered and the content viewport synced to the bottom.
+func seedStreamingModel(t *testing.T, n int) Model {
+	t.Helper()
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.active = true
+	m.pipelineScreen.goal = "scroll test"
+
+	stream := orchestrator.NewStreamRing(n + 50)
+	m.pipelineScreen.streamBuf = stream
+	stream.SetAgent("researcher")
+	for i := 1; i <= n; i++ {
+		stream.AppendText(fmt.Sprintf("stream line %03d\n", i))
+	}
+	m.recalculateLayout()
+	m.pipelineScreen.SyncViewports()
+	if !m.pipelineScreen.contentVP.AtBottom() {
+		t.Fatal("expected fresh streaming viewport to follow the bottom")
+	}
+	return m
+}
+
+// TestPipelineScroll_KeyScrollAndTickStability covers the scroll-stability
+// invariant: PgUp scrolls off the bottom, and a later stream tick must not yank
+// a user-scrolled viewport back down.
+func TestPipelineScroll_KeyScrollAndTickStability(t *testing.T) {
+	m := seedStreamingModel(t, 100)
+
+	res, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	m = res.(Model)
+	if m.pipelineScreen.contentVP.AtBottom() {
+		t.Fatal("expected viewport to leave the bottom after PgUp")
+	}
+	scrolled := m.pipelineScreen.contentVP.YOffset()
+
+	// New content arrives and a tick fires SyncViewports.
+	m.pipelineScreen.streamBuf.AppendText("stream line 101\n")
+	res, _ = m.Update(tickMsg(time.Now()))
+	m = res.(Model)
+
+	if m.pipelineScreen.contentVP.AtBottom() {
+		t.Error("tick yanked a user-scrolled viewport back to the bottom")
+	}
+	if got := m.pipelineScreen.contentVP.YOffset(); got != scrolled {
+		t.Errorf("tick moved user scroll position: got %d want %d", got, scrolled)
+	}
+}
+
+// TestPipelineScroll_MouseWheel covers mouse-wheel routing — a regression guard
+// against Model.handleMouse reverting to a no-op.
+func TestPipelineScroll_MouseWheel(t *testing.T) {
+	m := seedStreamingModel(t, 100)
+
+	before := m.pipelineScreen.contentVP.YOffset()
+	res, _ := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	m = res.(Model)
+	after := m.pipelineScreen.contentVP.YOffset()
+
+	if after >= before {
+		t.Errorf("expected wheel-up to scroll the content viewport up: before=%d after=%d", before, after)
+	}
+}
 
 func TestFileHyperlink_AbsolutePath(t *testing.T) {
 	path := "/Users/dev/internal/model.go"
@@ -68,20 +134,30 @@ func setupTestPipelineScreen() PipelineScreen {
 	return s
 }
 
-func TestViewStreaming_NoRawDump(t *testing.T) {
+// The streaming body now carries the FULL history; the viewport (not a slice)
+// decides what is visible. Following the bottom shows the newest lines and clips
+// the oldest, but the full history stays retained for scrollback.
+func TestViewStreaming_ViewportRetainsFullHistoryAndClips(t *testing.T) {
 	s := setupTestPipelineScreen()
+	s.content = ContentStreaming
+	s.active = true
+	s.RecalculateLayout(120, 6) // small content zone forces clipping
+	s.SyncViewports()
 
-	out := s.viewStreaming(120)
-
-	if !strings.Contains(out, "Read") || !strings.Contains(out, "Bash") {
-		t.Errorf("expected activity names, got %s", out)
+	if !strings.Contains(s.lastContentBody, "Read") || !strings.Contains(s.lastContentBody, "Bash") {
+		t.Errorf("expected activity names in content, got %s", s.lastContentBody)
 	}
-
-	if strings.Contains(out, "stream line 01") {
-		t.Errorf("expected oldest stream lines to be truncated")
+	// Full history retained (oldest line is in the content, just scrolled off).
+	if !strings.Contains(s.lastContentBody, "stream line 01") {
+		t.Errorf("expected full stream history retained in viewport content")
 	}
-	if !strings.Contains(out, "stream line 06") {
-		t.Errorf("expected newest stream lines to be visible")
+	// Following the bottom: newest line visible, oldest line clipped out of window.
+	view := s.contentVP.View()
+	if !strings.Contains(view, "stream line 16") {
+		t.Errorf("expected newest line visible at bottom, got:\n%s", view)
+	}
+	if strings.Contains(view, "stream line 01") {
+		t.Errorf("expected oldest line clipped by the viewport window, got:\n%s", view)
 	}
 }
 

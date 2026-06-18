@@ -2,12 +2,12 @@ package tui
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"regexp"
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
@@ -93,17 +93,22 @@ type PipelineScreen struct {
 	// Animation frame counter (for spinner)
 	animFrame int
 
-	// Flush queue: completed agent blocks to emit via tea.Println
-	pendingFlush []string
+	// Scrollable content zone for streaming/completion output.
+	contentVP      viewport.Model
+	lastContentBody string      // last body built into contentVP (guards SetContent)
+	lastSyncedMode  ContentMode // content mode the viewport was last built for
 
 	PendingIntent tea.Msg
 }
 
 // NewPipelineScreen creates a new pipeline screen.
 func NewPipelineScreen(configName string) PipelineScreen {
+	cvp := viewport.New()
+	cvp.MouseWheelEnabled = true
 	return PipelineScreen{
 		configName:  configName,
 		knownAgents: make(map[string]string),
+		contentVP:   cvp,
 	}
 }
 
@@ -148,7 +153,10 @@ func (s *PipelineScreen) Reset() {
 	s.liveInput = 0
 	s.liveOutput = 0
 	s.liveStart = time.Time{}
-	s.pendingFlush = nil
+	s.contentVP.SetContent("")
+	s.contentVP.GotoTop()
+	s.lastContentBody = ""
+	s.lastSyncedMode = ContentStreaming
 }
 
 // SetStreamBuf sets the shared stream buffer for live output.
@@ -184,7 +192,10 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 	}
 }
 
-// SyncViewports polls live metrics from the stream ring.
+// SyncViewports polls live metrics and rebuilds the scrollable content zone.
+// Called from Update paths (ticks, obs notifications, resize) — never from
+// View(). SetContent is guarded by a body diff and preserves the user's scroll
+// position unless they are following the bottom of a live stream.
 func (s *PipelineScreen) SyncViewports() {
 	if s.streamBuf != nil && s.active {
 		in, out, start := s.streamBuf.SnapshotUsage()
@@ -192,26 +203,57 @@ func (s *PipelineScreen) SyncViewports() {
 		s.liveOutput = out
 		s.liveStart = start
 	}
+
+	// Only the streaming and completion modes render into the scrollable
+	// viewport; the interactive modes (gate, question, edit-confirm) own their
+	// own rendering and are drawn inline by View().
+	if s.content != ContentStreaming && s.content != ContentCompletion {
+		return
+	}
+
+	var body string
+	if s.content == ContentStreaming {
+		body = s.viewStreaming(s.contentVP.Width())
+	} else {
+		body = s.viewCompletion(s.contentVP.Width())
+	}
+
+	modeChanged := s.content != s.lastSyncedMode
+	if !modeChanged && body == s.lastContentBody {
+		return // nothing changed; keep scroll position untouched
+	}
+
+	atBottom := s.contentVP.AtBottom()
+	prevOff := s.contentVP.YOffset()
+	s.contentVP.SetContent(body)
+	switch {
+	case modeChanged && s.content == ContentCompletion:
+		s.contentVP.GotoTop() // show the summary from the top on entry
+	case atBottom:
+		s.contentVP.GotoBottom() // follow the live stream
+	default:
+		s.contentVP.SetYOffset(prevOff) // user scrolled up — hold position
+	}
+	s.lastContentBody = body
+	s.lastSyncedMode = s.content
 }
 
-// RecalculateLayout is a no-op in the inline-scrollback design.
-func (s *PipelineScreen) RecalculateLayout(_, _ int) {}
+// RecalculateLayout sizes the content viewport to the available content zone.
+func (s *PipelineScreen) RecalculateLayout(width, contentHeight int) {
+	s.contentVP.SetWidth(width)
+	s.contentVP.SetHeight(contentHeight)
+}
 
-// StaticHeight is always 0 in the inline-scrollback design.
-func (s PipelineScreen) StaticHeight() int { return 0 }
-
-// FlushCmds returns tea.Println commands for all pending agent flush entries,
-// draining the queue.
-func (s *PipelineScreen) FlushCmds() []tea.Cmd {
-	if len(s.pendingFlush) == 0 {
-		return nil
+// HandleMouse routes mouse (wheel) events to the content viewport while the
+// scrollable modes are active. Interactive modes ignore the mouse.
+func (s PipelineScreen) HandleMouse(msg tea.MouseMsg) (PipelineScreen, tea.Cmd) {
+	switch s.content {
+	case ContentStreaming, ContentCompletion:
+		var cmd tea.Cmd
+		s.contentVP, cmd = s.contentVP.Update(msg)
+		return s, cmd
 	}
-	cmds := make([]tea.Cmd, len(s.pendingFlush))
-	for i, line := range s.pendingFlush {
-		cmds[i] = tea.Println(line)
-	}
-	s.pendingFlush = nil
-	return cmds
+	return s, nil
 }
 
 // ApplySnapshot updates the screen from an ObsStore snapshot, detecting state
@@ -256,7 +298,6 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 					s.reviewTokensIn += a.Input
 					s.reviewTokensOut += a.Output
 				}
-				s.pendingFlush = append(s.pendingFlush, formatAgentFlush(a, width))
 			case "failed":
 				for i := range s.agents {
 					if s.agents[i].ID == a.AgentID {
@@ -266,7 +307,6 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 				if a.Error != "" {
 					s.lastErr = errors.New(a.Error)
 				}
-				s.pendingFlush = append(s.pendingFlush, formatAgentFlush(a, width))
 			}
 			s.knownAgents[a.AgentID] = curr
 		}
@@ -312,20 +352,6 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 			s.hasValidation = true
 		}
 	}
-}
-
-// formatAgentFlush builds the one-line scrollback entry for a finished agent.
-func formatAgentFlush(a orchestrator.AgentSnapshot, _ int) string {
-	elapsed := a.EndTime.Sub(a.StartTime).Round(time.Second)
-	icon := "✓"
-	if a.Status == "failed" {
-		icon = "✗"
-	}
-	tokens := ""
-	if a.Input > 0 || a.Output > 0 {
-		tokens = fmt.Sprintf("  ↓%s ↑%s", formatTokens(a.Input), formatTokens(a.Output))
-	}
-	return fmt.Sprintf("%s %s  [%s]%s", icon, a.AgentID, elapsed, tokens)
 }
 
 // Update handles key events for the pipeline screen.

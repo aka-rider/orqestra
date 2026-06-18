@@ -110,6 +110,13 @@ func (s RunsListScreen) Update(msg tea.Msg) (RunsListScreen, tea.Cmd) {
 	return s, nil
 }
 
+// HandleMouse routes mouse (wheel) events to the list viewport.
+func (s RunsListScreen) HandleMouse(msg tea.MouseMsg) (RunsListScreen, tea.Cmd) {
+	var cmd tea.Cmd
+	s.viewport, cmd = s.viewport.Update(msg)
+	return s, cmd
+}
+
 // View renders the runs list screen.
 func (s RunsListScreen) View(width, height int) string {
 	if height < minHeight {

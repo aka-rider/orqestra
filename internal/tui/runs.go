@@ -44,6 +44,7 @@ func (m *Model) navigateToRunsList() {
 		return
 	}
 	m.runsListScreen.SetRuns(runs)
+	m.prevState = m.state // remember where we came from so Esc can return there
 	m.state = StateRunsList
 	m.recalculateLayout()
 	m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width())

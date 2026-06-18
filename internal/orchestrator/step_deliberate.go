@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/xiii/orqestra/internal/agent"
@@ -63,7 +62,12 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 			s.writeArchMeta(sc, archRes.SessionID, archStart, "failed", err, harness.TokenUsage{})
 			return PlanOutput{}, fmt.Errorf("architect: %w", err)
 		}
-		planMarkdown, err = agent.ReadPlan(archRes.SessionID, archRes.PlanFilePath, sc.RepoPath)
+		var usedFallback bool
+		planMarkdown, usedFallback, err = agent.ReadPlan(archRes.SessionID, archRes.PlanFilePath, sc.RepoPath, archRes.Output)
+		if usedFallback {
+			sc.Log.Warn("architect: model produced text output instead of writing plan file; "+
+				"model may have disobeyed plan-writing instructions", "session_id", archRes.SessionID)
+		}
 		if err != nil {
 			if attempt < maxArch {
 				sc.Log.Warn("architect plan extraction failed, retrying", "attempt", attempt, "err", err)
@@ -126,20 +130,21 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 			s.writeCriticMeta(sc, criticRes.SessionID, criticStart, "failed", err, harness.TokenUsage{})
 			return PlanOutput{}, fmt.Errorf("critic: %w", err)
 		}
-		criticMarkdown, err = agent.ReadPlan(criticRes.SessionID, criticRes.PlanFilePath, sc.RepoPath)
+		var criticFallback bool
+		criticMarkdown, criticFallback, err = agent.ReadPlan(criticRes.SessionID, criticRes.PlanFilePath, sc.RepoPath, criticRes.Output)
+		if criticFallback {
+			sc.Log.Warn("critic: model produced text output instead of writing plan file; "+
+				"model may have disobeyed plan-writing instructions", "session_id", criticRes.SessionID)
+		}
 		if err != nil {
-			// Critic report not in a plan file — fall back to stream output.
-			criticMarkdown = strings.TrimSpace(criticRes.Output)
-			if criticMarkdown == "" {
-				if attempt < maxCritic {
-					sc.Log.Warn("critic plan extraction failed, retrying", "attempt", attempt, "err", err)
-					sc.Obs.AgentStarted("critic", s.CriticMeta)
-					continue
-				}
-				sc.Obs.AgentFailed("critic", err)
-				s.writeCriticMeta(sc, criticRes.SessionID, criticStart, "failed", err, criticRes.Usage)
-				return PlanOutput{}, fmt.Errorf("critic: read report: %w", err)
+			if attempt < maxCritic {
+				sc.Log.Warn("critic plan extraction failed, retrying", "attempt", attempt, "err", err)
+				sc.Obs.AgentStarted("critic", s.CriticMeta)
+				continue
 			}
+			sc.Obs.AgentFailed("critic", err)
+			s.writeCriticMeta(sc, criticRes.SessionID, criticStart, "failed", err, criticRes.Usage)
+			return PlanOutput{}, fmt.Errorf("critic: read report: %w", err)
 		}
 		break
 	}
@@ -165,7 +170,7 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 		return PlanOutput{}, fmt.Errorf("architect critic revision: %w", revErr)
 	}
 
-	revised, readErr := agent.ReadPlan(revRes.SessionID, revRes.PlanFilePath, sc.RepoPath)
+	revised, _, readErr := agent.ReadPlan(revRes.SessionID, revRes.PlanFilePath, sc.RepoPath, "")
 	if readErr != nil {
 		// Continuation may have been chat-only (no plan rewrite) — treat as no change.
 		sc.Log.Debug("architect critic revision: plan unchanged (chat continuation)", "err", readErr)
