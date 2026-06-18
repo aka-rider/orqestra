@@ -146,6 +146,13 @@ type DefaultsConfig struct {
 	AppendSystemPrompt string   `yaml:"append_system_prompt"`
 }
 
+// LoopGuard configures the steering executor's loop-detection thresholds.
+type LoopGuard struct {
+	RepeatThreshold int `yaml:"repeat_threshold"` // identical tool calls before nudging (default 3)
+	MaxNudges       int `yaml:"max_nudges"`        // nudges before escalating to cancel (default 3)
+	CooldownTurns   int `yaml:"cooldown_turns"`    // turns to wait after a nudge before re-checking (default 2)
+}
+
 // BaseAgentConfig holds fields shared by all agent roles.
 type BaseAgentConfig struct {
 	Model              string    `yaml:"model"`
@@ -155,6 +162,9 @@ type BaseAgentConfig struct {
 	MCPServers         *[]string `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
 	PermissionMode     string    `yaml:"permission_mode"`
 	AppendSystemPrompt string    `yaml:"append_system_prompt"`
+	Timeout            Duration  `yaml:"timeout"`
+	MaxTurns           int       `yaml:"max_turns"`
+	LoopGuard          LoopGuard `yaml:"loop_guard"`
 }
 
 type ResearcherConfig struct {
@@ -173,9 +183,7 @@ type CriticConfig struct {
 
 type WorkerConfig struct {
 	BaseAgentConfig `yaml:",inline"`
-	Timeout         Duration `yaml:"timeout"`
-	MaxTurns        int      `yaml:"max_turns"`
-	Parallelism     int      `yaml:"parallelism"` // max concurrent workers per wave; 0 or 1 = sequential
+	Parallelism     int `yaml:"parallelism"` // max concurrent workers per wave; 0 or 1 = sequential
 }
 
 type RetryConfig struct {
@@ -261,9 +269,8 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// applyDefaults merges DefaultsConfig into each agent's BaseAgentConfig.
-// Agent-level values take precedence: if an agent already has DisallowedTools
-// or AppendSystemPrompt set, the default is not applied (replacement semantics).
+// applyDefaults merges DefaultsConfig into each agent's BaseAgentConfig,
+// and applies zero-value defaults for LoopGuard thresholds.
 func (c *Config) applyDefaults() {
 	agents := []*BaseAgentConfig{
 		&c.Researcher.BaseAgentConfig,
@@ -277,6 +284,15 @@ func (c *Config) applyDefaults() {
 		}
 		if a.AppendSystemPrompt == "" && c.Defaults.AppendSystemPrompt != "" {
 			a.AppendSystemPrompt = c.Defaults.AppendSystemPrompt
+		}
+		if a.LoopGuard.RepeatThreshold == 0 {
+			a.LoopGuard.RepeatThreshold = 3
+		}
+		if a.LoopGuard.MaxNudges == 0 {
+			a.LoopGuard.MaxNudges = 3
+		}
+		if a.LoopGuard.CooldownTurns == 0 {
+			a.LoopGuard.CooldownTurns = 2
 		}
 	}
 }

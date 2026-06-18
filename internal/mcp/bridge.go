@@ -9,7 +9,22 @@ import (
 	"sync"
 )
 
-// QuestionBridge listens on a Unix socket for questions from MCP bridge
+// bridgeEnvelope is the framed wire format for all bridge messages.
+// Kind is "question" or "report"; AgentID identifies the sending role.
+type bridgeEnvelope struct {
+	Kind    string          `json:"kind"`
+	AgentID string          `json:"agent_id"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+// ReportSubmission is a completed agent report received via SubmitReport.
+type ReportSubmission struct {
+	AgentID string
+	Report  string
+	Summary string
+}
+
+// QuestionBridge listens on a Unix socket for questions and reports from MCP bridge
 // subprocesses and routes them to the orchestrator via channels.
 //
 // Flow: MCP server (subprocess) → Unix socket → QuestionBridge → channel → orchestrator → TUI
@@ -23,6 +38,9 @@ type QuestionBridge struct {
 	done          chan struct{}
 	mu            sync.Mutex
 	stopped       bool
+
+	reportsMu sync.Mutex
+	reports   map[string]ReportSubmission
 }
 
 // NewQuestionBridge creates a bridge that will listen on the given socket path.
@@ -32,11 +50,12 @@ func NewQuestionBridge(socketPath string) *QuestionBridge {
 		questions:     make(chan ToolCall, 1),
 		pendingAnswer: make(chan Answer, 1),
 		done:          make(chan struct{}),
+		reports:       make(map[string]ReportSubmission),
 	}
 }
 
 // Start creates the Unix socket and begins accepting connections.
-// Each connection handles exactly one question/answer exchange.
+// Each connection handles exactly one question/answer or report exchange.
 // Start is safe to call after Stop — the bridge resets its internal state.
 func (b *QuestionBridge) Start(ctx context.Context) error {
 	b.mu.Lock()
@@ -89,15 +108,32 @@ func (b *QuestionBridge) acceptLoop(ctx context.Context) {
 func (b *QuestionBridge) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
-	questionData, err := readFrame(conn)
+	data, err := readFrame(conn)
 	if err != nil {
 		slog.Debug("question bridge read error", "err", err)
 		return
 	}
 
+	var env bridgeEnvelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		slog.Debug("question bridge envelope unmarshal error", "err", err)
+		return
+	}
+
+	switch env.Kind {
+	case "question":
+		b.handleQuestion(ctx, conn, env)
+	case "report":
+		b.handleReport(conn, env)
+	default:
+		slog.Debug("question bridge unknown envelope kind", "kind", env.Kind)
+	}
+}
+
+func (b *QuestionBridge) handleQuestion(ctx context.Context, conn net.Conn, env bridgeEnvelope) {
 	var question ToolCall
-	if err := json.Unmarshal(questionData, &question); err != nil {
-		slog.Debug("question bridge unmarshal error", "err", err)
+	if err := json.Unmarshal(env.Payload, &question); err != nil {
+		slog.Debug("question bridge question unmarshal error", "err", err)
 		return
 	}
 
@@ -126,6 +162,47 @@ func (b *QuestionBridge) handleConnection(ctx context.Context, conn net.Conn) {
 	if err := writeFrame(conn, answerData); err != nil {
 		slog.Debug("question bridge write answer error", "err", err)
 	}
+}
+
+func (b *QuestionBridge) handleReport(conn net.Conn, env bridgeEnvelope) {
+	var r struct {
+		Report  string `json:"report"`
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal(env.Payload, &r); err != nil {
+		slog.Debug("question bridge report unmarshal error", "err", err)
+		return
+	}
+
+	// Store before ack — happens-before the agent's "stop" → process exit → Exec.Run returns.
+	b.putReport(env.AgentID, ReportSubmission{
+		AgentID: env.AgentID,
+		Report:  r.Report,
+		Summary: r.Summary,
+	})
+
+	ack, _ := json.Marshal(map[string]bool{"ok": true})
+	if err := writeFrame(conn, ack); err != nil {
+		slog.Debug("question bridge write ack error", "err", err)
+	}
+}
+
+func (b *QuestionBridge) putReport(agentID string, r ReportSubmission) {
+	b.reportsMu.Lock()
+	b.reports[agentID] = r
+	b.reportsMu.Unlock()
+}
+
+// TakeReport returns and removes the report for agentID.
+// Returns false if no report is available (agent did not call SubmitReport).
+func (b *QuestionBridge) TakeReport(agentID string) (ReportSubmission, bool) {
+	b.reportsMu.Lock()
+	r, ok := b.reports[agentID]
+	if ok {
+		delete(b.reports, agentID)
+	}
+	b.reportsMu.Unlock()
+	return r, ok
 }
 
 // Stop closes the bridge and cleans up the socket file.

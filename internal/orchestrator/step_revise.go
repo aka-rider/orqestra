@@ -56,7 +56,7 @@ func (s *ReviseStep) Run(ctx context.Context, in ReviseInput, sc StepContext) (P
 		return PlanOutput{}, fmt.Errorf("revise: %w", err)
 	}
 
-	revised, _, readErr := agent.ReadPlan(res.SessionID, res.PlanFilePath, sc.RepoPath, false)
+	revised, _, readErr := preferReport(sc, "architect", res, false)
 	if readErr != nil {
 		// Chat-only continuation — the architect responded without revising the plan.
 		sc.Log.Debug("revise: plan unchanged (chat continuation)", "err", readErr)

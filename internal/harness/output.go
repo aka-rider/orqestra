@@ -1,10 +1,24 @@
 package harness
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
 )
+
+// normalizeArgs returns compact JSON for tool input, used as a loop fingerprint.
+// Returns empty string if input is nil or malformed.
+func normalizeArgs(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, input); err != nil {
+		return ""
+	}
+	return buf.String()
+}
 
 // ToolDetail extracts a human-readable summary from a tool invocation's
 // name and raw JSON arguments. Used to populate the TUI activity bar.

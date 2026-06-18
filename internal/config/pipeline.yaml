@@ -10,7 +10,10 @@ defaults:
 researcher:
   model: medium
   permission_mode: plan
-  disallowed_tools: [AskUserQuestion, ExitPlanMode]
+  max_turns: 40
+  timeout: 10m
+  allowed_tools: [Read, Glob, Grep, Bash, WebFetch, WebSearch, "mcp__orqestra__*"]
+  disallowed_tools: [AskUserQuestion, ExitPlanMode, Write, Edit, MultiEdit, NotebookEdit, EnterPlanMode, EnterWorktree, ExitWorktree, TaskCreate, TaskUpdate, TaskStop, KillShell]
   system_prompt: |
     You are a codebase researcher. Explore the code and produce a FACT REPORT.
     You report what EXISTS. You do not propose what to BUILD.
@@ -95,14 +98,18 @@ researcher:
     - Avoid vague words ("appropriate", "as needed", "properly", "ensure",
       "consider", "various") — replace with the specific thing.
     - ExitPlanMode is not available to you. Do not search for it. Your
-      session ends when you produce the fact report output.
+      session ends when you call mcp__orqestra__SubmitReport with your final report.
+      Do not rely on stopping by yourself.
     - mcp__orqestra__AskUserQuestion is for scoping clarification only —
       not for signaling completion or asking if you should start building.
 
 architect:
   model: large
   permission_mode: plan
-  disallowed_tools: [AskUserQuestion, ExitPlanMode]
+  max_turns: 40
+  timeout: 10m
+  allowed_tools: [Read, Glob, Grep, Bash, WebFetch, WebSearch, "mcp__orqestra__*"]
+  disallowed_tools: [AskUserQuestion, ExitPlanMode, Write, Edit, MultiEdit, NotebookEdit, EnterPlanMode, EnterWorktree, ExitWorktree, TaskCreate, TaskUpdate, TaskStop, KillShell]
   system_prompt: |
     You are the Principal Engineer. You receive a user request and a
     codebase fact report. Your job is to produce the FINAL implementation
@@ -223,14 +230,18 @@ architect:
     - Your output is MARKDOWN ONLY. Begin with "# Plan", end after Gotchas —
       except in revision mode, where you end after Revision Notes.
     - ExitPlanMode is not available to you. Do not search for it. Your
-      session terminates after you produce the plan markdown output.
+      session ends when you call mcp__orqestra__SubmitReport with your final report.
+      Do not rely on stopping by yourself.
     - mcp__orqestra__AskUserQuestion is for requirement clarification only —
       not for signaling completion or asking if you should start implementing.
 
 critic:
   model: medium
   permission_mode: plan
-  disallowed_tools: [AskUserQuestion, ExitPlanMode]
+  max_turns: 40
+  timeout: 10m
+  allowed_tools: [Read, Glob, Grep, Bash, WebFetch, WebSearch, "mcp__orqestra__*"]
+  disallowed_tools: [AskUserQuestion, ExitPlanMode, Write, Edit, MultiEdit, NotebookEdit, EnterPlanMode, EnterWorktree, ExitWorktree, TaskCreate, TaskUpdate, TaskStop, KillShell]
   system_prompt: |
     You are the Plan Critic. You receive an implementation plan produced by
     an architect and the original user request. Your job is to find execution
@@ -307,7 +318,8 @@ critic:
       - Low: Minor gap that a competent worker can resolve independently.
     - Do not re-plan. You find problems; the architect fixes them.
     - ExitPlanMode is not available to you. Do not search for it. Your
-      session ends when you produce the Critic Report output.
+      session ends when you call mcp__orqestra__SubmitReport with your final report.
+      Do not rely on stopping by yourself.
 
 worker:
   model: medium

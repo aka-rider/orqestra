@@ -33,11 +33,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	// Subcommand: mcp-bridge (invoked by Claude CLI as MCP server)
 	if len(args) >= 2 && args[1] == "mcp-bridge" {
-		if len(args) < 4 || args[2] != "--socket" {
-			fmt.Fprintf(stderr, "Usage: orqestra mcp-bridge --socket <path>\n")
+		socketPath, agentID, ok := parseMCPBridgeArgs(args[2:])
+		if !ok {
+			fmt.Fprintf(stderr, "Usage: orqestra mcp-bridge --socket <path> --agent-id <id>\n")
 			return exitInvalidInput
 		}
-		if err := mcp.RunServer(args[3]); err != nil {
+		if err := mcp.RunServer(socketPath, agentID); err != nil {
 			slog.Error("mcp-bridge failed", "err", err)
 			return exitDomainFailure
 		}
@@ -156,25 +157,22 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		slog.Warn("cannot determine self path for MCP bridge, questions disabled", "err", selfErr)
 	}
 
-	// bridgeOpt injects the orqestra MCP server into each agent
-	var bridgeOpt harness.ClaudeCLIOption
-	if selfErr == nil {
-		bridgeOpt = harness.WithInlineMCPServer("orqestra", selfBin, []string{"mcp-bridge", "--socket", socketPath})
+	// bridgeOptFor returns a per-role MCP server option.
+	// Returns a no-op when selfBin is unavailable.
+	bridgeOptFor := func(agentID string) harness.ClaudeCLIOption {
+		if selfErr != nil {
+			return func(*harness.ClaudeCLI) {}
+		}
+		return harness.WithInlineMCPServer("orqestra", selfBin, []string{"mcp-bridge", "--socket", socketPath, "--agent-id", agentID})
 	}
 
 	// Build per-agent ClaudeCLIOptions for BuildProcessSpec.
 	resOpts := append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Researcher.BaseAgentConfig)...)
-	if bridgeOpt != nil {
-		resOpts = append(resOpts, bridgeOpt)
-	}
+	resOpts = append(resOpts, bridgeOptFor("researcher"), harness.WithMaxTurns(cfg.Researcher.MaxTurns))
 	plnOpts := append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Architect.BaseAgentConfig)...)
-	if bridgeOpt != nil {
-		plnOpts = append(plnOpts, bridgeOpt)
-	}
+	plnOpts = append(plnOpts, bridgeOptFor("architect"), harness.WithMaxTurns(cfg.Architect.MaxTurns))
 	criticOpts := append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Critic.BaseAgentConfig)...)
-	if bridgeOpt != nil {
-		criticOpts = append(criticOpts, bridgeOpt)
-	}
+	criticOpts = append(criticOpts, bridgeOptFor("critic"), harness.WithMaxTurns(cfg.Critic.MaxTurns))
 
 	// Worker sandbox environment (model-specific env vars for API keys etc.)
 	resolved, resolveErr := cfg.ResolveModel(cfg.Worker.Model)
@@ -210,22 +208,52 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		slog.Error("failed to build researcher spec", "err", specErr)
 		os.Exit(exitInvalidInput)
 	}
+	resSpec.AgentID = "researcher"
+	resSpec.SteerOnLoop = true
+	resSpec.Timeout = cfg.Researcher.Timeout.Duration
+	resSpec.LoopGuard = harness.LoopGuardSpec{
+		RepeatThreshold: cfg.Researcher.LoopGuard.RepeatThreshold,
+		MaxNudges:       cfg.Researcher.LoopGuard.MaxNudges,
+		CooldownTurns:   cfg.Researcher.LoopGuard.CooldownTurns,
+	}
+
 	archSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Architect.Model, harness.SandboxConfig{}, plnOpts...)
 	if specErr != nil {
 		slog.Error("failed to build architect spec", "err", specErr)
 		os.Exit(exitInvalidInput)
 	}
+	archSpec.AgentID = "architect"
+	archSpec.SteerOnLoop = true
+	archSpec.Timeout = cfg.Architect.Timeout.Duration
+	archSpec.LoopGuard = harness.LoopGuardSpec{
+		RepeatThreshold: cfg.Architect.LoopGuard.RepeatThreshold,
+		MaxNudges:       cfg.Architect.LoopGuard.MaxNudges,
+		CooldownTurns:   cfg.Architect.LoopGuard.CooldownTurns,
+	}
+
 	criticSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Critic.Model, harness.SandboxConfig{}, criticOpts...)
 	if specErr != nil {
 		slog.Error("failed to build critic spec", "err", specErr)
 		os.Exit(exitInvalidInput)
 	}
+	criticSpec.AgentID = "critic"
+	criticSpec.SteerOnLoop = true
+	criticSpec.Timeout = cfg.Critic.Timeout.Duration
+	criticSpec.LoopGuard = harness.LoopGuardSpec{
+		RepeatThreshold: cfg.Critic.LoopGuard.RepeatThreshold,
+		MaxNudges:       cfg.Critic.LoopGuard.MaxNudges,
+		CooldownTurns:   cfg.Critic.LoopGuard.CooldownTurns,
+	}
+
 	workerSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Worker.Model, workerSandboxCfg,
 		harness.WithWorkDir(repoPath))
 	if specErr != nil {
 		slog.Error("failed to build worker spec", "err", specErr)
 		os.Exit(exitInvalidInput)
 	}
+	workerSpec.AgentID = "worker"
+	workerSpec.SteerOnLoop = false
+	workerSpec.Timeout = cfg.Worker.Timeout.Duration
 
 	wtSpecFn := func(wtPath string) harness.ProcessSpec {
 		spec := workerSpec
@@ -314,8 +342,6 @@ func toolOpts(mcpServers *[]string, allowed, disallowed []string, permissionMode
 	// orqestra bridge MCP tool must be pre-approved.
 	if len(allowed) > 0 {
 		opts = append(opts, harness.WithAllowedTools(allowed))
-	} else if permissionMode == "plan" {
-		opts = append(opts, harness.WithAllowedTools([]string{"*", "mcp__*"}))
 	}
 
 	if len(disallowed) > 0 {
@@ -334,11 +360,10 @@ func bridgeToolOpts(base config.BaseAgentConfig) []harness.ClaudeCLIOption {
 		disallowed = append(disallowed, "AskUserQuestion")
 	}
 
-	// Orqestra agents always run in -p pipe mode where interactive permission
-	// prompts are impossible. Pre-approve all built-in and MCP tools
-	// unconditionally — the sandbox is the security boundary.
+	// Use the role's explicit allowed list from config, then add MCP bridge tools.
+	// Never add "*" — least-privilege: only the tools the role needs are approved.
 	allowed := append([]string(nil), base.AllowedTools...)
-	for _, tool := range []string{"*", "mcp__*", "mcp__orqestra__AskUserQuestion"} {
+	for _, tool := range []string{"mcp__*", "mcp__orqestra__AskUserQuestion"} {
 		if !stringSliceContains(allowed, tool) {
 			allowed = append(allowed, tool)
 		}
@@ -370,4 +395,19 @@ func stringSliceContains(s []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// parseMCPBridgeArgs extracts --socket and --agent-id from the mcp-bridge subcommand args.
+func parseMCPBridgeArgs(args []string) (socketPath, agentID string, ok bool) {
+	for i := 0; i+1 < len(args); i++ {
+		switch args[i] {
+		case "--socket":
+			socketPath = args[i+1]
+			i++
+		case "--agent-id":
+			agentID = args[i+1]
+			i++
+		}
+	}
+	return socketPath, agentID, socketPath != ""
 }

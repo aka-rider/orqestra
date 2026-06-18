@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/xiii/orqestra/internal/config"
@@ -216,6 +217,14 @@ func WithBinary(path string) ClaudeCLIOption {
 	return func(c *ClaudeCLI) {
 		c.binary = path
 	}
+}
+
+// WithMaxTurns limits the number of agentic turns. Zero or negative means no limit.
+func WithMaxTurns(limit int) ClaudeCLIOption {
+	if limit <= 0 {
+		return func(*ClaudeCLI) {}
+	}
+	return WithExtraArgs("--max-turns", strconv.Itoa(limit))
 }
 
 // WithInlineMCPServer injects an MCP server definition that will be merged

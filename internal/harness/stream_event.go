@@ -126,7 +126,7 @@ func streamEventsFrom(event streamEvent) []Event {
 			out = append(out, Event{Kind: EventChunk, Text: text})
 		}
 		for _, tu := range event.extractAssistantToolUses() {
-			out = append(out, Event{Kind: EventToolUse, Tool: tu.Name, Detail: ToolDetail(tu.Name, tu.Input)})
+			out = append(out, Event{Kind: EventToolUse, Tool: tu.Name, Detail: ToolDetail(tu.Name, tu.Input), Args: normalizeArgs(tu.Input)})
 		}
 	case "content_block_delta":
 		if event.Delta.Text != "" {
@@ -134,7 +134,11 @@ func streamEventsFrom(event streamEvent) []Event {
 		}
 	case "content_block_start":
 		if name, args := event.extractToolUse(); name != "" {
-			out = append(out, Event{Kind: EventToolUse, Tool: name, Detail: ToolDetail(name, args)})
+			out = append(out, Event{Kind: EventToolUse, Tool: name, Detail: ToolDetail(name, args), Args: normalizeArgs(args)})
+		}
+	case "user":
+		for _, isErr := range extractToolResults(event.Message) {
+			out = append(out, Event{Kind: EventToolResult, IsError: isErr})
 		}
 	case "stream_event":
 		if event.Event == nil {
@@ -147,12 +151,36 @@ func streamEventsFrom(event streamEvent) []Event {
 		switch inner.Type {
 		case "content_block_start":
 			if name, args := inner.extractToolUse(); name != "" {
-				out = append(out, Event{Kind: EventToolUse, Tool: name, Detail: ToolDetail(name, args)})
+				out = append(out, Event{Kind: EventToolUse, Tool: name, Detail: ToolDetail(name, args), Args: normalizeArgs(args)})
 			}
 		case "content_block_delta":
 			if inner.Delta.Text != "" {
 				out = append(out, Event{Kind: EventChunk, Text: inner.Delta.Text, IsDelta: true})
 			}
+		}
+	}
+	return out
+}
+
+// extractToolResults parses a user message's content for tool_result blocks
+// and returns a slice of is_error booleans — one per tool result.
+func extractToolResults(msg json.RawMessage) []bool {
+	if msg == nil {
+		return nil
+	}
+	var m struct {
+		Content []struct {
+			Type    string `json:"type"`
+			IsError bool   `json:"is_error"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(msg, &m); err != nil {
+		return nil
+	}
+	var out []bool
+	for _, block := range m.Content {
+		if block.Type == "tool_result" {
+			out = append(out, block.IsError)
 		}
 	}
 	return out
@@ -174,6 +202,7 @@ func parseStream(r io.Reader, events chan<- Event) (result string, isError bool,
 		}
 		var event struct {
 			Type         string       `json:"type"`
+			Subtype      string       `json:"subtype,omitempty"`
 			Result       string       `json:"result,omitempty"`
 			IsError      bool         `json:"is_error,omitempty"`
 			SessionID    string       `json:"session_id,omitempty"`
@@ -185,7 +214,7 @@ func parseStream(r io.Reader, events chan<- Event) (result string, isError bool,
 		}
 		if event.Type == "result" {
 			result = event.Result
-			isError = event.IsError
+			isError = event.IsError || strings.HasPrefix(event.Subtype, "error_")
 			if event.SessionID != "" {
 				sessionID = event.SessionID
 			}
@@ -230,6 +259,10 @@ func parseStreamLines(src io.Reader, events chan<- Event) (string, error) {
 
 		if event.SessionID != "" && events != nil {
 			events <- Event{Kind: EventSessionStart, SessionID: event.SessionID}
+		}
+
+		if event.Type == "result" && events != nil {
+			events <- Event{Kind: EventSessionDone}
 		}
 
 		emitStreamEvents(event, events)

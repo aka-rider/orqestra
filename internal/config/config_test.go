@@ -1030,6 +1030,43 @@ func TestValidate_ProviderType(t *testing.T) {
 	}
 }
 
+func TestLoopGuardDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+
+	for _, tc := range []struct {
+		role string
+		lg   LoopGuard
+		mt   int
+		to   time.Duration
+	}{
+		{"researcher", cfg.Researcher.LoopGuard, cfg.Researcher.MaxTurns, cfg.Researcher.Timeout.Duration},
+		{"architect", cfg.Architect.LoopGuard, cfg.Architect.MaxTurns, cfg.Architect.Timeout.Duration},
+		{"critic", cfg.Critic.LoopGuard, cfg.Critic.MaxTurns, cfg.Critic.Timeout.Duration},
+	} {
+		if tc.lg.RepeatThreshold != 3 {
+			t.Errorf("%s.LoopGuard.RepeatThreshold = %d, want 3", tc.role, tc.lg.RepeatThreshold)
+		}
+		if tc.lg.MaxNudges != 3 {
+			t.Errorf("%s.LoopGuard.MaxNudges = %d, want 3", tc.role, tc.lg.MaxNudges)
+		}
+		if tc.lg.CooldownTurns != 2 {
+			t.Errorf("%s.LoopGuard.CooldownTurns = %d, want 2", tc.role, tc.lg.CooldownTurns)
+		}
+		if tc.mt != 40 {
+			t.Errorf("%s.MaxTurns = %d, want 40", tc.role, tc.mt)
+		}
+		if tc.to != 10*time.Minute {
+			t.Errorf("%s.Timeout = %v, want 10m", tc.role, tc.to)
+		}
+	}
+
+	if cfg.Worker.Timeout.Duration != 45*time.Minute {
+		t.Errorf("worker.Timeout = %v, want 45m", cfg.Worker.Timeout.Duration)
+	}
+	// Worker.Parallelism is optional; zero value is valid (sequential).
+	_ = cfg.Worker.Parallelism
+}
+
 func TestIsProviderType(t *testing.T) {
 	tests := []struct {
 		typ    string

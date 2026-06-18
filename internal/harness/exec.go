@@ -8,6 +8,7 @@ import (
 	"io"
 	"os/exec"
 	"syscall"
+	"time"
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/sandbox"
@@ -38,6 +39,9 @@ func ResumeSession(id string) SessionRef { return SessionRef{ID: id, Valid: id !
 
 // ProcessSpec is a pure value type: two identical specs run identical processes.
 // Continuation is the explicit Resume field — not hidden session state.
+// AgentID, SteerOnLoop, Timeout, and LoopGuard are runtime orchestration knobs —
+// they do NOT enter buildSpecArgs, so identical subprocess args still imply
+// identical subprocesses.
 type ProcessSpec struct {
 	Model        ModelSpec
 	SystemPrompt string  // merged into --append-system-prompt
@@ -49,6 +53,12 @@ type ProcessSpec struct {
 	Inline       []InlineMCP
 	Sandbox      SandboxConfig
 	Output       OutputMode
+
+	// Orchestration runtime knobs (not passed to subprocess).
+	AgentID     string        // role label used by steering and report capture
+	SteerOnLoop bool          // enable steering executor loop detection
+	Timeout     time.Duration // wall-clock cap; 0 means no limit
+	LoopGuard   LoopGuardSpec // thresholds for the steering executor
 }
 
 // Message is a user turn sent to a running process via the input plane.

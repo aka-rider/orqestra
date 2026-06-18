@@ -82,9 +82,13 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 		sup := &Supervisor{}
 		defer sup.Shutdown(logger)
 
-		// Build executor (harness.Run wrapped with budget).
+		// Build executor chain: steering (outermost) → watchdog → budget → harness.Run.
 		guard := NewBudgetGuard(NewRunUsage(e.Config.Pipeline.TokenBudget))
-		exec := NewBudgetExecutor(harness.RunFunc(harness.Run), guard, "pipeline")
+		exec := NewSteeringExecutor(
+			NewWatchdogExecutor(
+				NewBudgetExecutor(harness.RunFunc(harness.Run), guard, "pipeline"),
+			),
+		)
 
 		// Build step context.
 		sc := StepContext{
@@ -93,6 +97,7 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 			Artifacts: NewArtifactSink(session),
 			Control:   ctrl,
 			Sessions:  session,
+			Reports:   e.QuestionBridge,
 			Log:       logger,
 			RepoPath:  e.RepoPath,
 		}
