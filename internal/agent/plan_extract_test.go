@@ -53,7 +53,7 @@ func setupPlanFile(t *testing.T, sessionID, planContent string) string {
 
 
 func TestReadPlan_NoSessionID(t *testing.T) {
-	_, _, err := ReadPlan("", "", "", "")
+	_, _, err := ReadPlan("", "", "", false)
 	if err == nil {
 		t.Fatal("expected error for missing session ID")
 	}
@@ -70,7 +70,7 @@ func TestReadPlan_MissingJSONL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err = ReadPlan("nonexistent-session", "", cwd, "")
+	_, _, err = ReadPlan("nonexistent-session", "", cwd, false)
 	if err == nil {
 		t.Fatal("expected error for missing JSONL")
 	}
@@ -111,7 +111,7 @@ func TestReadPlan_SecurityGate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err = ReadPlan(sessionID, "", cwd, "")
+	_, _, err = ReadPlan(sessionID, "", cwd, false)
 	if err == nil {
 		t.Fatal("expected error for out-of-bounds plan file")
 	}
@@ -125,7 +125,7 @@ func TestReadPlan_EmptyPlanFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err = ReadPlan(sessionID, "", cwd, "")
+	_, _, err = ReadPlan(sessionID, "", cwd, false)
 	if err == nil {
 		t.Fatal("expected error for empty plan file")
 	}
@@ -147,7 +147,7 @@ func TestReadPlan_UsesStreamPlanFilePath(t *testing.T) {
 	}
 
 	// Provide planFilePath directly — repoCWD is not needed for this path.
-	content, fromFallback, err := ReadPlan("some-session", planFile, "", "")
+	content, fromFallback, err := ReadPlan("some-session", planFile, "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestReadPlan_PlanFileNeverWritten(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err = ReadPlan(sessionID, "", cwd, "")
+	_, _, err = ReadPlan(sessionID, "", cwd, false)
 	if err == nil {
 		t.Fatal("expected error for plan file that was never written")
 	}
@@ -204,20 +204,21 @@ func TestReadPlan_PlanFileNeverWritten(t *testing.T) {
 	}
 }
 
-func TestReadPlan_OutputTextFallback(t *testing.T) {
+// setupGhostPlan creates the plans dir and session JSONL with a plan_mode attachment
+// pointing to a non-existent plan file. Additional JSONL lines can be appended via extraLines.
+func setupGhostPlan(t *testing.T, sessionID string, extraLines ...string) (ghostPlan, cwd string) {
+	t.Helper()
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
-	sessionID := "test-output-fallback"
-
-	// Create plans dir but do NOT write the plan file — the model disobeyed.
 	plansDir := filepath.Join(tmp, ".claude", "plans")
 	if err := os.MkdirAll(plansDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ghostPlan := filepath.Join(plansDir, "ghost-plan.md")
+	ghostPlan = filepath.Join(plansDir, sessionID+"-ghost.md")
 
-	cwd, err := os.Getwd()
+	var err error
+	cwd, err = os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,58 +231,89 @@ func TestReadPlan_OutputTextFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
-	jsonlContent := fmt.Sprintf(`{"type":"attachment","attachment":{"type":"plan_mode","planFilePath":%q}}`, ghostPlan)
-	if err := os.WriteFile(jsonlPath, []byte(jsonlContent+"\n"), 0o644); err != nil {
+	content := fmt.Sprintf(`{"type":"attachment","attachment":{"type":"plan_mode","planFilePath":%q}}`, ghostPlan) + "\n"
+	for _, line := range extraLines {
+		content += line + "\n"
+	}
+	if err := os.WriteFile(jsonlPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return ghostPlan, cwd
+}
 
-	outputText := "## Goal\nAdd feature X.\n\n## Codebase Facts\n- file: foo.go"
-	content, fromFallback, err := ReadPlan(sessionID, "", cwd, outputText)
+func TestReadPlan_JSONLTextFallback(t *testing.T) {
+	wantText := "## Goal\nAdd feature X.\n\n## Codebase Facts\n- file: foo.go"
+	textLine := fmt.Sprintf(`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":%q}]}}`, wantText)
+	_, cwd := setupGhostPlan(t, "test-text-fallback", textLine)
+
+	content, fromFallback, err := ReadPlan("test-text-fallback", "", cwd, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !fromFallback {
 		t.Error("expected fromFallback=true when model did not write plan file")
 	}
-	if content != outputText {
-		t.Errorf("content mismatch:\ngot:  %s\nwant: %s", content, outputText)
+	if content != wantText {
+		t.Errorf("content mismatch:\ngot:  %s\nwant: %s", content, wantText)
 	}
 }
 
-func TestReadPlan_OutputTextFallbackEmpty(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+func TestReadPlan_JSONLThinkingFallback(t *testing.T) {
+	wantThinking := "Key findings:\n1. screen_prompt.go uses textarea.Model\n2. clipboard dep exists"
+	thinkingLine := fmt.Sprintf(`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":%q}]}}`, wantThinking)
+	_, cwd := setupGhostPlan(t, "test-thinking-fallback", thinkingLine)
 
-	sessionID := "test-output-fallback-empty"
-
-	plansDir := filepath.Join(tmp, ".claude", "plans")
-	if err := os.MkdirAll(plansDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	ghostPlan := filepath.Join(plansDir, "ghost-plan-empty.md")
-
-	cwd, err := os.Getwd()
+	content, fromFallback, err := ReadPlan("test-thinking-fallback", "", cwd, true)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	resolved, err := filepath.EvalSymlinks(cwd)
-	if err != nil {
-		t.Fatal(err)
+	if !fromFallback {
+		t.Error("expected fromFallback=true for thinking-only response")
 	}
-	projDir := filepath.Join(tmp, ".claude", "projects", harness.CwdToDash(resolved))
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
+	if content != wantThinking {
+		t.Errorf("content mismatch:\ngot:  %s\nwant: %s", content, wantThinking)
 	}
-	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
-	jsonlContent := fmt.Sprintf(`{"type":"attachment","attachment":{"type":"plan_mode","planFilePath":%q}}`, ghostPlan)
-	if err := os.WriteFile(jsonlPath, []byte(jsonlContent+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+}
 
-	// outputText is empty — tier 4 does not fire, error is returned.
-	_, _, err = ReadPlan(sessionID, "", cwd, "")
+func TestReadPlan_JSONLTextBeforeThinking(t *testing.T) {
+	wantText := "## Plan\nThe text output."
+	mixedLine := fmt.Sprintf(`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":"raw internal deliberation"},{"type":"text","text":%q}]}}`, wantText)
+	_, cwd := setupGhostPlan(t, "test-text-priority", mixedLine)
+
+	content, fromFallback, err := ReadPlan("test-text-priority", "", cwd, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !fromFallback {
+		t.Error("expected fromFallback=true")
+	}
+	if content != wantText {
+		t.Errorf("text should take priority over thinking:\ngot:  %s\nwant: %s", content, wantText)
+	}
+}
+
+func TestReadPlan_JSONLFallbackNoContent(t *testing.T) {
+	// No assistant end_turn in JSONL — fallback finds nothing, error is returned.
+	_, cwd := setupGhostPlan(t, "test-fallback-empty")
+
+	_, _, err := ReadPlan("test-fallback-empty", "", cwd, true)
 	if err == nil {
-		t.Fatal("expected error when plan file missing and outputText empty")
+		t.Fatal("expected error when plan file missing and JSONL has no end_turn message")
+	}
+	if !strings.Contains(err.Error(), "did not write a plan file") {
+		t.Errorf("unexpected error message: %s", err.Error())
+	}
+}
+
+func TestReadPlan_FallbackDisabled(t *testing.T) {
+	wantText := "## Plan\nContent that should not be recovered."
+	textLine := fmt.Sprintf(`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":%q}]}}`, wantText)
+	_, cwd := setupGhostPlan(t, "test-fallback-disabled", textLine)
+
+	// withFallback=false — even though JSONL has content, it should not be used.
+	_, _, err := ReadPlan("test-fallback-disabled", "", cwd, false)
+	if err == nil {
+		t.Fatal("expected error when withFallback=false and plan file not written")
 	}
 	if !strings.Contains(err.Error(), "did not write a plan file") {
 		t.Errorf("unexpected error message: %s", err.Error())

@@ -21,7 +21,7 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 		s.PendingIntent = NavigateToRunsListIntent{}
 		return s, nil
 	}
-	return s.scrollContent(msg)
+	return s, nil
 }
 
 func (s PipelineScreen) handleCompletionKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
@@ -35,23 +35,7 @@ func (s PipelineScreen) handleCompletionKey(msg tea.KeyPressMsg) (PipelineScreen
 	case "ctrl+q":
 		return s, tea.Quit
 	}
-	return s.scrollContent(msg)
-}
-
-// scrollContent routes navigation keys to the content viewport. Home/End jump
-// to the ends; pgup/pgdn/up/down (and the viewport's pager keys) scroll.
-func (s PipelineScreen) scrollContent(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
-	switch msg.Code {
-	case tea.KeyHome:
-		s.contentVP.GotoTop()
-		return s, nil
-	case tea.KeyEnd:
-		s.contentVP.GotoBottom()
-		return s, nil
-	}
-	var cmd tea.Cmd
-	s.contentVP, cmd = s.contentVP.Update(msg)
-	return s, cmd
+	return s, nil
 }
 
 func (s PipelineScreen) handleEditConfirmKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {

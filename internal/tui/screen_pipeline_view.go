@@ -31,15 +31,26 @@ func (s PipelineScreen) View(width, height int) string {
 	// Status bar (1 line)
 	sidebar := s.viewStatusLine(w) + "\n"
 
-	// Available lines for content (height minus chrome: footer=2, input=2, sidebar=1)
-	chromeH := constFooterHeight + constPipelineInputHeight + constSidebarHeight
-	contentH := max(0, height-chromeH)
-
-	// Streaming and completion render through the scrollable content viewport,
-	// whose content is built in SyncViewports (Update path). View stays pure.
+	// Streaming and completion use inline (non-alt-screen) rendering. Completed
+	// lines are in native scrollback; View() shows only the live region.
 	switch s.content {
-	case ContentStreaming, ContentCompletion:
-		return s.contentVP.View() + "\n" + input + sidebar + footer
+	case ContentStreaming:
+		var partial string
+		if s.streamBuf != nil {
+			_, _, partial, _ = s.streamBuf.SnapshotText()
+		}
+		var liveRegion string
+		if partial != "" {
+			innerWidth := max(1, w-constContentInset-4)
+			display := partial
+			if len(display) > innerWidth {
+				display = display[len(display)-innerWidth:]
+			}
+			liveRegion = streamBlockStyle.Width(innerWidth).Render(display+"▍") + "\n"
+		}
+		return sidebar + liveRegion + input + footer
+	case ContentCompletion:
+		return input + sidebar + footer
 	}
 
 	var body string
@@ -54,6 +65,10 @@ func (s PipelineScreen) View(width, height int) string {
 		body = s.viewEditConfirm(w)
 	}
 
+	// Interactive modes (gate, question, edit-confirm) still run in alt-screen
+	// and cap to the available content zone.
+	chromeH := constFooterHeight + constPipelineInputHeight + constSidebarHeight
+	contentH := max(0, height-chromeH)
 	if contentH > 0 && body != "" {
 		return lipgloss.NewStyle().MaxHeight(contentH).Render(body) + "\n" + input + sidebar + footer
 	}
@@ -190,58 +205,6 @@ func (s PipelineScreen) viewInputZone() string {
 	return ""
 }
 
-func (s PipelineScreen) viewStreaming(width int) string {
-	var b strings.Builder
-	if s.goal != "" {
-		b.WriteString(renderPrefixedText(goalStyle, " Goal: ", s.goal, width))
-	}
-
-	var streamAgent string
-	var completedLines []string
-	var partial string
-	var activities []orchestrator.Activity
-	if s.streamBuf != nil {
-		streamAgent, completedLines, partial, activities = s.streamBuf.SnapshotText()
-	}
-
-	b.WriteString(fmt.Sprintf(" Phase: %s", s.phase))
-	if streamAgent != "" {
-		b.WriteString(fmt.Sprintf("  (%s)", streamAgent))
-	}
-	b.WriteString("\n\n")
-
-	if len(activities) > 0 {
-		// Full activity log goes into the viewport; the viewport, not a slice,
-		// decides what is visible. Bounded by the stream ring capacity.
-		b.WriteString(renderActivityLog(activities, width, s.cwd, len(activities)))
-	}
-
-	if len(completedLines) > 0 || partial != "" {
-		b.WriteString("\n")
-		b.WriteString(streamStyle.Render(" Stream"))
-		b.WriteString("\n")
-
-		innerWidth := max(1, width-constContentInset-4)
-		unique := deduplicateLines(completedLines)
-
-		// Full stream history goes into the viewport (scrollable). No preview cap.
-		var contentLines []string
-		contentLines = append(contentLines, unique...)
-
-		if partial != "" {
-			display := partial
-			if len(display) > innerWidth {
-				display = display[len(display)-innerWidth:]
-			}
-			contentLines = append(contentLines, display)
-		}
-
-		content := strings.Join(contentLines, "\n")
-		b.WriteString(streamBlockStyle.Width(innerWidth).Render(content))
-		b.WriteString("\n")
-	}
-	return b.String()
-}
 
 func (s PipelineScreen) viewCompletion(width int) string {
 	var b strings.Builder
@@ -345,6 +308,18 @@ func (s PipelineScreen) viewEditConfirm(width int) string {
 	return lipgloss.NewStyle().Width(width).Render(b.String())
 }
 
+// formatActivityLine returns a single styled line for a tool invocation.
+// Used both for inline rendering and for scrollback emission.
+func formatActivityLine(tool, detail, cwd string) string {
+	icon := IconForAction(tool)
+	toolLabel := activityToolStyle.Render(fmt.Sprintf(" %s %-10s", icon, tool))
+	if isFilePathTool(tool) && detail != "" {
+		linked := fileHyperlink(detail, cwd)
+		return toolLabel + " " + activityPathStyle.Render(linked)
+	}
+	return toolLabel + " " + activityDetailStyle.Render(detail)
+}
+
 // renderActivityLog renders the most recent tool-use entries as a compact log.
 func renderActivityLog(activities []orchestrator.Activity, width int, cwd string, maxShow int) string {
 	start := 0
@@ -355,16 +330,7 @@ func renderActivityLog(activities []orchestrator.Activity, width int, cwd string
 
 	var b strings.Builder
 	for _, act := range recent {
-		toolName := act.Tool
-		icon := IconForAction(toolName)
-		toolLabel := activityToolStyle.Render(fmt.Sprintf(" %s %-10s", icon, toolName))
-		detail := act.Detail
-		if isFilePathTool(act.Tool) && detail != "" {
-			detail = fileHyperlink(detail, cwd)
-			b.WriteString(toolLabel + " " + activityPathStyle.Render(detail))
-		} else {
-			b.WriteString(toolLabel + " " + activityDetailStyle.Render(detail))
-		}
+		b.WriteString(formatActivityLine(act.Tool, act.Detail, cwd))
 		b.WriteString("\n")
 	}
 	return b.String()

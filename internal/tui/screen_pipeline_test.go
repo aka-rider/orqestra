@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -11,70 +10,6 @@ import (
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
-// seedStreamingModel returns a Model in a live streaming state with n stream
-// lines already buffered and the content viewport synced to the bottom.
-func seedStreamingModel(t *testing.T, n int) Model {
-	t.Helper()
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentStreaming
-	m.pipelineScreen.active = true
-	m.pipelineScreen.goal = "scroll test"
-
-	stream := orchestrator.NewStreamRing(n + 50)
-	m.pipelineScreen.streamBuf = stream
-	stream.SetAgent("researcher")
-	for i := 1; i <= n; i++ {
-		stream.AppendText(fmt.Sprintf("stream line %03d\n", i))
-	}
-	m.recalculateLayout()
-	m.pipelineScreen.SyncViewports()
-	if !m.pipelineScreen.contentVP.AtBottom() {
-		t.Fatal("expected fresh streaming viewport to follow the bottom")
-	}
-	return m
-}
-
-// TestPipelineScroll_KeyScrollAndTickStability covers the scroll-stability
-// invariant: PgUp scrolls off the bottom, and a later stream tick must not yank
-// a user-scrolled viewport back down.
-func TestPipelineScroll_KeyScrollAndTickStability(t *testing.T) {
-	m := seedStreamingModel(t, 100)
-
-	res, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
-	m = res.(Model)
-	if m.pipelineScreen.contentVP.AtBottom() {
-		t.Fatal("expected viewport to leave the bottom after PgUp")
-	}
-	scrolled := m.pipelineScreen.contentVP.YOffset()
-
-	// New content arrives and a tick fires SyncViewports.
-	m.pipelineScreen.streamBuf.AppendText("stream line 101\n")
-	res, _ = m.Update(tickMsg(time.Now()))
-	m = res.(Model)
-
-	if m.pipelineScreen.contentVP.AtBottom() {
-		t.Error("tick yanked a user-scrolled viewport back to the bottom")
-	}
-	if got := m.pipelineScreen.contentVP.YOffset(); got != scrolled {
-		t.Errorf("tick moved user scroll position: got %d want %d", got, scrolled)
-	}
-}
-
-// TestPipelineScroll_MouseWheel covers mouse-wheel routing — a regression guard
-// against Model.handleMouse reverting to a no-op.
-func TestPipelineScroll_MouseWheel(t *testing.T) {
-	m := seedStreamingModel(t, 100)
-
-	before := m.pipelineScreen.contentVP.YOffset()
-	res, _ := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
-	m = res.(Model)
-	after := m.pipelineScreen.contentVP.YOffset()
-
-	if after >= before {
-		t.Errorf("expected wheel-up to scroll the content viewport up: before=%d after=%d", before, after)
-	}
-}
 
 func TestFileHyperlink_AbsolutePath(t *testing.T) {
 	path := "/Users/dev/internal/model.go"
@@ -134,43 +69,37 @@ func setupTestPipelineScreen() PipelineScreen {
 	return s
 }
 
-// The streaming body now carries the FULL history; the viewport (not a slice)
-// decides what is visible. Following the bottom shows the newest lines and clips
-// the oldest, but the full history stays retained for scrollback.
-func TestViewStreaming_ViewportRetainsFullHistoryAndClips(t *testing.T) {
-	s := setupTestPipelineScreen()
-	s.content = ContentStreaming
-	s.active = true
-	s.RecalculateLayout(120, 6) // small content zone forces clipping
-	s.SyncViewports()
+func TestViewStreaming_FilePathsAreFullPaths(t *testing.T) {
+	line := formatActivityLine("Read", "file1.txt", "/test/dir")
 
-	if !strings.Contains(s.lastContentBody, "Read") || !strings.Contains(s.lastContentBody, "Bash") {
-		t.Errorf("expected activity names in content, got %s", s.lastContentBody)
+	if !strings.Contains(line, "file1.txt") {
+		t.Errorf("expected relative path to remain visible, got %s", line)
 	}
-	// Full history retained (oldest line is in the content, just scrolled off).
-	if !strings.Contains(s.lastContentBody, "stream line 01") {
-		t.Errorf("expected full stream history retained in viewport content")
-	}
-	// Following the bottom: newest line visible, oldest line clipped out of window.
-	view := s.contentVP.View()
-	if !strings.Contains(view, "stream line 16") {
-		t.Errorf("expected newest line visible at bottom, got:\n%s", view)
-	}
-	if strings.Contains(view, "stream line 01") {
-		t.Errorf("expected oldest line clipped by the viewport window, got:\n%s", view)
+	if !strings.Contains(line, "file:///test/dir/file1.txt") {
+		t.Errorf("expected absolute OSC 8 URI, got %s", line)
 	}
 }
 
-func TestViewStreaming_FilePathsAreFullPaths(t *testing.T) {
-	s := setupTestPipelineScreen()
-
-	out := s.viewStreaming(120)
-
-	if !strings.Contains(out, "file1.txt") {
-		t.Errorf("expected relative path to remain visible, got %s", out)
+// TestDrainStreamUpdates_TextLineQueuedToPrint verifies that a newline-terminated
+// EntryText causes TakePrintCmd to return a non-nil command, then nil after drain.
+func TestDrainStreamUpdates_TextLineQueuedToPrint(t *testing.T) {
+	s := PipelineScreen{
+		streamBuf: orchestrator.NewStreamRing(200),
 	}
-	if !strings.Contains(out, "file:///test/dir/file1.txt") {
-		t.Errorf("expected absolute OSC 8 URI, got %s", out)
+
+	updates := make(chan orchestrator.StreamEntry, 2)
+	updates <- orchestrator.StreamEntry{Kind: orchestrator.EntryText, Text: "hello world\n"}
+	close(updates)
+
+	s.DrainStreamUpdates(updates)
+
+	cmd := s.TakePrintCmd()
+	if cmd == nil {
+		t.Fatal("expected TakePrintCmd to be non-nil after ingesting a completed line")
+	}
+	// Second call must be nil — queue was drained.
+	if s.TakePrintCmd() != nil {
+		t.Error("expected TakePrintCmd to return nil after draining")
 	}
 }
 

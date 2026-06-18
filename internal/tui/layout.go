@@ -69,19 +69,3 @@ func renderPrefixedText(style lipgloss.Style, prefix, text string, maxW int) str
 	return b.String()
 }
 
-// deduplicateLines removes earlier occurrences of any line that appears later,
-// preserving original order of last occurrences. Used for stream display.
-func deduplicateLines(lines []string) []string {
-	seen := make(map[string]struct{}, len(lines))
-	out := make([]string, 0, len(lines))
-	for i := len(lines) - 1; i >= 0; i-- {
-		if _, dup := seen[lines[i]]; !dup {
-			seen[lines[i]] = struct{}{}
-			out = append(out, lines[i])
-		}
-	}
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
-	return out
-}

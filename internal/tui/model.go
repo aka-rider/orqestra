@@ -191,7 +191,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pipelineScreen.hasEditComment = false
 			m.pipelineScreen.content = ContentEditConfirm
 			m.recalculateLayout()
-			m.pipelineScreen.SyncViewports()
+			m.pipelineScreen.SyncLiveMetrics()
 			return m, nil
 		}
 		return m, nil
@@ -202,7 +202,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recalculateLayout()
 		switch m.state {
 		case StatePipeline:
-			m.pipelineScreen.SyncViewports()
+			m.pipelineScreen.SyncLiveMetrics()
 		case StateRunsList:
 			m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width())
 		case StateRunDetail:
@@ -226,9 +226,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.obs != nil {
 				m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
 			}
-			m.pipelineScreen.SyncViewports()
-			return m, tickCmd()
+			m.pipelineScreen.SyncLiveMetrics()
+			return m, tea.Batch(m.pipelineScreen.TakePrintCmd(), tickCmd())
 		case m.pipelineScreen.active:
+			// Background ingest only — user is in runs list; do not emit to scrollback
+			// (tea.Println is a no-op under alt-screen).
 			if m.obs != nil {
 				m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
 			}
@@ -258,14 +260,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
 		m.pipelineScreen.ApplySnapshot(snap, m.width)
 		m.lastRev = snap.Rev
+		content := m.pipelineScreen.content
+
+		// Queue scrollback payloads on key transitions.
+		if prevContent == ContentStreaming && content == ContentCompletion {
+			m.pipelineScreen.QueuePrint(m.pipelineScreen.viewCompletion(m.width))
+		}
+		if prevContent != ContentHumanGate && content == ContentHumanGate && m.pipelineScreen.finalPlan != "" {
+			m.pipelineScreen.QueuePrint(m.pipelineScreen.finalPlan)
+		}
+
 		if m.state == StatePipeline {
-			if inputHeightChanged(prevContent, m.pipelineScreen.content) {
+			if inputHeightChanged(prevContent, content) {
 				m.recalculateLayout()
 			}
-			m.pipelineScreen.SyncViewports()
+			m.pipelineScreen.SyncLiveMetrics()
 		}
 		if !snap.Terminal.Done {
-			return m, notifyCmd(m.obs.NotifyCh())
+			var printCmd tea.Cmd
+			if m.state == StatePipeline {
+				printCmd = m.pipelineScreen.TakePrintCmd()
+			}
+			return m, tea.Batch(printCmd, notifyCmd(m.obs.NotifyCh()))
+		}
+		// Done: emit completion summary on the same beat the run finishes.
+		if m.state == StatePipeline {
+			return m, m.pipelineScreen.TakePrintCmd()
 		}
 		return m, nil
 	}
@@ -289,14 +309,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleMouse routes mouse (wheel) events to the active screen's viewport so
-// scrollback works with the mouse. Without this the program captures the wheel
-// (MouseModeCellMotion) and the terminal's own scroll is dead.
+// handleMouse routes mouse events to the active screen's viewport.
+// StatePipeline runs inline — the terminal owns mouse and scrollback.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch m.state {
-	case StatePipeline:
-		m.pipelineScreen, cmd = m.pipelineScreen.HandleMouse(msg)
 	case StateRunsList:
 		m.runsListScreen, cmd = m.runsListScreen.HandleMouse(msg)
 	case StateRunDetail:
@@ -365,8 +382,9 @@ func (m Model) handleRunsListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if m.prevState == StatePipeline && (m.pipelineScreen.active || m.obs != nil) {
 				m.state = StatePipeline
 				m.recalculateLayout()
-				m.pipelineScreen.SyncViewports()
-				return m, nil
+				m.pipelineScreen.SyncLiveMetrics()
+				// Flush lines queued while user was in the alt-screen runs list.
+				return m, m.pipelineScreen.TakePrintCmd()
 			}
 			m.state = StatePrompt
 			m.recalculateLayout()
@@ -522,7 +540,7 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 		})
 		m.pipelineScreen.awaitingPlanDecision = false
 		m.pipelineScreen.content = ContentStreaming
-		m.pipelineScreen.SyncViewports()
+		m.pipelineScreen.SyncLiveMetrics()
 		return m, batch(nil)
 	case EditPlanIntent:
 		m.ctrl.Submit(orchestrator.Decision{
@@ -644,8 +662,13 @@ func (m Model) View() tea.View {
 		content = m.runDetailScreen.View(m.effectiveWidth(), m.height)
 	}
 	v := tea.NewView(content)
-	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
+	// StateRunsList and StateRunDetail are viewport browsers — they own the
+	// screen. StatePrompt and StatePipeline run inline so the terminal handles
+	// mouse and scrollback natively.
+	if m.state == StateRunsList || m.state == StateRunDetail {
+		v.AltScreen = true
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 	return v
 }
 
@@ -684,7 +707,6 @@ func (m *Model) recalculateLayout() {
 	usedHeight := inputHeight + constFooterHeight + constSidebarHeight
 	contentHeight := max(0, m.height-usedHeight)
 
-	m.pipelineScreen.RecalculateLayout(m.width, contentHeight)
 	if m.pipelineScreen.content == ContentUserQuestion && m.pipelineScreen.hasQuestion {
 		m.pipelineScreen.question = m.pipelineScreen.question.SetWidth(m.width)
 	}

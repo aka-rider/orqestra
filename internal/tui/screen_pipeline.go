@@ -4,10 +4,10 @@ import (
 	"errors"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
@@ -93,22 +93,17 @@ type PipelineScreen struct {
 	// Animation frame counter (for spinner)
 	animFrame int
 
-	// Scrollable content zone for streaming/completion output.
-	contentVP      viewport.Model
-	lastContentBody string      // last body built into contentVP (guards SetContent)
-	lastSyncedMode  ContentMode // content mode the viewport was last built for
+	// Lines queued for tea.Println (native scrollback); flushed by TakePrintCmd.
+	pendingPrint []string
 
 	PendingIntent tea.Msg
 }
 
 // NewPipelineScreen creates a new pipeline screen.
 func NewPipelineScreen(configName string) PipelineScreen {
-	cvp := viewport.New()
-	cvp.MouseWheelEnabled = true
 	return PipelineScreen{
 		configName:  configName,
 		knownAgents: make(map[string]string),
-		contentVP:   cvp,
 	}
 }
 
@@ -153,10 +148,7 @@ func (s *PipelineScreen) Reset() {
 	s.liveInput = 0
 	s.liveOutput = 0
 	s.liveStart = time.Time{}
-	s.contentVP.SetContent("")
-	s.contentVP.GotoTop()
-	s.lastContentBody = ""
-	s.lastSyncedMode = ContentStreaming
+	s.pendingPrint = nil
 }
 
 // SetStreamBuf sets the shared stream buffer for live output.
@@ -165,6 +157,8 @@ func (s *PipelineScreen) SetStreamBuf(buf *orchestrator.StreamRing) {
 }
 
 // DrainStreamUpdates consumes currently buffered stream updates without blocking.
+// Completed text lines and tool activities are appended to pendingPrint for
+// later emission to native scrollback via TakePrintCmd.
 func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEntry) {
 	if updates == nil || s.streamBuf == nil {
 		return
@@ -173,87 +167,65 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 		select {
 		case u, ok := <-updates:
 			if !ok {
-				return
+				goto done
 			}
 			switch u.Kind {
 			case orchestrator.EntryText:
-				s.streamBuf.AppendText(u.Text)
+				lines := s.streamBuf.AppendText(u.Text)
+				for _, l := range lines {
+					if l != "" {
+						s.pendingPrint = append(s.pendingPrint, l)
+					}
+				}
 			case orchestrator.EntryToolUse:
 				if u.Detail != "" {
 					s.streamBuf.AppendActivity(u.Tool, u.Detail)
+					s.pendingPrint = append(s.pendingPrint, formatActivityLine(u.Tool, u.Detail, s.cwd))
 				}
 			case orchestrator.EntryStats:
 				s.streamBuf.RecordUsage(u.Stats.Input, u.Stats.Output)
 				s.streamBuf.AppendStats(u.Stats.Input, u.Stats.Output)
 			}
 		default:
-			return
+			goto done
 		}
+	}
+done:
+	const maxPending = 5000
+	if len(s.pendingPrint) > maxPending {
+		s.pendingPrint = s.pendingPrint[len(s.pendingPrint)-maxPending:]
 	}
 }
 
-// SyncViewports polls live metrics and rebuilds the scrollable content zone.
-// Called from Update paths (ticks, obs notifications, resize) — never from
-// View(). SetContent is guarded by a body diff and preserves the user's scroll
-// position unless they are following the bottom of a live stream.
-func (s *PipelineScreen) SyncViewports() {
+// QueuePrint enqueues a formatted string for the next TakePrintCmd flush.
+func (s *PipelineScreen) QueuePrint(text string) {
+	s.pendingPrint = append(s.pendingPrint, text)
+	const maxPending = 5000
+	if len(s.pendingPrint) > maxPending {
+		s.pendingPrint = s.pendingPrint[len(s.pendingPrint)-maxPending:]
+	}
+}
+
+// TakePrintCmd drains pendingPrint into a single tea.Println command so lines
+// reach native terminal scrollback in order. Returns nil when nothing is queued.
+func (s *PipelineScreen) TakePrintCmd() tea.Cmd {
+	if len(s.pendingPrint) == 0 {
+		return nil
+	}
+	text := strings.Join(s.pendingPrint, "\n")
+	s.pendingPrint = nil
+	return tea.Println(text)
+}
+
+// SyncLiveMetrics polls live token metrics from the stream buffer.
+// Called from Update paths (ticks, obs notifications, resize) — never from View().
+func (s *PipelineScreen) SyncLiveMetrics() {
 	if s.streamBuf != nil && s.active {
 		in, out, start := s.streamBuf.SnapshotUsage()
 		s.liveInput = in
 		s.liveOutput = out
 		s.liveStart = start
 	}
-
-	// Only the streaming and completion modes render into the scrollable
-	// viewport; the interactive modes (gate, question, edit-confirm) own their
-	// own rendering and are drawn inline by View().
-	if s.content != ContentStreaming && s.content != ContentCompletion {
-		return
-	}
-
-	var body string
-	if s.content == ContentStreaming {
-		body = s.viewStreaming(s.contentVP.Width())
-	} else {
-		body = s.viewCompletion(s.contentVP.Width())
-	}
-
-	modeChanged := s.content != s.lastSyncedMode
-	if !modeChanged && body == s.lastContentBody {
-		return // nothing changed; keep scroll position untouched
-	}
-
-	atBottom := s.contentVP.AtBottom()
-	prevOff := s.contentVP.YOffset()
-	s.contentVP.SetContent(body)
-	switch {
-	case modeChanged && s.content == ContentCompletion:
-		s.contentVP.GotoTop() // show the summary from the top on entry
-	case atBottom:
-		s.contentVP.GotoBottom() // follow the live stream
-	default:
-		s.contentVP.SetYOffset(prevOff) // user scrolled up — hold position
-	}
-	s.lastContentBody = body
-	s.lastSyncedMode = s.content
-}
-
-// RecalculateLayout sizes the content viewport to the available content zone.
-func (s *PipelineScreen) RecalculateLayout(width, contentHeight int) {
-	s.contentVP.SetWidth(width)
-	s.contentVP.SetHeight(contentHeight)
-}
-
-// HandleMouse routes mouse (wheel) events to the content viewport while the
-// scrollable modes are active. Interactive modes ignore the mouse.
-func (s PipelineScreen) HandleMouse(msg tea.MouseMsg) (PipelineScreen, tea.Cmd) {
-	switch s.content {
-	case ContentStreaming, ContentCompletion:
-		var cmd tea.Cmd
-		s.contentVP, cmd = s.contentVP.Update(msg)
-		return s, cmd
-	}
-	return s, nil
 }
 
 // ApplySnapshot updates the screen from an ObsStore snapshot, detecting state

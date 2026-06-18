@@ -51,7 +51,7 @@ func (s *ResearchStep) Run(ctx context.Context, in ResearchInput, sc StepContext
 			return ResearchOutput{}, fmt.Errorf("research: %w", err)
 		}
 		var usedFallback bool
-		plan, usedFallback, err = agent.ReadPlan(res.SessionID, res.PlanFilePath, sc.RepoPath, res.Output)
+		plan, usedFallback, err = agent.ReadPlan(res.SessionID, res.PlanFilePath, sc.RepoPath, true)
 		if usedFallback {
 			sc.Log.Warn("researcher: model produced text output instead of writing plan file; "+
 				"model may have disobeyed plan-writing instructions", "session_id", res.SessionID)

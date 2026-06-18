@@ -63,7 +63,7 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 			return PlanOutput{}, fmt.Errorf("architect: %w", err)
 		}
 		var usedFallback bool
-		planMarkdown, usedFallback, err = agent.ReadPlan(archRes.SessionID, archRes.PlanFilePath, sc.RepoPath, archRes.Output)
+		planMarkdown, usedFallback, err = agent.ReadPlan(archRes.SessionID, archRes.PlanFilePath, sc.RepoPath, true)
 		if usedFallback {
 			sc.Log.Warn("architect: model produced text output instead of writing plan file; "+
 				"model may have disobeyed plan-writing instructions", "session_id", archRes.SessionID)
@@ -131,7 +131,7 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 			return PlanOutput{}, fmt.Errorf("critic: %w", err)
 		}
 		var criticFallback bool
-		criticMarkdown, criticFallback, err = agent.ReadPlan(criticRes.SessionID, criticRes.PlanFilePath, sc.RepoPath, criticRes.Output)
+		criticMarkdown, criticFallback, err = agent.ReadPlan(criticRes.SessionID, criticRes.PlanFilePath, sc.RepoPath, true)
 		if criticFallback {
 			sc.Log.Warn("critic: model produced text output instead of writing plan file; "+
 				"model may have disobeyed plan-writing instructions", "session_id", criticRes.SessionID)
@@ -170,7 +170,7 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 		return PlanOutput{}, fmt.Errorf("architect critic revision: %w", revErr)
 	}
 
-	revised, _, readErr := agent.ReadPlan(revRes.SessionID, revRes.PlanFilePath, sc.RepoPath, "")
+	revised, _, readErr := agent.ReadPlan(revRes.SessionID, revRes.PlanFilePath, sc.RepoPath, false)
 	if readErr != nil {
 		// Continuation may have been chat-only (no plan rewrite) — treat as no change.
 		sc.Log.Debug("architect critic revision: plan unchanged (chat continuation)", "err", readErr)

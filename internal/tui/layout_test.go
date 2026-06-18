@@ -108,18 +108,27 @@ func TestLayout_HeightInvariant_ErrorStateCompletion(t *testing.T) {
 	}
 }
 
-// TestLayout_AltScreenEnabled guards the alt-screen invariant. The in-app
-// content viewport requires owning the screen; without alt-screen the program
-// runs inline and scrolling is dead.
-func TestLayout_AltScreenEnabled(t *testing.T) {
-	states := []AppState{StatePrompt, StatePipeline, StateRunsList, StateRunDetail}
-	for _, st := range states {
+// TestLayout_AltScreen_BrowserStates guards that runs-list and run-detail use
+// alt-screen (they are viewport browsers that need to own the screen).
+func TestLayout_AltScreen_BrowserStates(t *testing.T) {
+	for _, st := range []AppState{StateRunsList, StateRunDetail} {
+		m := layoutTestModel(120, 40, st)
+		if !m.View().AltScreen {
+			t.Errorf("expected AltScreen=true for state %d", st)
+		}
+	}
+}
+
+// TestLayout_NoAltScreen_InlineStates guards that prompt and pipeline run
+// inline so the terminal owns the mouse and provides native scrollback.
+func TestLayout_NoAltScreen_InlineStates(t *testing.T) {
+	for _, st := range []AppState{StatePrompt, StatePipeline} {
 		m := layoutTestModel(120, 40, st)
 		if st == StatePipeline {
 			m.pipelineScreen.content = ContentStreaming
 		}
-		if !m.View().AltScreen {
-			t.Errorf("expected AltScreen=true for state %d", st)
+		if m.View().AltScreen {
+			t.Errorf("expected AltScreen=false for state %d (inline mode)", st)
 		}
 	}
 }

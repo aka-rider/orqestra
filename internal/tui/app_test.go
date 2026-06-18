@@ -392,7 +392,7 @@ func TestTUI_SidebarTokens(t *testing.T) {
 		{ID: "architect", State: AgentStateRunning, StartedAt: time.Now().Add(-24 * time.Second), InputTokens: 0, OutputTokens: 0, ModelDisplay: "claude-opus-4"},
 	}
 	m.recalculateLayout()
-	m.pipelineScreen.SyncViewports()
+	m.pipelineScreen.SyncLiveMetrics()
 
 	view := viewString(m)
 
@@ -466,23 +466,33 @@ func TestTUI_StreamingOutput(t *testing.T) {
 	stream := orchestrator.NewStreamRing(200)
 	m.pipelineScreen.streamBuf = stream
 
-	// Simulate agent start + streaming output via the shared buffer
+	// A completed line + a partial. Completed lines go to scrollback (pendingPrint);
+	// only the in-progress partial appears in the inline live region.
 	stream.SetAgent("researcher")
-	stream.AppendText("Analyzing prompt...\nProcessing request...")
+	stream.AppendText("Completed line\n")  // stored in ring, but NOT in pendingPrint (direct write)
+	stream.AppendText("Partial in progress") // no \n → becomes the partial
 
 	m.recalculateLayout()
-	m.pipelineScreen.SyncViewports()
+	m.pipelineScreen.SyncLiveMetrics()
 
-	// Verify the view renders the streamed content
+	// The live region shows the in-progress partial.
 	view := viewString(m)
-	if !strings.Contains(view, "Analyzing prompt") {
-		t.Error("expected streaming output to appear in view")
+	if !strings.Contains(view, "Partial in progress") {
+		t.Error("expected in-progress partial to appear in inline live region")
 	}
-	if !strings.Contains(view, "Processing request") {
-		t.Error("expected second line of streaming output in view")
+	// Completed lines are NOT in the live View() — they belong to scrollback.
+	if strings.Contains(view, "Completed line") {
+		t.Error("completed line must not appear in View(); it belongs in native scrollback")
 	}
-	if !strings.Contains(view, "researcher") {
-		t.Error("expected agent name in streaming view")
+
+	// Ingesting a completed line via DrainStreamUpdates queues it for scrollback.
+	updates := make(chan orchestrator.StreamEntry, 1)
+	updates <- orchestrator.StreamEntry{Kind: orchestrator.EntryText, Text: "New completed line\n"}
+	close(updates)
+	m.pipelineScreen.DrainStreamUpdates(updates)
+
+	if m.pipelineScreen.TakePrintCmd() == nil {
+		t.Error("expected TakePrintCmd to be non-nil after ingesting a completed line")
 	}
 }
 

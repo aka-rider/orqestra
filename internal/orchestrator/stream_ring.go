@@ -271,10 +271,12 @@ func looksLikeStreamEventFrame(line string) (string, bool) {
 // AppendText handles raw text from io.Writer, accumulating partial lines and
 // emitting EntryText on newline boundaries. Completed lines that decode as
 // known Claude CLI stream-json event frames are dropped.
-func (r *StreamRing) AppendText(text string) {
+// Returns the lines completed by this call (already stored in entries).
+func (r *StreamRing) AppendText(text string) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	var lines []string
 	for len(text) > 0 {
 		nlIdx := strings.IndexByte(text, '\n')
 		if nlIdx == -1 {
@@ -291,6 +293,7 @@ func (r *StreamRing) AppendText(text string) {
 			slog.Warn("stream ring: dropping raw stream-event frame", "type", t, "len", len(completed))
 		} else if completed != "" {
 			r.entries = append(r.entries, StreamEntry{Kind: EntryText, Text: completed})
+			lines = append(lines, completed)
 		}
 
 		text = text[nlIdx+1:]
@@ -299,6 +302,7 @@ func (r *StreamRing) AppendText(text string) {
 	if len(r.entries) > r.maxEntries {
 		r.entries = r.entries[len(r.entries)-r.maxEntries:]
 	}
+	return lines
 }
 
 // AppendActivity adds a tool-use entry. Maintains the same capped behavior

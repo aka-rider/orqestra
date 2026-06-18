@@ -15,10 +15,12 @@ import (
 // It locates the plan file via planFilePath (from the run result stream), the
 // session JSONL's plan_mode attachment, or falls back to scanning ~/.claude/plans/.
 // repoCWD is the repository root used to resolve the session JSONL path.
-// outputText is the raw session stream output used as a last-resort tier-4 fallback
-// when no plan file was written; pass "" to disable. fromFallback=true signals that
-// the model disobeyed the plan-writing instruction — callers should log this as a canary.
-func ReadPlan(sessionID, planFilePath, repoCWD, outputText string) (content string, fromFallback bool, err error) {
+// withFallback enables a last-resort tier-4: when the plan file was not written,
+// the final assistant message is read directly from the session JSONL (text blocks
+// first, thinking blocks second). Pass false for continuation/revision sessions
+// where a non-write is a valid "no change". fromFallback=true signals that the
+// model disobeyed the plan-writing instruction — callers should log this as a canary.
+func ReadPlan(sessionID, planFilePath, repoCWD string, withFallback bool) (content string, fromFallback bool, err error) {
 	if sessionID == "" {
 		return "", false, fmt.Errorf("no session ID")
 	}
@@ -62,15 +64,17 @@ func ReadPlan(sessionID, planFilePath, repoCWD, outputText string) (content stri
 	c, err := readSecurePlanFile(jsonlPlanPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			// Tier 4: model produced text output instead of writing to the plan file path.
-			// This is a canary — the model did not follow the plan-writing instruction.
-			if t := strings.TrimSpace(outputText); t != "" {
-				slog.Warn("plan resolved from session stream output — model did not write to plan file",
-					"session_id", sessionID, "expected_path", jsonlPlanPath)
-				return t, true, nil
+			// Tier 4: model did not write the plan file — read its final message from the JSONL.
+			// Covers both text-only and thinking-only responses. This is a canary.
+			if withFallback {
+				if extracted, fbErr := harness.ExtractFinalOutput(jsonlPath); fbErr == nil {
+					slog.Warn("plan resolved from session JSONL output — model did not write to plan file",
+						"session_id", sessionID, "expected_path", jsonlPlanPath)
+					return extracted, true, nil
+				}
 			}
-			return "", false, fmt.Errorf("model session %s completed but did not write a plan file (%s); "+
-				"the model may have produced text output without writing to the plan file path", sessionID, jsonlPlanPath)
+			return "", false, fmt.Errorf("model session %s completed but did not write a plan file (%s)",
+				sessionID, jsonlPlanPath)
 		}
 		return "", false, fmt.Errorf("read plan file for session %s: %w", sessionID, err)
 	}
