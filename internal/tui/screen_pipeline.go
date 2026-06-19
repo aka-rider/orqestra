@@ -59,6 +59,9 @@ type PipelineScreen struct {
 	hasEditComment     bool
 	editorRunning      bool
 
+	// Post-message input (always visible during ContentStreaming)
+	postInput textarea.Model
+
 	// Plan tracking
 	finalPlan            string
 	hasPlan              bool
@@ -93,22 +96,37 @@ type PipelineScreen struct {
 	// Animation frame counter (for spinner)
 	animFrame int
 
-	// Lines queued for tea.Println (native scrollback); flushed by TakePrintCmd.
-	pendingPrint []string
+	// Alt-screen sub-models
+	transcript  Transcript
+	streaming   streamingConsole
+	lastAgentID string
+	bottom      bottomMode // sum type; nil means use streaming console directly
+
+	// Computed layout heights (set by model.recalculateLayout)
+	transcriptH int
+	streamH     int
 
 	PendingIntent tea.Msg
 }
 
 // NewPipelineScreen creates a new pipeline screen.
 func NewPipelineScreen(configName string) PipelineScreen {
+	ta := textarea.New()
+	ta.Placeholder = "post a message to the agent…"
+	ta.SetHeight(1)
+	ta.CharLimit = 4096
 	return PipelineScreen{
 		configName:  configName,
 		knownAgents: make(map[string]string),
+		transcript:  NewTranscript(transcriptStyles{selectionBg: selectionBg, rule: dividerStyle}),
+		streaming:   newStreamingConsole(80),
+		postInput:   ta,
 	}
 }
 
-// Start prepares the screen for a new pipeline run.
-func (s *PipelineScreen) Start(goal string) {
+// Start prepares the screen for a new pipeline run and returns the streaming
+// console's blink command (must be batched by the caller).
+func (s *PipelineScreen) Start(goal string) tea.Cmd {
 	s.Reset()
 	s.goal = goal
 	s.startTime = time.Now()
@@ -117,6 +135,10 @@ func (s *PipelineScreen) Start(goal string) {
 	}
 	s.content = ContentStreaming
 	s.active = true
+	s.postInput.Focus()
+	var blinkCmd tea.Cmd
+	s.streaming, blinkCmd = s.streaming.Start()
+	return blinkCmd
 }
 
 // Reset clears all pipeline state for a fresh run.
@@ -148,7 +170,12 @@ func (s *PipelineScreen) Reset() {
 	s.liveInput = 0
 	s.liveOutput = 0
 	s.liveStart = time.Time{}
-	s.pendingPrint = nil
+	s.transcript = NewTranscript(transcriptStyles{selectionBg: selectionBg, rule: dividerStyle})
+	s.streaming = newStreamingConsole(80)
+	s.lastAgentID = ""
+	s.bottom = nil
+	s.postInput.Reset()
+	s.postInput.Blur()
 }
 
 // SetStreamBuf sets the shared stream buffer for live output.
@@ -157,64 +184,60 @@ func (s *PipelineScreen) SetStreamBuf(buf *orchestrator.StreamRing) {
 }
 
 // DrainStreamUpdates consumes currently buffered stream updates without blocking.
-// Completed text lines and tool activities are appended to pendingPrint for
-// later emission to native scrollback via TakePrintCmd.
+// Completed text lines go to the transcript sub-model; tool events and streaming
+// deltas go to the streaming console.
 func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEntry) {
-	if updates == nil || s.streamBuf == nil {
+	if updates == nil {
 		return
 	}
 	for {
 		select {
 		case u, ok := <-updates:
 			if !ok {
-				goto done
+				return
 			}
 			switch u.Kind {
+			case orchestrator.EntryDelta:
+				s.streaming = s.streaming.AppendDelta(u.Text)
+				if s.streamBuf != nil {
+					s.streamBuf.AppendDelta(u.Text)
+				}
 			case orchestrator.EntryText:
-				lines := s.streamBuf.AppendText(u.Text)
-				for _, l := range lines {
-					if l != "" {
-						s.pendingPrint = append(s.pendingPrint, l)
+				var line string
+				if s.streamBuf != nil {
+					// Prefer the partial accumulated from prior EntryDelta events.
+					// EntryText.Text repeats that same content; re-appending doubles the line.
+					line = s.streamBuf.CurrentPartial()
+					s.streamBuf.FlushPartial()
+					if line == "" {
+						line = strings.TrimRight(u.Text, "\n\r")
 					}
+				} else {
+					line = strings.TrimRight(u.Text, "\n\r")
+				}
+				if line != "" {
+					s.transcript.Append(newTextLine(line))
+					s.streaming = s.streaming.CompletePartial()
 				}
 			case orchestrator.EntryToolUse:
 				if u.Detail != "" {
-					s.streamBuf.AppendActivity(u.Tool, u.Detail)
-					s.pendingPrint = append(s.pendingPrint, formatActivityLine(u.Tool, u.Detail, s.cwd))
+					if s.streamBuf != nil {
+						s.streamBuf.AppendActivity(u.Tool, u.Detail)
+					}
+					s.streaming = s.streaming.AddPendingTool(stripAnsi(formatActivityLine(u.Tool, u.Detail, s.cwd)))
 				}
+			case orchestrator.EntryToolResult:
+				s.streaming = s.streaming.ResolveLastTool(u.ToolErr)
 			case orchestrator.EntryStats:
-				s.streamBuf.RecordUsage(u.Stats.Input, u.Stats.Output)
-				s.streamBuf.AppendStats(u.Stats.Input, u.Stats.Output)
+				if s.streamBuf != nil {
+					s.streamBuf.RecordUsage(u.Stats.Input, u.Stats.Output)
+					s.streamBuf.AppendStats(u.Stats.Input, u.Stats.Output)
+				}
 			}
 		default:
-			goto done
+			return
 		}
 	}
-done:
-	const maxPending = 5000
-	if len(s.pendingPrint) > maxPending {
-		s.pendingPrint = s.pendingPrint[len(s.pendingPrint)-maxPending:]
-	}
-}
-
-// QueuePrint enqueues a formatted string for the next TakePrintCmd flush.
-func (s *PipelineScreen) QueuePrint(text string) {
-	s.pendingPrint = append(s.pendingPrint, text)
-	const maxPending = 5000
-	if len(s.pendingPrint) > maxPending {
-		s.pendingPrint = s.pendingPrint[len(s.pendingPrint)-maxPending:]
-	}
-}
-
-// TakePrintCmd drains pendingPrint into a single tea.Println command so lines
-// reach native terminal scrollback in order. Returns nil when nothing is queued.
-func (s *PipelineScreen) TakePrintCmd() tea.Cmd {
-	if len(s.pendingPrint) == 0 {
-		return nil
-	}
-	text := strings.Join(s.pendingPrint, "\n")
-	s.pendingPrint = nil
-	return tea.Println(text)
 }
 
 // SyncLiveMetrics polls live token metrics from the stream buffer.
@@ -241,6 +264,27 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 		prev, seen := s.knownAgents[a.AgentID]
 		curr := a.Status
 		if !seen {
+			// Emit phase separator rule + flush partial on agent transition.
+			if s.transcript.HasContent() {
+				// Promote any in-progress partial to transcript before separator.
+				if s.streamBuf != nil {
+					partial := s.streamBuf.CurrentPartial()
+					if partial != "" {
+						s.transcript.Append(newTextLine(partial))
+					}
+					s.streamBuf.FlushPartial()
+				}
+				ruleLabel := agentDisplayName(string(a.AgentID))
+				if a.Meta.ModelDisplay != "" {
+					ruleLabel += ": " + a.Meta.ModelDisplay
+				} else if a.Meta.ModelRef != "" {
+					ruleLabel += ": " + a.Meta.ModelRef
+				}
+				s.transcript.Append(newRuleLine(ruleLabel))
+				s.transcript.Append(newTextLine("")) // margin-bottom-1
+			}
+			s.streaming = s.streaming.ClearForAgent()
+			s.lastAgentID = a.AgentID
 			if s.streamBuf != nil {
 				s.streamBuf.SetAgent(a.AgentID)
 			}
@@ -299,6 +343,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 			s.hasPlan = snap.Gate.Position.IsPlanGate()
 			s.planFilePath = snap.Gate.PlanFilePath
 			s.activeChat = newHumanChatMode(snap.Gate, width)
+			s.bottom = gateBottom{chat: s.activeChat}
 		} else {
 			// Plan revised — update without reopening gate.
 			s.finalPlan = snap.Gate.FinalPlanMarkdown
@@ -310,6 +355,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 		s.content = ContentUserQuestion
 		s.question = newUserQuestion(snap.UserQuestion, width)
 		s.hasQuestion = true
+		s.bottom = questionBottom{q: s.question}
 	}
 
 	// Terminal: pipeline finished.
@@ -336,6 +382,7 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 			answer := s.question.Answer()
 			s.content = ContentStreaming
 			s.hasQuestion = false
+			s.postInput.Focus()
 			s.PendingIntent = SubmitQuestionAnswerIntent{Answer: answer}
 		}
 		return s, cmd
@@ -350,6 +397,7 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 			s.content = ContentStreaming
 			s.awaitingPlanDecision = false
 			s.seenGateMarkdown = "" // allow next gate to re-trigger
+			s.postInput.Focus()
 			switch p := pending.(type) {
 			case *orchestrator.Decision:
 				switch p.Type {
@@ -373,8 +421,24 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	return s, nil
 }
 
-// UpdateSubModel passes non-key messages to focused sub-models (textareas).
+// UpdateSubModel passes non-key messages to focused sub-models (textareas,
+// transcript autoscroll ticks, streaming console blink ticks).
 func (s PipelineScreen) UpdateSubModel(msg tea.Msg) (PipelineScreen, tea.Cmd) {
+	switch msg.(type) {
+	case transcriptAutoscrollMsg:
+		var cmd tea.Cmd
+		s.transcript, cmd = s.transcript.Update(msg)
+		return s, cmd
+	case streamBlinkMsg:
+		var cmd tea.Cmd
+		s.streaming, cmd = s.streaming.Update(msg)
+		return s, cmd
+	}
+	if s.content == ContentStreaming {
+		var cmd tea.Cmd
+		s.postInput, cmd = s.postInput.Update(msg)
+		return s, cmd
+	}
 	if s.content == ContentUserQuestion && s.hasQuestion {
 		var cmd tea.Cmd
 		s.question, cmd = s.question.Update(msg)

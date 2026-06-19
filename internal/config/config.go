@@ -151,6 +151,7 @@ type LoopGuard struct {
 	RepeatThreshold int `yaml:"repeat_threshold"` // identical tool calls before nudging (default 3)
 	MaxNudges       int `yaml:"max_nudges"`        // nudges before escalating to cancel (default 3)
 	CooldownTurns   int `yaml:"cooldown_turns"`    // turns to wait after a nudge before re-checking (default 2)
+	SilenceSecs     int `yaml:"silence_secs"`      // seconds of event-stream silence before nudging; 0 = disabled
 }
 
 // BaseAgentConfig holds fields shared by all agent roles.

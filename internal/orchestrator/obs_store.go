@@ -185,6 +185,8 @@ func (s *ObsStore) Stream(_ AgentID, ev harness.Event) {
 		entry = StreamEntry{Kind: EntryText, Text: ev.Text}
 	case ev.Tool != "":
 		entry = StreamEntry{Kind: EntryToolUse, Tool: ev.Tool, Detail: ev.Detail}
+	case ev.Kind == harness.EventToolResult:
+		entry = StreamEntry{Kind: EntryToolResult, ToolErr: ev.IsError}
 	case ev.Kind == harness.EventUsage:
 		entry = StreamEntry{Kind: EntryStats, Stats: StreamStats{Input: ev.Input, Output: ev.Output, Valid: true}}
 	default:

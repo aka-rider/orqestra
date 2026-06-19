@@ -38,6 +38,7 @@ type LoopGuardSpec struct {
 	RepeatThreshold int // identical tool calls before nudging
 	MaxNudges       int // nudges before escalating to cancel
 	CooldownTurns   int // turns to skip checking after a nudge
+	SilenceSecs     int // seconds of event-stream silence before nudging; 0 = disabled
 }
 
 // EventKind identifies the type of a Runner event.

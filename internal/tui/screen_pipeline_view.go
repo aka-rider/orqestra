@@ -12,7 +12,14 @@ import (
 
 // --- View rendering ---
 
-// View renders the pipeline screen.
+// View renders the pipeline screen in its alt-screen layout.
+//
+// Row layout (total = height):
+//   Row 0              : status bar (constStatusBarHeight = 1)
+//   Rows 1..transcriptH: transcript (scrollable, mouse-selectable)
+//   +streamH rows      : streaming console (live tool/partial output)
+//   +2 rows (input)    : divider + input zone
+//   +2 rows (footer)   : divider + key hints
 func (s PipelineScreen) View(width, height int) string {
 	w := width
 	if w < minWidth {
@@ -22,37 +29,25 @@ func (s PipelineScreen) View(width, height int) string {
 		return " Terminal too small. Please resize."
 	}
 
-	// Footer (2 lines)
+	// Row 0: status bar.
+	statusBar := s.viewStatusLine(w) + "\n"
+
+	// Bottom chrome (input + footer).
+	inputZone := dividerStyle.Render(strings.Repeat("─", w)) + "\n" + s.viewInputZone() + "\n"
 	footer := dividerStyle.Render(strings.Repeat("─", w)) + "\n" + s.viewFooter()
 
-	// Input zone (2 lines)
-	input := dividerStyle.Render(strings.Repeat("─", w)) + "\n" + s.viewInputZone() + "\n"
+	// Body area height (everything between status bar and input+footer).
+	bodyH := max(0, height-constStatusBarHeight-constPipelineInputHeight-constFooterHeight)
 
-	// Status bar (1 line)
-	sidebar := s.viewStatusLine(w) + "\n"
-
-	// Streaming and completion use inline (non-alt-screen) rendering. Completed
-	// lines are in native scrollback; View() shows only the live region.
-	switch s.content {
-	case ContentStreaming:
-		var partial string
-		if s.streamBuf != nil {
-			_, _, partial, _ = s.streamBuf.SnapshotText()
-		}
-		var liveRegion string
-		if partial != "" {
-			innerWidth := max(1, w-constContentInset-4)
-			display := partial
-			if len(display) > innerWidth {
-				display = display[len(display)-innerWidth:]
-			}
-			liveRegion = streamBlockStyle.Width(innerWidth).Render(display+"▍") + "\n"
-		}
-		return sidebar + liveRegion + input + footer
-	case ContentCompletion:
-		return input + sidebar + footer
+	// For streaming content mode, use transcript + streaming console.
+	if s.content == ContentStreaming || s.content == ContentCompletion {
+		transcriptView := s.transcript.View()
+		streamView := addLeftMargin(s.streaming.RenderFixed(s.streamH, w-2))
+		return statusBar + transcriptView + streamView + inputZone + footer
 	}
 
+	// For interactive modes (gate, question, edit-confirm), render a body
+	// in the area normally occupied by transcript + streaming console.
 	var body string
 	switch s.content {
 	case ContentHumanGate:
@@ -65,15 +60,10 @@ func (s PipelineScreen) View(width, height int) string {
 		body = s.viewEditConfirm(w)
 	}
 
-	// Interactive modes (gate, question, edit-confirm) still run in alt-screen
-	// and cap to the available content zone.
-	chromeH := constFooterHeight + constPipelineInputHeight + constSidebarHeight
-	contentH := max(0, height-chromeH)
-	if contentH > 0 && body != "" {
-		return lipgloss.NewStyle().MaxHeight(contentH).Render(body) + "\n" + input + sidebar + footer
+	if bodyH > 0 && body != "" {
+		body = lipgloss.NewStyle().MaxHeight(bodyH).Render(body)
 	}
-
-	return input + sidebar + footer
+	return statusBar + body + "\n" + inputZone + footer
 }
 
 // --- Status Bar ---
@@ -108,10 +98,7 @@ func (s PipelineScreen) viewStatusLine(width int) string {
 		default:
 			icon = "○"
 		}
-		name := a.ID
-		if len(name) > 4 {
-			name = name[:4]
-		}
+		name := agentDisplayName(a.ID)
 		if chain.Len() > 0 {
 			chain.WriteString(" ")
 		}
@@ -179,11 +166,7 @@ func formatTokenCompact(n int64) string {
 func (s PipelineScreen) viewInputZone() string {
 	switch s.content {
 	case ContentStreaming:
-		status := fmt.Sprintf(" %s running...", s.phase)
-		if s.lastErr != nil {
-			status = errorStyle.Render(fmt.Sprintf(" Error: %v", s.lastErr))
-		}
-		return status
+		return s.postInput.View()
 	case ContentUserQuestion:
 		return keyStyle.Render(s.question.InputZone())
 	case ContentEditConfirm:
@@ -312,7 +295,7 @@ func (s PipelineScreen) viewEditConfirm(width int) string {
 // Used both for inline rendering and for scrollback emission.
 func formatActivityLine(tool, detail, cwd string) string {
 	icon := IconForAction(tool)
-	toolLabel := activityToolStyle.Render(fmt.Sprintf(" %s %-10s", icon, tool))
+	toolLabel := activityToolStyle.Render(fmt.Sprintf("%s %-10s", icon, tool))
 	if isFilePathTool(tool) && detail != "" {
 		linked := fileHyperlink(detail, cwd)
 		return toolLabel + " " + activityPathStyle.Render(linked)
@@ -366,4 +349,21 @@ func formatTokens(n int64) string {
 		return fmt.Sprintf("%.0fk", float64(n)/1000)
 	}
 	return fmt.Sprintf("%.1fM", float64(n)/1000000)
+}
+
+// agentDisplayName maps an orchestrator AgentID to a human-readable label.
+// "researcher" is shortened to "research"; all other IDs pass through as-is.
+func agentDisplayName(id string) string {
+	if id == "researcher" {
+		return "research"
+	}
+	return id
+}
+
+// addLeftMargin prefixes every line in a multi-line string with one space.
+func addLeftMargin(s string) string {
+	if s == "" {
+		return s
+	}
+	return " " + strings.ReplaceAll(s, "\n", "\n ")
 }

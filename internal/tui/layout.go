@@ -40,6 +40,10 @@ const (
 
 	// Bottom sidebar height (agent list strip below the input zone).
 	constSidebarHeight = 1
+
+	// Pipeline alt-screen layout constants.
+	constStatusBarHeight = 1  // top status bar
+	constStreamMaxHeight = 12 // maximum rows for the streaming console
 )
 
 // renderPrefixedText hard-wraps text into the available width, applying style

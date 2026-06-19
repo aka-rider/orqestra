@@ -80,11 +80,13 @@ func TestViewStreaming_FilePathsAreFullPaths(t *testing.T) {
 	}
 }
 
-// TestDrainStreamUpdates_TextLineQueuedToPrint verifies that a newline-terminated
-// EntryText causes TakePrintCmd to return a non-nil command, then nil after drain.
-func TestDrainStreamUpdates_TextLineQueuedToPrint(t *testing.T) {
+// TestDrainStreamUpdates_TextLineGoesToTranscript verifies that a newline-terminated
+// EntryText is promoted to the transcript rather than queued for scrollback.
+func TestDrainStreamUpdates_TextLineGoesToTranscript(t *testing.T) {
 	s := PipelineScreen{
-		streamBuf: orchestrator.NewStreamRing(200),
+		streamBuf:  orchestrator.NewStreamRing(200),
+		transcript: NewTranscript(transcriptStyles{selectionBg: selectionBg, rule: dividerStyle}),
+		streaming:  newStreamingConsole(80),
 	}
 
 	updates := make(chan orchestrator.StreamEntry, 2)
@@ -93,13 +95,9 @@ func TestDrainStreamUpdates_TextLineQueuedToPrint(t *testing.T) {
 
 	s.DrainStreamUpdates(updates)
 
-	cmd := s.TakePrintCmd()
-	if cmd == nil {
-		t.Fatal("expected TakePrintCmd to be non-nil after ingesting a completed line")
-	}
-	// Second call must be nil — queue was drained.
-	if s.TakePrintCmd() != nil {
-		t.Error("expected TakePrintCmd to return nil after draining")
+	// The completed line must appear in the transcript.
+	if !s.transcript.HasContent() {
+		t.Fatal("expected transcript to have content after ingesting a completed line")
 	}
 }
 

@@ -12,6 +12,8 @@ researcher:
   permission_mode: plan
   max_turns: 40
   timeout: 10m
+  loop_guard:
+    silence_secs: 60
   allowed_tools: [Read, Glob, Grep, Bash, WebFetch, WebSearch, "mcp__orqestra__*"]
   disallowed_tools: [AskUserQuestion, ExitPlanMode, Write, Edit, MultiEdit, NotebookEdit, EnterPlanMode, EnterWorktree, ExitWorktree, TaskCreate, TaskUpdate, TaskStop, KillShell]
   system_prompt: |
@@ -108,6 +110,8 @@ architect:
   permission_mode: plan
   max_turns: 40
   timeout: 10m
+  loop_guard:
+    silence_secs: 60
   allowed_tools: [Read, Glob, Grep, Bash, WebFetch, WebSearch, "mcp__orqestra__*"]
   disallowed_tools: [AskUserQuestion, ExitPlanMode, Write, Edit, MultiEdit, NotebookEdit, EnterPlanMode, EnterWorktree, ExitWorktree, TaskCreate, TaskUpdate, TaskStop, KillShell]
   system_prompt: |
@@ -240,6 +244,8 @@ critic:
   permission_mode: plan
   max_turns: 40
   timeout: 10m
+  loop_guard:
+    silence_secs: 60
   allowed_tools: [Read, Glob, Grep, Bash, WebFetch, WebSearch, "mcp__orqestra__*"]
   disallowed_tools: [AskUserQuestion, ExitPlanMode, Write, Edit, MultiEdit, NotebookEdit, EnterPlanMode, EnterWorktree, ExitWorktree, TaskCreate, TaskUpdate, TaskStop, KillShell]
   system_prompt: |

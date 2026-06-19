@@ -141,3 +141,12 @@ type ToggleSetupIntent struct{}
 
 func (ToggleSetupIntent) isIntent() {}
 
+// PostMessageIntent sends a freeform text message to the active running agent
+// via ctrl.Input. Used for mid-run steering without blocking the pipeline.
+type PostMessageIntent struct {
+	AgentID string
+	Text    string
+}
+
+func (PostMessageIntent) isIntent() {}
+

@@ -10,6 +10,9 @@ import (
 
 func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	switch msg.String() {
+	case "pgup", "ctrl+b", "pgdn", "ctrl+f":
+		s.transcript, _ = s.transcript.Update(msg)
+		return s, nil
 	case "ctrl+n":
 		if s.active {
 			s.PendingIntent = ConfirmNewRunIntent{}
@@ -20,8 +23,20 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 	case "ctrl+r":
 		s.PendingIntent = NavigateToRunsListIntent{}
 		return s, nil
+	case "enter":
+		text := strings.TrimSpace(s.postInput.Value())
+		if text != "" {
+			s.postInput.Reset()
+			agentID := s.lastAgentID
+			return s, func() tea.Msg {
+				return PostMessageIntent{AgentID: agentID, Text: text}
+			}
+		}
+		return s, nil
 	}
-	return s, nil
+	var cmd tea.Cmd
+	s.postInput, cmd = s.postInput.Update(msg)
+	return s, cmd
 }
 
 func (s PipelineScreen) handleCompletionKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
@@ -157,6 +172,6 @@ func (s PipelineScreen) viewFooter() string {
 		}
 		return keyStyle.Render(hint) + ctrlCHint
 	default:
-		return keyStyle.Render(" [^N] new run  [^R] runs  ") + ctrlCHint
+		return keyStyle.Render(" [⏎] post  [^N] new run  [^R] runs  ") + ctrlCHint
 	}
 }

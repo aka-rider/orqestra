@@ -14,6 +14,27 @@ user-visible truth: store them in model state until rendered; never rely on supp
 - `messages.go` owns typed cross-screen messages and intents. Intents flow up to the root model; orchestration events flow down through typed messages.
 - Viewport and textarea dimensions are model state. Size, content, focus, scroll position, and bounds updates belong in `Update()` paths, not render paths.
 
+### Pipeline screen — alt-screen managed layout
+
+`StatePipeline` runs in **alt-screen** with `v.AltScreen = true` and `v.MouseMode = tea.MouseModeCellMotion`. No output is sent to native terminal scrollback (`tea.Println` is gone). The layout is divided into three rows:
+
+- **Transcript** (`Transcript` value sub-model, `transcript.go`) — scrollable, mouse-selectable, auto-copying log of completed speech lines and phase-separator rules. Selection uses logical `Pos{line, col}` so it survives re-wrap. OSC 52 clipboard via `tea.SetClipboard`.
+- **Streaming console** (`streamingConsole` value sub-model, `streaming_console.go`) — live tool lines (pending/resolved) and partial speech text with a blink cursor. `RenderFixed(h, w)` always returns exactly `h` rows.
+- **Bottom region** (`bottomMode` interface, `bottom_mode.go`) — sum type with three variants: `streamingBottom` (console during an agent run), `gateBottom` (plan review chat), `questionBottom` (MCP AskUserQuestion).
+
+Mouse hit-testing uses `image.Rectangle` bounds (`regionBounds` struct on `Model`) set by `recalculateLayout()`. Scroll and selection events are routed to `Transcript.handleMouse()` only when the cursor is inside `regions.transcript`.
+
+### Stream promotion pipeline
+
+`PipelineScreen.DrainStreamUpdates()` routes entries from `ObsStore.StreamCh()`:
+- `EntryDelta` → `streamingConsole.AppendDelta` (partial speech line in console)
+- `EntryText` → `streamingConsole.CompletePartial` + `transcript.Append(newTextLine)` (promote to scrollback-free transcript)
+- `EntryToolUse` → `streamingConsole.AddPendingTool`
+- `EntryToolResult` → `streamingConsole.ResolveLastTool`
+- `EntryStats` → `StreamRing` accounting
+
+Phase transitions (`ApplySnapshot` detecting a new agent ID) flush any partial console text to transcript, emit a separator rule (`newRuleLine`), call `streamingConsole.ClearForAgent()`, and set the appropriate `bottomMode`.
+
 </tui_architecture>
 
 <known_pressure_points>
@@ -27,7 +48,7 @@ These are current or recurring weak spots. Do not spread them; fix in scope when
 - `Model.View()` currently copies `ctrlCPending` into the pipeline screen before rendering. Do not add more render-time assignments. Prefer deriving render-only props locally or updating screen state in `Update()`.
 - Run detail log loading parses files synchronously when step selection changes. Future work should use async commands and typed completion messages.
 - Root-level `ctrl+c`, navigation, and gate decisions are delicate. Nested screens may emit intents, but the root model owns global exits and orchestration-side effects.
-- `PipelineScreen` (`screen_pipeline.go`) is the canonical mode-state-flattening offender (see `<state_modeling>`): ~50 fields across 9 content modes, redundant boolean flags, a 40-line `Reset()`, a partial `screen_pipeline_keys.go` split, and a legacy render path duplicating the frame renderer. Do not extend it. When you touch a mode, decompose that mode into its own sub-model rather than adding a field/flag/switch-arm.
+- `PipelineScreen` (`screen_pipeline.go`) still carries `ContentMode` (flat enum) alongside the newer `bottomMode` sum type — they coexist during the transition. Key routing still dispatches on `ContentMode`; only `View()` uses `bottomMode`. When touching a content mode, migrate that mode to a `bottomMode` variant and remove its `ContentMode` arm; do not add new `ContentMode` values.
 
 </known_pressure_points>
 

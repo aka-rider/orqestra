@@ -20,10 +20,11 @@ const maxActivities = 20
 type StreamEntryKind int
 
 const (
-	EntryText    StreamEntryKind = iota // completed text line
-	EntryDelta                          // partial text delta (content_block_delta)
-	EntryToolUse                        // tool invocation
-	EntryStats                          // token usage snapshot
+	EntryText       StreamEntryKind = iota // completed text line
+	EntryDelta                             // partial text delta (content_block_delta)
+	EntryToolUse                           // tool invocation
+	EntryStats                             // token usage snapshot
+	EntryToolResult                        // tool result (carries ToolErr)
 )
 
 // EntryStats carries token usage at a point in time.
@@ -37,11 +38,12 @@ type StreamStats struct {
 // StreamEntry is the unified entry type for the StreamRing.
 // Pure value type — no pointers, no aliasing across goroutines.
 type StreamEntry struct {
-	Kind   StreamEntryKind
-	Text   string      // EntryText: completed line content
-	Tool   string      // EntryToolUse: tool name
-	Detail string      // EntryToolUse: human-readable detail
-	Stats  StreamStats // EntryStats: token snapshot
+	Kind    StreamEntryKind
+	Text    string      // EntryText: completed line content
+	Tool    string      // EntryToolUse: tool name
+	Detail  string      // EntryToolUse: human-readable detail
+	Stats   StreamStats // EntryStats: token snapshot
+	ToolErr bool        // EntryToolResult: true when the tool returned is_error
 }
 
 const defaultRingCapacity = 200
@@ -322,6 +324,14 @@ func (r *StreamRing) AppendDelta(text string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.partial += text
+}
+
+// CurrentPartial returns the current in-progress (not yet newline-terminated) text.
+// Safe for concurrent reads from the TUI tick.
+func (r *StreamRing) CurrentPartial() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.partial
 }
 
 // FlushPartial promotes the current partial buffer to a completed EntryText.

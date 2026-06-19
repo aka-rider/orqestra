@@ -198,12 +198,17 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		Env:      modelEnv,
 		Writable: false,
 	}
+	roSandboxCfg := harness.SandboxConfig{
+		RepoPath: repoPath,
+		Profiles: sandboxProfiles,
+		Writable: false,
+	}
 
 	// BuildProcessSpec inherits all options already set in resOpts/plnOpts/criticOpts
 	// (including AppendSystemPrompt from bridgeToolOpts). Do NOT add an extra
 	// WithAppendSystemPrompt here — that would overwrite the one bridgeToolOpts set
 	// with the wrong field (BaseAgentConfig.SystemPrompt ≠ AppendSystemPrompt).
-	resSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Researcher.Model, harness.SandboxConfig{}, resOpts...)
+	resSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Researcher.Model, roSandboxCfg, resOpts...)
 	if specErr != nil {
 		slog.Error("failed to build researcher spec", "err", specErr)
 		os.Exit(exitInvalidInput)
@@ -215,9 +220,11 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		RepeatThreshold: cfg.Researcher.LoopGuard.RepeatThreshold,
 		MaxNudges:       cfg.Researcher.LoopGuard.MaxNudges,
 		CooldownTurns:   cfg.Researcher.LoopGuard.CooldownTurns,
+		SilenceSecs:     cfg.Researcher.LoopGuard.SilenceSecs,
 	}
+	resSpec.PreTimeoutNudge = preTimeoutNudgeFor("researcher")
 
-	archSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Architect.Model, harness.SandboxConfig{}, plnOpts...)
+	archSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Architect.Model, roSandboxCfg, plnOpts...)
 	if specErr != nil {
 		slog.Error("failed to build architect spec", "err", specErr)
 		os.Exit(exitInvalidInput)
@@ -229,9 +236,11 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		RepeatThreshold: cfg.Architect.LoopGuard.RepeatThreshold,
 		MaxNudges:       cfg.Architect.LoopGuard.MaxNudges,
 		CooldownTurns:   cfg.Architect.LoopGuard.CooldownTurns,
+		SilenceSecs:     cfg.Architect.LoopGuard.SilenceSecs,
 	}
+	archSpec.PreTimeoutNudge = preTimeoutNudgeFor("architect")
 
-	criticSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Critic.Model, harness.SandboxConfig{}, criticOpts...)
+	criticSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Critic.Model, roSandboxCfg, criticOpts...)
 	if specErr != nil {
 		slog.Error("failed to build critic spec", "err", specErr)
 		os.Exit(exitInvalidInput)
@@ -243,7 +252,9 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		RepeatThreshold: cfg.Critic.LoopGuard.RepeatThreshold,
 		MaxNudges:       cfg.Critic.LoopGuard.MaxNudges,
 		CooldownTurns:   cfg.Critic.LoopGuard.CooldownTurns,
+		SilenceSecs:     cfg.Critic.LoopGuard.SilenceSecs,
 	}
+	criticSpec.PreTimeoutNudge = preTimeoutNudgeFor("critic")
 
 	workerSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Worker.Model, workerSandboxCfg,
 		harness.WithWorkDir(repoPath))
@@ -254,6 +265,7 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 	workerSpec.AgentID = "worker"
 	workerSpec.SteerOnLoop = false
 	workerSpec.Timeout = cfg.Worker.Timeout.Duration
+	workerSpec.PreTimeoutNudge = preTimeoutNudgeFor("worker")
 
 	wtSpecFn := func(wtPath string) harness.ProcessSpec {
 		spec := workerSpec
@@ -279,6 +291,38 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 	}
 }
 
+
+// preTimeoutNudgeFor returns the role-specific steering message sent to an actor
+// 60 s before its hard deadline and whenever the event stream has been silent for
+// SilenceSecs seconds. The message is designed to prompt the model to emit its
+// expected output format immediately rather than continuing to work.
+func preTimeoutNudgeFor(role string) string {
+	switch role {
+	case "researcher":
+		return "Your time is almost up. Your role is to report facts, not implement. " +
+			"Call mcp__orqestra__SubmitReport NOW with your report. " +
+			"Required sections: ## Goal, ## Codebase Facts, ## Constraints Discovered, ## Gotchas. " +
+			"Include what you have found so far — a partial report is better than no report."
+	case "architect":
+		return "Your time is almost up. " +
+			"Call mcp__orqestra__SubmitReport NOW with your implementation plan. " +
+			"Required format: # Plan → ## Goal, ## Context, ## Constraints, ## Risks, " +
+			"## Work Packages (each with Steps + Done when), ## Verification, ## Assumptions, ## Gotchas. " +
+			"Submit what you have."
+	case "critic":
+		return "Your time is almost up. " +
+			"Call mcp__orqestra__SubmitReport NOW with your critic report. " +
+			"Required format: ## Critic Report → ### Blockers Found (each with Category, Severity, " +
+			"Evidence, Impact, Suggested fix), ### Verified Claims, ### Summary. " +
+			"Submit findings so far."
+	case "worker":
+		return "Your time is almost up. Describe what you are doing at this moment and what the " +
+			"next step is. If you are stuck, explain why. Your file changes are already saved in " +
+			"the worktree and will be preserved — do NOT run any cleanup, exit, or discard commands."
+	default:
+		return ""
+	}
+}
 
 func resolveConfigPath(name, repoPath string) (string, error) {
 	if filepath.IsAbs(name) {

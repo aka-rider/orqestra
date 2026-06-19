@@ -119,17 +119,22 @@ func TestLayout_AltScreen_BrowserStates(t *testing.T) {
 	}
 }
 
-// TestLayout_NoAltScreen_InlineStates guards that prompt and pipeline run
+// TestLayout_NoAltScreen_PromptIsInline guards that the prompt screen runs
 // inline so the terminal owns the mouse and provides native scrollback.
-func TestLayout_NoAltScreen_InlineStates(t *testing.T) {
-	for _, st := range []AppState{StatePrompt, StatePipeline} {
-		m := layoutTestModel(120, 40, st)
-		if st == StatePipeline {
-			m.pipelineScreen.content = ContentStreaming
-		}
-		if m.View().AltScreen {
-			t.Errorf("expected AltScreen=false for state %d (inline mode)", st)
-		}
+func TestLayout_NoAltScreen_PromptIsInline(t *testing.T) {
+	m := layoutTestModel(120, 40, StatePrompt)
+	if m.View().AltScreen {
+		t.Error("expected AltScreen=false for StatePrompt (inline mode)")
+	}
+}
+
+// TestLayout_AltScreen_PipelineIsAltScreen guards that pipeline now runs in
+// alt-screen (full managed layout with transcript + streaming console).
+func TestLayout_AltScreen_PipelineIsAltScreen(t *testing.T) {
+	m := layoutTestModel(120, 40, StatePipeline)
+	m.pipelineScreen.content = ContentStreaming
+	if !m.View().AltScreen {
+		t.Error("expected AltScreen=true for StatePipeline (alt-screen managed layout)")
 	}
 }
 

@@ -55,10 +55,11 @@ type ProcessSpec struct {
 	Output       OutputMode
 
 	// Orchestration runtime knobs (not passed to subprocess).
-	AgentID     string        // role label used by steering and report capture
-	SteerOnLoop bool          // enable steering executor loop detection
-	Timeout     time.Duration // wall-clock cap; 0 means no limit
-	LoopGuard   LoopGuardSpec // thresholds for the steering executor
+	AgentID        string        // role label used by steering and report capture
+	SteerOnLoop    bool          // enable steering executor loop detection
+	Timeout        time.Duration // wall-clock cap; 0 means no limit
+	LoopGuard      LoopGuardSpec // thresholds for the steering executor
+	PreTimeoutNudge string       // role-specific message sent 60 s before deadline and on silence; "" = disabled
 }
 
 // Message is a user turn sent to a running process via the input plane.

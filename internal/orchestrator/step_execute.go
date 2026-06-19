@@ -61,6 +61,12 @@ func (s *ExecuteStep) Run(ctx context.Context, in ExecuteInput, sc StepContext) 
 	res, err := sc.Exec.Run(ctx, spec, nil, sink)
 
 	if err != nil {
+		// Preserve the worktree on controlled failure (timeout, loop escalation, etc.)
+		// so the partial work can be inspected or resumed. The supervisor would otherwise
+		// remove it on Shutdown; untracking here keeps the directory intact.
+		if wt.Path != "" && s.Sup != nil {
+			s.Sup.UntrackWorktree(wt.Path)
+		}
 		sc.Obs.AgentFailed(s.ID(), err)
 		s.writeMeta(sc, res.SessionID, start, "failed", err, harness.TokenUsage{})
 		return ExecuteOutput{}, fmt.Errorf("worker: %w", err)

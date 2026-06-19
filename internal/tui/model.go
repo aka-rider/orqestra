@@ -3,11 +3,13 @@ package tui
 import (
 	"context"
 	"fmt"
+	"image"
 	"os"
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
@@ -59,12 +61,21 @@ type AgentRow struct {
 	ContextWindow int64  // context window in tokens (0 = unknown)
 }
 
+// regionBounds holds the absolute terminal rectangles for the pipeline
+// alt-screen layout. Used for mouse hit-testing to prevent panes stealing events.
+type regionBounds struct {
+	transcript image.Rectangle
+	streaming  image.Rectangle
+	input      image.Rectangle
+}
+
 // Model is the top-level Bubble Tea model for the Orqestra TUI.
 type Model struct {
 	state     AppState
 	prevState AppState // state to return to when leaving the runs list (set on entry)
 	width     int
 	height    int
+	regions   regionBounds // pipeline alt-screen layout regions
 
 	// Pipeline observation + control (ObsStore polling path)
 	obs     *orchestrator.ObsStore
@@ -226,11 +237,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.obs != nil {
 				m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
 			}
+			m.recalculateLayout() // refresh streaming console height after drain
 			m.pipelineScreen.SyncLiveMetrics()
-			return m, tea.Batch(m.pipelineScreen.TakePrintCmd(), tickCmd())
+			return m, tickCmd()
 		case m.pipelineScreen.active:
-			// Background ingest only — user is in runs list; do not emit to scrollback
-			// (tea.Println is a no-op under alt-screen).
+			// Background ingest — user is in runs list; transcript updates silently.
 			if m.obs != nil {
 				m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
 			}
@@ -262,14 +273,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastRev = snap.Rev
 		content := m.pipelineScreen.content
 
-		// Queue scrollback payloads on key transitions.
-		if prevContent == ContentStreaming && content == ContentCompletion {
-			m.pipelineScreen.QueuePrint(m.pipelineScreen.viewCompletion(m.width))
-		}
-		if prevContent != ContentHumanGate && content == ContentHumanGate && m.pipelineScreen.finalPlan != "" {
-			m.pipelineScreen.QueuePrint(m.pipelineScreen.finalPlan)
-		}
-
 		if m.state == StatePipeline {
 			if inputHeightChanged(prevContent, content) {
 				m.recalculateLayout()
@@ -277,15 +280,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pipelineScreen.SyncLiveMetrics()
 		}
 		if !snap.Terminal.Done {
-			var printCmd tea.Cmd
-			if m.state == StatePipeline {
-				printCmd = m.pipelineScreen.TakePrintCmd()
-			}
-			return m, tea.Batch(printCmd, notifyCmd(m.obs.NotifyCh()))
-		}
-		// Done: emit completion summary on the same beat the run finishes.
-		if m.state == StatePipeline {
-			return m, m.pipelineScreen.TakePrintCmd()
+			return m, notifyCmd(m.obs.NotifyCh())
 		}
 		return m, nil
 	}
@@ -310,16 +305,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // handleMouse routes mouse events to the active screen's viewport.
-// StatePipeline runs inline — the terminal owns mouse and scrollback.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch m.state {
+	case StatePipeline:
+		cmd = m.handlePipelineMouse(msg)
 	case StateRunsList:
 		m.runsListScreen, cmd = m.runsListScreen.HandleMouse(msg)
 	case StateRunDetail:
 		m.runDetailScreen, cmd = m.runDetailScreen.HandleMouse(msg)
 	}
 	return m, cmd
+}
+
+// handlePipelineMouse routes mouse events for the pipeline alt-screen layout.
+// Wheel events always reach the transcript; click/motion/release are bounded
+// to the transcript region to avoid background panes stealing foreground events.
+func (m *Model) handlePipelineMouse(msg tea.MouseMsg) tea.Cmd {
+	var cmd tea.Cmd
+	switch msg.(type) {
+	case tea.MouseWheelMsg:
+		m.pipelineScreen.transcript, cmd = m.pipelineScreen.transcript.Update(msg)
+	case tea.MouseClickMsg, tea.MouseReleaseMsg, tea.MouseMotionMsg:
+		pt := image.Point{X: msg.Mouse().X, Y: msg.Mouse().Y}
+		if pt.In(m.regions.transcript) {
+			m.pipelineScreen.transcript, cmd = m.pipelineScreen.transcript.Update(msg)
+		}
+	}
+	return cmd
 }
 
 // handleKey processes key events.
@@ -383,8 +396,7 @@ func (m Model) handleRunsListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.state = StatePipeline
 				m.recalculateLayout()
 				m.pipelineScreen.SyncLiveMetrics()
-				// Flush lines queued while user was in the alt-screen runs list.
-				return m, m.pipelineScreen.TakePrintCmd()
+				return m, nil
 			}
 			m.state = StatePrompt
 			m.recalculateLayout()
@@ -459,17 +471,17 @@ func (m Model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				phase := m.lastRestartPhase
 				m.lastRestartRunPath = ""
 				m.lastRestartPhase = ""
-				m.pipelineScreen.Start(i.Prompt)
+				blinkCmd := m.pipelineScreen.Start(i.Prompt)
 				m.state = StatePipeline
 				m.recalculateLayout()
 				pipelineCmd := m.startPipelineRestart(i.Prompt, runPath, phase)
-				return m, tea.Batch(pipelineCmd, animTickCmd())
+				return m, tea.Batch(blinkCmd, pipelineCmd, animTickCmd())
 			}
-			m.pipelineScreen.Start(i.Prompt)
+			blinkCmd := m.pipelineScreen.Start(i.Prompt)
 			m.state = StatePipeline
 			m.recalculateLayout()
 			pipelineCmd := m.startPipeline(i.Prompt)
-			return m, tea.Batch(pipelineCmd, animTickCmd())
+			return m, tea.Batch(blinkCmd, pipelineCmd, animTickCmd())
 		case NavigateToRunsListIntent:
 			m.navigateToRunsList()
 			return m, nil
@@ -597,6 +609,18 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 		prompt := "Restart run from phase: " + string(i.Phase)
 		m.promptScreen.SetValue(prompt)
 		return m, batch(nil)
+	case PostMessageIntent:
+		if m.ctrl != nil && i.Text != "" {
+			text := i.Text
+			agentID := orchestrator.AgentID(i.AgentID)
+			return m, batch(func() tea.Msg {
+				if ch := m.ctrl.Input(agentID); ch != nil {
+					ch <- harness.Message{Text: text}
+				}
+				return nil
+			})
+		}
+		return m, batch(nil)
 	}
 	return m, batch(nil)
 }
@@ -662,10 +686,8 @@ func (m Model) View() tea.View {
 		content = m.runDetailScreen.View(m.effectiveWidth(), m.height)
 	}
 	v := tea.NewView(content)
-	// StateRunsList and StateRunDetail are viewport browsers — they own the
-	// screen. StatePrompt and StatePipeline run inline so the terminal handles
-	// mouse and scrollback natively.
-	if m.state == StateRunsList || m.state == StateRunDetail {
+	// Alt-screen states: pipeline, runs list, run detail. StatePrompt is inline.
+	if m.state == StatePipeline || m.state == StateRunsList || m.state == StateRunDetail {
 		v.AltScreen = true
 		v.MouseMode = tea.MouseModeCellMotion
 	}
@@ -703,13 +725,35 @@ func (m *Model) recalculateLayout() {
 		inputHeight = 0
 	}
 
-	// No header. Content gets full width. Sidebar is a bottom strip below the input zone.
-	usedHeight := inputHeight + constFooterHeight + constSidebarHeight
-	contentHeight := max(0, m.height-usedHeight)
-
 	if m.pipelineScreen.content == ContentUserQuestion && m.pipelineScreen.hasQuestion {
 		m.pipelineScreen.question = m.pipelineScreen.question.SetWidth(m.width)
 	}
+
+	// Pipeline alt-screen layout: status bar + transcript + streaming + input + footer.
+	if m.state == StatePipeline {
+		streamH := min(constStreamMaxHeight, m.pipelineScreen.streaming.DesiredHeight())
+		chromeH := constStatusBarHeight + inputHeight + constFooterHeight
+		transcriptH := max(0, m.height-chromeH-streamH)
+
+		m.pipelineScreen.transcriptH = transcriptH
+		m.pipelineScreen.streamH = streamH
+		m.pipelineScreen.streaming = m.pipelineScreen.streaming.SetWidth(m.width - 2)
+		m.pipelineScreen.postInput.SetWidth(m.width)
+
+		y := constStatusBarHeight
+		m.regions.transcript = image.Rect(1, y, m.width-1, y+transcriptH) // 1-col margins
+		y += transcriptH
+		m.regions.streaming = image.Rect(1, y, m.width-1, y+streamH)
+		y += streamH
+		m.regions.input = image.Rect(0, y, m.width, y+inputHeight)
+
+		m.pipelineScreen.transcript.SetRect(m.regions.transcript)
+		m.pipelineScreen.transcript.SetFullWidth(m.width)
+	}
+
+	// No header. Content gets full width. Sidebar is a bottom strip below the input zone.
+	usedHeight := inputHeight + constFooterHeight + constSidebarHeight
+	contentHeight := max(0, m.height-usedHeight)
 
 	// Runs list: full-width viewport
 	m.runsListScreen.viewport.SetWidth(m.width)

@@ -4,15 +4,14 @@ import (
 	"os"
 	"strings"
 
-	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
 
 // PromptScreen manages the task prompt input and file picker.
 type PromptScreen struct {
-	textarea      textarea.Model
-	fp            filePicker
+	input SmartInput
+	fp    filePicker
 	fpActive      bool
 	fpAtStart     int
 	fpQuery       string
@@ -21,51 +20,48 @@ type PromptScreen struct {
 	PendingIntent tea.Msg // set by Update, consumed by parent
 }
 
-// NewPromptScreen creates a new prompt screen with initialized textarea.
+// NewPromptScreen creates a new prompt screen with initialized smart input.
 func NewPromptScreen() PromptScreen {
-	ta := textarea.New()
-	ta.Placeholder = "Enter a task description. Be specific about the end state."
-	ta.Focus()
-	ta.SetWidth(80)
-	ta.SetHeight(3)
-	ta.CharLimit = 4096
-	return PromptScreen{textarea: ta}
+	return PromptScreen{
+		input: NewSmartInput(),
+	}
 }
 
-// Focus focuses the textarea.
-func (s *PromptScreen) Focus() { s.textarea.Focus() }
+// Focus focuses the input.
+func (s *PromptScreen) Focus() {}
 
-// Reset resets the textarea value.
-func (s *PromptScreen) Reset() { s.textarea.Reset() }
+// Reset resets the input value.
+func (s *PromptScreen) Reset() { s.input.Reset() }
 
-// SetValue sets the textarea value.
-func (s *PromptScreen) SetValue(v string) { s.textarea.SetValue(v) }
+// SetValue sets the input value.
+func (s *PromptScreen) SetValue(v string) {
+	// Insert as a single text segment.
+	s.input = NewSmartInput()
+	s.input.insertSegAtCursor(textSegment{text: v})
+}
 
-// Value returns the textarea value.
-func (s PromptScreen) Value() string { return s.textarea.Value() }
+// Value returns the input value.
+func (s PromptScreen) Value() string { return s.input.Value() }
 
-// SetWidth sets the textarea width.
-func (s *PromptScreen) SetWidth(w int) { s.textarea.SetWidth(w) }
+// SetWidth sets the input width.
+func (s *PromptScreen) SetWidth(w int) { s.input.width = w }
+
+// SetTextareaHeight explicitly sets the height of the input.
+// Kept for API compatibility; the SmartInput computes its own height.
+func (s *PromptScreen) SetTextareaHeight(h int) {
+	s.input.height = h
+}
 
 // DesiredInputHeight calculates the desired height for the input zone based on
 // its content, capped at half the terminal height.
 func (s *PromptScreen) DesiredInputHeight(termHeight int) int {
-	val := s.textarea.Value()
-	w := s.textarea.Width()
+	w := s.input.width
 	if w <= 0 {
 		return constPromptInputHeight
 	}
 
-	lines := 0
-	paragraphs := strings.Split(val, "\n")
-	for _, p := range paragraphs {
-		plen := lipgloss.Width(p)
-		if plen == 0 {
-			lines += 1
-		} else {
-			lines += (plen / w) + 1
-		}
-	}
+	// Count rendered lines (pills count as 1 line each).
+	lines := s.input.desiredLineCount(w)
 
 	// Calculate desired total height including chrome (divider + instruction label)
 	chrome := 2
@@ -77,18 +73,13 @@ func (s *PromptScreen) DesiredInputHeight(termHeight int) int {
 	return min(desired, maxHeight)
 }
 
-// SetTextareaHeight explicitly sets the height of the textarea.
-func (s *PromptScreen) SetTextareaHeight(h int) {
-	s.textarea.SetHeight(h)
-}
-
 // Update handles key events for the prompt screen.
 func (s PromptScreen) Update(msg tea.Msg) (PromptScreen, tea.Cmd) {
 	keyMsg, ok := msg.(tea.KeyPressMsg)
 	if !ok {
-		// Pass non-key messages to textarea (e.g., blink)
+		// Pass non-key messages to smart input (e.g., paste, blink)
 		var cmd tea.Cmd
-		s.textarea, cmd = s.textarea.Update(msg)
+		s.input, cmd = s.input.Update(msg)
 		return s, cmd
 	}
 
@@ -96,7 +87,7 @@ func (s PromptScreen) Update(msg tea.Msg) (PromptScreen, tea.Cmd) {
 		return s.handleFilePickerKey(keyMsg)
 	}
 
-	// Ctrl combos first (no named constants in v2)
+	// Ctrl combos first
 	switch keyMsg.String() {
 	case "ctrl+r":
 		s.PendingIntent = NavigateToRunsListIntent{}
@@ -110,10 +101,10 @@ func (s PromptScreen) Update(msg tea.Msg) (PromptScreen, tea.Cmd) {
 	case tea.KeyEnter:
 		if keyMsg.Mod.Contains(tea.ModShift) || keyMsg.Mod.Contains(tea.ModAlt) {
 			// Shift+Enter / Alt+Enter inserts a newline
-			s.textarea.InsertString("\n")
+			s.input.insertSegAtCursor(textSegment{text: "\n"})
 			return s, nil
 		}
-		prompt := strings.TrimSpace(s.textarea.Value())
+		prompt := strings.TrimSpace(s.input.Value())
 		if prompt == "" {
 			return s, nil
 		}
@@ -121,7 +112,7 @@ func (s PromptScreen) Update(msg tea.Msg) (PromptScreen, tea.Cmd) {
 		return s, nil
 	default:
 		var cmd tea.Cmd
-		s.textarea, cmd = s.textarea.Update(msg)
+		s.input, cmd = s.input.Update(msg)
 		if !s.fpActive && keyMsg.String() == "@" {
 			return s.activateFilePicker(cmd)
 		}
@@ -143,10 +134,10 @@ func (s PromptScreen) View(width, height int) string {
 	footer := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
 		keyStyle.Render(" [Enter] submit | [Shift+Enter] newline | [^P] setup  [^R] runs  [^C] quit")
 
-	// Input zone (divider + instruction + textarea + newline)
+	// Input zone (divider + instruction + smart input + newline)
 	input := dividerStyle.Render(strings.Repeat("─", w)) + "\n" +
 		" Enter a task description. Be specific about the end state.\n" +
-		s.textarea.View() + "\n"
+		s.input.View(w, height) + "\n"
 
 	// Content zone dimensions — no header, no sidebar in prompt view
 	inputHeight := s.DesiredInputHeight(height)
@@ -191,9 +182,9 @@ func (s PromptScreen) handleFilePickerKey(msg tea.KeyPressMsg) (PromptScreen, te
 	case tea.KeyEscape:
 		s.fp.stopScan()
 		s.fpActive = false
-		val := s.textarea.Value()
+		val := s.input.Value()
 		if s.fpAtStart < len(val) {
-			s.textarea.SetValue(val[:s.fpAtStart] + val[s.fpAtStart+1+len(s.fpQuery):])
+			s.input = s.input.WithValue(val[:s.fpAtStart] + val[s.fpAtStart+1+len(s.fpQuery):])
 		}
 		s.fpQuery = ""
 		return s, nil
@@ -203,14 +194,14 @@ func (s PromptScreen) handleFilePickerKey(msg tea.KeyPressMsg) (PromptScreen, te
 		s.fp.stopScan()
 		s.fpActive = false
 		if sel != "" {
-			val := s.textarea.Value()
+			val := s.input.Value()
 			before := val[:s.fpAtStart]
 			after := ""
 			end := s.fpAtStart + 1 + len(s.fpQuery)
 			if end < len(val) {
 				after = val[end:]
 			}
-			s.textarea.SetValue(before + sel + " " + after)
+			s.input = s.input.WithValue(before + sel + " " + after)
 		}
 		s.fpQuery = ""
 		return s, nil
@@ -234,9 +225,9 @@ func (s PromptScreen) handleFilePickerKey(msg tea.KeyPressMsg) (PromptScreen, te
 		} else {
 			s.fp.stopScan()
 			s.fpActive = false
-			val := s.textarea.Value()
+			val := s.input.Value()
 			if s.fpAtStart < len(val) {
-				s.textarea.SetValue(val[:s.fpAtStart] + val[s.fpAtStart+1:])
+				s.input = s.input.WithValue(val[:s.fpAtStart] + val[s.fpAtStart+1:])
 			}
 		}
 		return s, nil
@@ -246,7 +237,7 @@ func (s PromptScreen) handleFilePickerKey(msg tea.KeyPressMsg) (PromptScreen, te
 			s.fpQuery += msg.Text
 			s.fp.refilter(s.fpQuery)
 			var cmd tea.Cmd
-			s.textarea, cmd = s.textarea.Update(msg)
+			s.input, cmd = s.input.Update(msg)
 			return s, cmd
 		}
 	}
@@ -263,7 +254,7 @@ func (s PromptScreen) activateFilePicker(pendingCmd tea.Cmd) (PromptScreen, tea.
 	contentHeight := max(1, s.height-constPromptInputHeight-constFooterHeight)
 	s.fp = newFilePicker(cwd, contentWidth, contentHeight)
 	s.fpActive = true
-	s.fpAtStart = len(s.textarea.Value()) - 1
+	s.fpAtStart = len(s.input.Value()) - 1
 	s.fpQuery = ""
 	scanCmd := s.fp.startScan()
 	if pendingCmd != nil {
