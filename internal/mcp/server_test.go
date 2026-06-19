@@ -63,17 +63,11 @@ func TestHandleMCPRequest_ToolsList(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(result.Tools) != 2 {
-		t.Fatalf("expected 2 tools, got %d", len(result.Tools))
+	if len(result.Tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(result.Tools))
 	}
-	names := map[string]bool{}
-	for _, tool := range result.Tools {
-		names[tool.Name] = true
-	}
-	for _, want := range []string{"AskUserQuestion", "SubmitReport"} {
-		if !names[want] {
-			t.Errorf("missing tool %q in tools/list", want)
-		}
+	if result.Tools[0].Name != "AskUserQuestion" {
+		t.Errorf("tool name = %q, want AskUserQuestion", result.Tools[0].Name)
 	}
 
 	// AskUserQuestion schema still valid
@@ -129,87 +123,6 @@ func TestHandleMCPRequest_UnknownMethod(t *testing.T) {
 	}
 	if resp.Error.Code != -32601 {
 		t.Errorf("error code = %d, want -32601", resp.Error.Code)
-	}
-}
-
-func TestSubmitReport(t *testing.T) {
-	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-report-%d.sock", os.Getpid()))
-	defer os.Remove(sockPath)
-	bridge := NewQuestionBridge(sockPath)
-
-	// Start a mini bridge server
-	ln, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	done := make(chan error, 1)
-	var gotReport ReportSubmission
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			done <- err
-			return
-		}
-		defer conn.Close()
-		data, err := readFrame(conn)
-		if err != nil {
-			done <- err
-			return
-		}
-		var env bridgeEnvelope
-		if err := json.Unmarshal(data, &env); err != nil {
-			done <- err
-			return
-		}
-		var payload struct {
-			Report  string `json:"report"`
-			Summary string `json:"summary"`
-		}
-		if err := json.Unmarshal(env.Payload, &payload); err != nil {
-			done <- err
-			return
-		}
-		gotReport = ReportSubmission{AgentID: env.AgentID, Report: payload.Report, Summary: payload.Summary}
-		// store before ack (simulating bridge behavior)
-		bridge.putReport(env.AgentID, gotReport)
-		ack, _ := json.Marshal(map[string]bool{"ok": true})
-		if err := writeFrame(conn, ack); err != nil {
-			done <- err
-			return
-		}
-		done <- nil
-	}()
-
-	req := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      json.RawMessage(`5`),
-		Method:  "tools/call",
-		Params:  json.RawMessage(`{"name":"SubmitReport","arguments":{"report":"## My Report\nHello world","summary":"hello"}}`),
-	}
-	resp := handleMCPRequest(req, sockPath, "researcher")
-	if resp == nil || resp.Error != nil {
-		t.Fatalf("SubmitReport error: %v", resp)
-	}
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("bridge handler error: %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("timeout waiting for bridge")
-	}
-	ln.Close()
-
-	if gotReport.Report != "## My Report\nHello world" {
-		t.Errorf("report = %q, want '## My Report\\nHello world'", gotReport.Report)
-	}
-	if gotReport.Summary != "hello" {
-		t.Errorf("summary = %q, want 'hello'", gotReport.Summary)
-	}
-	if gotReport.AgentID != "researcher" {
-		t.Errorf("agentID = %q, want 'researcher'", gotReport.AgentID)
 	}
 }
 

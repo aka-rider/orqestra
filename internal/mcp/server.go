@@ -70,21 +70,6 @@ var askUserQuestionSchema = json.RawMessage(`{
   "required": ["question"]
 }`)
 
-var submitReportSchema = json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "report": {
-      "type": "string",
-      "description": "Your complete final report in markdown format."
-    },
-    "summary": {
-      "type": "string",
-      "description": "Optional one-sentence summary of the report for logging."
-    }
-  },
-  "required": ["report"]
-}`)
-
 // ToolCall is the parsed input from a tools/call invocation.
 type ToolCall struct {
 	Question    string       `json:"question"`
@@ -168,11 +153,6 @@ func handleMCPRequest(req jsonRPCRequest, socketPath, agentID string) *jsonRPCRe
 					"description": "Ask the user a question. Use this when you need clarification, want the user to choose between options, or need any input from the user. The user will see your question in the Orqestra TUI and can respond with text or by selecting from options you provide.",
 					"inputSchema": json.RawMessage(askUserQuestionSchema),
 				},
-				{
-					"name":        "SubmitReport",
-					"description": "Submit your final report. Calling this ends your session — stop after it.",
-					"inputSchema": json.RawMessage(submitReportSchema),
-				},
 			},
 		})
 
@@ -207,8 +187,6 @@ func handleToolCall(req jsonRPCRequest, socketPath, agentID string) *jsonRPCResp
 	switch params.Name {
 	case "AskUserQuestion":
 		return handleAskUserQuestion(req, params.Arguments, socketPath, agentID)
-	case "SubmitReport":
-		return handleSubmitReport(req, params.Arguments, socketPath, agentID)
 	default:
 		return &jsonRPCResponse{
 			JSONRPC: "2.0",
@@ -239,30 +217,6 @@ func handleAskUserQuestion(req jsonRPCRequest, arguments json.RawMessage, socket
 
 	text := FormatAnswer(toolCall, answer)
 	return respondMCPToolResult(req.ID, false, text)
-}
-
-func handleSubmitReport(req jsonRPCRequest, arguments json.RawMessage, socketPath, agentID string) *jsonRPCResponse {
-	var args struct {
-		Report  string `json:"report"`
-		Summary string `json:"summary"`
-	}
-	if err := json.Unmarshal(arguments, &args); err != nil {
-		return &jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Error:   &jsonRPCError{Code: -32602, Message: fmt.Sprintf("invalid tool arguments: %v", err)},
-		}
-	}
-
-	if args.Report == "" {
-		return respondMCPToolResult(req.ID, true, "Error: report is required")
-	}
-
-	if err := sendReportToBridge(socketPath, agentID, args.Report, args.Summary); err != nil {
-		return respondMCPToolResult(req.ID, true, fmt.Sprintf("Error communicating with Orqestra: %v", err))
-	}
-
-	return respondMCPToolResult(req.ID, false, "Report received. Your session is complete — stop now.")
 }
 
 func sendQuestionToBridge(socketPath, agentID string, toolCall ToolCall) (Answer, error) {
@@ -296,37 +250,6 @@ func sendQuestionToBridge(socketPath, agentID string, toolCall ToolCall) (Answer
 		return Answer{}, fmt.Errorf("unmarshal answer: %w", err)
 	}
 	return answer, nil
-}
-
-func sendReportToBridge(socketPath, agentID, report, summary string) error {
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		return fmt.Errorf("dial bridge socket: %w", err)
-	}
-	defer conn.Close()
-
-	reportPayload, err := json.Marshal(struct {
-		Report  string `json:"report"`
-		Summary string `json:"summary"`
-	}{Report: report, Summary: summary})
-	if err != nil {
-		return fmt.Errorf("marshal report: %w", err)
-	}
-
-	env := bridgeEnvelope{Kind: "report", AgentID: agentID, Payload: reportPayload}
-	envData, err := json.Marshal(env)
-	if err != nil {
-		return fmt.Errorf("marshal envelope: %w", err)
-	}
-	if err := writeFrame(conn, envData); err != nil {
-		return fmt.Errorf("write report: %w", err)
-	}
-
-	// Read ack — confirms bridge stored the report before we return.
-	if _, err := readFrame(conn); err != nil {
-		return fmt.Errorf("read ack: %w", err)
-	}
-	return nil
 }
 
 // FormatAnswer converts an Answer to a human-readable text tool result.

@@ -19,8 +19,8 @@ type ResearchStep struct {
 
 func (s *ResearchStep) ID() AgentID { return "researcher" }
 
-const researcherFallbackPrompt = "[Orchestrator] Your session has ended. " +
-	"Call SubmitReport with your gathered findings now. " +
+const researcherFallbackPrompt = "[Orchestrator] Your session did not produce a plan file. " +
+	"Write your gathered findings as your plan now. " +
 	"Required sections: ## Goal, ## Codebase Facts, ## Constraints Discovered, ## Gotchas. " +
 	"Partial is acceptable."
 
@@ -57,15 +57,9 @@ func (s *ResearchStep) Run(ctx context.Context, in ResearchInput, sc StepContext
 		break
 	}
 
-	if runErr != nil {
-		if ctx.Err() == nil && res.SessionID != "" {
-			report, usedFallback, runErr = mcpFallback(ctx, "researcher", spec, res.SessionID, researcherFallbackPrompt, sc)
-		}
-	} else {
-		report, usedFallback, runErr = extractWithFallback(ctx, "researcher", spec, res, researcherFallbackPrompt, checkResearchReport, sc)
-		if runErr == nil && !strings.Contains(strings.ToLower(report), "## user task") {
-			sc.Log.Warn("research report missing ## User Task section (canary)", "session_id", res.SessionID)
-		}
+	report, usedFallback, runErr = extractPlan(ctx, "researcher", spec, res, runErr, researcherFallbackPrompt, checkResearchReport, sc)
+	if runErr == nil && !strings.Contains(strings.ToLower(report), "## user task") {
+		sc.Log.Warn("research report missing ## User Task section (canary)", "session_id", res.SessionID)
 	}
 	if usedFallback {
 		sc.Log.Warn("researcher: model produced text output instead of writing plan file; "+
@@ -75,7 +69,7 @@ func (s *ResearchStep) Run(ctx context.Context, in ResearchInput, sc StepContext
 	if runErr != nil {
 		sc.Obs.AgentFailed(s.ID(), runErr)
 		s.writeMeta(sc, res.SessionID, start, "failed", runErr, res.Usage)
-		return ResearchOutput{}, fmt.Errorf("research: %w", runErr)
+		return ResearchOutput{}, runErr
 	}
 
 	// Integrity artifact: researcher draft markdown.

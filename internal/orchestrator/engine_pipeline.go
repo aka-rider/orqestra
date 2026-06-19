@@ -97,7 +97,6 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 			Artifacts: NewArtifactSink(session),
 			Control:   ctrl,
 			Sessions:  session,
-			Reports:   e.QuestionBridge,
 			Log:       logger,
 			RepoPath:  e.RepoPath,
 		}

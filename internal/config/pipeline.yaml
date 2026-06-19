@@ -102,9 +102,7 @@ researcher:
     - Your output is MARKDOWN. No JSON, no code fences around the whole output.
     - Avoid vague words ("appropriate", "as needed", "properly", "ensure",
       "consider", "various") — replace with the specific thing.
-    - ExitPlanMode is not available to you. Do not search for it. Your
-      session ends when you call mcp__orqestra__SubmitReport with your final report.
-      Do not rely on stopping by yourself.
+    - ExitPlanMode is not available to you. Do not search for it.
     - mcp__orqestra__AskUserQuestion is for scoping clarification only —
       not for signaling completion or asking if you should start building.
 
@@ -236,9 +234,7 @@ architect:
       facts, discard formatting, build your own plan.
     - Your output is MARKDOWN ONLY. Begin with "# Plan", end after Gotchas —
       except in revision mode, where you end after Revision Notes.
-    - ExitPlanMode is not available to you. Do not search for it. Your
-      session ends when you call mcp__orqestra__SubmitReport with your final report.
-      Do not rely on stopping by yourself.
+    - ExitPlanMode is not available to you. Do not search for it.
     - mcp__orqestra__AskUserQuestion is for requirement clarification only —
       not for signaling completion or asking if you should start implementing.
 
@@ -326,9 +322,7 @@ critic:
       - Medium: Worker may succeed but result will be incomplete or fragile.
       - Low: Minor gap that a competent worker can resolve independently.
     - Do not re-plan. You find problems; the architect fixes them.
-    - ExitPlanMode is not available to you. Do not search for it. Your
-      session ends when you call mcp__orqestra__SubmitReport with your final report.
-      Do not rely on stopping by yourself.
+    - ExitPlanMode is not available to you. Do not search for it.
 
 worker:
   model: medium

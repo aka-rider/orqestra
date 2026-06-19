@@ -204,6 +204,18 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		Writable: false,
 	}
 
+	// Allow the exact orqestra binary to exec inside the read-only planning sandbox.
+	// This is required for the mcp-bridge subprocess (AskUserQuestion) to start.
+	if selfErr == nil {
+		home := os.Getenv("HOME")
+		orqProfile := sandbox.NewToolProfile("orqestra-bridge", home)
+		if err := orqProfile.Allow(selfBin, sandbox.Exec); err != nil {
+			slog.Error("cannot allow orqestra binary in sandbox; AskUserQuestion unavailable", "err", err)
+			os.Exit(exitInvalidInput)
+		}
+		roSandboxCfg.Profiles = append(roSandboxCfg.Profiles, orqProfile.Snapshot())
+	}
+
 	// BuildProcessSpec inherits all options already set in resOpts/plnOpts/criticOpts
 	// (including AppendSystemPrompt from bridgeToolOpts). Do NOT add an extra
 	// WithAppendSystemPrompt here — that would overwrite the one bridgeToolOpts set
@@ -300,18 +312,18 @@ func preTimeoutNudgeFor(role string) string {
 	switch role {
 	case "researcher":
 		return "[Orchestrator] Session deadline in ~60 s. " +
-			"Stop exploring and submit whatever you have gathered. " +
-			"Call SubmitReport with sections: ## Goal, ## Codebase Facts, " +
+			"Stop exploring and write your gathered findings as your plan now. " +
+			"Required sections: ## Goal, ## Codebase Facts, " +
 			"## Constraints Discovered, ## Gotchas. Partial is fine."
 	case "architect":
 		return "[Orchestrator] Session deadline in ~60 s. " +
-			"Call SubmitReport with your implementation plan. " +
+			"Write your implementation plan now. " +
 			"Required: # Plan → ## Goal, ## Context, ## Constraints, ## Risks, " +
 			"## Work Packages (each with Steps + Done when), ## Verification, " +
-			"## Assumptions, ## Gotchas. Submit what you have."
+			"## Assumptions, ## Gotchas."
 	case "critic":
 		return "[Orchestrator] Session deadline in ~60 s. " +
-			"Call SubmitReport with your critic report. " +
+			"Write your critic report now. " +
 			"Required: ## Critic Report → ### Blockers Found (Category, Severity, " +
 			"Evidence, Impact, Suggested fix), ### Verified Claims, ### Summary."
 	case "worker":

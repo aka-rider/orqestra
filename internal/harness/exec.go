@@ -130,12 +130,16 @@ func Run(ctx context.Context, spec ProcessSpec, in <-chan Message, sink Sink) (R
 	// Sandbox wrapping (before opening pipes).
 	var sb *sandbox.Sandbox
 	if spec.Sandbox.RepoPath != "" || len(spec.Sandbox.Profiles) > 0 {
+		mEnv, mEnvErr := buildModelEnvFromSpec(spec)
+		if mEnvErr != nil {
+			return RunResult{}, fmt.Errorf("exec: sandbox model env: %w", mEnvErr)
+		}
 		sb, err = sandbox.New(sandbox.Config{
 			RepoPath:     spec.Sandbox.RepoPath,
 			WorktreePath: spec.Sandbox.WorktreePath,
 			RepoWritable: spec.Sandbox.Writable,
 			Profiles:     spec.Sandbox.Profiles,
-			HarnessEnv:   spec.Sandbox.Env,
+			HarnessEnv:   append(mEnv, spec.Sandbox.Env...),
 		})
 		if err != nil {
 			return RunResult{}, fmt.Errorf("exec: sandbox: %w", err)
@@ -422,6 +426,29 @@ func mergeInlineMCP(args []string, inline []InlineMCP) []string {
 		out = append(out, "--mcp-config", string(merged))
 	}
 	return out
+}
+
+// buildModelEnvFromSpec returns only the model-routing env vars derived from spec.Model.
+// Used to inject ANTHROPIC_BASE_URL/ANTHROPIC_MODEL into the sandbox HarnessEnv so that
+// sandboxed processes can reach the configured model regardless of spec.Sandbox.Env.
+// Returns nil, nil for native-provider specs (no env override needed).
+func buildModelEnvFromSpec(spec ProcessSpec) ([]string, error) {
+	resolved := config.ResolvedModel{
+		Type:    spec.Model.Provider,
+		Model:   spec.Model.Model,
+		BaseURL: spec.Model.BaseURL,
+		APIKey:  spec.Model.APIKey,
+	}
+	var utility *config.ResolvedModel
+	if spec.Model.SmallModel != "" {
+		u := config.ResolvedModel{
+			Type:    spec.Model.Provider,
+			Model:   spec.Model.SmallModel,
+			BaseURL: spec.Model.BaseURL,
+		}
+		utility = &u
+	}
+	return BuildModelEnv(resolved, utility)
 }
 
 // buildEnvFromSpec constructs the subprocess environment from a ProcessSpec.

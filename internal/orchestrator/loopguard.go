@@ -213,7 +213,7 @@ func (s *steeringExecutor) Run(ctx context.Context, spec harness.ProcessSpec, in
 						if nudgeText == "" {
 							nudgeText = "You appear to be calling the same tool repeatedly " +
 								"with identical arguments. Step back: re-read what you already know, pick a " +
-								"different approach, or call SubmitReport to deliver your findings so far."
+								"different approach, or write your plan now to record your findings so far."
 						}
 						select {
 						case myIn <- harness.Message{Text: nudgeText}:
@@ -269,7 +269,8 @@ func (s *steeringExecutor) Run(ctx context.Context, spec harness.ProcessSpec, in
 	// Silence detector goroutine: fires when no harness events arrive for SilenceSecs.
 	// Only active when SteerOnLoop=true (steerSink tracks lastEvent).
 	// Writes to nudgeCh, so it belongs in sendersDone.
-	// Uses ns > 0 to detect "no events yet" since lastEvent starts at 0, not time.IsZero.
+	// The silence clock is anchored to process start (startNs): if lastEvent==0 (no events
+	// yet), we use startNs so total silence from start also triggers the nudge.
 	//
 	// silenceCancel is a separate cancel derived from childCtx: we stop only the senders
 	// before close(nudgeCh), without canceling childCtx (which would interrupt the control
@@ -278,6 +279,7 @@ func (s *steeringExecutor) Run(ctx context.Context, spec harness.ProcessSpec, in
 	defer silenceCancel()
 	if steerSink != nil && spec.LoopGuard.SilenceSecs > 0 {
 		silenceDur := time.Duration(spec.LoopGuard.SilenceSecs) * time.Second
+		startNs := time.Now().UnixNano()
 		sendersDone.Add(1)
 		go func() {
 			defer sendersDone.Done()
@@ -288,7 +290,12 @@ func (s *steeringExecutor) Run(ctx context.Context, spec harness.ProcessSpec, in
 				case <-silenceCtx.Done():
 					return
 				case <-ticker.C:
-					if ns := steerSink.lastEvent.Load(); ns > 0 && time.Since(time.Unix(0, ns)) >= silenceDur {
+					ns := steerSink.lastEvent.Load()
+					anchor := ns
+					if anchor == 0 {
+						anchor = startNs // anchor to process start when no event has arrived yet
+					}
+					if time.Since(time.Unix(0, anchor)) >= silenceDur {
 						select {
 						case nudgeCh <- loopNudge:
 						default:

@@ -489,24 +489,33 @@ func TestSilenceNudge(t *testing.T) {
 	<-done
 }
 
-func TestSilenceNudgeSkippedBeforeFirstEvent(t *testing.T) {
-	// No events from inner → lastEvent is zero → silence goroutine must not fire.
-	inner := &blockingInner{} // no events
+func TestSilenceNudgeFiresOnTotalSilence(t *testing.T) {
+	// No events from inner → silence clock anchors to process start → nudge fires after SilenceSecs.
+	inner := &blockingInner{
+		msgNotify: make(chan struct{}, 8),
+	}
 	s := NewSteeringExecutor(inner)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	// 3-second deadline so the silence nudge (at ~1s) fires before ctx deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	spec := harness.ProcessSpec{
-		SteerOnLoop: true,
-		Prompt:      "work",
-		LoopGuard:   harness.LoopGuardSpec{RepeatThreshold: 3, MaxNudges: 3, CooldownTurns: 1, SilenceSecs: 1},
+		SteerOnLoop:     true,
+		Prompt:          "work",
+		PreTimeoutNudge: "please submit",
+		LoopGuard:       harness.LoopGuardSpec{RepeatThreshold: 3, MaxNudges: 3, CooldownTurns: 1, SilenceSecs: 1},
 	}
-	_, _ = s.Run(ctx, spec, nil, nil)
 
-	for _, m := range inner.received() {
-		if m != "work" { // prompt is expected; anything else is a spurious nudge
-			t.Errorf("spurious message when no events emitted: %q", m)
-		}
-	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Run(ctx, spec, nil, nil) //nolint:errcheck
+	}()
+
+	// Silence nudge must fire even with zero events.
+	waitForMessage(t, inner, func(m string) bool { return m == "please submit" }, "silence nudge on total silence")
+
+	cancel()
+	<-done
 }

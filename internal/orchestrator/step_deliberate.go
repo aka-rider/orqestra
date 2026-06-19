@@ -48,14 +48,14 @@ type DeliberateStep struct {
 
 func (s *DeliberateStep) ID() AgentID { return "architect" }
 
-const architectFallbackPrompt = "[Orchestrator] Your session has ended. " +
-	"Call SubmitReport with your implementation plan. " +
+const architectFallbackPrompt = "[Orchestrator] Your session did not produce a plan file. " +
+	"Write your implementation plan now. " +
 	"Required: # Plan → ## Goal, ## Context, ## Constraints, ## Risks, " +
 	"## Work Packages (each with Steps + Done when), ## Verification, " +
-	"## Assumptions, ## Gotchas. Submit what you have."
+	"## Assumptions, ## Gotchas."
 
-const criticFallbackPrompt = "[Orchestrator] Your session has ended. " +
-	"Call SubmitReport with your critic report. " +
+const criticFallbackPrompt = "[Orchestrator] Your session did not produce a plan file. " +
+	"Write your critic report now. " +
 	"Required: ## Critic Report → ### Blockers Found (Category, Severity, " +
 	"Evidence, Impact, Suggested fix), ### Verified Claims, ### Summary."
 
@@ -97,17 +97,11 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 		break
 	}
 
-	if archErr != nil {
-		if ctx.Err() == nil && archRes.SessionID != "" {
-			planMarkdown, _, archErr = mcpFallback(ctx, "architect", archSpec, archRes.SessionID, architectFallbackPrompt, sc)
-		}
-	} else {
-		var usedFallback bool
-		planMarkdown, usedFallback, archErr = extractWithFallback(ctx, "architect", archSpec, archRes, architectFallbackPrompt, checkArchitectReport, sc)
-		if usedFallback {
-			sc.Log.Warn("architect: model produced text output instead of writing plan file; "+
-				"model may have disobeyed plan-writing instructions", "session_id", archRes.SessionID)
-		}
+	var archUsedFallback bool
+	planMarkdown, archUsedFallback, archErr = extractPlan(ctx, "architect", archSpec, archRes, archErr, architectFallbackPrompt, checkArchitectReport, sc)
+	if archUsedFallback {
+		sc.Log.Warn("architect: model produced text output instead of writing plan file; "+
+			"model may have disobeyed plan-writing instructions", "session_id", archRes.SessionID)
 	}
 
 	if archErr != nil {
@@ -167,17 +161,11 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 		break
 	}
 
-	if criticErr != nil {
-		if ctx.Err() == nil && criticRes.SessionID != "" {
-			criticMarkdown, _, criticErr = mcpFallback(ctx, "critic", criticSpec, criticRes.SessionID, criticFallbackPrompt, sc)
-		}
-	} else {
-		var usedFallback bool
-		criticMarkdown, usedFallback, criticErr = extractWithFallback(ctx, "critic", criticSpec, criticRes, criticFallbackPrompt, checkCriticReport, sc)
-		if usedFallback {
-			sc.Log.Warn("critic: model produced text output instead of writing plan file; "+
-				"model may have disobeyed plan-writing instructions", "session_id", criticRes.SessionID)
-		}
+	var criticUsedFallback bool
+	criticMarkdown, criticUsedFallback, criticErr = extractPlan(ctx, "critic", criticSpec, criticRes, criticErr, criticFallbackPrompt, checkCriticReport, sc)
+	if criticUsedFallback {
+		sc.Log.Warn("critic: model produced text output instead of writing plan file; "+
+			"model may have disobeyed plan-writing instructions", "session_id", criticRes.SessionID)
 	}
 
 	if criticErr != nil {
