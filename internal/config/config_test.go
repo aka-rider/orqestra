@@ -1055,8 +1055,8 @@ func TestLoopGuardDefaults(t *testing.T) {
 		if tc.mt != 40 {
 			t.Errorf("%s.MaxTurns = %d, want 40", tc.role, tc.mt)
 		}
-		if tc.to != 10*time.Minute {
-			t.Errorf("%s.Timeout = %v, want 10m", tc.role, tc.to)
+		if tc.to != 15*time.Minute {
+			t.Errorf("%s.Timeout = %v, want 15m", tc.role, tc.to)
 		}
 	}
 

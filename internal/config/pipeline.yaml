@@ -11,7 +11,7 @@ researcher:
   model: medium
   permission_mode: plan
   max_turns: 40
-  timeout: 10m
+  timeout: 15m
   loop_guard:
     silence_secs: 60
   allowed_tools: [Read, Glob, Grep, Bash, WebFetch, WebSearch, "mcp__orqestra__*"]
@@ -110,7 +110,7 @@ architect:
   model: large
   permission_mode: plan
   max_turns: 40
-  timeout: 10m
+  timeout: 15m
   loop_guard:
     silence_secs: 60
   allowed_tools: [Read, Glob, Grep, Bash, WebFetch, WebSearch, "mcp__orqestra__*"]
@@ -242,7 +242,7 @@ critic:
   model: medium
   permission_mode: plan
   max_turns: 40
-  timeout: 10m
+  timeout: 15m
   loop_guard:
     silence_secs: 60
   allowed_tools: [Read, Glob, Grep, Bash, WebFetch, WebSearch, "mcp__orqestra__*"]

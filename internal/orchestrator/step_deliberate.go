@@ -16,8 +16,8 @@ func checkArchitectReport(md string) error {
 	if len(trimmed) < 100 {
 		return fmt.Errorf("architect report too short (%d chars)", len(trimmed))
 	}
-	if !strings.HasPrefix(trimmed, "# Plan") {
-		return fmt.Errorf("architect report does not start with '# Plan'")
+	if !strings.HasPrefix(trimmed, "# ") {
+		return fmt.Errorf("architect report does not start with an H1 heading")
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/xiii/orqestra/internal/agent"
@@ -40,10 +41,54 @@ func preferReport(sc StepContext, agentID string, res harness.RunResult, allowFa
 	return content, usedFallback, nil
 }
 
+// qualityPassOrTrim returns (report, true) if report passes qualityCheck as-is, or
+// (trimmed, true) with the text trimmed to start at the first '#'-prefixed line that
+// makes qualityCheck pass. Returns ("", false) if no such position exists.
+func qualityPassOrTrim(report string, qualityCheck func(string) error) (string, bool) {
+	if qualityCheck(report) == nil {
+		return report, true
+	}
+	lines := strings.Split(report, "\n")
+	for i := 1; i < len(lines); i++ {
+		if !strings.HasPrefix(strings.TrimSpace(lines[i]), "#") {
+			continue
+		}
+		candidate := strings.TrimSpace(strings.Join(lines[i:], "\n"))
+		if candidate != "" && qualityCheck(candidate) == nil {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+// runFallbackWithQuality runs nativeFallback and applies qualityCheck (with preamble
+// trimming) to its result. Returns error if the result still fails quality.
+func runFallbackWithQuality(
+	ctx context.Context,
+	agentID string,
+	spec harness.ProcessSpec,
+	sessionID string,
+	fallbackPrompt string,
+	qualityCheck func(string) error,
+	sc StepContext,
+) (string, bool, error) {
+	fbReport, fbUsed, fbErr := nativeFallback(ctx, agentID, spec, sessionID, fallbackPrompt, sc)
+	if fbErr != nil {
+		return "", false, fbErr
+	}
+	if qualityCheck == nil {
+		return fbReport, fbUsed, nil
+	}
+	if out, ok := qualityPassOrTrim(fbReport, qualityCheck); ok {
+		return out, fbUsed, nil
+	}
+	return "", false, fmt.Errorf("native fallback: model output does not meet format requirements after recovery")
+}
+
 // extractWithFallback extracts the agent output via preferReport. If extraction fails
-// or qualityCheck returns an error, it resumes the session via nativeFallback and asks
-// the model to write its plan natively. qualityCheck may be nil — in that case only
-// extraction failure triggers the fallback.
+// or qualityCheck returns an error, it resumes the session via runFallbackWithQuality
+// which applies quality check (with preamble trimming) to the fallback result too.
+// qualityCheck may be nil — in that case only extraction failure triggers the fallback.
 func extractWithFallback(
 	ctx context.Context,
 	agentID string,
@@ -53,23 +98,28 @@ func extractWithFallback(
 	qualityCheck func(string) error,
 	sc StepContext,
 ) (string, bool, error) {
+	canFallback := ctx.Err() == nil && res.SessionID != ""
+
 	report, usedFallback, err := preferReport(sc, agentID, res, true)
 	if err != nil {
-		if ctx.Err() == nil && res.SessionID != "" {
-			return nativeFallback(ctx, agentID, spec, res.SessionID, fallbackPrompt, sc)
+		if canFallback {
+			return runFallbackWithQuality(ctx, agentID, spec, res.SessionID, fallbackPrompt, qualityCheck, sc)
 		}
 		return "", false, err
 	}
+
 	if qualityCheck != nil {
-		if qErr := qualityCheck(report); qErr != nil {
-			sc.Log.Warn("report failed quality check, attempting native fallback",
-				"agent", agentID, "err", qErr)
-			if ctx.Err() == nil && res.SessionID != "" {
-				return nativeFallback(ctx, agentID, spec, res.SessionID, fallbackPrompt, sc)
-			}
-			return "", false, fmt.Errorf("report quality: %w", qErr)
+		if out, ok := qualityPassOrTrim(report, qualityCheck); ok {
+			return out, usedFallback, nil
 		}
+		sc.Log.Warn("report failed quality check, attempting native fallback",
+			"agent", agentID)
+		if canFallback {
+			return runFallbackWithQuality(ctx, agentID, spec, res.SessionID, fallbackPrompt, qualityCheck, sc)
+		}
+		return "", false, fmt.Errorf("report quality: model output does not meet format requirements")
 	}
+
 	return report, usedFallback, nil
 }
 
