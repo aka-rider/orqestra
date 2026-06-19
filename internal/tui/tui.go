@@ -10,7 +10,10 @@ import (
 
 // Run starts the full-screen Bubble Tea TUI.
 func Run(engine *orchestrator.Engine, configName string) error {
-	model := NewModel(engine, configName)
+	model, err := NewModel(engine, configName)
+	if err != nil {
+		return fmt.Errorf("init TUI: %w", err)
+	}
 	p := tea.NewProgram(model)
 
 	defer func() {
@@ -20,6 +23,6 @@ func Run(engine *orchestrator.Engine, configName string) error {
 		}
 	}()
 
-	_, err := p.Run()
-	return err
+	_, runErr := p.Run()
+	return runErr
 }

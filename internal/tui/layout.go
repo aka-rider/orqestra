@@ -17,8 +17,8 @@ const (
 	// and input is the body zone's line terminator, not chrome).
 	constPipelineInputHeight = 2
 
-	// Prompt mode: divider + instruction label + 3-line textarea
-	constPromptInputHeight = 5
+	// Prompt mode: divider + 3-line textarea (instruction is a placeholder inside the input)
+	constPromptInputHeight = 4
 
 	// Run detail lower pane height (raw agent JSONL log)
 	constRunLogHeight = 8

@@ -52,6 +52,9 @@ researcher:
     YOUR OUTPUT must contain ONLY these H2 sections, in this order.
     Any other H2 is a format violation. Any H1 is a format violation.
 
+    ## User Task
+    Copy the user's original task prompt verbatim. Required for report validation.
+
     ## Goal
     One sentence: what changes when this is done.
 

@@ -86,6 +86,9 @@ type Model struct {
 	// Engine
 	engine *orchestrator.Engine
 
+	// Shared rune setup bundle (built once, threaded into prompt/gate sub-models)
+	runeUI runeUI
+
 	// Per-screen sub-models
 	promptScreen      PromptScreen
 	pipelineScreen    PipelineScreen
@@ -108,18 +111,24 @@ type Model struct {
 	contentMode    ContentMode
 }
 
-// NewModel creates the initial TUI model.
-func NewModel(engine *orchestrator.Engine, configName string) Model {
+// NewModel creates the initial TUI model. Returns an error if the rune UI
+// bundle (keymap, textedit commands, keybind resolver) fails to initialise.
+func NewModel(engine *orchestrator.Engine, configName string) (Model, error) {
+	ui, err := newRuneUI()
+	if err != nil {
+		return Model{}, fmt.Errorf("init rune UI: %w", err)
+	}
 	return Model{
 		state:             StatePrompt,
-		promptScreen:      NewPromptScreen(),
-		pipelineScreen:    NewPipelineScreen(configName),
+		promptScreen:      NewPromptScreen(ui),
+		pipelineScreen:    NewPipelineScreen(configName, ui),
 		engine:            engine,
+		runeUI:            ui,
 		runsListScreen:    NewRunsListScreen(),
 		runDetailScreen:   NewRunDetailScreen(),
 		setupScreen:       newSetupModel(),
 		confirmedSetup:    orchestrator.DefaultPipelineSetup(),
-	}
+	}, nil
 }
 
 // Init returns the initial command.
@@ -670,6 +679,8 @@ func (m Model) View() tea.View {
 		v := tea.NewView(viewSetupOverlay(m.setupScreen, m.effectiveWidth(), m.height))
 		v.AltScreen = true
 		v.MouseMode = tea.MouseModeCellMotion
+		v.KeyboardEnhancements.ReportAlternateKeys = true
+		v.KeyboardEnhancements.ReportAllKeysAsEscapeCodes = true
 		return v
 	}
 
@@ -686,6 +697,10 @@ func (m Model) View() tea.View {
 		content = m.runDetailScreen.View(m.effectiveWidth(), m.height)
 	}
 	v := tea.NewView(content)
+	// Keyboard enhancements: enable for all states so Shift+Enter is
+	// distinguishable from plain Enter in the prompt and gate inputs.
+	v.KeyboardEnhancements.ReportAlternateKeys = true
+	v.KeyboardEnhancements.ReportAllKeysAsEscapeCodes = true
 	// Alt-screen states: pipeline, runs list, run detail. StatePrompt is inline.
 	if m.state == StatePipeline || m.state == StateRunsList || m.state == StateRunDetail {
 		v.AltScreen = true
@@ -712,7 +727,7 @@ func (m *Model) recalculateLayout() {
 	switch m.state {
 	case StatePrompt:
 		inputHeight = m.promptScreen.DesiredInputHeight(m.height)
-		m.promptScreen.SetTextareaHeight(inputHeight - 2) // Subtract chrome
+		m.promptScreen.SetTextareaHeight(inputHeight - 1) // Subtract divider chrome
 	case StatePipeline:
 		if m.pipelineScreen.content == ContentUserQuestion && m.pipelineScreen.hasQuestion {
 			// Auto-grow input zone for question options
@@ -779,6 +794,14 @@ func (m *Model) recalculateLayout() {
 		m.promptScreen.SetWidth(max(1, m.width-4))
 		m.promptScreen.width = m.width
 		m.promptScreen.height = m.height
+	}
+
+	// Propagate gate body dimensions to the active chat view (markdownedit).
+	if m.state == StatePipeline &&
+		m.pipelineScreen.content == ContentHumanGate &&
+		m.pipelineScreen.activeChat != nil {
+		bodyH := max(0, m.height-constStatusBarHeight-constPipelineInputHeight-constFooterHeight)
+		m.pipelineScreen.activeChat.SetSize(m.width, bodyH)
 	}
 
 }

@@ -106,17 +106,21 @@ type PipelineScreen struct {
 	transcriptH int
 	streamH     int
 
+	// rune UI bundle — passed to newHumanChatMode for markdownedit construction.
+	ui runeUI
+
 	PendingIntent tea.Msg
 }
 
 // NewPipelineScreen creates a new pipeline screen.
-func NewPipelineScreen(configName string) PipelineScreen {
+func NewPipelineScreen(configName string, ui runeUI) PipelineScreen {
 	ta := textarea.New()
-	ta.Placeholder = "post a message to the agent…"
+	ta.Placeholder = "post to steer the model"
 	ta.SetHeight(1)
 	ta.CharLimit = 4096
 	return PipelineScreen{
 		configName:  configName,
+		ui:          ui,
 		knownAgents: make(map[string]string),
 		transcript:  NewTranscript(transcriptStyles{selectionBg: selectionBg, rule: dividerStyle}),
 		streaming:   newStreamingConsole(80),
@@ -342,7 +346,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 			s.finalPlan = snap.Gate.FinalPlanMarkdown
 			s.hasPlan = snap.Gate.Position.IsPlanGate()
 			s.planFilePath = snap.Gate.PlanFilePath
-			s.activeChat = newHumanChatMode(snap.Gate, width)
+			s.activeChat = newHumanChatMode(snap.Gate, s.ui)
 			s.bottom = gateBottom{chat: s.activeChat}
 		} else {
 			// Plan revised — update without reopening gate.

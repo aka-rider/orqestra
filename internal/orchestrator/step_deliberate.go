@@ -4,11 +4,34 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/harness"
 )
+
+func checkArchitectReport(md string) error {
+	trimmed := strings.TrimSpace(md)
+	if len(trimmed) < 100 {
+		return fmt.Errorf("architect report too short (%d chars)", len(trimmed))
+	}
+	if !strings.HasPrefix(trimmed, "# Plan") {
+		return fmt.Errorf("architect report does not start with '# Plan'")
+	}
+	return nil
+}
+
+func checkCriticReport(md string) error {
+	trimmed := strings.TrimSpace(md)
+	if len(trimmed) < 50 {
+		return fmt.Errorf("critic report too short (%d chars)", len(trimmed))
+	}
+	if !strings.Contains(strings.ToLower(trimmed), "## critic report") {
+		return fmt.Errorf("critic report missing '## Critic Report' section")
+	}
+	return nil
+}
 
 // DeliberateStep runs architect planning followed by critic review and revision.
 // If CriticSpec is zero (no critic configured), only the architect runs.
@@ -24,6 +47,17 @@ type DeliberateStep struct {
 }
 
 func (s *DeliberateStep) ID() AgentID { return "architect" }
+
+const architectFallbackPrompt = "[Orchestrator] Your session has ended. " +
+	"Call SubmitReport with your implementation plan. " +
+	"Required: # Plan → ## Goal, ## Context, ## Constraints, ## Risks, " +
+	"## Work Packages (each with Steps + Done when), ## Verification, " +
+	"## Assumptions, ## Gotchas. Submit what you have."
+
+const criticFallbackPrompt = "[Orchestrator] Your session has ended. " +
+	"Call SubmitReport with your critic report. " +
+	"Required: ## Critic Report → ### Blockers Found (Category, Severity, " +
+	"Evidence, Impact, Suggested fix), ### Verified Claims, ### Summary."
 
 func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepContext) (PlanOutput, error) {
 	// --- Architect initial pass ---
@@ -47,38 +81,39 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 
 	var archRes harness.RunResult
 	var planMarkdown string
-	var err error
+	var archErr error
 
 	for attempt := 1; attempt <= maxArch; attempt++ {
 		sink := SinkFromObserver("architect", sc.Obs)
-		archRes, err = sc.Exec.Run(ctx, archSpec, nil, sink)
-		if err != nil {
+		archRes, archErr = sc.Exec.Run(ctx, archSpec, nil, sink)
+		if archErr != nil {
 			if attempt < maxArch {
-				sc.Log.Warn("architect attempt failed, retrying", "attempt", attempt, "err", err)
+				sc.Log.Warn("architect attempt failed, retrying", "attempt", attempt, "err", archErr)
 				sc.Obs.AgentStarted("architect", s.ArchMeta)
 				continue
 			}
-			sc.Obs.AgentFailed("architect", err)
-			s.writeArchMeta(sc, archRes.SessionID, archStart, "failed", err, harness.TokenUsage{})
-			return PlanOutput{}, fmt.Errorf("architect: %w", err)
+			break
 		}
+		break
+	}
+
+	if archErr != nil {
+		if ctx.Err() == nil && archRes.SessionID != "" {
+			planMarkdown, _, archErr = mcpFallback(ctx, "architect", archSpec, archRes.SessionID, architectFallbackPrompt, sc)
+		}
+	} else {
 		var usedFallback bool
-		planMarkdown, usedFallback, err = preferReport(sc, "architect", archRes, true)
+		planMarkdown, usedFallback, archErr = extractWithFallback(ctx, "architect", archSpec, archRes, architectFallbackPrompt, checkArchitectReport, sc)
 		if usedFallback {
 			sc.Log.Warn("architect: model produced text output instead of writing plan file; "+
 				"model may have disobeyed plan-writing instructions", "session_id", archRes.SessionID)
 		}
-		if err != nil {
-			if attempt < maxArch {
-				sc.Log.Warn("architect plan extraction failed, retrying", "attempt", attempt, "err", err)
-				sc.Obs.AgentStarted("architect", s.ArchMeta)
-				continue
-			}
-			sc.Obs.AgentFailed("architect", err)
-			s.writeArchMeta(sc, archRes.SessionID, archStart, "failed", err, archRes.Usage)
-			return PlanOutput{}, fmt.Errorf("architect: read plan: %w", err)
-		}
-		break
+	}
+
+	if archErr != nil {
+		sc.Obs.AgentFailed("architect", archErr)
+		s.writeArchMeta(sc, archRes.SessionID, archStart, "failed", archErr, archRes.Usage)
+		return PlanOutput{}, fmt.Errorf("architect: %w", archErr)
 	}
 
 	s.writeArchMeta(sc, archRes.SessionID, archStart, "done", nil, archRes.Usage)
@@ -116,37 +151,39 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 
 	var criticRes harness.RunResult
 	var criticMarkdown string
+	var criticErr error
 
 	for attempt := 1; attempt <= maxCritic; attempt++ {
 		sink := SinkFromObserver("critic", sc.Obs)
-		criticRes, err = sc.Exec.Run(ctx, criticSpec, nil, sink)
-		if err != nil {
+		criticRes, criticErr = sc.Exec.Run(ctx, criticSpec, nil, sink)
+		if criticErr != nil {
 			if attempt < maxCritic {
-				sc.Log.Warn("critic attempt failed, retrying", "attempt", attempt, "err", err)
+				sc.Log.Warn("critic attempt failed, retrying", "attempt", attempt, "err", criticErr)
 				sc.Obs.AgentStarted("critic", s.CriticMeta)
 				continue
 			}
-			sc.Obs.AgentFailed("critic", err)
-			s.writeCriticMeta(sc, criticRes.SessionID, criticStart, "failed", err, harness.TokenUsage{})
-			return PlanOutput{}, fmt.Errorf("critic: %w", err)
+			break
 		}
-		var criticFallback bool
-		criticMarkdown, criticFallback, err = preferReport(sc, "critic", criticRes, true)
-		if criticFallback {
+		break
+	}
+
+	if criticErr != nil {
+		if ctx.Err() == nil && criticRes.SessionID != "" {
+			criticMarkdown, _, criticErr = mcpFallback(ctx, "critic", criticSpec, criticRes.SessionID, criticFallbackPrompt, sc)
+		}
+	} else {
+		var usedFallback bool
+		criticMarkdown, usedFallback, criticErr = extractWithFallback(ctx, "critic", criticSpec, criticRes, criticFallbackPrompt, checkCriticReport, sc)
+		if usedFallback {
 			sc.Log.Warn("critic: model produced text output instead of writing plan file; "+
 				"model may have disobeyed plan-writing instructions", "session_id", criticRes.SessionID)
 		}
-		if err != nil {
-			if attempt < maxCritic {
-				sc.Log.Warn("critic plan extraction failed, retrying", "attempt", attempt, "err", err)
-				sc.Obs.AgentStarted("critic", s.CriticMeta)
-				continue
-			}
-			sc.Obs.AgentFailed("critic", err)
-			s.writeCriticMeta(sc, criticRes.SessionID, criticStart, "failed", err, criticRes.Usage)
-			return PlanOutput{}, fmt.Errorf("critic: read report: %w", err)
-		}
-		break
+	}
+
+	if criticErr != nil {
+		sc.Obs.AgentFailed("critic", criticErr)
+		s.writeCriticMeta(sc, criticRes.SessionID, criticStart, "failed", criticErr, criticRes.Usage)
+		return PlanOutput{}, fmt.Errorf("critic: %w", criticErr)
 	}
 
 	sc.Artifacts.WriteBestEffort("critic_report.md", []byte(criticMarkdown))

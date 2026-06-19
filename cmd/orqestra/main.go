@@ -299,26 +299,26 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 func preTimeoutNudgeFor(role string) string {
 	switch role {
 	case "researcher":
-		return "Your time is almost up. Your role is to report facts, not implement. " +
-			"Call mcp__orqestra__SubmitReport NOW with your report. " +
-			"Required sections: ## Goal, ## Codebase Facts, ## Constraints Discovered, ## Gotchas. " +
-			"Include what you have found so far — a partial report is better than no report."
+		return "[Orchestrator] Session deadline in ~60 s. " +
+			"Stop exploring and submit whatever you have gathered. " +
+			"Call SubmitReport with sections: ## Goal, ## Codebase Facts, " +
+			"## Constraints Discovered, ## Gotchas. Partial is fine."
 	case "architect":
-		return "Your time is almost up. " +
-			"Call mcp__orqestra__SubmitReport NOW with your implementation plan. " +
-			"Required format: # Plan → ## Goal, ## Context, ## Constraints, ## Risks, " +
-			"## Work Packages (each with Steps + Done when), ## Verification, ## Assumptions, ## Gotchas. " +
-			"Submit what you have."
+		return "[Orchestrator] Session deadline in ~60 s. " +
+			"Call SubmitReport with your implementation plan. " +
+			"Required: # Plan → ## Goal, ## Context, ## Constraints, ## Risks, " +
+			"## Work Packages (each with Steps + Done when), ## Verification, " +
+			"## Assumptions, ## Gotchas. Submit what you have."
 	case "critic":
-		return "Your time is almost up. " +
-			"Call mcp__orqestra__SubmitReport NOW with your critic report. " +
-			"Required format: ## Critic Report → ### Blockers Found (each with Category, Severity, " +
-			"Evidence, Impact, Suggested fix), ### Verified Claims, ### Summary. " +
-			"Submit findings so far."
+		return "[Orchestrator] Session deadline in ~60 s. " +
+			"Call SubmitReport with your critic report. " +
+			"Required: ## Critic Report → ### Blockers Found (Category, Severity, " +
+			"Evidence, Impact, Suggested fix), ### Verified Claims, ### Summary."
 	case "worker":
-		return "Your time is almost up. Describe what you are doing at this moment and what the " +
-			"next step is. If you are stuck, explain why. Your file changes are already saved in " +
-			"the worktree and will be preserved — do NOT run any cleanup, exit, or discard commands."
+		return "[Orchestrator] Session deadline in ~60 s. " +
+			"Describe what you are doing and what the next step is. " +
+			"If stuck, explain why. Your file changes are already saved — " +
+			"do NOT run cleanup, exit, or discard commands."
 	default:
 		return ""
 	}

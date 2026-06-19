@@ -20,7 +20,10 @@ func testModel() Model {
 	engine := &orchestrator.Engine{
 		Config: testConfig(),
 	}
-	m := NewModel(engine, "test.yaml")
+	m, err := NewModel(engine, "test.yaml")
+	if err != nil {
+		panic("testModel: NewModel: " + err.Error())
+	}
 	m.width = 120
 	m.height = 40
 	m.recalculateLayout()

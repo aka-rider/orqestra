@@ -37,7 +37,7 @@ func TestFileHyperlink_RelativePath(t *testing.T) {
 }
 
 func setupTestPipelineScreen() PipelineScreen {
-	s := NewPipelineScreen("test")
+	s := NewPipelineScreen("test", runeUI{})
 	s.cwd = "/test/dir"
 	sb := orchestrator.NewStreamRing(50)
 	sb.SetAgent("researcher")
@@ -117,7 +117,7 @@ func TestViewCompletion_ShowsAgentSummary(t *testing.T) {
 }
 
 func setupEditConfirmScreen() PipelineScreen {
-	s := NewPipelineScreen("test")
+	s := NewPipelineScreen("test", runeUI{})
 	s.content = ContentEditConfirm
 	s.awaitingPlanDecision = true
 	s.hasPlan = true
@@ -239,7 +239,7 @@ func setupUserQuestionScreen(multi bool) PipelineScreen {
 			{Label: "No", Hint: "because..."},
 		},
 	}
-	s := NewPipelineScreen("test")
+	s := NewPipelineScreen("test", runeUI{})
 	s.content = ContentUserQuestion
 	s.question = newUserQuestion(q, 80)
 	s.hasQuestion = true
