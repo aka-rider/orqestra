@@ -1,5 +1,9 @@
 # Orqestra - TUI Instructions
 
+Routed companion to `.github/copilot-instructions.md` — read it first for the error two-way-door
+and the universal Go rules. This file owns `internal/tui/` (Bubble Tea MVU). TUI errors are
+user-visible truth: store them in model state until rendered; never rely on suppressed stderr.
+
 <tui_architecture>
 
 ## Current TUI Architecture
@@ -9,6 +13,27 @@
 - Screen structs such as `PipelineScreen`, `PromptScreen`, `RunsListScreen`, and `RunDetailScreen` are value-style sub-models. They return updated copies plus `tea.Cmd` values.
 - `messages.go` owns typed cross-screen messages and intents. Intents flow up to the root model; orchestration events flow down through typed messages.
 - Viewport and textarea dimensions are model state. Size, content, focus, scroll position, and bounds updates belong in `Update()` paths, not render paths.
+
+### Pipeline screen — alt-screen managed layout
+
+`StatePipeline` runs in **alt-screen** with `v.AltScreen = true` and `v.MouseMode = tea.MouseModeCellMotion`. No output is sent to native terminal scrollback (`tea.Println` is gone). The layout is divided into three rows:
+
+- **Transcript** (`Transcript` value sub-model, `transcript.go`) — scrollable, mouse-selectable, auto-copying log of completed speech lines and phase-separator rules. Selection uses logical `Pos{line, col}` so it survives re-wrap. OSC 52 clipboard via `tea.SetClipboard`.
+- **Streaming console** (`streamingConsole` value sub-model, `streaming_console.go`) — live tool lines (pending/resolved) and partial speech text with a blink cursor. `RenderFixed(h, w)` always returns exactly `h` rows.
+- **Bottom region** (`bottomMode` interface, `bottom_mode.go`) — sum type with three variants: `streamingBottom` (console during an agent run), `gateBottom` (plan review chat), `questionBottom` (MCP AskUserQuestion).
+
+Mouse hit-testing uses `image.Rectangle` bounds (`regionBounds` struct on `Model`) set by `recalculateLayout()`. Scroll and selection events are routed to `Transcript.handleMouse()` only when the cursor is inside `regions.transcript`.
+
+### Stream promotion pipeline
+
+`PipelineScreen.DrainStreamUpdates()` routes entries from `ObsStore.StreamCh()`:
+- `EntryDelta` → `streamingConsole.AppendDelta` (partial speech line in console)
+- `EntryText` → `streamingConsole.CompletePartial` + `transcript.Append(newTextLine)` (promote to scrollback-free transcript)
+- `EntryToolUse` → `streamingConsole.AddPendingTool`
+- `EntryToolResult` → `streamingConsole.ResolveLastTool`
+- `EntryStats` → `StreamRing` accounting
+
+Phase transitions (`ApplySnapshot` detecting a new agent ID) flush any partial console text to transcript, emit a separator rule (`newRuleLine`), call `streamingConsole.ClearForAgent()`, and set the appropriate `bottomMode`.
 
 </tui_architecture>
 
@@ -23,7 +48,7 @@ These are current or recurring weak spots. Do not spread them; fix in scope when
 - `Model.View()` currently copies `ctrlCPending` into the pipeline screen before rendering. Do not add more render-time assignments. Prefer deriving render-only props locally or updating screen state in `Update()`.
 - Run detail log loading parses files synchronously when step selection changes. Future work should use async commands and typed completion messages.
 - Root-level `ctrl+c`, navigation, and gate decisions are delicate. Nested screens may emit intents, but the root model owns global exits and orchestration-side effects.
-- `PipelineScreen` (`screen_pipeline.go`) is the canonical mode-state-flattening offender (see `<state_modeling>`): ~50 fields across 9 content modes, redundant boolean flags, a 40-line `Reset()`, a partial `screen_pipeline_keys.go` split, and a legacy render path duplicating the frame renderer. Do not extend it. When you touch a mode, decompose that mode into its own sub-model rather than adding a field/flag/switch-arm.
+- `PipelineScreen` (`screen_pipeline.go`) still carries `ContentMode` (flat enum) alongside the newer `bottomMode` sum type — they coexist during the transition. Key routing still dispatches on `ContentMode`; only `View()` uses `bottomMode`. When touching a content mode, migrate that mode to a `bottomMode` variant and remove its `ContentMode` arm; do not add new `ContentMode` values.
 
 </known_pressure_points>
 
@@ -79,6 +104,83 @@ A screen with multiple mutually-exclusive modes is a sum type. Model it as one a
 - Timer ticks may refresh elapsed time and live stream output, but they must not reset user scroll or rebuild expensive content unless the underlying data changed.
 
 </async_commands>
+
+<tui_debugging>
+
+## Debugging the TUI with ttyd + Playwright MCP
+
+When you need to visually observe or interact with the TUI — to verify a layout fix, test a key-binding, or reproduce a rendering bug — use `ttyd` to expose the running terminal in a browser and drive it with the Playwright MCP tools.
+
+### Prerequisites
+
+- `ttyd` is installed: `brew install ttyd` (already present in this dev environment).
+- Playwright MCP is active in Claude Code: if the `browser_*` tools are not available, add it with `mcp__MCP_DOCKER__mcp-add` (`name: "playwright"`).
+
+### Workflow
+
+**1. Build and start the TUI under ttyd**
+
+```sh
+make build
+ttyd -p 7681 ./orqestra
+# or with a config:
+ttyd -p 7681 ./orqestra --config orqestra.yaml
+```
+
+ttyd serves the terminal at `http://localhost:7681` via xterm.js. The process inherits your environment, so real Claude CLI credentials and config are available.
+
+**2. Open the terminal in the browser**
+
+```
+browser_navigate  { url: "http://localhost:7681" }
+browser_resize    { width: 1400, height: 900 }   # wide enough for Orqestra's layout
+```
+
+Set the viewport *before* taking any screenshot so terminal dimensions are stable. Orqestra's layout recalculates on every `tea.WindowSizeMsg`; a narrow viewport triggers the small-screen fallback.
+
+**3. Focus the terminal and observe**
+
+```
+browser_click          { target: "terminal" }     # focus xterm.js so key events land
+browser_take_screenshot { type: "png" }           # see current TUI state
+```
+
+xterm.js renders to a `<canvas>` by default. `browser_take_screenshot` is the primary observation tool; `browser_snapshot` returns the DOM accessibility tree, which is sparse for canvas-rendered terminals.
+
+**4. Send keystrokes**
+
+```
+browser_press_key { key: "ArrowDown" }
+browser_press_key { key: "ArrowUp" }
+browser_press_key { key: "Enter" }
+browser_press_key { key: "Escape" }
+browser_press_key { key: "Control+c" }
+browser_press_key { key: "Control+p" }    # ^P → pipeline setup panel
+```
+
+Key names follow the `KeyboardEvent.key` spec. Modifier combos use `+`: `"Control+c"`, `"Control+p"`, `"Shift+Tab"`.
+
+**5. Wait for state changes**
+
+```
+browser_wait_for { text: "Deliberation" }         # wait for a screen element to appear
+browser_wait_for { textGone: "Submitting" }       # wait for transient state to clear
+browser_wait_for { time: 0.5 }                    # fixed delay when text isn't stable
+```
+
+**6. Teardown**
+
+Kill the ttyd process with `Ctrl+C` where it was launched, or send `Control+c` via Playwright and call `browser_close`.
+
+### Tips
+
+- **Terminal size matters**: `Model.recalculateLayout()` fires on every `tea.WindowSizeMsg`. Use `browser_resize` to reproduce specific terminal sizes — `1400×900` ≈ 240×50 cols/rows at xterm.js defaults.
+- **Screenshot after every interaction**: xterm.js redraws asynchronously. Add `browser_wait_for { time: 0.3 }` before screenshots when the frame hasn't settled.
+- **Alt-screen mode hides stderr**: TUI stderr is suppressed. Check `.orqestra/sessions/<run>/` artifacts and `~/.claude/projects/` JSONL logs for model-side errors that won't appear in the screenshot.
+- **Editor and gate flows**: when the TUI opens `$EDITOR`, it suspends alt-screen and the browser goes blank. Bypass editor flows with `--auto-approve` or pre-approved configs.
+- **Port conflict**: if 7681 is taken, pick another port: `ttyd -p 7682 …` and adjust the `browser_navigate` URL.
+
+</tui_debugging>
 
 <testing_enforcement>
 

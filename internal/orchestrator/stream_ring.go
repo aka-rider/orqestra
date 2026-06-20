@@ -20,10 +20,11 @@ const maxActivities = 20
 type StreamEntryKind int
 
 const (
-	EntryText    StreamEntryKind = iota // completed text line
-	EntryDelta                          // partial text delta (content_block_delta)
-	EntryToolUse                        // tool invocation
-	EntryStats                          // token usage snapshot
+	EntryText       StreamEntryKind = iota // completed text line
+	EntryDelta                             // partial text delta (content_block_delta)
+	EntryToolUse                           // tool invocation
+	EntryStats                             // token usage snapshot
+	EntryToolResult                        // tool result (carries ToolErr)
 )
 
 // EntryStats carries token usage at a point in time.
@@ -37,11 +38,12 @@ type StreamStats struct {
 // StreamEntry is the unified entry type for the StreamRing.
 // Pure value type — no pointers, no aliasing across goroutines.
 type StreamEntry struct {
-	Kind   StreamEntryKind
-	Text   string      // EntryText: completed line content
-	Tool   string      // EntryToolUse: tool name
-	Detail string      // EntryToolUse: human-readable detail
-	Stats  StreamStats // EntryStats: token snapshot
+	Kind    StreamEntryKind
+	Text    string      // EntryText: completed line content
+	Tool    string      // EntryToolUse: tool name
+	Detail  string      // EntryToolUse: human-readable detail
+	Stats   StreamStats // EntryStats: token snapshot
+	ToolErr bool        // EntryToolResult: true when the tool returned is_error
 }
 
 const defaultRingCapacity = 200
@@ -271,10 +273,12 @@ func looksLikeStreamEventFrame(line string) (string, bool) {
 // AppendText handles raw text from io.Writer, accumulating partial lines and
 // emitting EntryText on newline boundaries. Completed lines that decode as
 // known Claude CLI stream-json event frames are dropped.
-func (r *StreamRing) AppendText(text string) {
+// Returns the lines completed by this call (already stored in entries).
+func (r *StreamRing) AppendText(text string) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	var lines []string
 	for len(text) > 0 {
 		nlIdx := strings.IndexByte(text, '\n')
 		if nlIdx == -1 {
@@ -291,6 +295,7 @@ func (r *StreamRing) AppendText(text string) {
 			slog.Warn("stream ring: dropping raw stream-event frame", "type", t, "len", len(completed))
 		} else if completed != "" {
 			r.entries = append(r.entries, StreamEntry{Kind: EntryText, Text: completed})
+			lines = append(lines, completed)
 		}
 
 		text = text[nlIdx+1:]
@@ -299,6 +304,7 @@ func (r *StreamRing) AppendText(text string) {
 	if len(r.entries) > r.maxEntries {
 		r.entries = r.entries[len(r.entries)-r.maxEntries:]
 	}
+	return lines
 }
 
 // AppendActivity adds a tool-use entry. Maintains the same capped behavior
@@ -318,6 +324,14 @@ func (r *StreamRing) AppendDelta(text string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.partial += text
+}
+
+// CurrentPartial returns the current in-progress (not yet newline-terminated) text.
+// Safe for concurrent reads from the TUI tick.
+func (r *StreamRing) CurrentPartial() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.partial
 }
 
 // FlushPartial promotes the current partial buffer to a completed EntryText.

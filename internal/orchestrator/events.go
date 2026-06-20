@@ -1,63 +1,24 @@
 package orchestrator
 
-import "github.com/xiii/orqestra/internal/mcp"
-
-// EventType classifies orchestrator events emitted to the TUI.
-type EventType int
-
-const (
-	EventPhaseChange EventType = iota
-	EventAgentStarted
-	EventAgentDone
-	EventAgentFailed
-	EventAgentCancelled
-	EventAgentOutput
-	EventPlanReady
-	EventGateRequest
-	EventComplete
-	EventError
-	EventRunDirReady   // emitted once after session dir is created
-	EventChatResponse  // emitted when architect answers without revising the plan
-	EventUserQuestion  // emitted when an agent asks the user a question via MCP
-	EventMergeConflict // emitted when the post-run merge has conflicts
-	EventMergeError    // emitted when the post-run merge fails (dirty repo, permissions, etc.)
-)
-
 // Phase represents the current pipeline phase.
 type Phase string
 
 const (
 	PhaseResearching    Phase = "researching"
 	PhasePlanning       Phase = "planning"
+	PhaseDeliberating   Phase = "deliberating"
 	PhaseCritiquing     Phase = "critiquing"
 	PhaseExecuting      Phase = "executing"
 	PhaseSelfValidating Phase = "self-validating"
 	PhaseDone           Phase = "done"
 )
 
-// GateType identifies which interactive gate the pipeline is waiting at.
-type GateType int
-
-const (
-	GatePlanApproval GateType = iota
-)
-
 // GateRequest is emitted when the pipeline needs user input.
 type GateRequest struct {
-	Type              GateType
-	FinalPlanMarkdown string // for GatePlanApproval
-	PlanFilePath      string // absolute path to plan.md on disk (for external editor)
-	PlanDiff          string // unified diff from git micro-repo (empty if no history)
+	Position          HumanGatePosition
+	FinalPlanMarkdown string
+	PlanFilePath      string
 	PlanWarnings      []string
-	CriticReport      string // critic's review report, shown alongside the plan at gate
-
-	// PlanHistoryDir is the absolute path to the plan-history/ git micro-repo
-	// for this run, empty when no plan repo was created. Used by the TUI plan
-	// history viewer (Ctrl+Y) to browse and revert plan revisions.
-	PlanHistoryDir string
-	// PlanHistoryHeadSHA is the SHA of the current HEAD of plan-history. Empty
-	// when planRepo was nil or rev-parse failed.
-	PlanHistoryHeadSHA string
 }
 
 // DecisionType classifies user decisions at gates.
@@ -72,66 +33,21 @@ const (
 	DecisionMergeAbort // abort the post-run merge, keep the worktree branch
 )
 
-// MergeConflictInfo is carried by EventMergeConflict.
+// MergeConflictInfo carries merge conflict details for the TUI.
 type MergeConflictInfo struct {
-	WorktreeBranch string   // branch that was merged (for display)
-	WorktreePath   string   // preserved worktree path for manual resolution
-	TargetBranch   string   // branch that received the merge
-	ConflictFiles  []string // list of conflicting files
+	WorktreeBranch string
+	WorktreePath   string
+	TargetBranch   string
+	ConflictFiles  []string
 }
 
 // Decision is sent from TUI to pipeline at gates.
 type Decision struct {
 	Type          DecisionType
 	EditedContent string
-	Comment       string // for DecisionComment
-	// AutoApprove, when true on a DecisionEdit, instructs the gate loop
-	// to treat the edit as a final approval (no re-show, no architect
-	// re-engagement). Set by the TUI only after the user has explicitly
-	// confirmed the edited content (^E -> save -> Yes). The revert path
-	// (plan-history Ctrl+Y) leaves this false so the user must re-review.
-	// If Comment is non-empty, architect re-engagement takes precedence
-	// and AutoApprove is ignored (user asked for another review).
+	Comment       string
+	// AutoApprove treats a DecisionEdit as final approval — no re-show, no architect
+	// re-engagement. Set only after user explicitly confirms edited content (^E → save → Yes).
+	// Ignored when Comment is non-empty (architect re-engagement takes precedence).
 	AutoApprove bool
-}
-
-// Event is emitted by the orchestrator to notify the TUI of progress.
-type Event struct {
-	Type        EventType
-	Phase       Phase
-	AgentID     string
-	Gate        GateRequest
-	WorkOutput  string
-	OutputChunk string
-	Err         error
-
-	// New pipeline fields
-	ResearchDraft    string
-	FinalPlan        string
-	WorkerValidation string
-	Status           RunStatus // set on EventComplete
-	RunDir           string    // set on EventComplete
-
-	// Token usage from the agent's streaming events. Set on EventAgentDone.
-	InputTokens  int64
-	OutputTokens int64
-
-	// Meta carries model metadata for the agent. Set on EventAgentStarted.
-	Meta AgentMeta
-
-	// ChatText is set on EventChatResponse — architect answered without revising the plan.
-	ChatText string
-
-	// UserQuestion is set on EventUserQuestion.
-	UserQuestion mcp.ToolCall
-
-	// MergeConflict is set on EventMergeConflict.
-	MergeConflict MergeConflictInfo
-
-	// MergeError is set on EventMergeError — the error message from the failed merge.
-	MergeError string
-	// MergeBranch is set on EventMergeError — the branch containing committed work.
-	MergeBranch string
-	// MergeWorktreePath is set on merge error/conflict events when manual recovery artifacts are preserved.
-	MergeWorktreePath string
 }

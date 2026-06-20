@@ -337,6 +337,45 @@ func TestStreamRing_AppendDelta_FlushesOnAgentSwitch(t *testing.T) {
 	}
 }
 
+func TestStreamRing_CurrentPartial(t *testing.T) {
+	r := NewStreamRing(100)
+	r.SetAgent("test")
+
+	if got := r.CurrentPartial(); got != "" {
+		t.Errorf("CurrentPartial before any delta = %q, want empty", got)
+	}
+
+	r.AppendDelta("hel")
+	r.AppendDelta("lo")
+	if got := r.CurrentPartial(); got != "hello" {
+		t.Errorf("CurrentPartial = %q, want %q", got, "hello")
+	}
+
+	r.FlushPartial()
+	if got := r.CurrentPartial(); got != "" {
+		t.Errorf("CurrentPartial after flush = %q, want empty", got)
+	}
+}
+
+func TestStreamRing_EntryToolResult(t *testing.T) {
+	r := NewStreamRing(100)
+	r.SetAgent("test")
+
+	r.Append(StreamEntry{Kind: EntryToolResult, ToolErr: true})
+	r.Append(StreamEntry{Kind: EntryToolResult, ToolErr: false})
+
+	_, entries := r.Snapshot()
+	if len(entries) != 2 {
+		t.Fatalf("len(entries) = %d, want 2", len(entries))
+	}
+	if entries[0].Kind != EntryToolResult || !entries[0].ToolErr {
+		t.Errorf("entries[0] = %+v, want EntryToolResult{ToolErr:true}", entries[0])
+	}
+	if entries[1].Kind != EntryToolResult || entries[1].ToolErr {
+		t.Errorf("entries[1] = %+v, want EntryToolResult{ToolErr:false}", entries[1])
+	}
+}
+
 func TestStreamRing_AppendText_SplitsOnNewline(t *testing.T) {
 	r := NewStreamRing(100)
 	r.SetAgent("test")

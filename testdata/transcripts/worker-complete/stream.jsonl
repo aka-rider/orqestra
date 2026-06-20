@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"redacted","cwd":"redacted","model":"claude-sonnet-4-6","tools":["Read","Write","Bash"]}
+{"type":"assistant","message":{"id":"redacted","content":[{"type":"text","text":"OK"}]}}
+{"type":"assistant","message":{"id":"redacted","content":[{"type":"tool_use","id":"redacted","name":"Read","input":{"file_path":"/repo/main.go"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"redacted","content":"file contents"}]}}
+{"type":"result","subtype":"success","session_id":"redacted","uuid":"redacted","result":"## Summary\nDone.\n","usage":{"input_tokens":120,"output_tokens":12}}

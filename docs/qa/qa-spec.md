@@ -137,18 +137,20 @@ Keystone invariants only — one or two per pillar, not exhaustive. Format: stat
 
 ## 4. Confirmed defects (the falsification targets)
 
-These are personally verified and exist to prove the gates are real: each gate above must go **red** against current `flexible-pipeline` before any fix. Fixes are out of scope for this spec.
+Each defect was verified red-first; the red→green transition is how a gate proves it is real. Status below is reconciled against `flexible-pipeline` (which fixed several) and is machine-checked: anchors and canaries live in `invariants.yaml`, so this table cannot drift silently from reality. Anchors are **symbols** (per §11 — line numbers rot).
 
-| ID | Pillar | Defect | Evidence |
-|----|--------|--------|----------|
-| **DEFECT-01** | P1/P3 | Sandboxed runner never closes its event channel (and `SetEvents`/`Receive` split-brain); since every runner is now sandboxed, the main flow **hangs** after Claude exits. | `[V runner.go:348-351]` `[V claude_cli.go:341-348,445]` `[V planner.go:57,110]` |
-| **DEFECT-02** | P3 | Validation that errored or produced no `✕` marker parses to `VerdictPass` → run reported `StatusSuccess` with no evidence of a passing build. | `[V validation.go:80,48]` `[V engine.go:1330,1393,1439-1442]` |
-| **DEFECT-03** | P2/P3 | `worktree.Create` failure (or missing factory/branch) silently falls back to a writable-repo worker, emitting only a `slog.Warn` (suppressed in TUI) — isolation degraded invisibly. | `[V engine.go:1242-1251]` (+ doc `engine.go:100-101`) |
-| **DEFECT-04** | P3 | Worktree commit failure skips the merge but leaves `status = StatusSuccess`. | `[V engine.go:1448-1455,1439]` |
-| **DEFECT-05** | P1 | `SessionID` is never assigned and `EventSessionStart` is never emitted, so `SessionID()` is always `""` and `planner.go`'s session-id branch never fires → plan extraction and validation continuation break. (INV-H2-SESSIONID) | `[V claude_cli.go:271/296/360]` `[V planner.go:67]` (no emit sites) |
-| **DEFECT-06** | P5 | The sandboxed runner hardcoded `"claude"`, silently ignoring the documented `binary` config knob — the only runner path. **Fixed** in this increment (honors `r.cli.binary`, empty→`"claude"`) to enable the replay seam. | `[V runner.go sandboxedRunner.init]` |
+| ID | Pillar | Defect | Status | Anchor |
+|----|--------|--------|--------|--------|
+| DEFECT-01 | P1/P3 | Sandboxed runner never closed its event channel (+ `SetEvents`/`Receive` split-brain) → main flow hangs after Claude exits. | **fixed** — harness refactor; `harness.Run` returns exactly once. Gate `TestHarnessRun_TerminatesWhenProcessExits` (INV-H1-CLOSE) now green. | `harness/exec.go: Run` |
+| DEFECT-02 | P3 | Validation that errored or produced no `✕` marker parses to `VerdictPass` → `StatusSuccess` with no passing evidence. | **live** — canary `TestCanary_DEFECT02_*` reproduces. | `agent/validation.go: ParseValidationOutput`; `orchestrator/step_validate.go` |
+| DEFECT-03 | P2/P3 | `worktree.Create` failure silently falls back to the direct repo, only a `slog.Warn`, no event — isolation degraded invisibly. | **live** — `step_execute.go` "falling back to direct repo". | `orchestrator/step_execute.go: WorktreeSpecFn` |
+| DEFECT-04 | P3 | Worktree commit failure skips the merge but leaves `StatusSuccess`. | **live** (re-verify post-refactor). | `orchestrator/step_merge.go` |
+| DEFECT-05 | P1 | `SessionID` never set / `EventSessionStart` never emitted → plan extraction + validation continuation break. | **fixed** — `parseStreamLines` emits `EventSessionStart`. Gate (INV-H2-SESSIONID) now green. | `harness/stream_event.go: EventSessionStart` |
+| DEFECT-06 | P5 | Sandboxed runner hardcoded `"claude"`, ignoring the `binary` config knob. | **fixed** — `harness.Run` honors `spec.Binary` (refactor superseded the interim one-line fix). | `harness/exec.go: Run` |
 
-**Why the suite stays green:** `harness/claude_cli_test.go` (22 funcs) tests only `buildEnv`/args; TUI tests wire `noopRunner` whose `Receive()` returns `nil` `[V app_test.go:24-26]` — so nothing drives `Post→Receive→close`, and no test maps a real validation/merge outcome to a run status.
+**What this proves (the spec-vs-code test):** the gates are anchored to the **spec**, not the code. When `flexible-pipeline` refactored the harness severely and fixed the bugs, the contract gate `TestHarnessRun_TerminatesWhenProcessExits` flipped **red→green** by adapting only its plumbing (`Receive()` → `harness.Run`) — its assertion (no hang, session id captured) unchanged; the DEFECT-01/05 canaries correctly stopped reproducing and were retired; `qaverify`'s anchor check named every moved symbol so the registry could be re-pointed. DEFECT-02/03 survived the refactor and remain flagged. Nothing in the QA layer was "tested against the code" — it tracked the invariants, and the invariants held.
+
+> Note: prose `[V file:line]` tags in §1–§3 are from the original pre-refactor grounding pass and may be stale. The **authoritative, machine-checked** anchors are the symbols in `invariants.yaml` (validated by `make qa-verify`); §1–§3 line numbers are slated for migration to symbol form.
 
 ## 5. Layered seam architecture
 
@@ -181,14 +183,14 @@ Review blockers on any PR touching `*_test.go` — enforced by the `orqestra-cri
 - **Two schemas, two sources** (a real distinction `[V]`):
   - **stdout `stream-json`** — carries `result` with `session_id`/`usage`/`planFilePath`; drives `parseStream` `[V claude_cli.go:620-661]`. Needs one captured run; seed exists at `internal/harness/testdata/worker_stream_sample.jsonl` `[V]`.
   - **project JSONL conversation log** + `~/.claude/plans/*.md` — carries the `plan_mode` attachment (`attachment.planFilePath`) that drives plan extraction `[2]`; seed directly from existing logs, no live run.
-- **Replay executable** — `cmd/replayclaude` (**delivered**): a recording *player* (writes a committed real recording to stdout, ignores argv), driven through the real `sandboxedRunner`/`ClaudeCLI` via the `binary` knob (DEFECT-06 fix). First consumer: the H1 gate (§8) replays `worker_stream_sample.jsonl` through real seatbelt. Generalizes to the L2 app-level replay.
+- **Replay executable** — `cmd/replayclaude` (**delivered**): a recording *player* (writes a committed real recording to stdout, ignores argv), driven through the real `harness.Run` via `spec.Binary` (honored by `harness.Run`). First consumer: the H1 gate (§8) replays `worker_stream_sample.jsonl` through real seatbelt. Generalizes to the L2 app-level replay.
 - Real **failure** fixtures (validator error, marker-less output, merge conflict, oversized line) are first-class — they are how INV-P3/P4 go red. Secrets redacted; committed under `testdata/transcripts/`.
 
 ## 8. Proposed red gates (app + package — not exhaustive)
 
 App-level (L2/L3): **A1** INV-P1-EXEC (prompt == plan) · **A2** INV-O1-FLOW (auto-approve reaches EventComplete) · **A3** INV-P3-VALID/DEGRADE (injected FAIL/conflict ⇒ non-success exit + artifacts).
 
-Package-level keystones: **H1** INV-H1-CLOSE *(**landed** — `TestHarnessRunner_ReceiveClosesOnExit`, red-first demonstrated; canary `TestCanary_DEFECT01_*` live in qaverify)* · **V1** INV-P3-VALID *(red — DEFECT-02)* · **W1** INV-P3-DEGRADE *(red — DEFECT-03/04)* · **S1** INV-P2-WRITE *(covered; formalize)* · **C1** INV-P5-FAILCLOSED *(partial; extend)* · **PX1** INV-P4-PARSE/STREAM *(gap)* · **PL1** INV-P1-PLANSRC *(covered; extend)*.
+Package-level keystones: **H1** INV-H1-CLOSE + **H2** INV-H2-SESSIONID *(**covered, green** — `TestHarnessRun_TerminatesWhenProcessExits`; was red pre-fix, passes post-fix; DEFECT-01/05 canaries retired)* · **V1** INV-P3-VALID *(defect — DEFECT-02, canary live)* · **W1** INV-P3-DEGRADE *(defect — DEFECT-03/04)* · **S1** INV-P2-WRITE *(covered; formalize)* · **C1** INV-P5-FAILCLOSED *(partial; extend)* · **PX1** INV-P4-PARSE/STREAM *(gap)* · **PL1** INV-P1-PLANSRC *(covered; extend)*.
 
 ## 9. Coverage ledger (by invariant, never by line %)
 
@@ -198,8 +200,8 @@ The status column is **generated** from `docs/qa/invariants.yaml` by `make qa-ve
 
 | Invariant | Pillar | Layer | Status |
 |-----------|--------|-------|--------|
-| INV-H1-CLOSE | P1 | L1 | defect |
-| INV-H2-SESSIONID | P1 | L1 | defect |
+| INV-H1-CLOSE | P1 | L1 | covered |
+| INV-H2-SESSIONID | P1 | L1 | covered |
 | INV-O1-FLOW | P6 | L2 | gap |
 | INV-P1-EXEC | P1 | L2 | gap |
 | INV-P1-PLANSRC | P1 | L0 | covered |

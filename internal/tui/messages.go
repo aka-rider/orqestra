@@ -5,13 +5,9 @@ import (
 
 	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
-	"github.com/xiii/orqestra/internal/plan"
 )
 
 // --- TUI Messages (tea.Msg types) ---
-
-// OrchestratorEventMsg wraps an orchestrator event for the TUI.
-type OrchestratorEventMsg struct{ Event orchestrator.Event }
 
 // tickMsg fires every second to refresh elapsed timers and live output.
 type tickMsg time.Time
@@ -48,6 +44,13 @@ func (CancelPipelineIntent) isIntent() {}
 
 // ApprovePlanIntent approves the current plan to proceed with execution.
 type ApprovePlanIntent struct{}
+
+// ConfirmSetupIntent confirms the pipeline setup from the setup panel.
+type ConfirmSetupIntent struct {
+	Setup orchestrator.PipelineSetup
+}
+
+func (ConfirmSetupIntent) isIntent() {}
 
 func (ApprovePlanIntent) isIntent() {}
 
@@ -94,11 +97,6 @@ type NavigateBackIntent struct{}
 
 func (NavigateBackIntent) isIntent() {}
 
-// ToggleDashboardIntent toggles the dashboard panel visibility.
-type ToggleDashboardIntent struct{}
-
-func (ToggleDashboardIntent) isIntent() {}
-
 // OpenExternalEditorIntent opens a file in the user's external editor.
 type OpenExternalEditorIntent struct {
 	FilePath string
@@ -118,11 +116,6 @@ type SubmitQuestionAnswerIntent struct {
 
 func (SubmitQuestionAnswerIntent) isIntent() {}
 
-// AbortMergeIntent aborts the post-run merge (user chose not to resolve conflicts).
-type AbortMergeIntent struct{}
-
-func (AbortMergeIntent) isIntent() {}
-
 // ConfirmEditIntent confirms a user's manual plan edit with an optional comment.
 type ConfirmEditIntent struct {
 	EditedContent string
@@ -135,56 +128,25 @@ func (ConfirmEditIntent) isIntent() {}
 // ctrlCTimeoutMsg resets the Ctrl+C pending-quit state after the time gate expires.
 type ctrlCTimeoutMsg struct{}
 
-// OpenPlanHistoryIntent requests opening the plan-history viewer (Ctrl+Y).
-// ReadOnly is true when invoked from a historical Run Detail screen — the
-// viewer hides the revert hint and ignores the `r` key. HeadSHA may be empty
-// at the read-only entry point; the loader will resolve and return it via
-// planRevisionsLoadedMsg.HeadSHA.
-type OpenPlanHistoryIntent struct {
-	HistoryDir string
-	HeadSHA    string
-	ReadOnly   bool
-}
-
-func (OpenPlanHistoryIntent) isIntent() {}
-
-// ClosePlanHistoryIntent dismisses the plan-history viewer.
-type ClosePlanHistoryIntent struct{}
-
-func (ClosePlanHistoryIntent) isIntent() {}
-
-// RevertPlanIntent reverts the live plan to a historical revision via a
-// forward DecisionEdit with empty Comment (non-destructive — the orchestrator
-// skips architect re-engagement when Comment is empty).
-type RevertPlanIntent struct {
-	Content  string
-	ShortSHA string
-}
-
-func (RevertPlanIntent) isIntent() {}
-
 // RestartRunIntent requests restarting a failed or incomplete historical run.
 type RestartRunIntent struct {
-	RunPath           string
-	FirstMissingAgent string
+	RunPath string
+	Phase   orchestrator.RestartPhase
 }
 
 func (RestartRunIntent) isIntent() {}
 
-// planRevisionsLoadedMsg carries the revision list and resolved HEAD SHA
-// returned by loadPlanRevisions.
-type planRevisionsLoadedMsg struct {
-	HistoryDir string
-	HeadSHA    string
-	Revisions  []plan.Revision
-	Err        error
+// ToggleSetupIntent opens or closes the pipeline setup overlay.
+type ToggleSetupIntent struct{}
+
+func (ToggleSetupIntent) isIntent() {}
+
+// PostMessageIntent sends a freeform text message to the active running agent
+// via ctrl.Input. Used for mid-run steering without blocking the pipeline.
+type PostMessageIntent struct {
+	AgentID string
+	Text    string
 }
 
-// planRevisionDetailLoadedMsg carries the full content and HEAD-vs-selected
-// diff for a single revision.
-type planRevisionDetailLoadedMsg struct {
-	SHA     string
-	Content string
-	Diff    string
-	Err     error
-}
+func (PostMessageIntent) isIntent() {}
+

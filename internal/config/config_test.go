@@ -35,8 +35,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Critic.SystemPrompt == "" {
 		t.Error("critic system prompt should be set from embedded pipeline.yaml")
 	}
-	if cfg.Critic.PermissionMode != "plan" {
-		t.Errorf("critic permission_mode = %q, want %q", cfg.Critic.PermissionMode, "plan")
+	if cfg.Critic.PermissionMode != "default" {
+		t.Errorf("critic permission_mode = %q, want %q", cfg.Critic.PermissionMode, "default")
 	}
 }
 
@@ -532,44 +532,6 @@ func TestResolveUtilityModel(t *testing.T) {
 	}
 }
 
-func TestLoad_ValidationAtLoadTime_InvalidGraphModelRef(t *testing.T) {
-	content := `
-providers:
-  local:
-    base_url: http://localhost
-    type: openai
-models:
-  medium:
-    provider: local
-    model: big
-  small:
-    provider: local
-    model: small
-researcher:
-  model: medium
-architect:
-  model: medium
-worker:
-  model: medium
-execution_graph:
-  agents:
-    - id: implement
-      role: implementer
-      model_ref: missing
-`
-	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.WriteString(content)
-	f.Close()
-
-	_, err = Load(f.Name())
-	if err == nil {
-		t.Fatal("expected validation error for missing graph model_ref")
-	}
-}
-
 func TestParseTokenLimit(t *testing.T) {
 	tests := []struct {
 		input   string
@@ -809,7 +771,7 @@ worker:
 	}
 }
 
-func TestLoad_SandboxPerAgentOverride(t *testing.T) {
+func TestLoad_SandboxGlobalConfig(t *testing.T) {
 	yaml := `
 providers:
   test:
@@ -835,15 +797,6 @@ sandbox:
   max_lifetime: 1h
   allow_exec:
     - /opt/homebrew/bin
-execution_graph:
-  agents:
-    - id: worker-1
-      role: worker
-      model_ref: medium
-      sandbox:
-        max_lifetime: 30m
-        allow_write:
-          - /tmp/worker-cache
 `
 	f := filepath.Join(t.TempDir(), "cfg.yaml")
 	os.WriteFile(f, []byte(yaml), 0644)
@@ -856,19 +809,8 @@ execution_graph:
 	if cfg.Sandbox.MaxLifetime.Duration != 1*time.Hour {
 		t.Errorf("global max_lifetime = %v, want 1h", cfg.Sandbox.MaxLifetime.Duration)
 	}
-
-	if len(cfg.ExecutionGraph.Agents) == 0 {
-		t.Fatal("expected at least one agent in execution_graph")
-	}
-	agent := cfg.ExecutionGraph.Agents[0]
-	if agent.Sandbox == nil {
-		t.Fatal("agent sandbox override is nil")
-	}
-	if agent.Sandbox.MaxLifetime.Duration != 30*time.Minute {
-		t.Errorf("agent max_lifetime = %v, want 30m", agent.Sandbox.MaxLifetime.Duration)
-	}
-	if len(agent.Sandbox.AllowWrite) != 1 || agent.Sandbox.AllowWrite[0] != "/tmp/worker-cache" {
-		t.Errorf("agent allow_write = %v, want [/tmp/worker-cache]", agent.Sandbox.AllowWrite)
+	if len(cfg.Sandbox.AllowExec) != 1 || cfg.Sandbox.AllowExec[0] != "/opt/homebrew/bin" {
+		t.Errorf("allow_exec = %v, want [/opt/homebrew/bin]", cfg.Sandbox.AllowExec)
 	}
 }
 
@@ -1086,6 +1028,44 @@ func TestValidate_ProviderType(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoopGuardDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+
+	for _, tc := range []struct {
+		role   string
+		lg     LoopGuard
+		mt     int
+		wantMT int
+		to     time.Duration
+	}{
+		{"researcher", cfg.Researcher.LoopGuard, cfg.Researcher.MaxTurns, 40, cfg.Researcher.Timeout.Duration},
+		{"architect", cfg.Architect.LoopGuard, cfg.Architect.MaxTurns, 40, cfg.Architect.Timeout.Duration},
+		{"critic", cfg.Critic.LoopGuard, cfg.Critic.MaxTurns, 15, cfg.Critic.Timeout.Duration},
+	} {
+		if tc.lg.RepeatThreshold != 3 {
+			t.Errorf("%s.LoopGuard.RepeatThreshold = %d, want 3", tc.role, tc.lg.RepeatThreshold)
+		}
+		if tc.lg.MaxNudges != 3 {
+			t.Errorf("%s.LoopGuard.MaxNudges = %d, want 3", tc.role, tc.lg.MaxNudges)
+		}
+		if tc.lg.CooldownTurns != 2 {
+			t.Errorf("%s.LoopGuard.CooldownTurns = %d, want 2", tc.role, tc.lg.CooldownTurns)
+		}
+		if tc.mt != tc.wantMT {
+			t.Errorf("%s.MaxTurns = %d, want %d", tc.role, tc.mt, tc.wantMT)
+		}
+		if tc.to != 15*time.Minute {
+			t.Errorf("%s.Timeout = %v, want 15m", tc.role, tc.to)
+		}
+	}
+
+	if cfg.Worker.Timeout.Duration != 45*time.Minute {
+		t.Errorf("worker.Timeout = %v, want 45m", cfg.Worker.Timeout.Duration)
+	}
+	// Worker.Parallelism is optional; zero value is valid (sequential).
+	_ = cfg.Worker.Parallelism
 }
 
 func TestIsProviderType(t *testing.T) {

@@ -1,10 +1,21 @@
 package harness
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// mustJSON returns the JSON encoding of v as a string, panicking on error.
+func mustJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
 
 func parseLogFileUpdates(t *testing.T, path string, maxLines int) []Event {
 	t.Helper()
@@ -210,6 +221,107 @@ func TestExtractPlanFilePath_NoAttachment(t *testing.T) {
 
 func TestExtractPlanFilePath_MissingFile(t *testing.T) {
 	_, err := ExtractPlanFilePath("/nonexistent/path.jsonl")
+	if err == nil {
+		t.Fatal("expected error for missing file")
+	}
+}
+
+func TestExtractFinalOutput_Text(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "session.jsonl")
+
+	want := "## Research\nFound the module at go.mod."
+	lines := `{"type":"user","message":{"content":[{"type":"text","text":"research this"}]}}` + "\n" +
+		`{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Read","input":{"file_path":"go.mod"}}]}}` + "\n" +
+		fmt.Sprintf(`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":%s}]}}`, mustJSON(want)) + "\n"
+	if err := os.WriteFile(logPath, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ExtractFinalOutput(logPath)
+	if err != nil {
+		t.Fatalf("ExtractFinalOutput: %v", err)
+	}
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestExtractFinalOutput_Thinking(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "session.jsonl")
+
+	want := "Key findings:\n1. foo.go owns the logic\n2. bar.go is unused"
+	lines := fmt.Sprintf(`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":%s}]}}`, mustJSON(want)) + "\n"
+	if err := os.WriteFile(logPath, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ExtractFinalOutput(logPath)
+	if err != nil {
+		t.Fatalf("ExtractFinalOutput: %v", err)
+	}
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestExtractFinalOutput_TextPriorityOverThinking(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "session.jsonl")
+
+	wantText := "The final answer."
+	lines := `{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":"internal deliberation"},{"type":"text","text":"` + wantText + `"}]}}` + "\n"
+	if err := os.WriteFile(logPath, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ExtractFinalOutput(logPath)
+	if err != nil {
+		t.Fatalf("ExtractFinalOutput: %v", err)
+	}
+	if got != wantText {
+		t.Errorf("text should take priority: got %q, want %q", got, wantText)
+	}
+}
+
+func TestExtractFinalOutput_LastEndTurn(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "session.jsonl")
+
+	wantText := "second end_turn content"
+	lines := `{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"first end_turn content"}]}}` + "\n" +
+		`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"` + wantText + `"}]}}` + "\n"
+	if err := os.WriteFile(logPath, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ExtractFinalOutput(logPath)
+	if err != nil {
+		t.Fatalf("ExtractFinalOutput: %v", err)
+	}
+	if got != wantText {
+		t.Errorf("should return last end_turn: got %q, want %q", got, wantText)
+	}
+}
+
+func TestExtractFinalOutput_NoEndTurn(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "session.jsonl")
+
+	lines := `{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Read","input":{}}]}}` + "\n"
+	if err := os.WriteFile(logPath, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ExtractFinalOutput(logPath)
+	if err == nil {
+		t.Fatal("expected error when no end_turn message")
+	}
+}
+
+func TestExtractFinalOutput_MissingFile(t *testing.T) {
+	_, err := ExtractFinalOutput("/nonexistent/path.jsonl")
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}

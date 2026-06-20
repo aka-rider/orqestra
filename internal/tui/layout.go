@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"image"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -18,11 +17,8 @@ const (
 	// and input is the body zone's line terminator, not chrome).
 	constPipelineInputHeight = 2
 
-	// Plan review mode: divider + 2-line comment textarea + padding
-	constPlanReviewInputHeight = 4
-
-	// Prompt mode: divider + instruction label + 3-line textarea
-	constPromptInputHeight = 5
+	// Prompt mode: divider + 3-line textarea (instruction is a placeholder inside the input)
+	constPromptInputHeight = 4
 
 	// Run detail lower pane height (raw agent JSONL log)
 	constRunLogHeight = 8
@@ -44,14 +40,11 @@ const (
 
 	// Bottom sidebar height (agent list strip below the input zone).
 	constSidebarHeight = 1
-)
 
-// layoutBounds holds the computed bounding rectangles for each zone.
-type layoutBounds struct {
-	content  image.Rectangle
-	sidebar  image.Rectangle
-	textarea image.Rectangle
-}
+	// Pipeline alt-screen layout constants.
+	constStatusBarHeight = 1  // top status bar
+	constStreamMaxHeight = 12 // maximum rows for the streaming console
+)
 
 // renderPrefixedText hard-wraps text into the available width, applying style
 // per segment. The first segment is prefixed with prefix; continuations are
@@ -80,19 +73,3 @@ func renderPrefixedText(style lipgloss.Style, prefix, text string, maxW int) str
 	return b.String()
 }
 
-// deduplicateLines removes earlier occurrences of any line that appears later,
-// preserving original order of last occurrences. Used for stream display.
-func deduplicateLines(lines []string) []string {
-	seen := make(map[string]struct{}, len(lines))
-	out := make([]string, 0, len(lines))
-	for i := len(lines) - 1; i >= 0; i-- {
-		if _, dup := seen[lines[i]]; !dup {
-			seen[lines[i]] = struct{}{}
-			out = append(out, lines[i])
-		}
-	}
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
-	return out
-}

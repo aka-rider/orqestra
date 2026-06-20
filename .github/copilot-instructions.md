@@ -1,223 +1,121 @@
-# Orqestra - Copilot Instructions
+# Orqestra — Agent Instructions
 
-<instruction_file_topology>
+`CLAUDE.md` and `.github/copilot-instructions.md` are one file (`CLAUDE.md` is a symlink). Edit
+this target; never fork a divergent copy. Verify with `readlink CLAUDE.md`.
 
-## Instruction File Topology
+Orqestra is a macOS-first Go CLI/TUI that orchestrates Claude Code through a harness (subprocess
++ stream parsing), not direct model APIs.
 
-- Canonical instruction file: `.github/copilot-instructions.md`.
-- Symlink topology: `.github/copilot-instructions.md` <-- symlink <-- `CLAUDE.md`.
-- `CLAUDE.md` must remain a symlink to `.github/copilot-instructions.md`. Edit the canonical target, not a divergent copy. Verify with `readlink CLAUDE.md` after instruction-file changes.
+## Errors — two legal fates, no third
 
-</instruction_file_topology>
+Every error must end in exactly one of these. There is no silent third path.
 
-<system_router>
+1. **Propagate** with operation + resource context (verb, the resource, `%w`):
+   ```go
+   return fmt.Errorf("read plan %s: %w", path, err)
+   ```
+2. **Drop it on purpose**, marked at the call site with a truthful reason:
+   ```go
+   _ = os.Remove(sock) // fire-and-forget: socket may not exist yet
+   ```
 
-## Routing Rules
+If you cannot write an honest `// fire-and-forget: <reason>`, you must propagate. These are
+review blockers — never write them:
+```go
+data, _ := json.Marshal(v)        // dropped with no reason
+if err != nil { return nil }       // swallowed
+if err != nil { log.Printf(...) }  // logged, then continued past a real failure
+if os.IsNotExist(err) { ... }      // OK only if absence is valid; otherwise propagate
+```
+A dropped or downgraded error must never leave the TUI, an artifact, or a return value claiming a
+step succeeded. Real examples — wrap: `internal/config/config.go:284`,
+`internal/harness/claude_cli.go:70`; fire-and-forget: `internal/sandbox/sandbox.go:261`,
+`internal/mcp/bridge.go` (`os.Remove` in `Run`).
 
-Before planning or editing code, decide whether the task touches one of these domains and load the matching file first.
+## Routing — read the domain file before editing
 
-1. Terminal UI and Bubble Tea architecture: any edit under `internal/tui/`
-   - Read `.github/tui-instructions.md`.
-2. Agent execution, harnesses, sandboxing, token limits, or plan persistence: edits under `internal/agent/`, `internal/harness/`, `internal/sandbox/`, `internal/tokenlimit/`, or `internal/plan/`
-   - Read `.github/agent-instructions.md`.
-3. Cross-domain changes
-   - Read every matching instruction file before designing the change.
-
-</system_router>
-
-<commands>
+- `internal/tui/**` → read `.github/tui-instructions.md`.
+- `internal/{agent,harness,sandbox,orchestrator,plan}/**` → read `.github/agent-instructions.md`.
+- Touching both → read both.
 
 ## Commands
 
-- `make build` — builds `./bin/orqestra` (CGO disabled, stripped).
-- `make test` — unit tests with race detector and coverage. Fast, no external deps.
-- `make test-integration` — adds `-tags integration`; needs `git` and `go build` in PATH.
-- `make test-sandbox` — adds `-tags 'darwin integration'`; needs `sandbox-exec` (macOS only).
-- `make test-e2e` — `-tags e2e` in `internal/harness/`; requires real `claude` CLI and API access.
+- `make build` — build `./orqestra` (repo root, CGO off, stripped).
+- `make test` — unit + race + coverage. Fast, no external deps.
+- `make test-integration` — `-tags integration`; needs `git`, `go build`.
+- `make test-sandbox` — `-tags 'darwin integration'`; needs `sandbox-exec` (macOS).
+- `make test-e2e` — `-tags e2e` in `internal/harness/`; needs real `claude` CLI + API.
 - `make lint` — `go vet ./...`.
-- Single package/test: `go test -race ./internal/agent/ -run TestArchitect_… -v`.
-- Run TUI: `make run` (or `./bin/orqestra` after `make build`).
-- Headless smoke: `./bin/orqestra --prompt "..." --auto-approve --config orqestra.yaml`.
-- CLI subcommands: `plan`, `validate`, `exec`, `usage`, `reset-usage`, plus internal `mcp-bridge` (invoked by Claude CLI as an MCP server, not by users).
+- One test: `go test -race ./internal/agent/ -run TestX -v`.
+- Run: `make run`. Headless: `./orqestra --prompt "…" --auto-approve --config orqestra.yaml`.
 
-</commands>
+## Architecture facts
 
-<repo_truth>
+- Pipeline (`internal/orchestrator/run_pipeline.go`): Research → Deliberate (Architect+Critic) →
+  human plan gate (with Revise) → sandboxed Worker → worker self-validation → optional worktree
+  commit/merge.
+- Plan contract is `agent.RawPlan`: raw markdown read from Claude plan files by
+  `agent.ReadPlanFromRun`, under `~/.claude/plans/`. Never scrape plans from stdout.
+- `internal/harness/` owns the Claude subprocess (`harness.ClaudeCLI`), stream parsing, session
+  IDs, plan-file paths, token usage (`harness.RunResult`), and the MCP bridge.
+- Worker writes go through the seatbelt sandbox (`sandbox.New`, `internal/sandbox/`), isolated in
+  a per-run git worktree when available.
+- Token budgets live in `internal/orchestrator/budget.go`; exhaustion is `harness.ErrBudgetExhausted`.
+- Config is YAML via `internal/config/`, defaults embedded from `internal/config/pipeline.yaml`.
+- `agent.Specification`, `agent.PlanOutput`, `agent.ProjectPlan`, `WorkPackage`, and
+  `internal/scheduler/` are legacy/experimental — not on the active path. Don't extend them unless
+  the task names them.
 
-## Hard Architecture Facts
+## Non-obvious rules
 
-- Orqestra is a macOS-first Go CLI/TUI that orchestrates Claude Code through harnesses, not direct model APIs.
-- The active pipeline in `internal/orchestrator/` is: Researcher -> Architect -> Critic -> human plan gate -> sandboxed Worker -> worker self-validation -> optional worktree commit/merge.
-- The current plan contract is `agent.RawPlan`: raw markdown read from Claude plan files by `agent.ReadPlanFromRun`. `agent.Specification`, `agent.PlanOutput`, `agent.ProjectPlan`, and `internal/scheduler/` are legacy or secondary paths unless the task explicitly targets them.
-- `internal/harness/` owns CLI invocation, Claude stream parsing, session IDs, plan-file paths, and token usage. Agent domain structs must not import harness types only to carry execution metadata.
-- Worker execution must go through the macOS seatbelt sandbox in `internal/sandbox/` via `harness.SandboxCLIRunner`; repo writes should be isolated in a per-run worktree when available.
-- `internal/tui/` is Bubble Tea MVU. `Update()` mutates model state and returns commands; `View()` renders only.
-- Session artifacts live under `.orqestra/sessions/<run>/`; Claude session logs are copied there for diagnostics when available.
-- Configuration is YAML loaded through `internal/config/`, with embedded defaults from `internal/config/pipeline.yaml`. Explicit user-supplied paths, model refs, sandbox settings, and prompt files must fail clearly when invalid.
+**Integrity vs best-effort.** Fail closed at integrity boundaries — missing/empty/corrupt plans,
+unresolved models, invalid config, sandbox-setup failure, unsafe paths, broken worktree, merge
+conflicts: stop, return, emit `EventError`, or ask the user. Best-effort diagnostics (session-log
+copy, plan-history diff, commit-message gen) may continue only if they carry a fire-and-forget
+marker AND user-visible state stays truthful.
 
-</repo_truth>
+**User intent never falls back silently.** User-supplied paths, model refs, prompt files, config
+keys, and command targets must error when missing or invalid — never default. Genuinely optional
+discovery may return empty; explicit intent must return an error. Don't use `os.MkdirAll` for
+user-initiated creation (it hides `EEXIST`) — use `os.Mkdir`.
 
-<architectural_fault_lines>
+**LLM output is hostile input.** Parse typed formats with typed parsers; validate paths under
+allowed roots; run commands only through known execution boundaries; preserve raw text when
+parsing is advisory. Worker self-validation text never proves success without command/artifact
+evidence.
 
-## Architectural Fault Lines To Hedge
+**Domain vs infrastructure.** Token usage, session IDs, log paths, timings, and plan-file paths
+live on `harness.RunResult` and orchestration boundaries — never on domain structs (`RawPlan`,
+`ValidationReport`, `Issue`, …).
 
-- Plan extraction depends on external Claude plan files and JSONL session logs. Missing session IDs, unreadable plan files, empty plans, and paths outside `~/.claude/plans/` are integrity failures, not soft warnings. Directory-scan fallback is allowed only behind the existing security gate and must be logged with enough context to debug the source of truth.
-- The orchestrator is a long stateful pipeline with intentional best-effort diagnostics. Keep a hard boundary between integrity errors and optional observability: config/model resolution, sandbox setup, plan extraction, worker execution, validation verdict parsing, and merge conflict state must return, emit, or gate; session-log copy, plan-history diff, and commit-message generation may warn and continue if the user-visible state remains truthful.
-- Worktree isolation currently falls back to writable-repo execution when branch detection or worktree creation fails. Changes in execution, merge, or sandbox code must either remove that fallback, gate it explicitly, or prove with tests and user-visible events that the fallback cannot hide unsafe writes.
-- `internal/scheduler/` uses an opaque `spec any` payload and mutates per-agent status from goroutines. Treat it as legacy/experimental unless requested. Any new scheduler work needs typed payload boundaries or explicit adapters, race-safe status/event handling, unknown-dependency checks, cycle tests, and `go test -race` coverage.
-- Config model lookup currently accepts case-insensitive aliases in some paths. Do not add new fallback resolution. Tightening this behavior requires migration-aware tests for exact refs, wrong-case refs, missing refs, and graph validator refs.
-- The TUI is prone to layout desynchronization if viewport/text-area state changes during render. Viewport sizing, content sync, scroll restoration, focus changes, and input-height recalculation belong in `Update()` paths, not `View()`.
-- LLM validation output is advisory. Preserve raw validation text for users, parse typed verdicts defensively, and never let parser success imply that the worker truly satisfied the plan without command or artifact evidence.
+**Constructors that can fail return `(T, error)`.** Runners, sandboxes, stores, parsers,
+resolvers, and orchestrators never return `nil, nil` to mean "disabled."
 
-</architectural_fault_lines>
+**Value semantics.** Use values unless nil has a defined meaning or the type owns a resource/sync
+primitive. For optional data crossing goroutines, prefer `struct{ …; Valid bool }` over a pointer;
+the zero value must be meaningful.
 
-<core_principles>
+**Make illegal states unrepresentable.** Model mutually-exclusive modes (screen modes, phases,
+variants) as one active sub-model — not one struct holding every variant's fields plus tags/`hasX`
+bools.
 
-## Core Principles
+**Concurrency & streaming.** `context.Context` is a function argument, never a struct field;
+signal session end via context and return `ctx.Err()`. Messages crossing goroutines carry
+copies/immutable values. Shared state needs ownership, channels, or mutexes. JSONL scanners need
+an explicit buffer and a `scanner.Err()` check. The only shutdown signal is context.Context:
+service lifetime is `Run(ctx context.Context) error` — never `Start()+Stop()` or a
+`done chan struct{}`. When multiple stop reasons must be distinguished, use
+`context.WithCancelCause`: the cause is the signal; no secondary `stopped bool` or `stopReason`
+variable. Every goroutine must exit via `ctx.Done()` or be deterministically joined via its
+result channel after the context is cancelled.
 
-1. Contracts first: identify the existing package boundary and public behavior before editing. Add or update the smallest test that would fail for the behavior being changed.
-2. Harness over direct API: route model work through `harness.CLIRunner` or `harness.ContinuableRunner` unless implementing the harness itself.
-3. Fail closed at integrity boundaries: corrupt plans, unresolved models, invalid config, sandbox setup failures, unsafe paths, and broken worktree state must stop, return, emit an error, or ask the user.
-4. Best-effort work must be named as best effort: if failure does not change correctness, log or surface the operation, resource, and error, then keep user-visible state truthful.
-5. LLM output is hostile input: parse typed formats with typed parsers, validate paths under allowed roots, gate commands through known execution boundaries, and preserve raw text when parsing is advisory.
-6. Domain state and execution metadata stay separate: domain types describe Orqestra concepts; token usage, timing, session IDs, plan-file paths, and logs are returned or persisted at orchestration boundaries.
-7. Value semantics by default: use values unless nil has a distinct meaning, the type owns a process/resource/sync primitive, or mutation sharing is deliberate and documented by the API shape. For absence/optionality in data crossing goroutine boundaries, prefer `struct { ...; Valid bool }` over `*struct`. The zero value must be meaningful; the `Valid` flag carries the same semantics without aliasing or nil-check overhead.
-8. User-visible truth: the TUI and artifacts must never imply an agent, validation, merge, or sandbox step succeeded when it was skipped, degraded, or failed.
-9. Small, idiomatic Go: prefer concrete structs and narrow consumer-owned interfaces; add abstraction only after two real call sites need it.
+**Determinism.** Sort map keys before rendering, comparing, or persisting.
 
-</core_principles>
+**File hygiene.** One primary entity per file; no `types`/`utils`/`helpers`/`misc` packages. A Go
+file over 500 lines is a smell — split by entity; don't pile onto a known offender (e.g.
+`internal/tui/screen_pipeline.go`).
 
-<banned_patterns>
-
-## Banned Patterns
-
-These are review blockers. If existing code contains one near the task, do not spread it; either fix it in scope or call it out.
-
-- Silent fallback after explicit user intent: user-supplied config paths, plan paths, model refs, prompt files, sandbox paths, and command targets must not fall back to defaults when missing or invalid.
-- Log-and-continue across integrity boundaries: after an error that affects correctness, model selection, sandboxing, plan source, worker execution, merge state, or user-visible output, return or emit a failure instead of continuing.
-- Swallowed file-system errors: do not treat all `os.Stat` or read errors as absence. Propagate permission, symlink, parse, and IO errors with operation and path context.
-- `os.MkdirAll` masking errors: never use `MkdirAll` for explicit user-initiated creation (e.g. `Init`). It silently succeeds when the directory already exists, hiding state corruption or re-initialization bugs. Use `os.Mkdir` and let the `EEXIST` error surface.
-- Bare ignored errors: `_ = err` is allowed only with an adjacent `// fire-and-forget: <reason>` comment or in tests where the assertion already covers the failure path.
-- Nil interface construction: factories for runners, sandboxes, stores, parsers, resolvers, and orchestrators return `(T, error)` and never use `nil, nil` to mean disabled or misconfigured.
-- Direct worker execution outside the sandbox/worktree boundary: worker shells, validation continuations, and merge-producing execution must use the seatbelt runner or an explicit test double.
-- Raw LLM command execution: never execute commands, file paths, JSON, YAML, or markdown emitted by an LLM without parsing and boundary validation.
-- Stdout plan scraping: plans come from Claude plan files through `ReadPlanFromRun`, not from free-form stdout, except in tests explicitly covering legacy behavior.
-- Infrastructure metadata on agent domain structs: no `harness.TokenUsage`, session IDs, log paths, timings, or plan file paths inside `RawPlan`, `Specification`, `PlanOutput`, `ProjectPlan`, `ValidationReport`, or `Issue`.
-- TUI mutation in render paths: no `SetWidth`, `SetHeight`, `SetContent`, `GotoBottom`, focus mutation, channel reads, IO, or layout recalculation from `View()`.
-- Blocking work in Bubble Tea `Update()` or `Init()`: IO, sleeps, network calls, subprocesses, and long parsing run in `tea.Cmd` or outside the TUI model.
-- Mutable pointers in messages crossing goroutine boundaries: Bubble Tea messages sent from goroutines must carry copies or immutable values.
-- Unsynchronized shared state in goroutines: status slices, maps, buffers, callbacks, and event collectors need ownership, channels, mutexes, or deterministic test hooks.
-- Unbounded or unchecked streaming scanners: set explicit scanner buffers for Claude/MCP JSONL streams and handle `scanner.Err()`.
-- Map-order-dependent output: sort keys before rendering, comparing, persisting golden output, or generating deterministic artifacts.
-- `time.Sleep` as test synchronization: tests must coordinate with channels, contexts, fake clocks, hooks, or explicit process signals.
-- Catch-all packages: do not create `types`, `utils`, `helpers`, or `misc`. Put concepts in the package that owns the behavior.
-- Oversize source files: a Go source file over 500 lines is a code smell that must be eliminated before further work in that file ships. Split by entity into new files in the same package; do not let new feature work pile onto an already-oversize file.
-- Magic layout arithmetic: layout dimensions must come from measured components or named chrome constants, not unexplained offsets.
-- Sum type flattened into a product type: modeling mutually-exclusive states (screen modes, pipeline phases, variants) as one struct holding the union of every variant's fields plus a tag and/or `hasX`/awaiting booleans, instead of a single value whose type or constructor guarantees only the active variant's fields exist. Make illegal states unrepresentable. (TUI: a screen with N content modes holds one active sub-model, not every mode's fields as siblings — mirror `userQuestionModel`/`DashboardModel`, not `PipelineScreen`.)
-- `done <-chan error` `done <-chan {}` — use `context.Context` to signal session end from; always return ctx.Err() for caller to distinguish the reason: cancel vs timeout vs error
-- Store `context.Context` in structs — `context.Context` should be a function argument, chain of calls is allways explicit
-
-</banned_patterns>
-
-<go_engineering>
-
-## Go Engineering Rules
-
-- Start from repo evidence: inspect relevant files, callers, tests, config, and build tags before choosing an approach.
-- Use table-driven tests for validation matrices, config loading, parser behavior, state transitions, and dependency graphs.
-- Run the narrowest relevant `go test` package after a change; broaden to `go test -race ./...` when touching concurrency, streaming, orchestration, sandboxing, or shared state.
-- Wrap errors with operation and resource context: include the model ref, file path, session ID, agent ID, command, or config key that failed.
-- Keep package ownership clear:
-  - `internal/agent/`: agent-facing contracts, raw plan handling, plan health checks, validation parsing, work package legacy helpers, session artifact helpers.
-  - `internal/harness/`: Claude CLI execution, stream parsing, MCP bridge, model environment, runner interfaces.
-  - `internal/orchestrator/`: pipeline state, gates, event emission, session artifact writing, worktree handoff.
-  - `internal/config/`: YAML schema, defaults, config validation, model and graph resolution.
-  - `internal/sandbox/`: seatbelt profile generation, environment scrub, command wrapping, process-group cleanup.
-  - `internal/tokenlimit/`: token budget storage, accounting, and runner decoration.
-  - `internal/tui/`: pure rendering, MVU state transitions, screen models, user interaction.
-  - `internal/plan/`: plan-history and markdown persistence adapters.
-  - `internal/scheduler/`: DAG execution support; treat as separate from the active orchestrator pipeline unless explicitly wired.
-- One entity per file: each Go source file owns a single primary type (struct, interface, or top-level coordinator) plus the constants, helpers, and adapter wrappers that exist only to serve it. Sibling entities live in their own files in the same package. Catch-all containers (`types.go`, `utils.go`, `misc.go`) remain forbidden under `<banned_patterns>`; the rule here is positive — give each entity its own home.
-- Constructors and loaders that can fail return errors. Do not panic except for impossible embedded build-time invariants.
-- Prefer concrete types internally. Introduce interfaces at the consumer boundary when tests or alternate implementations need them now.
-- Use `context.Context` for subprocesses, LLM calls, validators, sandboxes, and long-running orchestration steps.
-- If a change degrades capability intentionally, persist or emit that fact so the TUI, run artifacts, and logs agree.
-- Do not fix unrelated defects. If an adjacent defect affects the task, either cover it with the focused change or report it with evidence.
-
-</go_engineering>
-
-<enforcement>
-
-## Enforcement Checklist
-
-For every non-trivial change, enforce the relevant invariant class rather than adding one cherry-picked example.
-
-- Config invariants: test missing, malformed, wrong-case, unknown provider/model, and conflicting values at load or resolution boundaries.
-- Plan invariants: test missing session ID, missing JSONL, invalid plan path, empty plan file, truncated/bad-shaped markdown, and fallback logging behavior.
-- Sandbox invariants: test missing HOME, missing sandbox-exec, invalid repo/worktree/session paths, environment scrub, proxy env validation, process-group cleanup, and writable-root policy.
-- Orchestrator invariants: test phase/event ordering, gate re-entry, cancellation, retry exhaustion, artifact status, degraded diagnostics, validation verdict handling, and merge conflict surfacing.
-- TUI invariants: test window resize, content-mode transitions, viewport scroll retention, key routing, mouse routing, and render height stability without mutating in `View()`.
-- Concurrency invariants: run race tests for shared buffers, scheduler waves, bridge communication, stream parsing, and any goroutine-updated state.
-- Parser invariants: use malformed input, extra fields, missing fields, hostile paths, large lines, and advisory raw-output preservation.
-- When a broad invariant is too expensive to test fully, add the smallest deterministic boundary test and state the residual risk in the final response.
-
-</enforcement>
-
-<common_gotchas>
-
-## Common Gotchas
-
-- Nil has meaning only when the API defines it. A `*RawPlan` continuation result may mean no plan revision; a nullable runner from a factory is a bug.
-- Zero `harness.TokenUsage` means the harness did not report usage. Do not use a pointer solely to represent absence.
-- `bufio.Scanner` defaults are too small for streamed LLM JSON lines. Set buffers and handle scan errors.
-- Loop variables must be copied before goroutines or closures that outlive the iteration.
-- Optional discovery can return empty results; explicit user intent must return errors.
-- Golden tests and rendered output must not depend on map order or terminal-specific width guesses.
-- TUI stderr is suppressed in alt-screen mode; if users need to know, emit an event or write a session artifact.
-- Claude CLI logs under `~/.claude/` are often the ground truth when headless or TUI runs look silent.
-
-</common_gotchas>
-
-<e2e_debugging>
-
-## Debugging E2E And Headless Runs Via Claude CLI Logs
-
-When an orchestrator run hangs, produces no output, or errors opaquely, inspect Claude CLI logs on disk. TUI mode intentionally silences ordinary stderr.
-
-### Log Locations
-
-| Path                                                   | Contents                                                                                                                                                        |
-| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `~/.claude/sessions/`                                  | Active process metadata: PID, session ID, cwd, CLI version. One JSON file per running `claude` process.                                                         |
-| `~/.claude/projects/-Users-<user>-Developer-orqestra/` | Per-session JSONL conversation logs. Each line is a typed event such as `queue-operation`, `user`, `assistant`, or `last-prompt`. Filename is the session UUID. |
-| `~/.claude/debug/latest`                               | Symlink to the most recent debug trace, when debug mode was enabled.                                                                                            |
-
-### How To Read Them
-
-1. Find recent session logs:
-
-   ```sh
-   ls -lt ~/.claude/projects/-Users-*-Developer-orqestra/*.jsonl | head -5
-   ```
-
-2. Inspect the JSONL events. Important fields:
-   - `"type":"user"`: prompt sent by Orqestra's harness.
-   - `"type":"assistant"`: model response; check `message.content[].text`.
-   - `"isApiErrorMessage": true`: the model did not run; inspect the text for provider or connection errors.
-   - `"error":"unknown"`: transport failure, not a model refusal.
-
-3. Classify connection errors (`ConnectionRefused`, timeout, rate limit, auth) as infrastructure until code evidence says otherwise.
-
-4. Cross-reference the session ID in the JSONL filename with `~/.claude/sessions/<pid>.json` to identify the running process.
-
-</e2e_debugging>
-
-<mcp_servers>
-
-## Available MCP Servers
-
-Use active MCP tools when they are available instead of inventing raw integrations.
-
-- `MCP_DOCKER`
-
-</mcp_servers>
+**Tests.** Table-driven for matrices. Run the narrowest package; add `-race` when touching
+concurrency, streaming, sandbox, harness, or orchestrator state. Never use `time.Sleep` to
+synchronize tests — use channels, contexts, or fake clocks. The full per-domain invariant matrix
+and the CLI-log debugging guide live in `.github/agent-instructions.md`.

@@ -1,0 +1,2 @@
+{"type":"user","message":{"content":[{"type":"text","text":"What is the current status of the pipeline?"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"The pipeline is idle. No active run is in progress."}]}}

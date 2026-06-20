@@ -167,13 +167,9 @@ func TestNewClaudeCLIFromConfig_AppliesModelRuntimeOptions(t *testing.T) {
 		},
 	}
 
-	runner, err := NewClaudeCLIFromConfig(cfg, "worker", WithExtraArgs("--verbose-mode"))
+	cli, err := NewClaudeCLIFromConfig(cfg, "worker", WithExtraArgs("--verbose-mode"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	cli, ok := runner.(*ClaudeCLI)
-	if !ok {
-		t.Fatalf("runner = %T, want *ClaudeCLI", runner)
 	}
 	if cli.binary != "claude-test" {
 		t.Errorf("binary = %q, want claude-test", cli.binary)
@@ -433,9 +429,9 @@ func TestMergeAppendPrompts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := mergeAppendPrompts(tt.parts...)
+			got := MergeAppendPrompts(tt.parts...)
 			if got != tt.want {
-				t.Errorf("mergeAppendPrompts(%v) = %q, want %q", tt.parts, got, tt.want)
+				t.Errorf("MergeAppendPrompts(%v) = %q, want %q", tt.parts, got, tt.want)
 			}
 		})
 	}
@@ -448,7 +444,7 @@ func TestNoSystemPromptFlag(t *testing.T) {
 	// Provide both a role system prompt (via RunPrint parameter) and an
 	// append option to verify they are merged into a single --append-system-prompt.
 	// We cannot call RunPrint without a real binary, but we can verify the
-	// mergeAppendPrompts helper produces the right combined text and that
+	// MergeAppendPrompts helper produces the right combined text and that
 	// buildFinalArgs never contains --system-prompt.
 	cli := NewClaudeCLI(config.ResolvedModel{Type: config.ProviderTypeAnthropic},
 		WithAppendSystemPrompt("bridge nudge"),

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"testing"
 
-	"charm.land/bubbles/v2/textarea"
 	"charm.land/lipgloss/v2"
 )
 
@@ -69,8 +68,10 @@ func TestLayout_HeightInvariant(t *testing.T) {
 				m := layoutTestModel(sz[0], sz[1], st.state)
 				view := m.View().Content
 				got := lipgloss.Height(view)
-				if got != sz[1] {
-					t.Errorf("lipgloss.Height(View()) = %d, want %d", got, sz[1])
+				// Alt-screen: the view owns the screen and fills up to the full
+				// height. Verify it does not overflow.
+				if got > sz[1] {
+					t.Errorf("lipgloss.Height(View()) = %d, overflows %d", got, sz[1])
 				}
 			})
 		}
@@ -78,8 +79,6 @@ func TestLayout_HeightInvariant(t *testing.T) {
 }
 
 func TestLayout_HeightInvariant_SmallTerminal(t *testing.T) {
-	// At small sizes, the prompt screen may skip the split view;
-	// verify it doesn't panic and doesn't exceed the requested height.
 	m := layoutTestModel(60, 10, StatePrompt)
 	view := m.View().Content
 	got := lipgloss.Height(view)
@@ -87,124 +86,16 @@ func TestLayout_HeightInvariant_SmallTerminal(t *testing.T) {
 		t.Errorf("prompt at 60x10: lipgloss.Height = %d, want <= 10", got)
 	}
 
-	// Pipeline at 60x10 should match exactly
 	m2 := layoutTestModel(60, 10, StatePipeline)
 	view2 := m2.View().Content
 	got2 := lipgloss.Height(view2)
-	if got2 != 10 {
-		t.Errorf("pipeline at 60x10: lipgloss.Height = %d, want 10", got2)
-	}
-}
-
-func TestLayout_RecalculateConstants(t *testing.T) {
-	m := layoutTestModel(120, 40, StatePipeline)
-
-	// New geometry: full-width content, constSidebarHeight=1 (status bar)
-	contentHeight := 40 - constPipelineInputHeight - constFooterHeight - constSidebarHeight
-
-	if m.pipelineScreen.contentVP.Width() != 120 {
-		t.Errorf("contentVP.Width = %d, want 120", m.pipelineScreen.contentVP.Width())
-	}
-	if m.pipelineScreen.contentVP.Height() != contentHeight {
-		t.Errorf("contentVP.Height = %d, want %d", m.pipelineScreen.contentVP.Height(), contentHeight)
-	}
-	if m.pipelineScreen.dashboard.width != 120 {
-		t.Errorf("dashboard.width = %d, want 120", m.pipelineScreen.dashboard.width)
-	}
-}
-
-func TestLayout_RecalculatePromptMode(t *testing.T) {
-	m := layoutTestModel(120, 40, StatePrompt)
-
-	contentHeight := 40 - constPromptInputHeight - constFooterHeight - constSidebarHeight
-
-	if m.pipelineScreen.contentVP.Height() != contentHeight {
-		t.Errorf("contentVP.Height = %d, want %d (prompt mode)", m.pipelineScreen.contentVP.Height(), contentHeight)
-	}
-}
-
-func TestLayout_BelowMinimumNoOp(t *testing.T) {
-	m := testModel()
-	m.width = 30
-	m.height = 5
-	m.recalculateLayout()
-
-	// Viewports should remain at zero (not set to negative)
-	if m.pipelineScreen.contentVP.Width() < 0 || m.pipelineScreen.contentVP.Height() < 0 {
-		t.Error("viewport dimensions should not be negative below minimum size")
-	}
-}
-
-func TestLayout_StatusBarGeometry(t *testing.T) {
-	// Status bar is 1 line — just verify the layout math is consistent
-	widths := []int{60, 80, 120, 200}
-	for _, w := range widths {
-		m := layoutTestModel(w, 40, StatePipeline)
-		expectedContent := 40 - constPipelineInputHeight - constFooterHeight - constSidebarHeight
-		if m.pipelineScreen.contentVP.Height() != expectedContent {
-			t.Errorf("width=%d: contentVP.Height=%d, want %d", w, m.pipelineScreen.contentVP.Height(), expectedContent)
-		}
-	}
-}
-
-func TestLayout_BoundsNonOverlapping(t *testing.T) {
-	m := layoutTestModel(120, 40, StatePipeline)
-
-	// Content and sidebar should not overlap
-	if m.pipelineScreen.bounds.content.Overlaps(m.pipelineScreen.bounds.sidebar) {
-		t.Error("content and sidebar bounds overlap")
-	}
-	// Textarea should be below content
-	if m.pipelineScreen.bounds.textarea.Min.Y <= m.pipelineScreen.bounds.content.Min.Y {
-		t.Error("textarea should be below content zone")
-	}
-}
-
-// TestLayout_HeightInvariant_ContentModeTransition verifies that switching content
-// modes (e.g. ContentStreaming → ContentPlanReview) does not push the footer
-// off-screen. The root cause: ContentPlanReview uses a taller input zone
-// (constPlanReviewInputHeight vs constPipelineInputHeight), so if viewports are
-// not resized on transition the body overflows by exactly the height delta and
-// the footer disappears.
-func TestLayout_HeightInvariant_ContentModeTransition(t *testing.T) {
-	sizes := [][2]int{{80, 24}, {120, 40}, {200, 60}}
-
-	for _, sz := range sizes {
-		w, h := sz[0], sz[1]
-		t.Run(itoa(w)+"x"+itoa(h), func(t *testing.T) {
-			// Start in streaming mode — viewports sized for constPipelineInputHeight.
-			m := layoutTestModel(w, h, StatePipeline)
-
-			// Simulate transition to plan review — the bug was missing recalculateLayout.
-			m.pipelineScreen.content = ContentPlanReview
-			m.pipelineScreen.hasPlan = true
-			m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nDo the thing."
-			ta := textarea.New()
-			ta.SetWidth(max(1, w-4))
-			ta.SetHeight(2)
-			ta.CharLimit = 1024
-			ta.Focus()
-			m.pipelineScreen.planComment = ta
-			m.pipelineScreen.hasPlanComment = true
-
-			// The fix: recalculateLayout after content mode transition,
-			// matching what the OrchestratorEventMsg / handlePipelineKey
-			// handlers now do via planReviewHeightChanged.
-			m.recalculateLayout()
-			m.pipelineScreen.SyncViewports()
-
-			// View must still fill exactly h lines — footer must not disappear.
-			view := m.View().Content
-			got := lipgloss.Height(view)
-			if got != h {
-				t.Errorf("after ContentStreaming→ContentPlanReview: lipgloss.Height = %d, want %d (footer disappeared)", got, h)
-			}
-		})
+	if got2 > 10 {
+		t.Errorf("pipeline at 60x10: lipgloss.Height = %d, want <= 10", got2)
 	}
 }
 
 // TestLayout_HeightInvariant_ErrorStateCompletion verifies that ContentCompletion
-// with an active lastErr also preserves the exact terminal height.
+// with an active lastErr does not overflow the terminal height.
 func TestLayout_HeightInvariant_ErrorStateCompletion(t *testing.T) {
 	m := layoutTestModel(120, 40, StatePipeline)
 	m.pipelineScreen.content = ContentCompletion
@@ -212,8 +103,38 @@ func TestLayout_HeightInvariant_ErrorStateCompletion(t *testing.T) {
 
 	view := m.View().Content
 	got := lipgloss.Height(view)
-	if got != 40 {
-		t.Errorf("ContentCompletion+lastErr: lipgloss.Height = %d, want 40", got)
+	if got > 40 {
+		t.Errorf("ContentCompletion+lastErr: lipgloss.Height = %d, overflows 40", got)
+	}
+}
+
+// TestLayout_AltScreen_BrowserStates guards that runs-list and run-detail use
+// alt-screen (they are viewport browsers that need to own the screen).
+func TestLayout_AltScreen_BrowserStates(t *testing.T) {
+	for _, st := range []AppState{StateRunsList, StateRunDetail} {
+		m := layoutTestModel(120, 40, st)
+		if !m.View().AltScreen {
+			t.Errorf("expected AltScreen=true for state %d", st)
+		}
+	}
+}
+
+// TestLayout_NoAltScreen_PromptIsInline guards that the prompt screen runs
+// inline so the terminal owns the mouse and provides native scrollback.
+func TestLayout_NoAltScreen_PromptIsInline(t *testing.T) {
+	m := layoutTestModel(120, 40, StatePrompt)
+	if m.View().AltScreen {
+		t.Error("expected AltScreen=false for StatePrompt (inline mode)")
+	}
+}
+
+// TestLayout_AltScreen_PipelineIsAltScreen guards that pipeline now runs in
+// alt-screen (full managed layout with transcript + streaming console).
+func TestLayout_AltScreen_PipelineIsAltScreen(t *testing.T) {
+	m := layoutTestModel(120, 40, StatePipeline)
+	m.pipelineScreen.content = ContentStreaming
+	if !m.View().AltScreen {
+		t.Error("expected AltScreen=true for StatePipeline (alt-screen managed layout)")
 	}
 }
 

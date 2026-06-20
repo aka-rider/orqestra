@@ -2,24 +2,17 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"strings"
 
-	"github.com/mattn/go-isatty"
-	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
-	"github.com/xiii/orqestra/internal/plan"
 	"github.com/xiii/orqestra/internal/project"
 	"github.com/xiii/orqestra/internal/sandbox"
 	"github.com/xiii/orqestra/internal/sandbox/detect"
@@ -40,11 +33,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	// Subcommand: mcp-bridge (invoked by Claude CLI as MCP server)
 	if len(args) >= 2 && args[1] == "mcp-bridge" {
-		if len(args) < 4 || args[2] != "--socket" {
-			fmt.Fprintf(stderr, "Usage: orqestra mcp-bridge --socket <path>\n")
+		socketPath, agentID, ok := parseMCPBridgeArgs(args[2:])
+		if !ok {
+			fmt.Fprintf(stderr, "Usage: orqestra mcp-bridge --socket <path> --agent-id <id>\n")
 			return exitInvalidInput
 		}
-		if err := mcp.RunServer(args[3]); err != nil {
+		if err := mcp.RunServer(socketPath, agentID); err != nil {
 			slog.Error("mcp-bridge failed", "err", err)
 			return exitDomainFailure
 		}
@@ -52,36 +46,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// Global flags
-	var (
-		configPath  string
-		jsonOutput  bool
-		noExecute   bool
-		planPath    string
-		promptFlag  string
-		autoApprove bool
-		autoReject  bool
-		autoInit    bool
-	)
+	var configPath string
 
 	fs := flag.NewFlagSet("orqestra", flag.ContinueOnError)
 	fs.StringVar(&configPath, "config", "orqestra.yaml", "config file name or absolute path")
-	fs.BoolVar(&jsonOutput, "json", false, "output JSON instead of human-friendly text")
-	fs.BoolVar(&noExecute, "no-execute", false, "plan only, skip execution")
-	fs.StringVar(&planPath, "plan", "", "path to a plan markdown file; skips prompting and planning")
-	fs.StringVar(&promptFlag, "prompt", "", "non-interactive prompt; requires --auto-approve or --auto-reject for headless mode")
-	fs.BoolVar(&autoApprove, "auto-approve", false, "auto-approve all gates (headless mode, requires --prompt)")
-	fs.BoolVar(&autoReject, "auto-reject", false, "run pipeline through planning then stop (no worker execution; headless, requires --prompt)")
-	fs.BoolVar(&autoInit, "auto-init", false, "auto-initialize project in headless mode (creates .orqestra at git root)")
-
 	if err := fs.Parse(args[1:]); err != nil {
-		fmt.Fprintf(stderr, "Usage: orqestra [--config path|preset] [--json] [--no-execute] [--plan file.md]\n")
+		fmt.Fprintf(stderr, "Usage: orqestra [--config path|preset]\n")
 		return exitInvalidInput
 	}
 
 	cmdArgs := fs.Args()
 
-	// Project root detection and initialization gate — runs before config.
-	// The 'init' subcommand also needs this to work without orqestra.yaml.
+	// Project root detection and initialization gate.
 	baseDir, dirErr := os.Getwd()
 	if dirErr != nil {
 		fmt.Fprintf(stderr, "Error: cannot determine working directory: %v\n", dirErr)
@@ -97,33 +73,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	}
 
-	isHeadless := promptFlag != "" || planPath != ""
-
 	var repoPath string
-	if isHeadless {
-		// Headless mode: text errors to stderr.
-		var gateErr error
-		repoPath, gateErr = ensureProjectRoot(baseDir, true, autoInit, stderr)
-		if gateErr != nil {
-			fmt.Fprintf(stderr, "Error: %v\n", gateErr)
-			return exitInvalidInput
-		}
-	} else {
-		// TUI mode: need a real terminal.
-		if !isatty.IsTerminal(os.Stdin.Fd()) && !isatty.IsCygwinTerminal(os.Stdin.Fd()) {
-			fmt.Fprintf(stderr, "Error: orqestra requires an interactive terminal.\n")
-			fmt.Fprintf(stderr, "Usage: orqestra [flags]\n")
-			fmt.Fprintf(stderr, "       orqestra [flags] plan <prompt>\n")
-			fmt.Fprintf(stderr, "       orqestra --plan <file.md>\n")
-			return exitInvalidInput
-		}
-		// Render the project-root gate in the TUI.
-		switch tui.RunInitGate(baseDir) {
-		case tui.InitGateOK, tui.InitGateInitDone:
-			repoPath = baseDir
-		default:
-			return exitUserCancelled
-		}
+	switch tui.RunInitGate(baseDir) {
+	case tui.InitGateOK, tui.InitGateInitDone:
+		repoPath = baseDir
+	default:
+		return exitUserCancelled
 	}
 
 	configPath, err := resolveConfigPath(configPath, repoPath)
@@ -137,9 +92,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitInvalidInput
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer cancel()
-
 	// Detect seatbelt profiles at startup.
 	home := os.Getenv("HOME")
 	if home == "" {
@@ -150,146 +102,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if profileErr != nil {
 		fmt.Fprintf(stderr, "Error: sandbox profile detection failed: %v\n", profileErr)
 		return exitInvalidInput
-	}
-
-	// --prompt --auto-reject: headless plan-only mode (no worker execution).
-	if promptFlag != "" && autoReject {
-		if autoApprove {
-			fmt.Fprintf(stderr, "Error: --auto-approve and --auto-reject are mutually exclusive\n")
-			return exitInvalidInput
-		}
-		engine := buildEngine(cfg, sandboxProfiles, repoPath)
-		result, err := tui.RunHeadlessPlanOnly(ctx, engine, promptFlag)
-		if err != nil {
-			if jsonOutput {
-				outputJSON(map[string]any{"error": err.Error(), "stage": "headless-plan-only"})
-			} else {
-				slog.Error("headless plan-only failed", "err", err)
-			}
-			return exitProviderError
-		}
-		if jsonOutput {
-			outputJSON(map[string]any{"status": "plan_only", "prompt": promptFlag, "plan": result.FinalPlan, "run_dir": result.RunDir})
-		} else {
-			fmt.Fprintln(stdout, result.FinalPlan)
-		}
-		return exitOK
-	}
-
-	// --prompt --auto-approve: headless mode via orchestrator channels.
-	if promptFlag != "" && autoApprove {
-		engine := buildEngine(cfg, sandboxProfiles, repoPath)
-		if err := tui.RunHeadless(ctx, engine, promptFlag); err != nil {
-			if jsonOutput {
-				outputJSON(map[string]any{"error": err.Error(), "stage": "headless"})
-			} else {
-				slog.Error("headless execution failed", "err", err)
-			}
-			return exitProviderError
-		}
-		if jsonOutput {
-			outputJSON(map[string]any{"status": "done", "prompt": promptFlag})
-		} else {
-			fmt.Println("\nDone.")
-		}
-		return exitOK
-	}
-	if promptFlag != "" && !autoApprove {
-		fmt.Fprintf(stderr, "Error: --prompt requires --auto-approve or --auto-reject for headless execution\n")
-		return exitInvalidInput
-	}
-
-	// --plan: load a pre-written plan file and skip the researcher/architect phase.
-	if planPath != "" {
-		data, readErr := os.ReadFile(planPath)
-		if readErr != nil {
-			fmt.Fprintf(stderr, "error: cannot read plan file %s: %v\n", planPath, readErr)
-			return exitDomainFailure
-		}
-		content := strings.TrimSpace(string(data))
-
-		if agent.IsNewFormat(content) {
-			// New markdown format — pass directly to engine
-			engine := buildEngine(cfg, sandboxProfiles, repoPath)
-			channels := engine.Start(ctx, orchestrator.Input{
-				Prompt:      content,
-				AutoApprove: autoApprove || noExecute,
-				PlanFile:    content,
-				NoExecute:   noExecute,
-			})
-			for event := range channels.Events {
-				if event.Type == orchestrator.EventError {
-					slog.Error("pipeline error", "err", event.Err)
-					return exitProviderError
-				}
-			}
-			if !noExecute {
-				fmt.Println("\nDone.")
-			} else {
-				fmt.Println("\nPlan loaded (--no-execute). Exiting.")
-			}
-		} else {
-			// Legacy JSON format
-			ps, parseErr := plan.LoadFromFile(planPath)
-			if parseErr != nil {
-				fmt.Fprintf(stderr, "error: cannot parse plan file %s: %v\n", planPath, parseErr)
-				return exitDomainFailure
-			}
-			po := plan.ToPlanOutput(ps)
-			spec := po.Spec
-
-			if noExecute {
-				if jsonOutput {
-					outputJSON(map[string]any{"status": "plan_only", "spec": spec})
-				} else {
-					fmt.Println("\nPlan loaded (--no-execute). Exiting.")
-				}
-				return exitOK
-			}
-
-			// Execute legacy spec
-			resolved, resolveErr := cfg.ResolveModel(cfg.Worker.Model)
-			if resolveErr != nil {
-				slog.Error("failed to resolve worker model", "err", resolveErr)
-				return exitInvalidInput
-			}
-			modelEnv, modelEnvErr := harness.BuildModelEnv(resolved, cfg.ResolveUtilityModel())
-			if modelEnvErr != nil {
-				slog.Error("invalid model configuration", "err", modelEnvErr)
-				return exitInvalidInput
-			}
-			workerRunner, err := harness.NewRunner(harness.RunnerConfig{
-				Sandbox: harness.SandboxConfig{
-					RepoPath:     repoPath,
-					WorktreePath: "",
-					Profiles:     sandboxProfiles,
-					Env:          modelEnv,
-					Writable:     true,
-				},
-			}, ctx)
-			if err != nil {
-				slog.Error("failed to create worker runner", "err", err)
-				return exitInvalidInput
-			}
-
-			var stdout io.Writer = stdout
-			if jsonOutput {
-				stdout = io.Discard
-			}
-
-			result, execErr := runStreamingToWriter(ctx, workerRunner, agent.BuildExecutionPrompt(spec), "", stdout)
-			if execErr != nil {
-				slog.Error("execution failed", "err", execErr)
-				return exitProviderError
-			}
-
-			if jsonOutput {
-				outputJSON(map[string]any{"status": "done", "output": result.Output})
-			} else {
-				fmt.Println("\nDone.")
-			}
-		}
-		return exitOK
 	}
 
 	if len(cmdArgs) == 0 {
@@ -305,73 +117,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	}
 
-	// Route subcommands
-	switch cmdArgs[0] {
-	case "plan":
-		if len(cmdArgs) < 2 {
-			fmt.Fprintf(stderr, "Usage: orqestra plan <prompt>\n")
-			return exitInvalidInput
-		}
-		prompt := strings.Join(cmdArgs[1:], " ")
-		runPlanOnly(ctx, cfg, prompt, jsonOutput, repoPath)
-	case "validate":
-		if len(cmdArgs) < 2 {
-			fmt.Fprintf(stderr, "Usage: orqestra validate <plan-file.md>\n")
-			return exitInvalidInput
-		}
-		runValidateOnly(cmdArgs[1])
-	case "exec":
-		if len(cmdArgs) < 2 {
-			fmt.Fprintf(stderr, "Usage: orqestra exec <plan-file.md>\n")
-			return exitInvalidInput
-		}
-		runExecOnly(ctx, cfg, sandboxProfiles, cmdArgs[1], jsonOutput, repoPath)
-	default:
-		fmt.Fprintf(stderr, "Unknown command: %s\n", cmdArgs[0])
-		fmt.Fprintf(stderr, "Available commands: plan, validate, exec, init\n")
-		return exitInvalidInput
-	}
-	return exitOK
+	fmt.Fprintf(stderr, "Unknown command: %s\n", cmdArgs[0])
+	fmt.Fprintf(stderr, "Available commands: init\n")
+	return exitInvalidInput
 }
 
 func main() {
 	os.Exit(run(os.Args, os.Stdout, os.Stderr))
-}
-
-// ensureProjectRoot checks that cwd is a git project root and is initialized.
-// If not initialized, prompts (TUI) or requires --auto-init (headless).
-func ensureProjectRoot(cwd string, isHeadless, autoInit bool, stderr io.Writer) (string, error) {
-	if err := project.CheckGitRoot(cwd); err != nil {
-		return "", fmt.Errorf("orqestra must be run from the project root directory (no .git found in %s)", cwd)
-	}
-
-	if project.IsInitialized(cwd) {
-		return cwd, nil
-	}
-
-	// Not initialized — gate on init.
-	if !isHeadless {
-		fmt.Fprintf(stderr, "%s is not initialized.\nInitialize .orqestra? [Y/n] ", cwd)
-		var input string
-		fmt.Fscanln(os.Stdin, &input)
-		if input == "n" || input == "no" || input == "N" || input == "No" {
-			return "", fmt.Errorf("not initialized: run 'orqestra init' to set up the project")
-		}
-		if initErr := project.Init(cwd); initErr != nil {
-			return "", fmt.Errorf("failed to initialize project: %w", initErr)
-		}
-		fmt.Fprintf(stderr, "Initialized .orqestra in %s\n", cwd)
-		return cwd, nil
-	}
-
-	if autoInit {
-		if initErr := project.Init(cwd); initErr != nil {
-			return "", fmt.Errorf("failed to auto-initialize project: %w", initErr)
-		}
-		return cwd, nil
-	}
-
-	return "", fmt.Errorf("project %s not initialized: use --auto-init or run 'orqestra init' first", cwd)
 }
 
 // runInitCommand handles the 'orqestra init' subcommand.
@@ -394,12 +146,8 @@ func runInitCommand(baseDir string, stderr io.Writer) error {
 	return nil
 }
 
-// buildEngine constructs the full Engine with all runners.
+// buildEngine constructs the Engine with ProcessSpecs for the RunPipeline path.
 func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPath string) *orchestrator.Engine {
-	// Budget guard from pipeline config
-	usage := orchestrator.NewRunUsage(cfg.Pipeline.TokenBudget)
-	guard := orchestrator.NewBudgetGuard(usage)
-
 	// Question bridge for AskUserQuestion MCP tool
 	socketPath := filepath.Join("/tmp", fmt.Sprintf("orqestra-q-%d.sock", os.Getpid()))
 	bridge := mcp.NewQuestionBridge(socketPath)
@@ -409,46 +157,24 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		slog.Warn("cannot determine self path for MCP bridge, questions disabled", "err", selfErr)
 	}
 
-	// bridgeOpt injects the orqestra MCP server into each runner
-	var bridgeOpt harness.ClaudeCLIOption
-	if selfErr == nil {
-		bridgeOpt = harness.WithInlineMCPServer("orqestra", selfBin, []string{"mcp-bridge", "--socket", socketPath})
+	// bridgeOptFor returns a per-role MCP server option.
+	// Returns a no-op when selfBin is unavailable.
+	bridgeOptFor := func(agentID string) harness.ClaudeCLIOption {
+		if selfErr != nil {
+			return func(*harness.ClaudeCLI) {}
+		}
+		return harness.WithInlineMCPServer("orqestra", selfBin, []string{"mcp-bridge", "--socket", socketPath, "--agent-id", agentID})
 	}
 
-	// Researcher
+	// Build per-agent ClaudeCLIOptions for BuildProcessSpec.
 	resOpts := append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Researcher.BaseAgentConfig)...)
-	if bridgeOpt != nil {
-		resOpts = append(resOpts, bridgeOpt)
-	}
-	researcherRunner, err := harness.NewClaudeCLIFromConfig(cfg, cfg.Researcher.Model, resOpts...)
-	if err != nil {
-		slog.Error("failed to create researcher runner", "err", err)
-		os.Exit(exitInvalidInput)
-	}
-
-	// Architect
+	resOpts = append(resOpts, bridgeOptFor("researcher"), harness.WithMaxTurns(cfg.Researcher.MaxTurns))
 	plnOpts := append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Architect.BaseAgentConfig)...)
-	if bridgeOpt != nil {
-		plnOpts = append(plnOpts, bridgeOpt)
-	}
-	architectRunner, err := harness.NewClaudeCLIFromConfig(cfg, cfg.Architect.Model, plnOpts...)
-	if err != nil {
-		slog.Error("failed to create architect runner", "err", err)
-		os.Exit(exitInvalidInput)
-	}
-
-	// Critic
+	plnOpts = append(plnOpts, bridgeOptFor("architect"), harness.WithMaxTurns(cfg.Architect.MaxTurns))
 	criticOpts := append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Critic.BaseAgentConfig)...)
-	if bridgeOpt != nil {
-		criticOpts = append(criticOpts, bridgeOpt)
-	}
-	criticRunner, err := harness.NewClaudeCLIFromConfig(cfg, cfg.Critic.Model, criticOpts...)
-	if err != nil {
-		slog.Error("failed to create critic runner", "err", err)
-		os.Exit(exitInvalidInput)
-	}
+	criticOpts = append(criticOpts, bridgeOptFor("critic"), harness.WithMaxTurns(cfg.Critic.MaxTurns))
 
-	// Worker (sandboxed) — no bridge, workers don't ask questions
+	// Worker sandbox environment (model-specific env vars for API keys etc.)
 	resolved, resolveErr := cfg.ResolveModel(cfg.Worker.Model)
 	if resolveErr != nil {
 		slog.Error("failed to resolve worker model", "err", resolveErr)
@@ -459,248 +185,165 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		slog.Error("invalid model configuration", "err", modelEnvErr)
 		os.Exit(exitInvalidInput)
 	}
-	sandboxRunner, err := harness.NewRunner(harness.RunnerConfig{
-		Sandbox: harness.SandboxConfig{
-			RepoPath:     repoPath,
-			WorktreePath: "",
-			Profiles:     sandboxProfiles,
-			Env:          modelEnv,
-			Writable:     true,
-		},
-	}, context.Background())
-	if err != nil {
-		slog.Error("failed to create sandbox runner", "err", err)
-		os.Exit(exitInvalidInput)
+
+	workerSandboxCfg := harness.SandboxConfig{
+		RepoPath: repoPath,
+		Profiles: sandboxProfiles,
+		Env:      modelEnv,
+		Writable: true,
+	}
+	worktreeSandboxCfg := harness.SandboxConfig{
+		RepoPath: repoPath,
+		Profiles: sandboxProfiles,
+		Env:      modelEnv,
+		Writable: false,
+	}
+	roSandboxCfg := harness.SandboxConfig{
+		RepoPath: repoPath,
+		Profiles: sandboxProfiles,
+		Writable: false,
 	}
 
-	// WorktreeRunnerFactory creates a read-only-repo runner scoped to a worktree.
-	// BudgetGuard wraps the worktree runner for token accounting.
-	sandboxRunnerCfg := harness.SandboxConfig{
-		RepoPath:     repoPath,
-		Env:          modelEnv,
-		Writable:     false, // repo is read-only; worktree is read-write via WorktreePath
-		Profiles:     sandboxProfiles,
-		WorktreePath: "",    // set per-call
-	}
-	worktreeRunnerFactory := func(worktreePath string) harness.Runner {
-		wtCfg := sandboxRunnerCfg
-		wtCfg.WorktreePath = worktreePath
-		r, err := harness.NewRunner(harness.RunnerConfig{
-			Sandbox: wtCfg,
-			Binary:  "claude",
-		}, context.Background())
-		if err != nil {
-			slog.Error("failed to create worktree runner", "err", err)
+	// Allow the exact orqestra binary to exec inside the read-only planning sandbox.
+	// This is required for the mcp-bridge subprocess (AskUserQuestion) to start.
+	if selfErr == nil {
+		home := os.Getenv("HOME")
+		orqProfile := sandbox.NewToolProfile("orqestra-bridge", home)
+		if err := orqProfile.Allow(selfBin, sandbox.Exec); err != nil {
+			slog.Error("cannot allow orqestra binary in sandbox; AskUserQuestion unavailable", "err", err)
 			os.Exit(exitInvalidInput)
 		}
-		return guard.Wrap(r, "worker")
+		roSandboxCfg.Profiles = append(roSandboxCfg.Profiles, orqProfile.Snapshot())
+	}
+
+	// BuildProcessSpec inherits all options already set in resOpts/plnOpts/criticOpts,
+	// including the role system prompt that bridgeToolOpts now delivers via
+	// MergeAppendPrompts(SystemPrompt, AppendSystemPrompt). Do NOT add another
+	// WithAppendSystemPrompt here — the last one wins and would drop the role prompt.
+	resSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Researcher.Model, roSandboxCfg, resOpts...)
+	if specErr != nil {
+		slog.Error("failed to build researcher spec", "err", specErr)
+		os.Exit(exitInvalidInput)
+	}
+	resSpec.AgentID = "researcher"
+	resSpec.ExpectsReport = true
+	resSpec.Timeout = cfg.Researcher.Timeout.Duration
+	resSpec.LoopGuard = harness.LoopGuardSpec{
+		RepeatThreshold: cfg.Researcher.LoopGuard.RepeatThreshold,
+		MaxNudges:       cfg.Researcher.LoopGuard.MaxNudges,
+		CooldownTurns:   cfg.Researcher.LoopGuard.CooldownTurns,
+	}
+	resSpec.SilenceGuard = harness.SilenceGuardSpec{
+		SilenceSecs: cfg.Researcher.SilenceGuard.SilenceSecs,
+		NudgeText:   cfg.Researcher.SilenceGuard.NudgeText,
+	}
+	resSpec.PreTimeoutNudge = preTimeoutNudgeFor("researcher")
+
+	archSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Architect.Model, roSandboxCfg, plnOpts...)
+	if specErr != nil {
+		slog.Error("failed to build architect spec", "err", specErr)
+		os.Exit(exitInvalidInput)
+	}
+	archSpec.AgentID = "architect"
+	archSpec.ExpectsReport = true
+	archSpec.PlanMode = cfg.Architect.PermissionMode == "plan"
+	archSpec.Timeout = cfg.Architect.Timeout.Duration
+	archSpec.LoopGuard = harness.LoopGuardSpec{
+		RepeatThreshold: cfg.Architect.LoopGuard.RepeatThreshold,
+		MaxNudges:       cfg.Architect.LoopGuard.MaxNudges,
+		CooldownTurns:   cfg.Architect.LoopGuard.CooldownTurns,
+	}
+	archSpec.SilenceGuard = harness.SilenceGuardSpec{
+		SilenceSecs: cfg.Architect.SilenceGuard.SilenceSecs,
+		NudgeText:   cfg.Architect.SilenceGuard.NudgeText,
+	}
+	archSpec.PreTimeoutNudge = preTimeoutNudgeFor("architect")
+
+	criticSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Critic.Model, roSandboxCfg, criticOpts...)
+	if specErr != nil {
+		slog.Error("failed to build critic spec", "err", specErr)
+		os.Exit(exitInvalidInput)
+	}
+	criticSpec.AgentID = "critic"
+	criticSpec.ExpectsReport = true
+	criticSpec.Timeout = cfg.Critic.Timeout.Duration
+	criticSpec.LoopGuard = harness.LoopGuardSpec{
+		RepeatThreshold: cfg.Critic.LoopGuard.RepeatThreshold,
+		MaxNudges:       cfg.Critic.LoopGuard.MaxNudges,
+		CooldownTurns:   cfg.Critic.LoopGuard.CooldownTurns,
+	}
+	criticSpec.SilenceGuard = harness.SilenceGuardSpec{
+		SilenceSecs: cfg.Critic.SilenceGuard.SilenceSecs,
+		NudgeText:   cfg.Critic.SilenceGuard.NudgeText,
+	}
+	criticSpec.PreTimeoutNudge = preTimeoutNudgeFor("critic")
+
+	// The worker does not route through bridgeToolOpts (it runs permission_mode: full
+	// and never asks questions), so deliver its system prompt — the VALIDATION REPORT
+	// contract — explicitly here.
+	workerSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Worker.Model, workerSandboxCfg,
+		harness.WithWorkDir(repoPath),
+		harness.WithAppendSystemPrompt(harness.MergeAppendPrompts(cfg.Worker.SystemPrompt, cfg.Worker.AppendSystemPrompt)))
+	if specErr != nil {
+		slog.Error("failed to build worker spec", "err", specErr)
+		os.Exit(exitInvalidInput)
+	}
+	workerSpec.AgentID = "worker"
+	workerSpec.Timeout = cfg.Worker.Timeout.Duration
+	workerSpec.LoopGuard = harness.LoopGuardSpec{
+		RepeatThreshold: cfg.Worker.LoopGuard.RepeatThreshold,
+		MaxNudges:       cfg.Worker.LoopGuard.MaxNudges,
+		CooldownTurns:   cfg.Worker.LoopGuard.CooldownTurns,
+	}
+	// SilenceGuard: zero value = disabled (worker runs long Bash commands; silence is expected)
+	workerSpec.PreTimeoutNudge = preTimeoutNudgeFor("worker")
+
+	wtSpecFn := func(wtPath string) harness.ProcessSpec {
+		spec := workerSpec
+		sc := worktreeSandboxCfg
+		sc.WorktreePath = wtPath
+		spec.Sandbox = sc
+		spec.WorkDir = wtPath
+		return spec
 	}
 
 	return &orchestrator.Engine{
 		Config:   cfg,
 		RepoPath: repoPath,
-		Runners: orchestrator.Runners{
-			Researcher: guard.Wrap(researcherRunner, "researcher"),
-			Architect:  guard.Wrap(architectRunner, "architect"),
-			Critic:     guard.Wrap(criticRunner, "critic"),
-			Worker:     guard.Wrap(sandboxRunner, "worker"),
+		Specs: orchestrator.ProcessSpecs{
+			Researcher:     resSpec,
+			Architect:      archSpec,
+			Critic:         criticSpec,
+			Worker:         workerSpec,
+			WorktreeSpecFn: wtSpecFn,
 		},
-		RunDirFactory:         orchestrator.DefaultRunDirFactory(repoPath),
-		QuestionBridge:        bridge,
-		WorktreeRunnerFactory: worktreeRunnerFactory,
+		RunDirFactory:  orchestrator.DefaultRunDirFactory(repoPath),
+		QuestionBridge: bridge,
 	}
 }
 
-func runPlanOnly(ctx context.Context, cfg *config.Config, prompt string, jsonOutput bool, repoPath string) {
-	// Researcher
-	researcherRunner, err := harness.NewClaudeCLIFromConfig(cfg, cfg.Researcher.Model,
-		append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Researcher.BaseAgentConfig)...)...)
-	if err != nil {
-		slog.Error("failed to create researcher runner", "err", err)
-		os.Exit(exitInvalidInput)
+
+// genericReportNudge is sent to report roles (researcher, architect, critic) both
+// 60 s before the hard deadline and when the driftPolicy detects implementation intent.
+const genericReportNudge = "[Orchestrator] Session deadline approaching. " +
+	"Stop what you are doing and submit your report now by calling " +
+	"mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. " +
+	"Partial output is acceptable."
+
+// preTimeoutNudgeFor returns the steering message for a role.
+// researcher/architect/critic share the generic report-nudge text; worker is kept verbatim.
+func preTimeoutNudgeFor(role string) string {
+	switch role {
+	case "researcher", "architect", "critic":
+		return genericReportNudge
+	case "worker":
+		return "[Orchestrator] Session deadline in ~60 s. " +
+			"Describe what you are doing and what the next step is. " +
+			"If stuck, explain why. Your file changes are already saved — " +
+			"do NOT run cleanup, exit, or discard commands."
+	default:
+		return ""
 	}
-	researcherPlanner := agent.NewPlanner(researcherRunner, cfg.Researcher.SystemPrompt)
-
-	researchPrompt, _ := agent.CheckPromptIntegrity(prompt, prompt)
-	researchResult, err := researcherPlanner.Run(ctx, researchPrompt, nil)
-	if err != nil {
-		slog.Error("research failed", "err", err)
-		os.Exit(exitProviderError)
-	}
-
-	// Architect
-	architectRunner, planErr := harness.NewClaudeCLIFromConfig(cfg, cfg.Architect.Model,
-		append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Architect.BaseAgentConfig)...)...)
-	if planErr != nil {
-		slog.Error("failed to create architect runner", "err", planErr)
-		os.Exit(exitInvalidInput)
-	}
-	architectPlanner := agent.NewPlanner(architectRunner, cfg.Architect.SystemPrompt)
-
-	archPrompt, _ := agent.CheckPromptIntegrity(agent.ArchitectPrompt(prompt, researchResult.Plan), prompt)
-	archResult, archErr := architectPlanner.Run(ctx, archPrompt, nil)
-	if archErr != nil {
-		slog.Error("planning failed", "err", archErr)
-		os.Exit(exitProviderError)
-	}
-
-	if jsonOutput {
-		outputJSON(map[string]any{"plan": archResult.Plan})
-	} else {
-		fmt.Println(archResult.Plan)
-	}
-}
-
-func runValidateOnly(planPath string) {
-	data, err := os.ReadFile(planPath)
-	if err != nil {
-		slog.Error("reading plan file", "err", err)
-		os.Exit(exitInvalidInput)
-	}
-
-	content := strings.TrimSpace(string(data))
-	if !agent.IsNewFormat(content) {
-		fmt.Fprintf(os.Stderr, "Plan file does not start with '# Plan' — not a valid v3 plan.\n")
-		os.Exit(exitDomainFailure)
-	}
-	if !strings.Contains(content, "## Work Packages") {
-		fmt.Fprintf(os.Stderr, "Plan file missing '## Work Packages' section.\n")
-		os.Exit(exitDomainFailure)
-	}
-	fmt.Println("Plan structure OK.")
-}
-
-func runExecOnly(ctx context.Context, cfg *config.Config, sandboxProfiles []sandbox.Snapshot, planPath string, jsonOutput bool, repoPath string) {
-	data, err := os.ReadFile(planPath)
-	if err != nil {
-		slog.Error("reading plan file", "err", err)
-		os.Exit(exitInvalidInput)
-	}
-
-	content := strings.TrimSpace(string(data))
-	var execPrompt string
-
-	if agent.IsNewFormat(content) {
-		execPrompt = agent.BuildExecutionPromptFromPlan(content)
-	} else {
-		// Legacy JSON spec
-		var spec agent.Specification
-		if err := json.Unmarshal(data, &spec); err != nil {
-			slog.Error("parsing plan file", "err", err)
-			os.Exit(exitInvalidInput)
-		}
-		execPrompt = agent.BuildExecutionPrompt(spec)
-	}
-
-	resolved, _ := cfg.ResolveModel(cfg.Worker.Model)
-	modelEnv, modelEnvErr := harness.BuildModelEnv(resolved, cfg.ResolveUtilityModel())
-	if modelEnvErr != nil {
-		slog.Error("invalid model configuration", "err", modelEnvErr)
-		os.Exit(exitInvalidInput)
-	}
-	workerRunner, err := harness.NewRunner(harness.RunnerConfig{
-		Sandbox: harness.SandboxConfig{
-			RepoPath:     repoPath,
-			WorktreePath: "",
-			Profiles:     sandboxProfiles,
-			Env:          modelEnv,
-			Writable:     true,
-		},
-	}, ctx)
-	if err != nil {
-		slog.Error("failed to create worker runner", "err", err)
-		os.Exit(exitInvalidInput)
-	}
-
-	// Budget guard for exec-only mode
-	usage := orchestrator.NewRunUsage(cfg.Pipeline.TokenBudget)
-	guard := orchestrator.NewBudgetGuard(usage)
-	runner := guard.Wrap(workerRunner, "worker")
-
-	var stdout io.Writer = os.Stdout
-	if jsonOutput {
-		stdout = io.Discard
-	}
-
-	result, execErr := runStreamingToWriter(ctx, runner, execPrompt, "", stdout)
-	if execErr != nil {
-		slog.Error("execution failed", "err", execErr)
-		os.Exit(exitProviderError)
-	}
-
-	if jsonOutput {
-		outputJSON(map[string]any{"status": "done", "output": result.Output})
-	} else {
-		fmt.Println("\nDone.")
-	}
-}
-
-func outputJSON(v any) {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(v); err != nil {
-		slog.Error("failed to write JSON output", "err", err)
-		os.Exit(exitDomainFailure)
-	}
-}
-
-func runStreamingToWriter(
-	ctx context.Context,
-	runner harness.Runner,
-	prompt, systemPrompt string,
-	w io.Writer,
-) (harness.RunResult, error) {
-	if w == nil {
-		runner.SetEvents(nil)
-		runner.Post(systemPrompt)
-		runner.Post(prompt)
-		var result harness.RunResult
-		for ev := range runner.Receive() {
-			if ev.Kind == harness.EventError {
-				return result, fmt.Errorf("runner error: %s", ev.Text)
-			}
-			if ev.Kind == harness.EventUsage {
-				result.Usage = harness.TokenUsage{Input: ev.Input, Output: ev.Output}
-			}
-			if ev.Kind == harness.EventChunk && ev.Text != "" {
-				result.Output += ev.Text
-			}
-		}
-		return result, nil
-	}
-
-	updates := make(chan harness.Event, 256)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for u := range updates {
-			if u.Text != "" {
-				_, _ = io.WriteString(w, u.Text)
-			}
-		}
-	}()
-
-	runner.SetEvents(updates)
-	runner.Post(systemPrompt)
-	runner.Post(prompt)
-
-	var result harness.RunResult
-	for ev := range runner.Receive() {
-		if ev.Kind == harness.EventError {
-			close(updates)
-			<-done
-			return result, fmt.Errorf("runner error: %s", ev.Text)
-		}
-		if ev.Kind == harness.EventUsage {
-			result.Usage = harness.TokenUsage{Input: ev.Input, Output: ev.Output}
-		}
-		if ev.Kind == harness.EventChunk && ev.Text != "" {
-			result.Output += ev.Text
-		}
-	}
-	close(updates)
-	<-done
-	return result, nil
 }
 
 func resolveConfigPath(name, repoPath string) (string, error) {
@@ -765,8 +408,6 @@ func toolOpts(mcpServers *[]string, allowed, disallowed []string, permissionMode
 	// orqestra bridge MCP tool must be pre-approved.
 	if len(allowed) > 0 {
 		opts = append(opts, harness.WithAllowedTools(allowed))
-	} else if permissionMode == "plan" {
-		opts = append(opts, harness.WithAllowedTools([]string{"*", "mcp__*"}))
 	}
 
 	if len(disallowed) > 0 {
@@ -785,11 +426,10 @@ func bridgeToolOpts(base config.BaseAgentConfig) []harness.ClaudeCLIOption {
 		disallowed = append(disallowed, "AskUserQuestion")
 	}
 
-	// Orqestra agents always run in -p pipe mode where interactive permission
-	// prompts are impossible. Pre-approve all built-in and MCP tools
-	// unconditionally — the sandbox is the security boundary.
+	// Use the role's explicit allowed list from config, then add MCP bridge tools.
+	// Never add "*" — least-privilege: only the tools the role needs are approved.
 	allowed := append([]string(nil), base.AllowedTools...)
-	for _, tool := range []string{"*", "mcp__*", "mcp__orqestra__AskUserQuestion"} {
+	for _, tool := range []string{"mcp__*", "mcp__orqestra__AskUserQuestion"} {
 		if !stringSliceContains(allowed, tool) {
 			allowed = append(allowed, tool)
 		}
@@ -806,8 +446,12 @@ func bridgeToolOpts(base config.BaseAgentConfig) []harness.ClaudeCLIOption {
 		`{"permissions":{"allow":["mcp__orqestra__*"]}}`,
 	))
 
-	if base.AppendSystemPrompt != "" {
-		opts = append(opts, harness.WithAppendSystemPrompt(base.AppendSystemPrompt))
+	// Deliver the role's full system prompt to the model. It rides --append-system-prompt
+	// (layer 5) alongside the question-routing default, so Claude Code's base prompt and
+	// CLAUDE.md (layer 4) are preserved. Without this the role instructions never reach the
+	// model and every role collapses into plain plan-mode behavior.
+	if merged := harness.MergeAppendPrompts(base.SystemPrompt, base.AppendSystemPrompt); merged != "" {
+		opts = append(opts, harness.WithAppendSystemPrompt(merged))
 	}
 
 	return opts
@@ -821,4 +465,19 @@ func stringSliceContains(s []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// parseMCPBridgeArgs extracts --socket and --agent-id from the mcp-bridge subcommand args.
+func parseMCPBridgeArgs(args []string) (socketPath, agentID string, ok bool) {
+	for i := 0; i+1 < len(args); i++ {
+		switch args[i] {
+		case "--socket":
+			socketPath = args[i+1]
+			i++
+		case "--agent-id":
+			agentID = args[i+1]
+			i++
+		}
+	}
+	return socketPath, agentID, socketPath != ""
 }

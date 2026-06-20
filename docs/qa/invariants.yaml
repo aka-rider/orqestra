@@ -21,7 +21,7 @@ invariants:
     status: gap
     anchors:
       - {file: internal/agent/spec.go, symbol: BuildExecutionPromptFromPlan}
-      - {file: internal/orchestrator/engine.go, symbol: BuildExecutionPromptFromPlan}
+      - {file: internal/orchestrator/step_execute.go, symbol: BuildExecutionPromptFromPlan}
     tests: []
 
   - id: INV-P1-PLANSRC
@@ -29,9 +29,9 @@ invariants:
     layer: L0
     status: covered
     anchors:
-      - {file: internal/harness/claude_cli.go, symbol: readSecurePlanFile}
-      - {file: internal/agent/plan_extract.go, symbol: ReadPlanFromRun}
-    tests: [TestReadPlanFromRun_SecurityGate]
+      - {file: internal/agent/plan_extract.go, symbol: ReadPlan}
+      - {file: internal/agent/plan_extract.go, symbol: ReadPlanFile}
+    tests: [TestReadPlan_SecurityGate]
 
   - id: INV-P2-WRITE
     pillar: P2
@@ -48,7 +48,7 @@ invariants:
     status: defect
     anchors:
       - {file: internal/agent/validation.go, symbol: ParseValidationOutput}
-      - {file: internal/orchestrator/engine.go, symbol: StatusSuccess}
+      - {file: internal/orchestrator/step_validate.go, symbol: ParseValidationOutput}
     tests: []
 
   - id: INV-P3-DEGRADE
@@ -56,7 +56,7 @@ invariants:
     layer: L1
     status: defect
     anchors:
-      - {file: internal/orchestrator/engine.go, symbol: WorktreeRunnerFactory}
+      - {file: internal/orchestrator/step_execute.go, symbol: WorktreeSpecFn}
     tests: []
 
   - id: INV-P4-PARSE
@@ -73,7 +73,7 @@ invariants:
     layer: L0
     status: gap
     anchors:
-      - {file: internal/harness/claude_cli.go, symbol: parseStreamLines}
+      - {file: internal/harness/stream_event.go, symbol: parseStreamLines}
     tests: []
 
   - id: INV-P5-FAILCLOSED
@@ -97,43 +97,34 @@ invariants:
     layer: L2
     status: gap
     anchors:
-      - {file: internal/orchestrator/engine.go, symbol: AutoApprove}
+      - {file: internal/orchestrator/events.go, symbol: AutoApprove}
     tests: []
 
   - id: INV-H1-CLOSE
     pillar: P1
     layer: L1
-    status: defect
+    status: covered        # fixed by the harness refactor; harness.Run returns exactly once
     anchors:
-      - {file: internal/harness/runner.go, symbol: sandboxedRunner}
-      - {file: internal/harness/claude_cli.go, symbol: startSession}
-      - {file: internal/agent/planner.go, symbol: Receive}
-    tests: []
+      - {file: internal/harness/exec.go, symbol: Run}
+    tests: [TestHarnessRun_TerminatesWhenProcessExits]
 
   - id: INV-H2-SESSIONID
     pillar: P1
     layer: L1
-    status: defect
+    status: covered        # fixed: parseStreamLines now emits EventSessionStart
     anchors:
-      - {file: internal/harness/claude_cli.go, symbol: SessionID}
+      - {file: internal/harness/stream_event.go, symbol: EventSessionStart}
       - {file: internal/harness/runner.go, symbol: EventSessionStart}
-      - {file: internal/agent/planner.go, symbol: EventSessionStart}
-    tests: []
+    tests: [TestHarnessRun_TerminatesWhenProcessExits]
 
 # Canaries: each proves a confirmed defect (§4) is still live. A canary with a
 # canary_test is RUN by `make qa-verify` and must pass; gate_test names the real
 # gate that should replace it once the bug is fixed.
+#
+# DEFECT-01 (channel never closes) and DEFECT-05 (session id never set) were FIXED
+# by the harness refactor; their canaries were retired and INV-H1-CLOSE /
+# INV-H2-SESSIONID are now covered by TestHarnessRun_TerminatesWhenProcessExits.
 canaries:
-  - id: DEFECT-01
-    invariant: INV-H1-CLOSE
-    summary: sandboxed runner never closes its event channel; main flow hangs after Claude exits
-    state: live
-    canary_test: TestCanary_DEFECT01_ReceiveNeverClosesAfterExit
-    package: ./internal/harness/
-    tags: qacanary darwin integration
-    platform: darwin
-    gate_test: TestHarnessRunner_ReceiveClosesOnExit   # skipped until DEFECT-01 is fixed
-
   - id: DEFECT-02
     invariant: INV-P3-VALID
     summary: empty/marker-less validation output parses to VerdictPass -> StatusSuccess
@@ -144,8 +135,8 @@ canaries:
 
   - id: DEFECT-03
     invariant: INV-P3-DEGRADE
-    summary: worktree.Create failure silently falls back to writable repo, no event emitted
-    state: live
+    summary: worktree.Create failure silently falls back to the direct repo, no event emitted
+    state: live           # still present post-refactor (step_execute.go: "falling back to direct repo")
     canary_test: ""          # TODO: engine-level, needs replay-Runner + temp git
     gate_test: ""
 
@@ -154,11 +145,4 @@ canaries:
     summary: worktree commit failure skips merge but leaves StatusSuccess
     state: live
     canary_test: ""          # TODO: engine-level
-    gate_test: ""
-
-  - id: DEFECT-05
-    invariant: INV-H2-SESSIONID
-    summary: SessionID never set & EventSessionStart never emitted; plan extraction + validation continuation break
-    state: live
-    canary_test: ""          # TODO: same replay seam as DEFECT-01
     gate_test: ""

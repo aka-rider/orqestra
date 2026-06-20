@@ -4,6 +4,7 @@ package detect
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/sandbox"
@@ -25,6 +26,16 @@ func UserProfile(home string, cfg config.SandboxConfig) (sandbox.Snapshot, error
 		}
 	}
 	for _, dir := range cfg.AllowExec {
+		info, statErr := os.Stat(dir)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue // AllowOptional semantics: skip absent paths
+			}
+			return sandbox.Snapshot{}, fmt.Errorf("user profile allow_exec %q: %w", dir, statErr)
+		}
+		if !info.IsDir() {
+			return sandbox.Snapshot{}, fmt.Errorf("user profile allow_exec %q: must be a directory", dir)
+		}
 		if err := p.AllowOptional(dir, sandbox.Exec); err != nil {
 			return sandbox.Snapshot{}, fmt.Errorf("user profile allow_exec %q: %w", dir, err)
 		}

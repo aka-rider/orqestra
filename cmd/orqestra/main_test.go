@@ -26,8 +26,8 @@ func TestRun_MissingConfig(t *testing.T) {
 	args := []string{"orqestra", "--config", "nonexistent-config.yaml", "usage"}
 
 	exitCode := run(args, outStream, errStream)
-	if exitCode != exitInvalidInput {
-		t.Fatalf("expected exitInvalidInput (2), got %d. stderr: %s", exitCode, errStream.String())
+	if exitCode != exitUserCancelled {
+		t.Fatalf("expected exitUserCancelled (130) for non-tty InitGate, got %d. stderr: %s", exitCode, errStream.String())
 	}
 }
 
@@ -37,8 +37,40 @@ func TestRun_Help(t *testing.T) {
 	args := []string{"orqestra"}
 
 	exitCode := run(args, outStream, errStream)
-	if exitCode != exitInvalidInput {
-		t.Fatalf("expected exitInvalidInput (2) for TUI requirement on non-tty, got %d", exitCode)
+	if exitCode != exitUserCancelled {
+		t.Fatalf("expected exitUserCancelled (130) for non-tty InitGate, got %d", exitCode)
+	}
+}
+
+// TestRolePromptsDelivered locks the system-prompt delivery fix: each role's
+// system_prompt from the embedded pipeline.yaml must be non-empty and ride
+// --append-system-prompt as MergeAppendPrompts(SystemPrompt, AppendSystemPrompt) —
+// the exact payload bridgeToolOpts (researcher/architect/critic) and buildEngine
+// (worker) hand to WithAppendSystemPrompt. Regression guard for the bug where the
+// role prompt was parsed into config but never delivered to the model. Asserted at
+// the merge layer so it stays stable across harness arg-building changes.
+func TestRolePromptsDelivered(t *testing.T) {
+	cfg := config.DefaultConfig()
+	for _, tt := range []struct {
+		role      string
+		base      config.BaseAgentConfig
+		signature string
+	}{
+		{"researcher", cfg.Researcher.BaseAgentConfig, "FACT REPORT"},
+		{"architect", cfg.Architect.BaseAgentConfig, "Principal Engineer"},
+		{"critic", cfg.Critic.BaseAgentConfig, "Plan Critic"},
+		{"worker", cfg.Worker.BaseAgentConfig, "VALIDATION REPORT"},
+	} {
+		t.Run(tt.role, func(t *testing.T) {
+			if tt.base.SystemPrompt == "" {
+				t.Fatalf("%s system_prompt empty in embedded config — nothing to deliver", tt.role)
+			}
+			delivered := harness.MergeAppendPrompts(tt.base.SystemPrompt, tt.base.AppendSystemPrompt)
+			if !strings.Contains(delivered, tt.signature) {
+				t.Errorf("%s delivered --append-system-prompt missing role signature %q; got %q",
+					tt.role, tt.signature, delivered)
+			}
+		})
 	}
 }
 
@@ -46,7 +78,7 @@ func TestRun_Help(t *testing.T) {
 // by bridgeToolOpts against Orqestra's hard constraints:
 //
 //  1. mcp__orqestra__AskUserQuestion is ALWAYS in --allowedTools
-//  2. Wildcards ("*", "mcp__*") pre-approve all tools for pipe mode
+//  2. mcp__* is in --allowedTools for MCP bridge tools; no bare "*" (least-privilege)
 //  3. Built-in AskUserQuestion is ALWAYS in --disallowedTools
 //  4. When mcp_servers is explicit, --strict-mcp-config is set
 //  5. When mcp_servers is nil, no --strict-mcp-config (all user MCPs available)
@@ -129,12 +161,15 @@ func TestBridgeToolOpts_Constraints(t *testing.T) {
 				t.Errorf("CONSTRAINT 1 violated: --allowedTools = %q, must contain mcp__orqestra__AskUserQuestion", allowed)
 			}
 
-			// CONSTRAINT 2: wildcards for pipe mode pre-approval
-			if !strings.Contains(allowed, "*") {
-				t.Errorf("CONSTRAINT 2 violated: --allowedTools = %q, must contain wildcard *", allowed)
-			}
+			// CONSTRAINT 2: mcp__* for bridge tool pre-approval; bare "*" forbidden (least-privilege)
 			if !strings.Contains(allowed, "mcp__*") {
 				t.Errorf("CONSTRAINT 2 violated: --allowedTools = %q, must contain wildcard mcp__*", allowed)
+			}
+			// Bare "*" would grant every built-in tool — must not be present.
+			for _, part := range strings.Split(allowed, ",") {
+				if strings.TrimSpace(part) == "*" {
+					t.Errorf("CONSTRAINT 2 (least-privilege) violated: --allowedTools contains bare \"*\": %q", allowed)
+				}
 			}
 
 			// CONSTRAINT 3: built-in AskUserQuestion always blocked
@@ -176,6 +211,63 @@ func TestBridgeToolOpts_Constraints(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSpecRuntimeFields verifies that bridgeToolOpts-produced options do not
+// encode orchestration runtime knobs (AgentID, Timeout, LoopGuard, SilenceGuard)
+// into the subprocess args — those are set by the caller after BuildProcessSpec.
+func TestSpecRuntimeFields_NotInArgs(t *testing.T) {
+	base := config.BaseAgentConfig{
+		PermissionMode:  "plan",
+		AllowedTools:    []string{"Read", "Grep"},
+		DisallowedTools: []string{"AskUserQuestion"},
+	}
+	opts := bridgeToolOpts(base)
+	args := harness.BuildTestArgs(opts...)
+
+	for _, arg := range args {
+		if strings.Contains(arg, "agent-id") ||
+			strings.Contains(arg, "loop-guard") || strings.Contains(arg, "timeout") {
+			t.Errorf("runtime orchestration knob leaked into subprocess args: %q", arg)
+		}
+	}
+}
+
+// TestLeastPrivilege_NoWildcardStar verifies that read-only roles (researcher,
+// architect, critic) never get a bare "*" tool grant regardless of what is
+// in AllowedTools — the configured list is used verbatim plus mcp__*.
+func TestLeastPrivilege_NoWildcardStar(t *testing.T) {
+	roleAllowedTools := [][]string{
+		// researcher
+		{"Read", "Glob", "Grep", "Bash", "WebFetch", "WebSearch", "mcp__orqestra__*"},
+		// architect
+		{"Read", "Glob", "Grep", "Bash", "WebFetch", "WebSearch", "mcp__orqestra__*"},
+		// critic
+		{"Read", "Glob", "Grep", "Bash", "WebSearch", "mcp__orqestra__*"},
+	}
+
+	for _, allowed := range roleAllowedTools {
+		base := config.BaseAgentConfig{
+			AllowedTools:    allowed,
+			DisallowedTools: []string{"AskUserQuestion"},
+		}
+		opts := bridgeToolOpts(base)
+		args := harness.BuildTestArgs(opts...)
+		allowedStr := flagValue(args, "--allowedTools")
+
+		for _, part := range strings.Split(allowedStr, ",") {
+			if strings.TrimSpace(part) == "*" {
+				t.Errorf("least-privilege violation: bare \"*\" in --allowedTools for role with allowed=%v: %q",
+					allowed, allowedStr)
+			}
+		}
+		// All role tools must be present.
+		for _, tool := range allowed {
+			if !strings.Contains(allowedStr, tool) {
+				t.Errorf("role tool %q lost from --allowedTools = %q", tool, allowedStr)
+			}
+		}
 	}
 }
 

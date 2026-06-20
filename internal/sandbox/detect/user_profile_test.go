@@ -83,6 +83,9 @@ func TestUserProfile_ExecRejectsFiles(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when allow_exec points to a file, not a directory")
 	}
+	if !strings.Contains(err.Error(), "must be a directory") {
+		t.Errorf("unexpected error: %v", err)
+	}
 }
 
 func TestUserProfile_EmptyConfig(t *testing.T) {

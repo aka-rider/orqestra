@@ -162,19 +162,16 @@ func TestToolProfile_Allow(t *testing.T) {
 	}
 }
 
-func TestToolProfile_ExecRequiresDir(t *testing.T) {
+func TestToolProfile_ExecAllowedForFile(t *testing.T) {
+	// Exec on a specific file is allowed — emits a (literal …) process-exec SBPL rule.
 	home := os.Getenv("HOME")
 	dir := t.TempDir()
-	file := filepath.Join(dir, "f.txt")
-	os.WriteFile(file, []byte("x"), 0644)
+	file := filepath.Join(dir, "mybinary")
+	os.WriteFile(file, []byte("x"), 0755)
 
 	p := NewToolProfile("test", home)
-	err := p.Allow(file, Exec)
-	if err == nil {
-		t.Fatal("expected error: exec requires directory")
-	}
-	if !strings.Contains(err.Error(), "exec requires directory") {
-		t.Errorf("unexpected error: %v", err)
+	if err := p.Allow(file, Exec); err != nil {
+		t.Fatalf("Allow file Exec should succeed: %v", err)
 	}
 }
 

@@ -50,6 +50,75 @@ type jsonlAttachmentMessage struct {
 	} `json:"attachment"`
 }
 
+// jsonlAssistantMessage represents a JSONL line with an assistant message.
+type jsonlAssistantMessage struct {
+	Type    string `json:"type"`
+	Message struct {
+		StopReason string `json:"stop_reason"`
+		Content    []struct {
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			Thinking string `json:"thinking"`
+		} `json:"content"`
+	} `json:"message"`
+}
+
+// ExtractFinalOutput scans a session JSONL for the last assistant end_turn message
+// and returns its content. Text blocks take priority; if none, thinking blocks are
+// returned. Returns an error if no end_turn message with usable content is found.
+func ExtractFinalOutput(sessionLogPath string) (string, error) {
+	f, err := os.Open(sessionLogPath)
+	if err != nil {
+		return "", fmt.Errorf("open session log %q: %w", sessionLogPath, err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, initialScanBufferBytes), maxJSONLLineBytes)
+
+	var last jsonlAssistantMessage
+	var found bool
+	for scanner.Scan() {
+		var msg jsonlAssistantMessage
+		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+			continue
+		}
+		if msg.Type == "assistant" && msg.Message.StopReason == "end_turn" {
+			last = msg
+			found = true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("scan session log %q: %w", sessionLogPath, err)
+	}
+	if !found {
+		return "", fmt.Errorf("no assistant end_turn message found in %q", sessionLogPath)
+	}
+
+	// Text blocks take priority over thinking.
+	var b strings.Builder
+	for _, c := range last.Message.Content {
+		if c.Type == "text" {
+			b.WriteString(c.Text)
+		}
+	}
+	if s := strings.TrimSpace(b.String()); s != "" {
+		return s, nil
+	}
+
+	b.Reset()
+	for _, c := range last.Message.Content {
+		if c.Type == "thinking" {
+			b.WriteString(c.Thinking)
+		}
+	}
+	if s := strings.TrimSpace(b.String()); s != "" {
+		return s, nil
+	}
+
+	return "", fmt.Errorf("assistant end_turn message in %q has no usable content", sessionLogPath)
+}
+
 // ExtractPlanFilePath scans a session JSONL file for a plan_mode attachment
 // and returns the plan file path. Returns an error if no attachment is found.
 func ExtractPlanFilePath(sessionLogPath string) (string, error) {

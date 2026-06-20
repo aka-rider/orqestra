@@ -47,13 +47,12 @@ func (p *ToolProfile) AddEnv(key, value string) {
 
 // Allow is the ONLY mutation method. Resolves raw path (expands ~, resolves symlinks, stats).
 // Returns error on any failure — never swallows.
+// Exec on a file emits a (literal …) process-exec rule for that specific binary.
+// Exec on a directory emits a (subpath …) process-exec rule allowing any binary beneath it.
 func (p *ToolProfile) Allow(raw string, perm Permission) error {
 	path, err := ResolvePath(raw, p.home)
 	if err != nil {
 		return fmt.Errorf("profile %q: %w", p.name, err)
-	}
-	if perm&Exec != 0 && !path.IsDir {
-		return fmt.Errorf("profile %q: exec requires directory, got file %q", p.name, raw)
 	}
 	p.entries = append(p.entries, entry{path: path, perm: perm})
 	return nil

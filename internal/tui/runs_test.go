@@ -9,11 +9,11 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/xiii/orqestra/internal/agent"
+	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
-func testRunSummaries() []agent.RunSummary {
-	return []agent.RunSummary{
+func testRunSummaries() []orchestrator.RunSummary {
+	return []orchestrator.RunSummary{
 		{
 			Timestamp: time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
 			Slug:      "second-run",
@@ -33,9 +33,9 @@ func testRunSummaries() []agent.RunSummary {
 	}
 }
 
-func testRunDetail() agent.RunDetail {
-	return agent.RunDetail{
-		RunSummary: agent.RunSummary{
+func testRunDetail() orchestrator.RunDetail {
+	return orchestrator.RunDetail{
+		RunSummary: orchestrator.RunSummary{
 			Timestamp: time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
 			Slug:      "second-run",
 			Path:      "/tmp/sessions/2026-05-10-120000-second-run",
@@ -43,7 +43,7 @@ func testRunDetail() agent.RunDetail {
 			Status:    "done",
 			Duration:  3 * time.Minute,
 		},
-		Steps: []agent.StepMeta{
+		Steps: []orchestrator.StepMeta{
 			{AgentID: "researcher", StartTime: time.Date(2026, 5, 10, 12, 0, 10, 0, time.UTC), EndTime: time.Date(2026, 5, 10, 12, 1, 0, 0, time.UTC), Status: "done", InputTokens: 2000, OutputTokens: 1000, ClaudeSessionID: "sess-abc"},
 			{AgentID: "worker", StartTime: time.Date(2026, 5, 10, 12, 1, 0, 0, time.UTC), EndTime: time.Date(2026, 5, 10, 12, 3, 0, 0, time.UTC), Status: "done", InputTokens: 5000, OutputTokens: 3000, ClaudeSessionID: "sess-def"},
 		},
@@ -102,7 +102,7 @@ func TestTUI_RunsListEnterLoadsDetail(t *testing.T) {
 	os.WriteFile(filepath.Join(sessDir, "prompt.md"), []byte("Test prompt"), 0o644)
 	os.WriteFile(filepath.Join(sessDir, "final_plan.md"), []byte("# Plan\n\n## Goal\nTest\n\n## Work Packages\n\n### 1. Do"), 0o644)
 
-	meta := agent.StepMeta{
+	meta := orchestrator.StepMeta{
 		AgentID:   "researcher",
 		StartTime: time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
 		EndTime:   time.Date(2026, 5, 10, 12, 0, 10, 0, time.UTC),
@@ -112,7 +112,7 @@ func TestTUI_RunsListEnterLoadsDetail(t *testing.T) {
 	os.WriteFile(filepath.Join(sessDir, "researcher_meta.json"), data, 0o644)
 
 	m := testModel()
-	m.runsListScreen.SetRuns([]agent.RunSummary{{
+	m.runsListScreen.SetRuns([]orchestrator.RunSummary{{
 		Timestamp: time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
 		Slug:      "test-run",
 		Path:      sessDir,
@@ -246,6 +246,47 @@ func TestTUI_CtrlR_DuringPipeline(t *testing.T) {
 	}
 }
 
+// TestTUI_CtrlR_EscReturnsToLivePipeline guards the re-entry round trip: leaving
+// a live run via Ctrl+R and pressing Esc must return to the running view, not
+// drop to the prompt screen (the one-way-door regression).
+func TestTUI_CtrlR_EscReturnsToLivePipeline(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentStreaming
+	m.pipelineScreen.active = true
+
+	res, _ := sendCtrl(m, 'r')
+	m = res.(Model)
+	if m.state != StateRunsList {
+		t.Fatalf("expected StateRunsList after Ctrl+R, got %d", m.state)
+	}
+
+	res, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = res.(Model)
+	if m.state != StatePipeline {
+		t.Fatalf("expected to return to StatePipeline on Esc while a run is live, got %d", m.state)
+	}
+}
+
+// TestTUI_CtrlR_EscFromPromptReturnsToPrompt confirms the non-live path still
+// lands on the prompt screen.
+func TestTUI_CtrlR_EscFromPromptReturnsToPrompt(t *testing.T) {
+	m := testModel()
+	m.state = StatePrompt
+
+	res, _ := sendCtrl(m, 'r')
+	m = res.(Model)
+	if m.state != StateRunsList {
+		t.Fatalf("expected StateRunsList after Ctrl+R, got %d", m.state)
+	}
+
+	res, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = res.(Model)
+	if m.state != StatePrompt {
+		t.Fatalf("expected to return to StatePrompt on Esc with no live run, got %d", m.state)
+	}
+}
+
 func TestTUI_RunsListEmpty(t *testing.T) {
 	m := testModel()
 	m.state = StateRunsList
@@ -268,9 +309,9 @@ func TestTUI_RunsListEmpty(t *testing.T) {
 func TestTUI_RunStepNoSessionID(t *testing.T) {
 	m := testModel()
 	m.state = StateRunDetail
-	m.runDetailScreen.SetDetail(agent.RunDetail{
-		RunSummary: agent.RunSummary{Status: "done"},
-		Steps: []agent.StepMeta{
+	m.runDetailScreen.SetDetail(orchestrator.RunDetail{
+		RunSummary: orchestrator.RunSummary{Status: "done"},
+		Steps: []orchestrator.StepMeta{
 			{AgentID: "researcher", Status: "done"}, // no ClaudeSessionID
 		},
 	})

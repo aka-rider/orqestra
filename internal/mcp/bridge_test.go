@@ -11,6 +11,58 @@ import (
 	"time"
 )
 
+// awaitSocket polls until the socket file at path exists or ctx is done.
+func awaitSocket(t *testing.T, ctx context.Context, path string) {
+	t.Helper()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("socket %s did not appear before deadline", path)
+		case <-tick.C:
+		}
+	}
+}
+
+// runBridge launches bridge.Run(ctx) in a goroutine and waits until the socket is ready.
+// Returns a channel that closes when Run() exits (including its deferred cleanup).
+func runBridge(t *testing.T, ctx context.Context, bridge *QuestionBridge, sockPath string) <-chan struct{} {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		_ = bridge.Run(ctx)
+		close(done)
+	}()
+	awaitSocket(t, ctx, sockPath)
+	return done
+}
+
+// sendQuestion dials the bridge and sends a question envelope, returning the answer.
+func sendQuestion(sockPath, agentID string, q ToolCall) (Answer, error) {
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		return Answer{}, err
+	}
+	defer conn.Close()
+
+	payload, _ := json.Marshal(q)
+	env := bridgeEnvelope{Kind: "question", AgentID: agentID, Payload: payload}
+	envData, _ := json.Marshal(env)
+	if err := writeFrame(conn, envData); err != nil {
+		return Answer{}, err
+	}
+	data, err := readFrame(conn)
+	if err != nil {
+		return Answer{}, err
+	}
+	var ans Answer
+	return ans, json.Unmarshal(data, &ans)
+}
+
 func TestQuestionBridge_RoundTrip(t *testing.T) {
 	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-rt-%d.sock", os.Getpid()))
 	defer os.Remove(sockPath)
@@ -18,11 +70,7 @@ func TestQuestionBridge_RoundTrip(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	if err := bridge.Start(ctx); err != nil {
-		t.Fatalf("bridge start: %v", err)
-	}
-	defer bridge.Stop()
+	runBridge(t, ctx, bridge, sockPath)
 
 	if _, err := os.Stat(sockPath); err != nil {
 		t.Fatalf("socket file should exist: %v", err)
@@ -32,13 +80,6 @@ func TestQuestionBridge_RoundTrip(t *testing.T) {
 	var gotAnswer Answer
 
 	go func() {
-		conn, err := net.Dial("unix", sockPath)
-		if err != nil {
-			done <- err
-			return
-		}
-		defer conn.Close()
-
 		question := ToolCall{
 			Question: "What color do you prefer?",
 			Options: []ToolOption{
@@ -46,21 +87,12 @@ func TestQuestionBridge_RoundTrip(t *testing.T) {
 				{Label: "Blue", Hint: "cool color"},
 			},
 		}
-		payload, _ := json.Marshal(question)
-		if err := writeFrame(conn, payload); err != nil {
-			done <- err
-			return
-		}
-
-		answerData, err := readFrame(conn)
+		ans, err := sendQuestion(sockPath, "researcher", question)
 		if err != nil {
 			done <- err
 			return
 		}
-		if err := json.Unmarshal(answerData, &gotAnswer); err != nil {
-			done <- err
-			return
-		}
+		gotAnswer = ans
 		done <- nil
 	}()
 
@@ -101,36 +133,18 @@ func TestQuestionBridge_FreeformRoundTrip(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	if err := bridge.Start(ctx); err != nil {
-		t.Fatalf("bridge start: %v", err)
-	}
-	defer bridge.Stop()
+	runBridge(t, ctx, bridge, sockPath)
 
 	done := make(chan error, 1)
 	var gotAnswer Answer
 
 	go func() {
-		conn, err := net.Dial("unix", sockPath)
+		ans, err := sendQuestion(sockPath, "architect", ToolCall{Question: "What is your name?"})
 		if err != nil {
 			done <- err
 			return
 		}
-		defer conn.Close()
-
-		question := ToolCall{Question: "What is your name?"}
-		payload, _ := json.Marshal(question)
-		if err := writeFrame(conn, payload); err != nil {
-			done <- err
-			return
-		}
-
-		answerData, err := readFrame(conn)
-		if err != nil {
-			done <- err
-			return
-		}
-		json.Unmarshal(answerData, &gotAnswer)
+		gotAnswer = ans
 		done <- nil
 	}()
 
@@ -162,30 +176,255 @@ func TestQuestionBridge_FreeformRoundTrip(t *testing.T) {
 	}
 }
 
-func TestQuestionBridge_ContextCancellation(t *testing.T) {
-	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-cancel-%d.sock", os.Getpid()))
+// sendReport dials the bridge and sends a report envelope, returning the ack.
+func sendReport(sockPath, agentID, report, summary string) error {
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	payload, _ := json.Marshal(ReportSubmission{Report: report, Summary: summary})
+	env := bridgeEnvelope{Kind: "report", AgentID: agentID, Payload: payload}
+	envData, _ := json.Marshal(env)
+	if err := writeFrame(conn, envData); err != nil {
+		return err
+	}
+	ackData, err := readFrame(conn)
+	if err != nil {
+		return err
+	}
+	var ack struct{ OK bool `json:"ok"` }
+	return json.Unmarshal(ackData, &ack)
+}
+
+func TestQuestionBridge_ReportRoundTrip(t *testing.T) {
+	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-report-%d.sock", os.Getpid()))
 	defer os.Remove(sockPath)
 	bridge := NewQuestionBridge(sockPath)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	runBridge(t, ctx, bridge, sockPath)
 
-	if err := bridge.Start(ctx); err != nil {
-		t.Fatalf("bridge start: %v", err)
+	const agentID = "researcher"
+	const reportText = "## Goal\nTest report.\n## Codebase Facts\n- fact1"
+
+	if err := sendReport(sockPath, agentID, reportText, "test summary"); err != nil {
+		t.Fatalf("sendReport: %v", err)
 	}
 
-	cancel()
-	bridge.Stop()
-
-	socketRemoved := false
-	for i := 0; i < 50; i++ {
-		if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-			socketRemoved = true
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	// TakeReport should return the report and remove it.
+	got, ok := bridge.TakeReport(agentID)
+	if !ok {
+		t.Fatal("expected TakeReport to return true")
+	}
+	if got != reportText {
+		t.Errorf("report = %q, want %q", got, reportText)
 	}
 
-	if !socketRemoved {
-		t.Error("socket file should be removed after stop")
+	// Second call should return nothing.
+	_, ok = bridge.TakeReport(agentID)
+	if ok {
+		t.Error("expected TakeReport to return false on second call")
+	}
+}
+
+func TestQuestionBridge_RunClearsStaleReport(t *testing.T) {
+	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-stale-%d.sock", os.Getpid()))
+	defer os.Remove(sockPath)
+	bridge := NewQuestionBridge(sockPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// First run: send a report, then stop.
+	ctx1, cancel1 := context.WithCancel(ctx)
+	runDone1 := runBridge(t, ctx1, bridge, sockPath)
+	if err := sendReport(sockPath, "critic", "stale report", ""); err != nil {
+		cancel1()
+		t.Fatalf("sendReport: %v", err)
+	}
+	cancel1()
+	<-runDone1 // wait for full exit including deferred socket removal
+
+	// Second run: Run() clears stale state at startup.
+	runBridge(t, ctx, bridge, sockPath)
+
+	_, ok := bridge.TakeReport("critic")
+	if ok {
+		t.Error("expected stale report to be cleared on second Run")
+	}
+}
+
+func TestReportSignal_OpenBeforeDelivery(t *testing.T) {
+	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-sig-open-%d.sock", os.Getpid()))
+	defer os.Remove(sockPath)
+	bridge := NewQuestionBridge(sockPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	runBridge(t, ctx, bridge, sockPath)
+
+	sig := bridge.ReportSignal("architect")
+
+	// Signal must be open (not yet closed) before delivery.
+	select {
+	case <-sig:
+		t.Fatal("signal should not be closed before report delivery")
+	default:
+	}
+
+	// Deliver the report.
+	if err := sendReport(sockPath, "architect", "# Plan\n## Goal\nTest.", ""); err != nil {
+		t.Fatalf("sendReport: %v", err)
+	}
+
+	// Signal must close promptly after delivery.
+	select {
+	case <-sig:
+	case <-time.After(time.Second):
+		t.Fatal("signal did not close after report delivery")
+	}
+}
+
+func TestReportSignal_PreClosedWhenReportExists(t *testing.T) {
+	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-sig-pre-%d.sock", os.Getpid()))
+	defer os.Remove(sockPath)
+	bridge := NewQuestionBridge(sockPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	runBridge(t, ctx, bridge, sockPath)
+
+	// Deliver the report first.
+	if err := sendReport(sockPath, "researcher", "## Goal\nTest.", ""); err != nil {
+		t.Fatalf("sendReport: %v", err)
+	}
+
+	// ReportSignal called after delivery must return a pre-closed channel.
+	sig := bridge.ReportSignal("researcher")
+	select {
+	case <-sig:
+	default:
+		t.Fatal("signal should be pre-closed when report already exists")
+	}
+}
+
+func TestReportSignal_ReArmedAfterTakeReport(t *testing.T) {
+	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-sig-rearm-%d.sock", os.Getpid()))
+	defer os.Remove(sockPath)
+	bridge := NewQuestionBridge(sockPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	runBridge(t, ctx, bridge, sockPath)
+
+	// First delivery.
+	if err := sendReport(sockPath, "architect", "# Plan\n## Goal\nFirst.", ""); err != nil {
+		t.Fatalf("sendReport 1: %v", err)
+	}
+	bridge.TakeReport("architect") // consume first report
+
+	// Re-arm: signal for a second delivery should be open again.
+	sig2 := bridge.ReportSignal("architect")
+	select {
+	case <-sig2:
+		t.Fatal("re-armed signal should be open before second delivery")
+	default:
+	}
+
+	// Second delivery closes the re-armed signal.
+	if err := sendReport(sockPath, "architect", "# Plan\n## Goal\nSecond.", ""); err != nil {
+		t.Fatalf("sendReport 2: %v", err)
+	}
+	select {
+	case <-sig2:
+	case <-time.After(time.Second):
+		t.Fatal("re-armed signal did not close after second delivery")
+	}
+}
+
+func TestReportSignal_ReArmedAfterRestart(t *testing.T) {
+	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-sig-restart-%d.sock", os.Getpid()))
+	defer os.Remove(sockPath)
+	bridge := NewQuestionBridge(sockPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// First run.
+	ctx1, cancel1 := context.WithCancel(ctx)
+	runDone1 := runBridge(t, ctx1, bridge, sockPath)
+
+	// Subscribe before stopping the first run.
+	sigBefore := bridge.ReportSignal("architect")
+	select {
+	case <-sigBefore:
+		t.Fatal("signal should be open before delivery")
+	default:
+	}
+
+	cancel1()
+	<-runDone1 // wait for full exit including deferred socket removal
+
+	// Second run: reportWaiters cleared by Run().
+	runBridge(t, ctx, bridge, sockPath)
+
+	// New subscription after restart must return a fresh open channel.
+	sigAfter := bridge.ReportSignal("architect")
+	select {
+	case <-sigAfter:
+		t.Fatal("re-armed signal after restart should be open, not pre-closed")
+	default:
+	}
+
+	// Delivery on the new run closes the new signal (not the stale one).
+	if err := sendReport(sockPath, "architect", "# Plan\n## Goal\nAfter restart.", ""); err != nil {
+		t.Fatalf("sendReport: %v", err)
+	}
+	select {
+	case <-sigAfter:
+	case <-time.After(time.Second):
+		t.Fatal("re-armed signal did not close after delivery on new run")
+	}
+}
+
+func TestReportSignal_TwoDeliveriesSameAgentNoPanic(t *testing.T) {
+	// Two SubmitReport calls for the same agentID across a TakeReport must not
+	// double-close the waiter channel (which would panic).
+	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-sig-dup-%d.sock", os.Getpid()))
+	defer os.Remove(sockPath)
+	bridge := NewQuestionBridge(sockPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	runBridge(t, ctx, bridge, sockPath)
+
+	// Subscribe before first delivery.
+	sig := bridge.ReportSignal("critic")
+
+	// First delivery — closes the waiter.
+	if err := sendReport(sockPath, "critic", "## Critic Report\n### Blockers Found\nNone.", ""); err != nil {
+		t.Fatalf("sendReport 1: %v", err)
+	}
+	select {
+	case <-sig:
+	case <-time.After(time.Second):
+		t.Fatal("signal did not close after first delivery")
+	}
+	bridge.TakeReport("critic")
+
+	// Second delivery must not panic (no open waiter to double-close).
+	if err := sendReport(sockPath, "critic", "## Critic Report\n### Blockers Found\nNone again.", ""); err != nil {
+		t.Fatalf("sendReport 2: %v", err)
+	}
+	// Verify second report is stored correctly.
+	got, ok := bridge.TakeReport("critic")
+	if !ok {
+		t.Fatal("expected second report to be stored")
+	}
+	if got == "" {
+		t.Error("second report text is empty")
 	}
 }

@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"image"
 	"os"
@@ -10,7 +9,7 @@ import (
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
-	"github.com/xiii/orqestra/internal/agent"
+	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
@@ -22,22 +21,17 @@ const (
 	StatePipeline                          // 3-zone split layout (pipeline running/done)
 	StateRunsList                          // historical runs list
 	StateRunDetail                         // detail view for a single historical run
-	StatePlanHistoryDetail                 // plan history viewer launched from Run Detail (read-only)
 )
 
 // ContentMode represents what the content zone shows during pipeline execution.
 type ContentMode int
 
 const (
-	ContentStreaming     ContentMode = iota // auto-follows active agent stream
-	ContentPlanReview                       // rendered spec
-	ContentAgentHistory                     // frozen output of a previously-run agent
-	ContentCompletion                       // QA report, summary
-	ContentUserQuestion                     // MCP AskUserQuestion picker
-	ContentPlanDiff                         // line diff of last plan revision
-	ContentMergeConflict                    // post-run merge conflict resolution
-	ContentEditConfirm                      // Ctrl+E edit confirmation prompt
-	ContentPlanHistory                      // Ctrl+Y plan history viewer (live gate)
+	ContentStreaming    ContentMode = iota // auto-follows active agent stream
+	ContentCompletion                     // QA report, summary
+	ContentUserQuestion                   // MCP AskUserQuestion picker
+	ContentEditConfirm                    // Ctrl+E edit confirmation prompt
+	ContentHumanGate                      // human-in-the-loop plan gate
 )
 
 // AgentState classifies an agent's execution state.
@@ -50,6 +44,7 @@ const (
 	AgentStateFailed    AgentState = "failed"
 	AgentStateCancelled AgentState = "cancelled"
 	AgentStateGate      AgentState = "gate"
+	AgentStateSkipped   AgentState = "skipped"
 )
 
 // AgentRow tracks a single agent's status in the sidebar.
@@ -66,27 +61,38 @@ type AgentRow struct {
 	ContextWindow int64  // context window in tokens (0 = unknown)
 }
 
+// regionBounds holds the absolute terminal rectangles for the pipeline
+// alt-screen layout. Used for mouse hit-testing to prevent panes stealing events.
+type regionBounds struct {
+	timeline image.Rectangle
+	input    image.Rectangle
+}
+
 // Model is the top-level Bubble Tea model for the Orqestra TUI.
 type Model struct {
-	state  AppState
-	width  int
-	height int
+	state     AppState
+	prevState AppState // state to return to when leaving the runs list (set on entry)
+	width     int
+	height    int
+	regions   regionBounds // pipeline alt-screen layout regions
 
-	// Pipeline communication (domain side-effects stay on root)
-	events        <-chan orchestrator.Event
-	streamUpdates <-chan orchestrator.StreamEntry
-	decisions     chan<- orchestrator.Decision
-	cancel        context.CancelFunc
+	// Pipeline observation + control (ObsStore polling path)
+	obs     *orchestrator.ObsStore
+	ctrl    orchestrator.Control
+	lastRev uint64
+	cancel  context.CancelFunc
 
 	// Engine
 	engine *orchestrator.Engine
+
+	// Shared rune setup bundle (built once, threaded into prompt/gate sub-models)
+	runeUI runeUI
 
 	// Per-screen sub-models
 	promptScreen      PromptScreen
 	pipelineScreen    PipelineScreen
 	runsListScreen    RunsListScreen
 	runDetailScreen   RunDetailScreen
-	planHistoryScreen PlanHistoryScreen
 
 	// Global UI state
 	ctrlCPending  bool
@@ -94,21 +100,34 @@ type Model struct {
 	lastErr       error // navigation-level errors (e.g. loading runs)
 
 	// Restart state: carries restart context from run detail to prompt screen.
-	lastRestartRunPath           string
-	lastRestartFirstMissingAgent string
+	lastRestartRunPath string
+	lastRestartPhase   orchestrator.RestartPhase
+
+	// Setup panel state.
+	setupScreen    setupModel
+	confirmedSetup orchestrator.PipelineSetup
+	activeChat     HumanChatMode
+	contentMode    ContentMode
 }
 
-// NewModel creates the initial TUI model.
-func NewModel(engine *orchestrator.Engine, configName string) Model {
+// NewModel creates the initial TUI model. Returns an error if the rune UI
+// bundle (keymap, textedit commands, keybind resolver) fails to initialise.
+func NewModel(engine *orchestrator.Engine, configName string) (Model, error) {
+	ui, err := newRuneUI()
+	if err != nil {
+		return Model{}, fmt.Errorf("init rune UI: %w", err)
+	}
 	return Model{
 		state:             StatePrompt,
-		promptScreen:      NewPromptScreen(),
-		pipelineScreen:    NewPipelineScreen(configName),
+		promptScreen:      NewPromptScreen(ui),
+		pipelineScreen:    NewPipelineScreen(configName, ui),
 		engine:            engine,
+		runeUI:            ui,
 		runsListScreen:    NewRunsListScreen(),
 		runDetailScreen:   NewRunDetailScreen(),
-		planHistoryScreen: NewPlanHistoryScreen(),
-	}
+		setupScreen:       newSetupModel(),
+		confirmedSetup:    orchestrator.DefaultPipelineSetup(),
+	}, nil
 }
 
 // Init returns the initial command.
@@ -133,28 +152,16 @@ func animTickCmd() tea.Cmd {
 	})
 }
 
-// waitForEvent returns a tea.Cmd that waits for the next pipeline event.
-func waitForEvent(events <-chan orchestrator.Event) tea.Cmd {
+// notifyCmd returns a tea.Cmd that waits for the next ObsStore notify signal.
+func notifyCmd(ch <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
-		event, ok := <-events
-		if !ok {
-			return pipelineClosedMsg{}
-		}
-		return OrchestratorEventMsg{Event: event}
+		<-ch
+		return obsNotifyMsg{}
 	}
 }
 
-// pipelineClosedMsg signals the events channel was closed.
-type pipelineClosedMsg struct{}
-
-// planHistoryVisible reports whether the plan-history viewer should receive
-// key/mouse events instead of the underlying pipeline / run-detail screen.
-func (m Model) planHistoryVisible() bool {
-	if m.state == StatePlanHistoryDetail {
-		return true
-	}
-	return m.state == StatePipeline && m.pipelineScreen.content == ContentPlanHistory
-}
+// obsNotifyMsg fires when ObsStore has an updated snapshot for the TUI to consume.
+type obsNotifyMsg struct{}
 
 // Update handles messages and returns the updated model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -202,9 +209,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pipelineScreen.editConfirmCursor = 0
 			m.pipelineScreen.hasEditComment = false
 			m.pipelineScreen.content = ContentEditConfirm
-			m.pipelineScreen.hasPlanComment = false
 			m.recalculateLayout()
-			m.pipelineScreen.SyncViewports()
+			m.pipelineScreen.SyncLiveMetrics()
 			return m, nil
 		}
 		return m, nil
@@ -215,7 +221,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recalculateLayout()
 		switch m.state {
 		case StatePipeline:
-			m.pipelineScreen.SyncViewports()
+			m.pipelineScreen.SyncLiveMetrics()
 		case StateRunsList:
 			m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width())
 		case StateRunDetail:
@@ -230,22 +236,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case tickMsg:
-		if m.state == StatePipeline {
-			m.pipelineScreen.DrainStreamUpdates(m.streamUpdates)
-			// Skip pipeline sync while the plan-history viewer is overlaid: its
-			// rendering is owned by planHistoryScreen, and timer ticks must not
-			// rebuild unrelated viewport content (tui-instructions.md §async).
-			if !m.planHistoryVisible() {
-				m.pipelineScreen.SyncViewports()
+		// Keep the tick loop alive while the pipeline screen is visible OR a run
+		// is still active in the background (user navigated to runs list). This
+		// keeps the stream ring fresh so returning shows live state, and avoids
+		// spawning duplicate loops on re-entry.
+		switch {
+		case m.state == StatePipeline:
+			if m.obs != nil {
+				m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
+			}
+			m.recalculateLayout() // refresh streaming console height after drain
+			m.pipelineScreen.SyncLiveMetrics()
+			return m, tickCmd()
+		case m.pipelineScreen.active:
+			// Background ingest — user is in runs list; transcript updates silently.
+			if m.obs != nil {
+				m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
 			}
 			return m, tickCmd()
 		}
 		return m, nil
 
 	case animTickMsg:
-		if m.state == StatePipeline && m.pipelineScreen.active {
-			m.pipelineScreen.animFrame++
-			m.pipelineScreen.frameList.SetAnimFrame(m.pipelineScreen.animFrame)
+		if m.pipelineScreen.active {
+			if m.state == StatePipeline {
+				m.pipelineScreen.animFrame++
+			}
 			return m, animTickCmd()
 		}
 		return m, nil
@@ -254,57 +270,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ctrlCPending = false
 		return m, nil
 
-	case OrchestratorEventMsg:
+	case obsNotifyMsg:
+		if m.obs == nil {
+			return m, nil
+		}
+		snap := m.obs.Snapshot()
 		prevContent := m.pipelineScreen.content
-		prevComment := m.pipelineScreen.hasPlanComment
-		m.pipelineScreen.ApplyEvent(msg.Event, m.width)
-		for {
-			select {
-			case ev, ok := <-m.events:
-				if !ok {
-					if !m.pipelineScreen.awaitingPlanDecision && m.pipelineScreen.content != ContentCompletion {
-						m.pipelineScreen.content = ContentCompletion
-					}
-					if m.state == StatePipeline {
-						if inputHeightChanged(prevContent, m.pipelineScreen.content, prevComment, m.pipelineScreen.hasPlanComment) {
-							m.recalculateLayout()
-						}
-						m.pipelineScreen.SyncViewports()
-					}
-					return m, nil
-				}
-				m.pipelineScreen.ApplyEvent(ev, m.width)
-			default:
-				if m.state == StatePipeline {
-					if inputHeightChanged(prevContent, m.pipelineScreen.content, prevComment, m.pipelineScreen.hasPlanComment) {
-						m.recalculateLayout()
-					}
-					m.pipelineScreen.SyncViewports()
-				}
-				return m, waitForEvent(m.events)
-			}
-		}
+		m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
+		m.pipelineScreen.ApplySnapshot(snap, m.width)
+		m.lastRev = snap.Rev
+		content := m.pipelineScreen.content
 
-	case planRevisionsLoadedMsg, planRevisionDetailLoadedMsg:
-		var cmd tea.Cmd
-		m.planHistoryScreen, cmd = m.planHistoryScreen.Update(msg)
-		if intent := m.planHistoryScreen.PendingIntent; intent != nil {
-			m.planHistoryScreen.PendingIntent = nil
-			return m.processIntent(intent, cmd)
-		}
-		return m, cmd
-
-	case pipelineClosedMsg:
-		prevContent := m.pipelineScreen.content
-		prevComment := m.pipelineScreen.hasPlanComment
-		if !m.pipelineScreen.awaitingPlanDecision && m.pipelineScreen.content != ContentCompletion {
-			m.pipelineScreen.content = ContentCompletion
-		}
 		if m.state == StatePipeline {
-			if inputHeightChanged(prevContent, m.pipelineScreen.content, prevComment, m.pipelineScreen.hasPlanComment) {
+			if inputHeightChanged(prevContent, content) {
 				m.recalculateLayout()
 			}
-			m.pipelineScreen.SyncViewports()
+			m.pipelineScreen.SyncLiveMetrics()
+		}
+		if !snap.Terminal.Done {
+			return m, notifyCmd(m.obs.NotifyCh())
 		}
 		return m, nil
 	}
@@ -328,30 +312,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleMouse routes mouse events to the active screen.
+// handleMouse routes mouse events to the active screen's viewport.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.planHistoryVisible() {
-		var cmd tea.Cmd
-		m.planHistoryScreen, cmd = m.planHistoryScreen.HandleMouse(msg)
-		if intent := m.planHistoryScreen.PendingIntent; intent != nil {
-			m.planHistoryScreen.PendingIntent = nil
-			return m.processIntent(intent, cmd)
-		}
-		return m, cmd
-	}
-	if m.state != StatePipeline {
-		return m, nil
-	}
 	var cmd tea.Cmd
-	m.pipelineScreen, cmd = m.pipelineScreen.HandleMouse(msg)
+	switch m.state {
+	case StatePipeline:
+		cmd = m.handlePipelineMouse(msg)
+	case StateRunsList:
+		m.runsListScreen, cmd = m.runsListScreen.HandleMouse(msg)
+	case StateRunDetail:
+		m.runDetailScreen, cmd = m.runDetailScreen.HandleMouse(msg)
+	}
 	return m, cmd
+}
+
+// handlePipelineMouse routes mouse events for the pipeline alt-screen layout.
+// Wheel events always reach the timeline; click/motion/release are bounded
+// to the timeline region to avoid background panes stealing foreground events.
+func (m *Model) handlePipelineMouse(msg tea.MouseMsg) tea.Cmd {
+	var cmd tea.Cmd
+	switch msg.(type) {
+	case tea.MouseWheelMsg:
+		m.pipelineScreen.timeline, cmd = m.pipelineScreen.timeline.Update(msg)
+	case tea.MouseClickMsg, tea.MouseReleaseMsg, tea.MouseMotionMsg:
+		pt := image.Point{X: msg.Mouse().X, Y: msg.Mouse().Y}
+		if pt.In(m.regions.timeline) {
+			m.pipelineScreen.timeline, cmd = m.pipelineScreen.timeline.Update(msg)
+		}
+	}
+	return cmd
 }
 
 // handleKey processes key events.
 func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
-		// Second Ctrl+C within the time gate → quit immediately
+		// Second Ctrl+C within the time gate → cancel and quit immediately.
 		if m.ctrlCPending && time.Now().Before(m.ctrlCDeadline) {
+			if m.cancel != nil {
+				m.cancel()
+			}
 			return m, tea.Quit
 		}
 		// Pipeline is idle or completed → quit immediately (nothing to cancel)
@@ -369,9 +368,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		})
 		// Dispatch cancel to the active pipeline screen
 		prevContent := m.pipelineScreen.content
-		prevComment := m.pipelineScreen.hasPlanComment
 		m.pipelineScreen = m.pipelineScreen.HandleCtrlCCancel()
-		if inputHeightChanged(prevContent, m.pipelineScreen.content, prevComment, m.pipelineScreen.hasPlanComment) {
+		if inputHeightChanged(prevContent, m.pipelineScreen.content) {
 			m.recalculateLayout()
 		}
 		// Process any intent emitted by the cancel handler
@@ -380,10 +378,6 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.processIntent(intent, timeoutCmd)
 		}
 		return m, timeoutCmd
-	}
-
-	if m.planHistoryVisible() {
-		return m.handlePlanHistoryKey(msg)
 	}
 
 	switch m.state {
@@ -399,17 +393,6 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handlePlanHistoryKey delegates to PlanHistoryScreen and drains its intent.
-func (m Model) handlePlanHistoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	m.planHistoryScreen, cmd = m.planHistoryScreen.Update(msg)
-	if intent := m.planHistoryScreen.PendingIntent; intent != nil {
-		m.planHistoryScreen.PendingIntent = nil
-		return m.processIntent(intent, cmd)
-	}
-	return m, cmd
-}
-
 // handleRunsListKey delegates to RunsListScreen and handles intents.
 func (m Model) handleRunsListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
@@ -418,6 +401,14 @@ func (m Model) handleRunsListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.runsListScreen.PendingIntent = nil
 		switch i := intent.(type) {
 		case NavigateBackIntent:
+			// Return to where we came from. If a pipeline is still live, go back
+			// to its view (the tick/anim loops stayed alive while we were away).
+			if m.prevState == StatePipeline && (m.pipelineScreen.active || m.obs != nil) {
+				m.state = StatePipeline
+				m.recalculateLayout()
+				m.pipelineScreen.SyncLiveMetrics()
+				return m, nil
+			}
 			m.state = StatePrompt
 			m.recalculateLayout()
 			return m, nil
@@ -425,7 +416,7 @@ func (m Model) handleRunsListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if i.RunIndex < 0 || i.RunIndex >= len(m.runsListScreen.runs) {
 				return m, nil
 			}
-			detail, err := agent.LoadRunDetail(m.runsListScreen.runs[i.RunIndex].Path)
+			detail, err := orchestrator.LoadRunDetail(m.runsListScreen.runs[i.RunIndex].Path)
 			if err != nil {
 				m.lastErr = err
 				return m, nil
@@ -453,7 +444,7 @@ func (m Model) handleRunDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.recalculateLayout()
 			m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width())
 			return m, nil
-		case OpenPlanHistoryIntent, RestartRunIntent:
+		case RestartRunIntent:
 			return m.processIntent(intent, cmd)
 		}
 	}
@@ -462,6 +453,19 @@ func (m Model) handleRunDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // handlePromptKey delegates to PromptScreen and handles intents.
 func (m Model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// When the setup panel is open, route all keys to it.
+	if m.setupScreen.IsOpen() {
+		var cmd tea.Cmd
+		m.setupScreen, cmd = m.setupScreen.Update(msg)
+		if intent := m.setupScreen.PendingIntent; intent != nil {
+			m.setupScreen.PendingIntent = nil
+			if ci, ok := intent.(ConfirmSetupIntent); ok {
+				m.confirmedSetup = ci.Setup
+			}
+		}
+		return m, cmd
+	}
+
 	prevHeight := m.promptScreen.DesiredInputHeight(m.height)
 	var cmd tea.Cmd
 	m.promptScreen, cmd = m.promptScreen.Update(msg)
@@ -475,51 +479,59 @@ func (m Model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// If we have a restart context, start a restart pipeline instead.
 			if m.lastRestartRunPath != "" {
 				runPath := m.lastRestartRunPath
-				firstMissing := m.lastRestartFirstMissingAgent
+				phase := m.lastRestartPhase
 				m.lastRestartRunPath = ""
-				m.lastRestartFirstMissingAgent = ""
-				m.pipelineScreen.Start(i.Prompt)
+				m.lastRestartPhase = ""
+				blinkCmd := m.pipelineScreen.Start(i.Prompt)
 				m.state = StatePipeline
 				m.recalculateLayout()
-				pipelineCmd := m.startPipelineRestart(i.Prompt, runPath, firstMissing)
-				return m, tea.Batch(pipelineCmd, animTickCmd())
+				pipelineCmd := m.startPipelineRestart(i.Prompt, runPath, phase)
+				return m, tea.Batch(blinkCmd, pipelineCmd, animTickCmd())
 			}
-			m.pipelineScreen.Start(i.Prompt)
+			blinkCmd := m.pipelineScreen.Start(i.Prompt)
 			m.state = StatePipeline
 			m.recalculateLayout()
 			pipelineCmd := m.startPipeline(i.Prompt)
-			return m, tea.Batch(pipelineCmd, animTickCmd())
+			return m, tea.Batch(blinkCmd, pipelineCmd, animTickCmd())
 		case NavigateToRunsListIntent:
 			m.navigateToRunsList()
+			return m, nil
+		case ToggleSetupIntent:
+			if m.setupScreen.IsOpen() {
+				m.setupScreen.Close()
+			} else {
+				m.setupScreen.Open(m.confirmedSetup)
+			}
 			return m, nil
 		}
 	}
 	return m, cmd
 }
 
-// planReviewHeightChanged reports whether a content mode transition requires a
-// layout recalculation. The taller input zone (constPlanReviewInputHeight) is
-// only active when content is ContentPlanReview AND the comment textarea is
-// visible, so both dimensions must be compared.
-func inputHeightChanged(prevContent, nextContent ContentMode, prevComment, nextComment bool) bool {
-	prevTall := prevContent == ContentPlanReview && prevComment
-	nextTall := nextContent == ContentPlanReview && nextComment
-	if prevTall != nextTall {
-		return true
-	}
-	// Question mode uses dynamic height
-	prevQuestion := prevContent == ContentUserQuestion
-	nextQuestion := nextContent == ContentUserQuestion
-	return prevQuestion != nextQuestion
+// inputHeightChanged reports whether a content mode transition requires a
+// layout recalculation. Question mode uses dynamic height.
+func inputHeightChanged(prevContent, nextContent ContentMode) bool {
+	return (prevContent == ContentUserQuestion) != (nextContent == ContentUserQuestion)
 }
 
 // handlePipelineKey delegates to PipelineScreen and handles intents.
 func (m Model) handlePipelineKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Explicit copy key bindings: Cmd+Shift+C copies selection; Cmd+C copies hovered frame.
+	switch msg.String() {
+	case "super+shift+c":
+		cmd := m.pipelineScreen.timeline.CopySelected()
+		return m, cmd
+	case "super+c":
+		if m.pipelineScreen.timeline.HasSelection() {
+			cmd := m.pipelineScreen.timeline.CopySelected()
+			return m, cmd
+		}
+	}
+
 	prevContent := m.pipelineScreen.content
-	prevComment := m.pipelineScreen.hasPlanComment
 	var cmd tea.Cmd
 	m.pipelineScreen, cmd = m.pipelineScreen.Update(msg)
-	if inputHeightChanged(prevContent, m.pipelineScreen.content, prevComment, m.pipelineScreen.hasPlanComment) {
+	if inputHeightChanged(prevContent, m.pipelineScreen.content) {
 		m.recalculateLayout()
 	}
 	if intent := m.pipelineScreen.PendingIntent; intent != nil {
@@ -552,43 +564,33 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 		}
 		return m, batch(nil)
 	case ApprovePlanIntent:
-		if m.decisions != nil {
-			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionApprove}
-		}
+		m.ctrl.Submit(orchestrator.Decision{Type: orchestrator.DecisionApprove})
 		return m, batch(nil)
 	case ConfirmEditIntent:
-		if m.decisions != nil {
-			m.decisions <- orchestrator.Decision{
-				Type:          orchestrator.DecisionEdit,
-				EditedContent: i.EditedContent,
-				Comment:       i.Comment,
-				AutoApprove:   i.AutoApprove,
-			}
-		}
+		m.ctrl.Submit(orchestrator.Decision{
+			Type:          orchestrator.DecisionEdit,
+			EditedContent: i.EditedContent,
+			Comment:       i.Comment,
+			AutoApprove:   i.AutoApprove,
+		})
 		m.pipelineScreen.awaitingPlanDecision = false
 		m.pipelineScreen.content = ContentStreaming
-		m.pipelineScreen.SyncViewports()
-		return m, batch(waitForEvent(m.events))
+		m.pipelineScreen.SyncLiveMetrics()
+		return m, batch(nil)
 	case EditPlanIntent:
-		if m.decisions != nil {
-			m.decisions <- orchestrator.Decision{
-				Type:          orchestrator.DecisionEdit,
-				EditedContent: i.ModifiedMarkdown,
-			}
-		}
+		m.ctrl.Submit(orchestrator.Decision{
+			Type:          orchestrator.DecisionEdit,
+			EditedContent: i.ModifiedMarkdown,
+		})
 		return m, batch(nil)
 	case CommentPlanIntent:
-		if m.decisions != nil {
-			m.decisions <- orchestrator.Decision{
-				Type:    orchestrator.DecisionComment,
-				Comment: i.Comment,
-			}
-		}
-		return m, batch(waitForEvent(m.events))
+		m.ctrl.Submit(orchestrator.Decision{
+			Type:    orchestrator.DecisionComment,
+			Comment: i.Comment,
+		})
+		return m, batch(nil)
 	case CancelPlanIntent:
-		if m.decisions != nil {
-			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionCancel}
-		}
+		m.ctrl.Submit(orchestrator.Decision{Type: orchestrator.DecisionCancel})
 		return m, batch(nil)
 	case CancelPipelineIntent:
 		if m.cancel != nil {
@@ -620,60 +622,28 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 		return m, batch(nil)
 	case OpenExternalEditorIntent:
 		return m, batch(openExternalEditor(i.FilePath))
-	case AbortMergeIntent:
-		if m.decisions != nil {
-			m.decisions <- orchestrator.Decision{Type: orchestrator.DecisionMergeAbort}
-		}
-		return m, batch(nil)
-	case OpenPlanHistoryIntent:
-		if i.HistoryDir == "" {
-			m.lastErr = errors.New("plan history unavailable for this run")
-			return m, batch(nil)
-		}
-		cmd := m.planHistoryScreen.Open(i.HistoryDir, i.ReadOnly, i.HeadSHA)
-		if i.ReadOnly {
-			m.state = StatePlanHistoryDetail
-		} else {
-			m.pipelineScreen.content = ContentPlanHistory
-		}
-		m.recalculateLayout()
-		return m, batch(cmd)
 	case RestartRunIntent:
 		m.lastRestartRunPath = i.RunPath
-		m.lastRestartFirstMissingAgent = i.FirstMissingAgent
+		m.lastRestartPhase = i.Phase
 		m.pipelineScreen.Reset()
 		m.state = StatePrompt
 		m.promptScreen.Reset()
 		// Pre-fill with a restart prompt that includes the missing agent context.
-		prompt := "Restart run from agent: " + i.FirstMissingAgent
+		prompt := "Restart run from phase: " + string(i.Phase)
 		m.promptScreen.SetValue(prompt)
 		return m, batch(nil)
-	case ClosePlanHistoryIntent:
-		if m.state == StatePlanHistoryDetail {
-			m.state = StateRunDetail
-			m.recalculateLayout()
-			m.runDetailScreen.SyncViewports()
-		} else {
-			m.pipelineScreen.content = ContentPlanReview
-			m.recalculateLayout()
-			m.pipelineScreen.SyncViewports()
+	case PostMessageIntent:
+		if m.ctrl != nil && i.Text != "" {
+			text := i.Text
+			agentID := orchestrator.AgentID(i.AgentID)
+			return m, batch(func() tea.Msg {
+				if ch := m.ctrl.Input(agentID); ch != nil {
+					ch <- harness.Message{Text: text}
+				}
+				return nil
+			})
 		}
 		return m, batch(nil)
-	case RevertPlanIntent:
-		// Comment intentionally empty; AutoApprove intentionally false: revert
-		// must re-show the gate so the user reviews the historical revision
-		// before approving. See `DecisionEdit` branch in orchestrator.go.
-		if m.decisions != nil {
-			m.decisions <- orchestrator.Decision{
-				Type:          orchestrator.DecisionEdit,
-				EditedContent: i.Content,
-			}
-		}
-		m.pipelineScreen.content = ContentStreaming
-		m.pipelineScreen.awaitingPlanDecision = false
-		m.recalculateLayout()
-		m.pipelineScreen.SyncViewports()
-		return m, batch(waitForEvent(m.events))
 	}
 	return m, batch(nil)
 }
@@ -683,64 +653,73 @@ func (m *Model) startPipeline(prompt string) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 
-	channels := m.engine.Start(ctx, orchestrator.Input{
+	handle := m.engine.Start(ctx, orchestrator.Input{
 		Prompt: prompt,
+		Setup:  m.confirmedSetup,
 	})
-	m.events = channels.Events
-	m.streamUpdates = channels.StreamUpdates
-	m.decisions = channels.Decisions
+	m.obs = handle.Obs
+	m.ctrl = handle.Ctrl
+	m.lastRev = 0
 	m.pipelineScreen.SetStreamBuf(orchestrator.NewStreamRing(200))
-	m.pipelineScreen.SetHistoryStore(channels.History)
 
-	return tea.Batch(waitForEvent(channels.Events), tickCmd())
+	return tea.Batch(notifyCmd(handle.Obs.NotifyCh()), tickCmd())
 }
 
 // startPipelineRestart launches the orchestrator for a restart run and returns
 // a command to start listening. The restart context is passed through the Input.
-func (m *Model) startPipelineRestart(prompt, runPath, firstMissingAgent string) tea.Cmd {
+func (m *Model) startPipelineRestart(prompt, runPath string, phase orchestrator.RestartPhase) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 
-	channels := m.engine.Start(ctx, orchestrator.Input{
-		Prompt:      prompt,
-		AutoApprove: true,
+	handle := m.engine.Start(ctx, orchestrator.Input{
+		Prompt: prompt,
 		RestartFrom: orchestrator.RestartInput{
-			RunPath:           runPath,
-			FirstMissingAgent: firstMissingAgent,
+			RunPath: runPath,
+			Phase:   phase,
 		},
 	})
-	m.events = channels.Events
-	m.streamUpdates = channels.StreamUpdates
-	m.decisions = channels.Decisions
+	m.obs = handle.Obs
+	m.ctrl = handle.Ctrl
+	m.lastRev = 0
 	m.pipelineScreen.SetStreamBuf(orchestrator.NewStreamRing(200))
-	m.pipelineScreen.SetHistoryStore(channels.History)
 
-	return tea.Batch(waitForEvent(channels.Events), tickCmd())
+	return tea.Batch(notifyCmd(handle.Obs.NotifyCh()), tickCmd())
 }
 
 // View renders the current screen.
 func (m Model) View() tea.View {
+	// Setup panel overlay takes over the entire screen when open.
+	if m.state == StatePrompt && m.setupScreen.IsOpen() {
+		v := tea.NewView(viewSetupOverlay(m.setupScreen, m.effectiveWidth(), m.height))
+		v.AltScreen = true
+		v.MouseMode = tea.MouseModeCellMotion
+		v.KeyboardEnhancements.ReportAlternateKeys = true
+		v.KeyboardEnhancements.ReportAllKeysAsEscapeCodes = true
+		return v
+	}
+
 	var content string
-	if m.planHistoryVisible() {
-		content = m.planHistoryScreen.View(m.effectiveWidth(), m.height)
-	} else {
-		switch m.state {
-		case StatePrompt:
-			content = m.promptScreen.View(m.effectiveWidth(), m.height)
-		case StatePipeline:
-			m.pipelineScreen.ctrlCPending = m.ctrlCPending
-			content = m.pipelineScreen.View(m.effectiveWidth(), m.height)
-		case StateRunsList:
-			content = m.runsListScreen.View(m.effectiveWidth(), m.height)
-		case StateRunDetail:
-			content = m.runDetailScreen.View(m.effectiveWidth(), m.height)
-		case StatePlanHistoryDetail:
-			content = m.planHistoryScreen.View(m.effectiveWidth(), m.height)
-		}
+	switch m.state {
+	case StatePrompt:
+		content = m.promptScreen.View(m.effectiveWidth(), m.height)
+	case StatePipeline:
+		m.pipelineScreen.ctrlCPending = m.ctrlCPending
+		content = m.pipelineScreen.View(m.effectiveWidth(), m.height)
+	case StateRunsList:
+		content = m.runsListScreen.View(m.effectiveWidth(), m.height)
+	case StateRunDetail:
+		content = m.runDetailScreen.View(m.effectiveWidth(), m.height)
 	}
 	v := tea.NewView(content)
-	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
+	// Keyboard enhancements: enable for all states so Shift+Enter is
+	// distinguishable from plain Enter in the prompt and gate inputs.
+	v.KeyboardEnhancements.ReportAlternateKeys = true
+	v.KeyboardEnhancements.ReportAllKeysAsEscapeCodes = true
+	// Alt-screen states: pipeline, runs list, run detail. StatePrompt is inline.
+	if m.state == StatePipeline || m.state == StateRunsList || m.state == StateRunDetail {
+		v.AltScreen = true
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 	return v
 }
 
@@ -762,11 +741,9 @@ func (m *Model) recalculateLayout() {
 	switch m.state {
 	case StatePrompt:
 		inputHeight = m.promptScreen.DesiredInputHeight(m.height)
-		m.promptScreen.SetTextareaHeight(inputHeight - 2) // Subtract chrome
+		m.promptScreen.SetTextareaHeight(inputHeight - 1) // Subtract divider chrome
 	case StatePipeline:
-		if m.pipelineScreen.content == ContentPlanReview && m.pipelineScreen.hasPlanComment {
-			inputHeight = constPlanReviewInputHeight
-		} else if m.pipelineScreen.content == ContentUserQuestion && m.pipelineScreen.hasQuestion {
+		if m.pipelineScreen.content == ContentUserQuestion && m.pipelineScreen.hasQuestion {
 			// Auto-grow input zone for question options
 			optCount := len(m.pipelineScreen.question.q.Options)
 			inputHeight = max(constPipelineInputHeight, optCount+2)
@@ -777,32 +754,29 @@ func (m *Model) recalculateLayout() {
 		inputHeight = 0
 	}
 
-	// No header. Content gets full width. Sidebar is a bottom strip below the input zone.
-	usedHeight := inputHeight + constFooterHeight + constSidebarHeight
-	contentHeight := max(0, m.height-usedHeight)
-
-	// Pipeline viewports and bounds — subtract static text region height.
-	if m.state == StatePipeline {
-		staticH := m.pipelineScreen.StaticHeight()
-		if staticH > 0 {
-			contentHeight -= staticH
-		}
-	}
-	m.pipelineScreen.RecalculateLayout(m.width, contentHeight)
 	if m.pipelineScreen.content == ContentUserQuestion && m.pipelineScreen.hasQuestion {
 		m.pipelineScreen.question = m.pipelineScreen.question.SetWidth(m.width)
 	}
-	inputTop := contentHeight
-	m.pipelineScreen.bounds = layoutBounds{
-		content: image.Rect(0, 0, m.width, contentHeight),
-		sidebar: image.Rect(0, inputTop+inputHeight, m.width, inputTop+inputHeight+constSidebarHeight),
-		textarea: image.Rect(
-			0,
-			contentHeight,
-			m.width,
-			contentHeight+inputHeight,
-		),
+
+	// Pipeline alt-screen layout: status bar + timeline + input + footer.
+	if m.state == StatePipeline {
+		chromeH := constStatusBarHeight + inputHeight + constFooterHeight
+		timelineH := max(0, m.height-chromeH)
+
+		m.pipelineScreen.postInput.SetWidth(m.width)
+
+		y := constStatusBarHeight
+		m.regions.timeline = image.Rect(1, y, m.width-1, y+timelineH) // 1-col margins
+		y += timelineH
+		m.regions.input = image.Rect(0, y, m.width, y+inputHeight)
+
+		m.pipelineScreen.timeline.SetRect(m.regions.timeline)
+		m.pipelineScreen.timeline.SetFullWidth(m.width)
 	}
+
+	// No header. Content gets full width. Sidebar is a bottom strip below the input zone.
+	usedHeight := inputHeight + constFooterHeight + constSidebarHeight
+	contentHeight := max(0, m.height-usedHeight)
 
 	// Runs list: full-width viewport
 	m.runsListScreen.viewport.SetWidth(m.width)
@@ -830,7 +804,12 @@ func (m *Model) recalculateLayout() {
 		m.promptScreen.height = m.height
 	}
 
-	if m.planHistoryVisible() {
-		m.planHistoryScreen.RecalculateLayout(m.width, contentHeight)
+	// Propagate gate body dimensions to the active chat view (markdownedit).
+	if m.state == StatePipeline &&
+		m.pipelineScreen.content == ContentHumanGate &&
+		m.pipelineScreen.activeChat != nil {
+		bodyH := max(0, m.height-constStatusBarHeight-constPipelineInputHeight-constFooterHeight)
+		m.pipelineScreen.activeChat.SetSize(m.width, bodyH)
 	}
+
 }

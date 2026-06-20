@@ -7,7 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,13 +15,34 @@ import (
 	"github.com/xiii/orqestra/internal/sandbox"
 )
 
-// driveRunnerUntilClose builds the replay stub, constructs the REAL sandboxed
-// runner pointed at it via the `binary` config knob, drives Post/Receive through
-// the seatbelt sandbox, and reports how many events arrived and whether the
-// Receive() channel closed within grace. This is the deterministic replay seam —
-// real production code (sandboxedRunner + ClaudeCLI), no hand-written fakes, the
-// only stand-in being a player of a committed real recording.
-func driveRunnerUntilClose(t *testing.T, grace time.Duration) (events int, closed bool) {
+// countingSink is a concurrency-safe harness.Sink for tests. Observe is called
+// from harness.Run's dedicated goroutine, so access is mutex-guarded.
+type countingSink struct {
+	mu        sync.Mutex
+	count     int
+	sessionID string
+}
+
+func (s *countingSink) Observe(ev harness.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.count++
+	if ev.SessionID != "" && s.sessionID == "" {
+		s.sessionID = ev.SessionID
+	}
+}
+
+func (s *countingSink) snapshot() (int, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.count, s.sessionID
+}
+
+// driveReplayRun builds the replay stub and runs the REAL harness.Run against it
+// through the seatbelt sandbox, injecting the stub via the `binary` knob (no
+// test-only seam). It reports whether Run returned within grace and what the sink
+// observed. This is the deterministic replay seam on the post-refactor harness.
+func driveReplayRun(t *testing.T, grace time.Duration) (returned bool, events int, sessionID string) {
 	t.Helper()
 
 	home := os.Getenv("HOME")
@@ -44,7 +65,7 @@ func driveRunnerUntilClose(t *testing.T, grace time.Duration) (events int, close
 		t.Fatalf("build replay stub: %v\n%s", err, out)
 	}
 
-	// Place the recording the stub will replay in the workspace (== runner CWD).
+	// Place the recording the stub replays in the workspace (== process CWD).
 	rec, err := os.ReadFile(filepath.Join(repoRoot, "internal", "harness", "testdata", "worker_stream_sample.jsonl"))
 	if err != nil {
 		t.Fatalf("read recording: %v", err)
@@ -60,42 +81,37 @@ func driveRunnerUntilClose(t *testing.T, grace time.Duration) (events int, close
 	}
 	snap := prof.Snapshot()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	r, err := harness.NewRunner(harness.RunnerConfig{
+	spec := harness.ProcessSpec{
+		Model:   harness.ModelSpec{Provider: "native"}, // no model-env override
 		Binary:  stub,
+		Prompt:  "go",
 		WorkDir: workspace,
 		Sandbox: harness.SandboxConfig{
 			RepoPath: workspace,
 			Writable: true,
 			Profiles: []sandbox.Snapshot{snap},
 		},
-	}, ctx)
-	if err != nil {
-		t.Fatalf("NewRunner: %v", err)
 	}
-	defer func() { _ = r.Cancel() }()
 
-	ch := r.Receive() // create the session before Post so forwarding has a target
-	r.Post("go")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	var count int64
-	closedCh := make(chan struct{})
+	sink := &countingSink{}
+	errCh := make(chan error, 1)
 	go func() {
-		for range ch {
-			atomic.AddInt64(&count, 1)
-		}
-		close(closedCh) // only reached when ch is closed
+		_, e := harness.Run(ctx, spec, nil, sink)
+		errCh <- e
 	}()
 
 	select {
-	case <-closedCh:
-		closed = true
+	case <-errCh:
+		returned = true
 	case <-time.After(grace):
-		closed = false
+		returned = false
+		cancel() // unblock Run so its goroutine can exit
 	}
-	return int(atomic.LoadInt64(&count)), closed
+	n, sid := sink.snapshot()
+	return returned, n, sid
 }
 
 // repoRootDir walks up from the test's working directory to the module root.
@@ -117,24 +133,25 @@ func repoRootDir(t *testing.T) string {
 	}
 }
 
-// TestHarnessRunner_ReceiveClosesOnExit is the gate for INV-H1-CLOSE: after the
-// underlying process exits, Receive()'s channel must close so a `for range`
-// consumer terminates.
+// TestHarnessRun_TerminatesWhenProcessExits is the gate for INV-H1-CLOSE and
+// INV-H2-SESSIONID.
 //
-// It is BLOCKED on DEFECT-01 (the sandboxed runner never closes the forwarded
-// channel) and therefore times out (red) today. It is guarded so the standard
-// `make test-sandbox` lane stays green while the defect is live — the DEFECT-01
-// canary tracks the bug in the qaverify lane. Run with ORQESTRA_RUN_PENDING_GATES=1
-// to see it red. When DEFECT-01 is fixed, delete this guard and it goes green.
-func TestHarnessRunner_ReceiveClosesOnExit(t *testing.T) {
-	if os.Getenv("ORQESTRA_RUN_PENDING_GATES") == "" {
-		t.Skip("INV-H1-CLOSE blocked on DEFECT-01 — see TestCanary_DEFECT01_ReceiveNeverClosesAfterExit")
+// INV-H1-CLOSE: harness.Run must return exactly once when the replayed process
+// exits — never leave a consumer hanging (the DEFECT-01 failure mode, fixed by
+// the harness refactor).
+//
+// INV-H2-SESSIONID: the session id must be captured from the stream via
+// EventSessionStart (the DEFECT-05 failure mode, fixed when parseStreamLines
+// began emitting EventSessionStart).
+func TestHarnessRun_TerminatesWhenProcessExits(t *testing.T) {
+	returned, events, sessionID := driveReplayRun(t, 15*time.Second)
+	if !returned {
+		t.Fatal("INV-H1-CLOSE: harness.Run did not return after the process exited (hang)")
 	}
-	events, closed := driveRunnerUntilClose(t, 5*time.Second)
-	if events < 1 {
-		t.Fatalf("inconclusive: replay stub produced no events (sandbox/exec setup issue)")
+	if events == 0 {
+		t.Fatal("inconclusive: replay stub produced no events (sandbox/exec setup issue)")
 	}
-	if !closed {
-		t.Fatalf("INV-H1-CLOSE: Receive() channel did not close after the process exited — DEFECT-01")
+	if sessionID == "" {
+		t.Fatal("INV-H2-SESSIONID: no SessionID observed from the stream")
 	}
 }

@@ -136,7 +136,6 @@ type Config struct {
 	Critic         CriticConfig              `yaml:"critic"`
 	Worker         WorkerConfig              `yaml:"worker"`
 	Retry          RetryConfig               `yaml:"retry"`
-	ExecutionGraph ExecutionGraphConfig      `yaml:"execution_graph"`
 	Sandbox        SandboxConfig             `yaml:"sandbox"`
 }
 
@@ -147,15 +146,32 @@ type DefaultsConfig struct {
 	AppendSystemPrompt string   `yaml:"append_system_prompt"`
 }
 
+// LoopGuard configures the LoopBreaker middleware's loop-detection thresholds.
+type LoopGuard struct {
+	RepeatThreshold int `yaml:"repeat_threshold"` // identical tool calls before nudging (default 3)
+	MaxNudges       int `yaml:"max_nudges"`        // nudges before escalating to cancel (default 3)
+	CooldownTurns   int `yaml:"cooldown_turns"`    // turns to wait after a nudge before re-checking (default 2)
+}
+
+// SilenceGuard configures the SilenceDetector middleware.
+type SilenceGuard struct {
+	SilenceSecs int    `yaml:"silence_secs"` // seconds of event-stream silence before nudging; 0 = disabled
+	NudgeText   string `yaml:"nudge_text"`   // optional; "" falls back to the agent's PreTimeoutNudge text
+}
+
 // BaseAgentConfig holds fields shared by all agent roles.
 type BaseAgentConfig struct {
-	Model              string    `yaml:"model"`
-	SystemPrompt       string    `yaml:"system_prompt"`
-	AllowedTools       []string  `yaml:"allowed_tools"`
-	DisallowedTools    []string  `yaml:"disallowed_tools"`
-	MCPServers         *[]string `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
-	PermissionMode     string    `yaml:"permission_mode"`
-	AppendSystemPrompt string    `yaml:"append_system_prompt"`
+	Model              string       `yaml:"model"`
+	SystemPrompt       string       `yaml:"system_prompt"`
+	AllowedTools       []string     `yaml:"allowed_tools"`
+	DisallowedTools    []string     `yaml:"disallowed_tools"`
+	MCPServers         *[]string    `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
+	PermissionMode     string       `yaml:"permission_mode"`
+	AppendSystemPrompt string       `yaml:"append_system_prompt"`
+	Timeout            Duration     `yaml:"timeout"`
+	MaxTurns           int          `yaml:"max_turns"`
+	LoopGuard          LoopGuard    `yaml:"loop_guard"`
+	SilenceGuard       SilenceGuard `yaml:"silence_guard"`
 }
 
 type ResearcherConfig struct {
@@ -174,9 +190,7 @@ type CriticConfig struct {
 
 type WorkerConfig struct {
 	BaseAgentConfig `yaml:",inline"`
-	Timeout         Duration `yaml:"timeout"`
-	MaxTurns        int      `yaml:"max_turns"`
-	Parallelism     int      `yaml:"parallelism"` // max concurrent workers per wave; 0 or 1 = sequential
+	Parallelism     int `yaml:"parallelism"` // max concurrent workers per wave; 0 or 1 = sequential
 }
 
 type RetryConfig struct {
@@ -189,43 +203,6 @@ type RetryConfig struct {
 // Duration wraps time.Duration for YAML unmarshaling.
 type Duration struct {
 	time.Duration
-}
-
-// ExecutionGraphConfig defines the DAG of agents for multi-agent orchestration.
-type ExecutionGraphConfig struct {
-	Agents      []AgentNodeConfig `yaml:"agents"`
-	Concurrency int               `yaml:"concurrency"`
-}
-
-// AgentNodeConfig defines an agent within the execution graph.
-type AgentNodeConfig struct {
-	ID               string               `yaml:"id"`
-	Role             string               `yaml:"role"`
-	Kind             string               `yaml:"kind"`
-	Model            string               `yaml:"model"`
-	ModelRef         string               `yaml:"model_ref"`
-	SmallModel       string               `yaml:"small_model"`
-	SmallModelRef    string               `yaml:"small_model_ref"`
-	PromptFile       string               `yaml:"prompt_file"`
-	SystemPromptFile string               `yaml:"system_prompt_file"`
-	DependsOn        []string             `yaml:"depends_on"`
-	InputsFrom       []string             `yaml:"inputs_from"`
-	Permissions      string               `yaml:"permissions"`
-	Timeout          Duration             `yaml:"timeout"`
-	MaxAttempts      int                  `yaml:"max_attempts"`
-	OnFailure        string               `yaml:"on_failure"`
-	Validator        *ValidatorNodeConfig `yaml:"validator"`
-	Sandbox          *SandboxConfig       `yaml:"sandbox"` // per-agent sandbox override
-}
-
-// ValidatorNodeConfig defines a validator attached to an agent.
-type ValidatorNodeConfig struct {
-	ID               string `yaml:"id"`
-	Role             string `yaml:"role"`
-	ModelRef         string `yaml:"model_ref"`
-	Model            string `yaml:"model"`
-	PromptFile       string `yaml:"prompt_file"`
-	SystemPromptFile string `yaml:"system_prompt_file"`
 }
 
 // PipelineConfig controls global pipeline behavior.
@@ -299,9 +276,8 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// applyDefaults merges DefaultsConfig into each agent's BaseAgentConfig.
-// Agent-level values take precedence: if an agent already has DisallowedTools
-// or AppendSystemPrompt set, the default is not applied (replacement semantics).
+// applyDefaults merges DefaultsConfig into each agent's BaseAgentConfig,
+// and applies zero-value defaults for LoopGuard thresholds.
 func (c *Config) applyDefaults() {
 	agents := []*BaseAgentConfig{
 		&c.Researcher.BaseAgentConfig,
@@ -315,6 +291,15 @@ func (c *Config) applyDefaults() {
 		}
 		if a.AppendSystemPrompt == "" && c.Defaults.AppendSystemPrompt != "" {
 			a.AppendSystemPrompt = c.Defaults.AppendSystemPrompt
+		}
+		if a.LoopGuard.RepeatThreshold == 0 {
+			a.LoopGuard.RepeatThreshold = 3
+		}
+		if a.LoopGuard.MaxNudges == 0 {
+			a.LoopGuard.MaxNudges = 3
+		}
+		if a.LoopGuard.CooldownTurns == 0 {
+			a.LoopGuard.CooldownTurns = 2
 		}
 	}
 }
@@ -383,60 +368,8 @@ func (c *Config) validate() error {
 	if _, err := c.ResolvedTokenLimits(); err != nil {
 		return err
 	}
-	for _, node := range c.ExecutionGraph.Agents {
-		if node.ID == "" && node.Role == "" {
-			return fmt.Errorf("execution graph agent missing mandatory id or role parameter")
-		}
-		if node.ModelRef != "" {
-			if _, key := c.lookupModel(node.ModelRef); key == "" {
-				return &ModelNotFoundError{
-					Name:      node.ModelRef,
-					Available: c.modelNames(),
-					Context:   fmt.Sprintf("execution graph node %q model_ref", node.identity()),
-				}
-			}
-		}
-		if node.SmallModelRef != "" {
-			if _, key := c.lookupModel(node.SmallModelRef); key == "" {
-				return &ModelNotFoundError{
-					Name:      node.SmallModelRef,
-					Available: c.modelNames(),
-					Context:   fmt.Sprintf("execution graph node %q small_model_ref", node.identity()),
-				}
-			}
-		}
-		if node.Validator != nil && node.Validator.ModelRef != "" {
-			if _, key := c.lookupModel(node.Validator.ModelRef); key == "" {
-				return &ModelNotFoundError{
-					Name:      node.Validator.ModelRef,
-					Available: c.modelNames(),
-					Context:   fmt.Sprintf("execution graph validator %q model_ref", node.Validator.identity()),
-				}
-			}
-		}
-	}
 
 	return nil
-}
-
-func (n AgentNodeConfig) identity() string {
-	if n.ID != "" {
-		return n.ID
-	}
-	if n.Role != "" {
-		return n.Role
-	}
-	return "<unnamed>"
-}
-
-func (n ValidatorNodeConfig) identity() string {
-	if n.ID != "" {
-		return n.ID
-	}
-	if n.Role != "" {
-		return n.Role
-	}
-	return "<unnamed>"
 }
 
 // envVarPattern matches ${VAR_NAME} for environment variable interpolation.

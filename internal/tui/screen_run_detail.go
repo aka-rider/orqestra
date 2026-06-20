@@ -8,7 +8,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/xiii/orqestra/internal/agent"
+	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
 // RunDetailFocus identifies which pane has keyboard focus in the run detail screen.
@@ -22,8 +22,8 @@ const (
 
 // RunDetailScreen manages the run detail inspection view.
 type RunDetailScreen struct {
-	detail        agent.RunDetail
-	completeness  agent.RunCompleteness
+	detail        orchestrator.RunDetail
+	completeness  orchestrator.RunCompleteness
 	stepCursor    int
 	focus         RunDetailFocus
 	logLines      []string
@@ -50,9 +50,9 @@ func NewRunDetailScreen() RunDetailScreen {
 }
 
 // SetDetail assigns the run detail, analyzes completeness, and resets the step cursor.
-func (s *RunDetailScreen) SetDetail(detail agent.RunDetail) {
+func (s *RunDetailScreen) SetDetail(detail orchestrator.RunDetail) {
 	s.detail = detail
-	s.completeness = agent.AnalyzeRunCompleteness(detail.Path, detail)
+	s.completeness = orchestrator.AnalyzeRunCompleteness(detail.Path)
 	s.stepCursor = 0
 	s.focus = RunDetailFocusMenu
 }
@@ -106,6 +106,20 @@ func (s *RunDetailScreen) SyncViewports() {
 	} else {
 		s.logVP.SetContent(strings.Join(s.logLines, "\n"))
 	}
+}
+
+// HandleMouse routes mouse (wheel) events to the currently focused pane's viewport.
+func (s RunDetailScreen) HandleMouse(msg tea.MouseMsg) (RunDetailScreen, tea.Cmd) {
+	var cmd tea.Cmd
+	switch s.focus {
+	case RunDetailFocusMenu:
+		s.stepsVP, cmd = s.stepsVP.Update(msg)
+	case RunDetailFocusContent:
+		s.detailVP, cmd = s.detailVP.Update(msg)
+	case RunDetailFocusLog:
+		s.logVP, cmd = s.logVP.Update(msg)
+	}
+	return s, cmd
 }
 
 // View renders the run detail screen.

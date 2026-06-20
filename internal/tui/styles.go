@@ -49,14 +49,6 @@ var (
 	streamStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("7"))
 
-	streamBlockStyle = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("7")).
-				Padding(0, 1)
-
-	streamHintStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("8")) // dim
-
 	// Runs history styles
 	selectedStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("0")).
@@ -104,3 +96,7 @@ var (
 	questionGutterStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("240"))
 )
+
+// selectionBg is the ANSI 256-colour index used for text-selection highlighting
+// in the alt-screen transcript.
+const selectionBg = "238"
