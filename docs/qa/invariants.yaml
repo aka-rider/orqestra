@@ -1,0 +1,164 @@
+# Orqestra QA — machine-readable invariant registry.
+#
+# This file is the SOURCE OF TRUTH that `cmd/qaverify` checks on every run
+# (`make qa-verify`). The prose in qa-spec.md is the human index; the §9 ledger
+# is GENERATED from this file. You cannot hand-write a false status here:
+#   - every anchor symbol must resolve in the code           (anchor check)
+#   - status: covered          requires a citing gate test   (traceability check)
+#   - status: defect           requires a linked canary       (traceability check)
+#   - a canary with a canary_test must currently PASS         (canary check)
+#     (it asserts the bug is still live; when it fails, the bug was fixed —
+#      retire the canary, add the real gate, flip status to covered)
+#
+# Anchors cite STABLE SYMBOLS (func/type names), never line numbers — line
+# numbers rot silently; a renamed/removed symbol fails the build loudly.
+# A test "cites" an invariant by containing its ID token (e.g. `// INV-P3-VALID`).
+
+invariants:
+  - id: INV-P1-EXEC
+    pillar: P1
+    layer: L2
+    status: gap
+    anchors:
+      - {file: internal/agent/spec.go, symbol: BuildExecutionPromptFromPlan}
+      - {file: internal/orchestrator/engine.go, symbol: BuildExecutionPromptFromPlan}
+    tests: []
+
+  - id: INV-P1-PLANSRC
+    pillar: P1
+    layer: L0
+    status: covered
+    anchors:
+      - {file: internal/harness/claude_cli.go, symbol: readSecurePlanFile}
+      - {file: internal/agent/plan_extract.go, symbol: ReadPlanFromRun}
+    tests: [TestReadPlanFromRun_SecurityGate]
+
+  - id: INV-P2-WRITE
+    pillar: P2
+    layer: L1
+    status: gap            # real sandbox tests exist (darwin) but are not yet linked to this ID
+    anchors:
+      - {file: internal/sandbox/sandbox.go, symbol: New}
+      - {file: internal/sandbox/sandbox.go, symbol: Wrap}
+    tests: []
+
+  - id: INV-P3-VALID
+    pillar: P3
+    layer: L1
+    status: defect
+    anchors:
+      - {file: internal/agent/validation.go, symbol: ParseValidationOutput}
+      - {file: internal/orchestrator/engine.go, symbol: StatusSuccess}
+    tests: []
+
+  - id: INV-P3-DEGRADE
+    pillar: P3
+    layer: L1
+    status: defect
+    anchors:
+      - {file: internal/orchestrator/engine.go, symbol: WorktreeRunnerFactory}
+    tests: []
+
+  - id: INV-P4-PARSE
+    pillar: P4
+    layer: L0
+    status: gap
+    anchors:
+      - {file: internal/agent/validation.go, symbol: ParseValidationOutput}
+      - {file: internal/agent/spec.go, symbol: ParseCommitMessage}
+    tests: []
+
+  - id: INV-P4-STREAM
+    pillar: P4
+    layer: L0
+    status: gap
+    anchors:
+      - {file: internal/harness/claude_cli.go, symbol: parseStreamLines}
+    tests: []
+
+  - id: INV-P5-FAILCLOSED
+    pillar: P5
+    layer: L0
+    status: gap            # config_test covers some branches but is not yet linked to this ID
+    anchors:
+      - {file: internal/config/config.go, symbol: validate}
+    tests: []
+
+  - id: INV-P5-ROUTE
+    pillar: P5
+    layer: L0
+    status: gap
+    anchors:
+      - {file: internal/harness/claude_cli.go, symbol: BuildModelEnv}
+    tests: []
+
+  - id: INV-O1-FLOW
+    pillar: P6
+    layer: L2
+    status: gap
+    anchors:
+      - {file: internal/orchestrator/engine.go, symbol: AutoApprove}
+    tests: []
+
+  - id: INV-H1-CLOSE
+    pillar: P1
+    layer: L1
+    status: defect
+    anchors:
+      - {file: internal/harness/runner.go, symbol: sandboxedRunner}
+      - {file: internal/harness/claude_cli.go, symbol: startSession}
+      - {file: internal/agent/planner.go, symbol: Receive}
+    tests: []
+
+  - id: INV-H2-SESSIONID
+    pillar: P1
+    layer: L1
+    status: defect
+    anchors:
+      - {file: internal/harness/claude_cli.go, symbol: SessionID}
+      - {file: internal/harness/runner.go, symbol: EventSessionStart}
+      - {file: internal/agent/planner.go, symbol: EventSessionStart}
+    tests: []
+
+# Canaries: each proves a confirmed defect (§4) is still live. A canary with a
+# canary_test is RUN by `make qa-verify` and must pass; gate_test names the real
+# gate that should replace it once the bug is fixed.
+canaries:
+  - id: DEFECT-01
+    invariant: INV-H1-CLOSE
+    summary: sandboxed runner never closes its event channel; main flow hangs after Claude exits
+    state: live
+    canary_test: TestCanary_DEFECT01_ReceiveNeverClosesAfterExit
+    package: ./internal/harness/
+    tags: qacanary darwin integration
+    platform: darwin
+    gate_test: TestHarnessRunner_ReceiveClosesOnExit   # skipped until DEFECT-01 is fixed
+
+  - id: DEFECT-02
+    invariant: INV-P3-VALID
+    summary: empty/marker-less validation output parses to VerdictPass -> StatusSuccess
+    state: live
+    canary_test: TestCanary_DEFECT02_EmptyValidationParsesPass
+    package: ./internal/agent/
+    gate_test: ""
+
+  - id: DEFECT-03
+    invariant: INV-P3-DEGRADE
+    summary: worktree.Create failure silently falls back to writable repo, no event emitted
+    state: live
+    canary_test: ""          # TODO: engine-level, needs replay-Runner + temp git
+    gate_test: ""
+
+  - id: DEFECT-04
+    invariant: INV-P3-DEGRADE
+    summary: worktree commit failure skips merge but leaves StatusSuccess
+    state: live
+    canary_test: ""          # TODO: engine-level
+    gate_test: ""
+
+  - id: DEFECT-05
+    invariant: INV-H2-SESSIONID
+    summary: SessionID never set & EventSessionStart never emitted; plan extraction + validation continuation break
+    state: live
+    canary_test: ""          # TODO: same replay seam as DEFECT-01
+    gate_test: ""

@@ -1,5 +1,5 @@
 # 2026-05-11
-.PHONY: build run test test-unit test-integration lint clean e2e sandbox-image test-sandbox harness
+.PHONY: build run test test-unit test-integration lint clean e2e sandbox-image test-sandbox harness qa-verify qa-verify-write
 
 THIS_MAKEFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
 ORQESTRA := "$(dir $(THIS_MAKEFILE_PATH))orqestra"
@@ -33,6 +33,15 @@ test-e2e:
 
 lint:
 	go vet ./...
+
+# QA spec self-defense: anchors resolve, status<->test traceability, ledger
+# freshness, and that documented defects still reproduce (canaries).
+qa-verify:
+	go run ./cmd/qaverify
+
+# Regenerate the generated §9 ledger in docs/qa/qa-spec.md from invariants.yaml.
+qa-verify-write:
+	go run ./cmd/qaverify --write
 
 test-all: test test-integration test-sandbox test-e2e lint
 

@@ -294,8 +294,15 @@ func (r *sandboxedRunner) init() error {
 		"--include-partial-messages",
 	}
 
-	// Build command.
-	cmd := exec.CommandContext(r.ctx, "claude", args...)
+	// Build command. Honor the configured binary (the `binary` config knob);
+	// fall back to "claude" when unset so production behavior is unchanged.
+	// DEFECT-06: this path previously hardcoded "claude", silently ignoring the
+	// binary config. Honoring it is also what lets QA gates inject a replay stub.
+	bin := r.cli.binary
+	if bin == "" {
+		bin = "claude"
+	}
+	cmd := exec.CommandContext(r.ctx, bin, args...)
 	cmd.Env = r.sandboxCfg.Env
 
 	if r.cli.workDir != "" {

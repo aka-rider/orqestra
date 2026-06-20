@@ -88,6 +88,7 @@ func TestReadPlanFromRun_MissingJSONL(t *testing.T) {
 	}
 }
 
+// Gate for INV-P1-PLANSRC: a plan path outside ~/.claude/plans/ is rejected.
 func TestReadPlanFromRun_SecurityGate(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
