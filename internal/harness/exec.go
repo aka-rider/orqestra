@@ -60,6 +60,8 @@ type ProcessSpec struct {
 	LoopGuard       LoopGuardSpec    // thresholds for LoopBreaker middleware; zero = disabled
 	SilenceGuard    SilenceGuardSpec // thresholds for SilenceDetector middleware; zero = disabled
 	PreTimeoutNudge string           // role-specific message sent 60 s before deadline; "" = disabled
+	PlanMode        bool             // agent runs in plan mode; extractReport reads plan file
+	ExpectsReport   bool             // agent should submit via SubmitReport; enables driftPolicy
 }
 
 // Message is a user turn sent to a running process via the input plane.

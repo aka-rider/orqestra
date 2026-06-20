@@ -25,17 +25,6 @@ type DeliberateStep struct {
 
 func (s *DeliberateStep) ID() AgentID { return "architect" }
 
-const architectNudgePrompt = "[Orchestrator] Submit your implementation plan now by calling " +
-	"mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. " +
-	"Required: # Plan → ## Goal, ## Context, ## Constraints, ## Risks, " +
-	"## Work Packages (each with Steps + Done when), ## Verification, " +
-	"## Assumptions, ## Gotchas."
-
-const criticNudgePrompt = "[Orchestrator] Submit your critic report now by calling " +
-	"mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. " +
-	"Required: ## Critic Report → ### Blockers Found (Category, Severity, " +
-	"Evidence, Impact, Suggested fix), ### Verified Claims, ### Summary."
-
 func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepContext) (PlanOutput, error) {
 	// --- Architect initial pass ---
 	sc.Obs.AgentStarted("architect", s.ArchMeta)
@@ -51,30 +40,7 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 	archSpec := s.ArchSpec
 	archSpec.Prompt = archPrompt
 
-	maxArch := s.ArchAttempts
-	if maxArch < 1 {
-		maxArch = 1
-	}
-
-	var archRes harness.RunResult
-	var planMarkdown string
-	var archErr error
-
-	for attempt := 1; attempt <= maxArch; attempt++ {
-		sink := SinkFromObserver("architect", sc.Obs)
-		archRes, archErr = sc.Exec.Run(ctx, archSpec, nil, sink)
-		if archErr != nil {
-			if attempt < maxArch {
-				sc.Log.Warn("architect attempt failed, retrying", "attempt", attempt, "err", archErr)
-				sc.Obs.AgentStarted("architect", s.ArchMeta)
-				continue
-			}
-			break
-		}
-		break
-	}
-
-	planMarkdown, archErr = extractReport(ctx, "architect", archSpec, archRes, archErr, architectNudgePrompt, architectSpectrum.check, true, sc)
+	archRes, planMarkdown, archErr := runReportAgent(ctx, sc, archSpec, s.ArchMeta, s.ArchAttempts)
 
 	if archErr != nil {
 		sc.Obs.AgentFailed("architect", archErr)
@@ -110,32 +76,7 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 	criticSpec := s.CriticSpec
 	criticSpec.Prompt = criticPrompt
 
-	maxCritic := s.CriticAttempts
-	if maxCritic < 1 {
-		maxCritic = 1
-	}
-
-	var criticRes harness.RunResult
-	var criticMarkdown string
-	var criticErr error
-
-	for attempt := 1; attempt <= maxCritic; attempt++ {
-		sink := SinkFromObserver("critic", sc.Obs)
-		criticRes, criticErr = sc.Exec.Run(ctx, criticSpec, nil, sink)
-		if criticErr != nil {
-			if attempt < maxCritic {
-				sc.Log.Warn("critic attempt failed, retrying", "attempt", attempt, "err", criticErr)
-				sc.Obs.AgentStarted("critic", s.CriticMeta)
-				continue
-			}
-			break
-		}
-		break
-	}
-
-	// Critic runs outside plan mode: extract via the submission → conversation → nudge
-	// ladder, gate on the role-adherence spectrum.
-	criticMarkdown, criticErr = extractReport(ctx, "critic", criticSpec, criticRes, criticErr, criticNudgePrompt, criticSpectrum.check, false, sc)
+	criticRes, criticMarkdown, criticErr := runReportAgent(ctx, sc, criticSpec, s.CriticMeta, s.CriticAttempts)
 
 	if criticErr != nil {
 		sc.Obs.AgentFailed("critic", criticErr)
@@ -156,29 +97,22 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 	revSpec.SilenceGuard = harness.SilenceGuardSpec{} // revision is text-only; silence nudge loops on it
 
 	revStart := time.Now()
-	revSink := SinkFromObserver("architect", sc.Obs)
-	revRes, revErr := sc.Exec.Run(ctx, revSpec, nil, revSink)
+	revRes, revised, revErr := runReportAgent(ctx, sc, revSpec, s.ArchMeta, 1)
 
 	if revErr != nil {
-		sc.Obs.AgentFailed("architect", revErr)
-		s.writeArchRevMeta(sc, planSessionID, revStart, "failed", revErr, harness.TokenUsage{})
-		return PlanOutput{}, fmt.Errorf("architect critic revision: %w", revErr)
-	}
-
-	var revised string
-	if sc.Reports != nil {
-		if sub, ok := sc.Reports.TakeReport("architect"); ok && sub != "" {
-			revised = sub
+		// Distinguish fatal context/budget/loop errors from "chat-only, no plan produced".
+		// Fatal: propagate. Chat-only: fall back to the existing plan.
+		if ctx.Err() != nil {
+			sc.Obs.AgentFailed("architect", ctx.Err())
+			s.writeArchRevMeta(sc, planSessionID, revStart, "failed", ctx.Err(), revRes.Usage)
+			return PlanOutput{}, fmt.Errorf("architect critic revision: %w", ctx.Err())
 		}
+		// No report extracted — treat as chat-only continuation (no plan rewrite).
+		sc.Log.Debug("architect critic revision: plan unchanged (chat continuation)", "err", revErr)
+		revised = planMarkdown
 	}
 	if revised == "" {
-		if r, readErr := preferReport(sc, "architect", revRes); readErr == nil {
-			revised = r
-		} else {
-			// Continuation may have been chat-only (no plan rewrite) — treat as no change.
-			sc.Log.Debug("architect critic revision: plan unchanged (chat continuation)", "err", readErr)
-			revised = planMarkdown
-		}
+		revised = planMarkdown
 	}
 
 	s.writeArchRevMeta(sc, planSessionID, revStart, "done", nil, revRes.Usage)

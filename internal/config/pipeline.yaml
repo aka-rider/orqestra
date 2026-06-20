@@ -14,6 +14,7 @@ researcher:
   timeout: 15m
   silence_guard:
     silence_secs: 60
+    nudge_text: "[Orchestrator] No activity for a while. If your fact report is ready, submit it now via mcp__orqestra__SubmitReport; otherwise continue researching."
   allowed_tools: [Read, Glob, Grep, Bash, WebFetch, WebSearch, "mcp__orqestra__*"]
   disallowed_tools: [AskUserQuestion, ExitPlanMode, Write, Edit, MultiEdit, NotebookEdit, EnterPlanMode, EnterWorktree, ExitWorktree, TaskCreate, TaskUpdate, TaskStop, KillShell]
   system_prompt: |
@@ -82,6 +83,7 @@ architect:
   timeout: 15m
   silence_guard:
     silence_secs: 60
+    nudge_text: "[Orchestrator] No activity for a while. If your plan is ready, submit it now via mcp__orqestra__SubmitReport; otherwise continue planning."
   allowed_tools: [Read, Glob, Grep, Bash, WebFetch, WebSearch, "mcp__orqestra__*"]
   disallowed_tools: [AskUserQuestion, ExitPlanMode, Write, Edit, MultiEdit, NotebookEdit, EnterPlanMode, EnterWorktree, ExitWorktree, TaskCreate, TaskUpdate, TaskStop, KillShell]
   system_prompt: |
@@ -164,6 +166,7 @@ critic:
   timeout: 15m
   silence_guard:
     silence_secs: 60
+    nudge_text: "[Orchestrator] No activity for a while. If your critic report is ready, submit it now via mcp__orqestra__SubmitReport; otherwise continue reviewing."
   allowed_tools: [Read, Glob, Grep, Bash, WebFetch, WebSearch, "mcp__orqestra__*"]
   disallowed_tools: [AskUserQuestion, ExitPlanMode, Write, Edit, MultiEdit, NotebookEdit, EnterPlanMode, EnterWorktree, ExitWorktree, TaskCreate, TaskUpdate, TaskStop, KillShell]
   system_prompt: |

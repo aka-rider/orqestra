@@ -226,6 +226,7 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		os.Exit(exitInvalidInput)
 	}
 	resSpec.AgentID = "researcher"
+	resSpec.ExpectsReport = true
 	resSpec.Timeout = cfg.Researcher.Timeout.Duration
 	resSpec.LoopGuard = harness.LoopGuardSpec{
 		RepeatThreshold: cfg.Researcher.LoopGuard.RepeatThreshold,
@@ -244,6 +245,8 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		os.Exit(exitInvalidInput)
 	}
 	archSpec.AgentID = "architect"
+	archSpec.ExpectsReport = true
+	archSpec.PlanMode = cfg.Architect.PermissionMode == "plan"
 	archSpec.Timeout = cfg.Architect.Timeout.Duration
 	archSpec.LoopGuard = harness.LoopGuardSpec{
 		RepeatThreshold: cfg.Architect.LoopGuard.RepeatThreshold,
@@ -262,6 +265,7 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		os.Exit(exitInvalidInput)
 	}
 	criticSpec.AgentID = "critic"
+	criticSpec.ExpectsReport = true
 	criticSpec.Timeout = cfg.Critic.Timeout.Duration
 	criticSpec.LoopGuard = harness.LoopGuardSpec{
 		RepeatThreshold: cfg.Critic.LoopGuard.RepeatThreshold,
@@ -319,31 +323,19 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 }
 
 
-// preTimeoutNudgeFor returns the role-specific steering message sent to an actor
-// 60 s before its hard deadline and whenever the event stream has been silent for
-// SilenceSecs seconds. The message is designed to prompt the model to emit its
-// expected output format immediately rather than continuing to work.
+// genericReportNudge is sent to report roles (researcher, architect, critic) both
+// 60 s before the hard deadline and when the driftPolicy detects implementation intent.
+const genericReportNudge = "[Orchestrator] Session deadline approaching. " +
+	"Stop what you are doing and submit your report now by calling " +
+	"mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. " +
+	"Partial output is acceptable."
+
+// preTimeoutNudgeFor returns the steering message for a role.
+// researcher/architect/critic share the generic report-nudge text; worker is kept verbatim.
 func preTimeoutNudgeFor(role string) string {
 	switch role {
-	case "researcher":
-		return "[Orchestrator] Session deadline in ~60 s. " +
-			"Stop exploring and submit your gathered findings now by calling " +
-			"mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. " +
-			"Required sections: ## Goal, ## Codebase Facts, " +
-			"## Constraints Discovered, ## Gotchas. Partial is fine."
-	case "architect":
-		return "[Orchestrator] Session deadline in ~60 s. " +
-			"Submit your implementation plan now by calling " +
-			"mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. " +
-			"Required: # Plan → ## Goal, ## Context, ## Constraints, ## Risks, " +
-			"## Work Packages (each with Steps + Done when), ## Verification, " +
-			"## Assumptions, ## Gotchas."
-	case "critic":
-		return "[Orchestrator] Session deadline in ~60 s. " +
-			"Submit your critic report now by calling " +
-			"mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. " +
-			"Required: ## Critic Report → ### Blockers Found (Category, Severity, " +
-			"Evidence, Impact, Suggested fix), ### Verified Claims, ### Summary."
+	case "researcher", "architect", "critic":
+		return genericReportNudge
 	case "worker":
 		return "[Orchestrator] Session deadline in ~60 s. " +
 			"Describe what you are doing and what the next step is. " +

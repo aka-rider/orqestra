@@ -2,11 +2,11 @@ package orchestrator
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
-	"bytes"
 	"testing"
 	"time"
 
@@ -116,25 +116,37 @@ func emitUserEvents(msgRaw json.RawMessage, sink harness.Sink) {
 	}
 }
 
-// TestLoopGuardFiresOnRealReplay replays the ExitWorktree loop fixture and
-// verifies the LoopBreaker escalates before all 15 calls complete.
-func TestLoopGuardFiresOnRealReplay(t *testing.T) {
-	player := &fixturePlayer{path: "testdata/exitworktree_loop.jsonl"}
-	exec := NewExecutorBuilder().With(NewLoopBreaker()).Wrap(player)
-
-	spec := harness.ProcessSpec{
-		Prompt: "explore the codebase",
+// newReplaySpec returns a ProcessSpec tuned for replay tests.
+func newReplaySpec(prompt string) harness.ProcessSpec {
+	return harness.ProcessSpec{
+		Prompt: prompt,
 		LoopGuard: harness.LoopGuardSpec{
 			RepeatThreshold: 3,
 			MaxNudges:       3,
 			CooldownTurns:   2,
 		},
 	}
+}
+
+// newReplaySupervisor wraps a fixturePlayer in an AgentSupervisor with
+// loop detection enabled (no report signal, unlimited budget).
+func newReplaySupervisor(player harness.Executor) *AgentSupervisor {
+	guard := NewBudgetGuard(NewRunUsage(0))
+	return NewAgentSupervisor(player, nil, guard)
+}
+
+// TestLoopGuardFiresOnRealReplay replays the ExitWorktree loop fixture and
+// verifies the supervisor escalates before all 15 calls complete.
+func TestLoopGuardFiresOnRealReplay(t *testing.T) {
+	player := &fixturePlayer{path: "testdata/exitworktree_loop.jsonl"}
+	sup := newReplaySupervisor(player)
+
+	spec := newReplaySpec("explore the codebase")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := exec.Run(ctx, spec, nil, nil)
+	_, err := sup.Run(ctx, spec, nil, nil)
 	if !errors.Is(err, ErrLoopEscalated) {
 		t.Errorf("expected ErrLoopEscalated on ExitWorktree loop replay, got: %v", err)
 	}
@@ -144,21 +156,14 @@ func TestLoopGuardFiresOnRealReplay(t *testing.T) {
 // without triggering escalation.
 func TestLoopGuardPassesNormalStream(t *testing.T) {
 	player := &fixturePlayer{path: "../harness/testdata/worker_stream_sample.jsonl"}
-	exec := NewExecutorBuilder().With(NewLoopBreaker()).Wrap(player)
+	sup := newReplaySupervisor(player)
 
-	spec := harness.ProcessSpec{
-		Prompt: "do work",
-		LoopGuard: harness.LoopGuardSpec{
-			RepeatThreshold: 3,
-			MaxNudges:       3,
-			CooldownTurns:   2,
-		},
-	}
+	spec := newReplaySpec("do work")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := exec.Run(ctx, spec, nil, nil)
+	_, err := sup.Run(ctx, spec, nil, nil)
 	if err != nil {
 		t.Errorf("expected no error on normal stream, got: %v", err)
 	}

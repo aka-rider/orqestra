@@ -346,8 +346,11 @@ func (m *Model) handlePipelineMouse(msg tea.MouseMsg) tea.Cmd {
 // handleKey processes key events.
 func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
-		// Second Ctrl+C within the time gate → quit immediately
+		// Second Ctrl+C within the time gate → cancel and quit immediately.
 		if m.ctrlCPending && time.Now().Before(m.ctrlCDeadline) {
+			if m.cancel != nil {
+				m.cancel()
+			}
 			return m, tea.Quit
 		}
 		// Pipeline is idle or completed → quit immediately (nothing to cancel)

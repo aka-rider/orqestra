@@ -30,7 +30,7 @@ if os.IsNotExist(err) { ... }      // OK only if absence is valid; otherwise pro
 A dropped or downgraded error must never leave the TUI, an artifact, or a return value claiming a
 step succeeded. Real examples — wrap: `internal/config/config.go:284`,
 `internal/harness/claude_cli.go:70`; fire-and-forget: `internal/sandbox/sandbox.go:261`,
-`internal/mcp/bridge.go:50`.
+`internal/mcp/bridge.go` (`os.Remove` in `Run`).
 
 ## Routing — read the domain file before editing
 
@@ -102,7 +102,12 @@ bools.
 **Concurrency & streaming.** `context.Context` is a function argument, never a struct field;
 signal session end via context and return `ctx.Err()`. Messages crossing goroutines carry
 copies/immutable values. Shared state needs ownership, channels, or mutexes. JSONL scanners need
-an explicit buffer and a `scanner.Err()` check.
+an explicit buffer and a `scanner.Err()` check. The only shutdown signal is context.Context:
+service lifetime is `Run(ctx context.Context) error` — never `Start()+Stop()` or a
+`done chan struct{}`. When multiple stop reasons must be distinguished, use
+`context.WithCancelCause`: the cause is the signal; no secondary `stopped bool` or `stopReason`
+variable. Every goroutine must exit via `ctx.Done()` or be deterministically joined via its
+result channel after the context is cancelled.
 
 **Determinism.** Sort map keys before rendering, comparing, or persisting.
 

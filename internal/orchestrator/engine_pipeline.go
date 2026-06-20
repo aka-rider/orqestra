@@ -58,37 +58,37 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 
 		// Question bridge.
 		if e.QuestionBridge != nil {
-			if err := e.QuestionBridge.Start(ctx); err != nil {
-				logger.Warn("question bridge failed to start", "err", err)
-			} else {
-				defer e.QuestionBridge.Stop()
-				go func() {
-					for {
-						select {
-						case q, ok := <-e.QuestionBridge.Questions():
-							if !ok {
-								return
-							}
-							obs.UserQuestion(q)
-						case <-ctx.Done():
+			go func() {
+				if err := e.QuestionBridge.Run(ctx); err != nil {
+					logger.Warn("question bridge", "err", err)
+				}
+			}()
+			go func() {
+				for {
+					select {
+					case q, ok := <-e.QuestionBridge.Questions():
+						if !ok {
 							return
 						}
+						obs.UserQuestion(q)
+					case <-ctx.Done():
+						return
 					}
-				}()
-			}
+				}
+			}()
 		}
 
 		// Build supervisor for process-group and worktree cleanup.
 		sup := &Supervisor{}
 		defer sup.Shutdown(logger)
 
-		// Build executor chain: pre-timeout → loop-break → silence → watchdog → budget → harness.Run.
+		// Build AgentSupervisor: single owner of timeout, budget, nudge policies, and report stop.
 		guard := NewBudgetGuard(NewRunUsage(e.Config.Pipeline.TokenBudget))
-		exec := NewExecutorBuilder().
-			With(NewPreTimeoutNudger()).
-			With(NewLoopBreaker()).
-			With(NewSilenceDetector()).
-			Wrap(NewWatchdogExecutor(NewBudgetExecutor(harness.RunFunc(harness.Run), guard, "pipeline")))
+		var reports ReportSignaler
+		if e.QuestionBridge != nil {
+			reports = e.QuestionBridge
+		}
+		exec := NewAgentSupervisor(harness.RunFunc(harness.Run), reports, guard)
 
 		// Build step context.
 		sc := StepContext{

@@ -19,48 +19,15 @@ type ResearchStep struct {
 
 func (s *ResearchStep) ID() AgentID { return "researcher" }
 
-const researcherNudgePrompt = "[Orchestrator] Submit your FACT REPORT now by calling " +
-	"mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. " +
-	"Required sections: ## Goal, ## Codebase Facts, ## Constraints Discovered, ## Gotchas. " +
-	"Report what exists; do not propose changes. Partial is acceptable."
-
 func (s *ResearchStep) Run(ctx context.Context, in ResearchInput, sc StepContext) (ResearchOutput, error) {
 	sc.Obs.PhaseChanged(PhaseResearching)
 	sc.Obs.AgentStarted(s.ID(), s.Meta)
-
-	maxAttempts := s.Attempts
-	if maxAttempts < 1 {
-		maxAttempts = 1
-	}
 
 	start := time.Now()
 	spec := s.Spec
 	spec.Prompt = guardPrompt(agent.ResearcherPrompt(in.Prompt), in.Prompt, "researcher")
 
-	var res harness.RunResult
-	var report string
-	var runErr error
-
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		sink := SinkFromObserver(s.ID(), sc.Obs)
-		res, runErr = sc.Exec.Run(ctx, spec, nil, sink)
-		if runErr != nil {
-			if attempt < maxAttempts {
-				sc.Log.Warn("researcher attempt failed, retrying",
-					"attempt", attempt, "err", runErr)
-				sc.Obs.AgentStarted(s.ID(), s.Meta)
-				continue
-			}
-			break
-		}
-		break
-	}
-
-	// Researcher runs outside plan mode (default permission): extract via the
-	// submission → conversation → nudge ladder, gate on the role-adherence spectrum,
-	// then inject the verbatim ## User Task section the orchestrator owns.
-	var extractErr error
-	report, extractErr = extractReport(ctx, "researcher", spec, res, runErr, researcherNudgePrompt, researchSpectrum.check, false, sc)
+	res, report, extractErr := runReportAgent(ctx, sc, spec, s.Meta, s.Attempts)
 	if extractErr == nil {
 		report = ensureUserTask(in.Prompt, report)
 	}

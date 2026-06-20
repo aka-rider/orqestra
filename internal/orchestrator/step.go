@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/harness"
@@ -50,28 +49,8 @@ func preferReport(sc StepContext, agentID string, res harness.RunResult) (string
 	return content, nil
 }
 
-// qualityPassOrTrim returns (report, true) if report passes qualityCheck as-is, or
-// (trimmed, true) with the text trimmed to start at the first '#'-prefixed line that
-// makes qualityCheck pass. Returns ("", false) if no such position exists.
-func qualityPassOrTrim(report string, qualityCheck func(string) error) (string, bool) {
-	if qualityCheck(report) == nil {
-		return report, true
-	}
-	lines := strings.Split(report, "\n")
-	for i := 1; i < len(lines); i++ {
-		if !strings.HasPrefix(strings.TrimSpace(lines[i]), "#") {
-			continue
-		}
-		candidate := strings.TrimSpace(strings.Join(lines[i:], "\n"))
-		if candidate != "" && qualityCheck(candidate) == nil {
-			return candidate, true
-		}
-	}
-	return "", false
-}
-
 // finalMessage returns an agent's final assistant text from the run result output
-// or the session JSONL. Used as the conversation-probe tier (tier 3) in extractReport.
+// or the session JSONL. Used as the conversation-probe tier in extractReport.
 func finalMessage(sc StepContext, res harness.RunResult) (string, error) {
 	if out := strings.TrimSpace(res.Output); out != "" {
 		return out, nil
@@ -93,116 +72,85 @@ func finalMessage(sc StepContext, res harness.RunResult) (string, error) {
 	return out, nil
 }
 
-// resumeForReport resumes an agent session with a nudge prompt requesting SubmitReport.
-// It zeroes per-run state (LoopGuard, SilenceGuard, PreTimeoutNudge) and defaults
-// Timeout to 3 minutes when the original spec has no timeout set.
-func resumeForReport(
-	ctx context.Context,
-	agentID string,
-	spec harness.ProcessSpec,
-	sessionID string,
-	nudgePrompt string,
-	sc StepContext,
-) (harness.RunResult, error) {
-	fbSpec := spec
-	fbSpec.Resume = harness.ResumeSession(sessionID)
-	fbSpec.PreTimeoutNudge = ""
-	fbSpec.LoopGuard = harness.LoopGuardSpec{}
-	fbSpec.SilenceGuard = harness.SilenceGuardSpec{}
-	if spec.Timeout <= 0 {
-		fbSpec.Timeout = 3 * time.Minute
-	}
-	fbSpec.Prompt = nudgePrompt
-	sink := SinkFromObserver(AgentID(agentID), sc.Obs)
-	return sc.Exec.Run(ctx, fbSpec, nil, sink)
-}
-
-const maxReportNudges = 2
-
-// extractReport is the unified report extraction ladder for all pipeline roles.
-// It tries five tiers in order and returns the first candidate that passes
-// qualityPassOrTrim. A Warn is logged whenever a tier beyond the first satisfies.
+// extractReport is the unified post-run report harvester for all pipeline roles.
+// Nudging now lives in the AgentSupervisor; this function only harvests what
+// arrived.
 //
-//	Tier 1: SubmitReport submission  (sc.Reports.TakeReport — if Reports != nil)
-//	Tier 2: Plan file                (preferReport — only when usesPlanFile=true)
-//	Tier 3: Conversation probe       (finalMessage — always, including on timeout)
-//	Tier 4: Nudge loop               (up to maxReportNudges resumes — only if ctx live)
-//	Tier 5: Fail closed              (wraps runErr when present)
+//	Tier 1: SubmitReport submission   (sc.Reports.TakeReport — if Reports != nil)
+//	Tier 2: Plan file                 (preferReport — only when spec.PlanMode is true)
+//	Tier 3: Conversation probe        (finalMessage — with looksLikeReport gate)
+//	Tier 4: Fail closed               (descriptive error; never bare context.Canceled)
 func extractReport(
-	ctx context.Context,
-	agentID string,
+	_ context.Context,
 	spec harness.ProcessSpec,
 	res harness.RunResult,
 	runErr error,
-	nudgePrompt string,
-	qualityCheck func(string) error,
-	usesPlanFile bool,
 	sc StepContext,
 ) (string, error) {
+	agentID := spec.AgentID
+
 	// Tier 1: SubmitReport submission.
 	if sc.Reports != nil {
 		if sub, ok := sc.Reports.TakeReport(agentID); ok && sub != "" {
-			if out, pass := qualityPassOrTrim(sub, qualityCheck); pass {
-				return out, nil
+			if looksLikeReport(sub) {
+				return sub, nil
 			}
-			sc.Log.Warn("submitted report failed quality check, trying next tier", "agent", agentID)
+			sc.Log.Warn("submitted report failed sanity check, trying next tier", "agent", agentID)
 		}
 	}
 
-	// Tier 2: Plan file (architect only).
-	if usesPlanFile {
-		if plan, err := preferReport(sc, agentID, res); err == nil {
-			if out, pass := qualityPassOrTrim(plan, qualityCheck); pass {
-				sc.Log.Warn("report satisfied by plan file (tier 2)", "agent", agentID)
-				return out, nil
-			}
-			sc.Log.Warn("plan file failed quality check, trying conversation probe", "agent", agentID)
+	// Tier 2: Plan file (architect plan-mode only).
+	if spec.PlanMode {
+		if plan, err := preferReport(sc, agentID, res); err == nil && looksLikeReport(plan) {
+			sc.Log.Warn("report satisfied by plan file (tier 2)", "agent", agentID)
+			return plan, nil
 		}
 	}
 
-	// Tier 3: Conversation probe — reachable even on timeout.
-	if msg, err := finalMessage(sc, res); err == nil {
-		if out, pass := qualityPassOrTrim(msg, qualityCheck); pass {
-			sc.Log.Warn("report satisfied by conversation probe (tier 3)", "agent", agentID)
-			return out, nil
-		}
-		sc.Log.Warn("conversation probe failed quality check", "agent", agentID)
+	// Tier 3: Conversation probe.
+	if msg, err := finalMessage(sc, res); err == nil && looksLikeReport(msg) {
+		sc.Log.Warn("report satisfied by conversation probe (tier 3)", "agent", agentID)
+		return msg, nil
 	}
 
-	// Tier 4: Nudge loop — only when the session is recoverable.
-	if ctx.Err() == nil && res.SessionID != "" {
-		for i := range maxReportNudges {
-			if ctx.Err() != nil {
-				break
-			}
-			fbRes, _ := resumeForReport(ctx, agentID, spec, res.SessionID, nudgePrompt, sc)
-
-			// Re-check tier 1 after the nudge resume.
-			if sc.Reports != nil {
-				if sub, ok := sc.Reports.TakeReport(agentID); ok && sub != "" {
-					if out, pass := qualityPassOrTrim(sub, qualityCheck); pass {
-						sc.Log.Warn("report recovered via SubmitReport after nudge",
-							"agent", agentID, "nudge", i+1)
-						return out, nil
-					}
-				}
-			}
-			// Re-check tier 3 after the nudge resume.
-			if msg, err := finalMessage(sc, fbRes); err == nil {
-				if out, pass := qualityPassOrTrim(msg, qualityCheck); pass {
-					sc.Log.Warn("report recovered via conversation after nudge",
-						"agent", agentID, "nudge", i+1)
-					return out, nil
-				}
-			}
-		}
-	}
-
-	// Tier 5: Fail closed.
+	// Tier 4: Fail closed.
 	if runErr != nil {
-		return "", fmt.Errorf("%s: %w", agentID, runErr)
+		return "", fmt.Errorf("%s failed: %w", agentID, runErr)
 	}
 	return "", fmt.Errorf("%s: no valid report produced", agentID)
+}
+
+// runReportAgent runs spec via sc.Exec (with retries on harness error) and then
+// harvests the report via extractReport. It is the DRY entry point for
+// researcher, architect, and critic — roles that always produce a structured report.
+//
+// The caller must call sc.Obs.AgentStarted before invoking; runReportAgent
+// re-calls it only on retries (attempt > 1).
+func runReportAgent(
+	ctx context.Context,
+	sc StepContext,
+	spec harness.ProcessSpec,
+	meta AgentMeta,
+	attempts int,
+) (harness.RunResult, string, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var res harness.RunResult
+	var runErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		sink := SinkFromObserver(AgentID(spec.AgentID), sc.Obs)
+		res, runErr = sc.Exec.Run(ctx, spec, nil, sink)
+		if runErr == nil || attempt >= attempts {
+			break
+		}
+		sc.Log.Warn("agent attempt failed, retrying",
+			"agent", spec.AgentID, "attempt", attempt, "err", runErr)
+		sc.Obs.AgentStarted(AgentID(spec.AgentID), meta)
+	}
+
+	report, err := extractReport(ctx, spec, res, runErr, sc)
+	return res, report, err
 }
 
 // SinkFromObserver returns a harness.Sink that forwards all events to Observer.Stream.
