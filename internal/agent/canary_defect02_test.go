@@ -1,10 +1,13 @@
-//go:build qacanary
-
 package agent
 
 import "testing"
 
 // Canary for DEFECT-02 / INV-P3-VALID (see docs/qa/qa-spec.md §4).
+//
+// This runs in `make test` (no build tag) so the defect stays visible in the
+// standard build: it PASSES while the bug is live and FAILS the moment the bug
+// is fixed — forcing whoever fixes it to retire this canary and add the real
+// gate (flip INV-P3-VALID to covered).
 //
 // It asserts the bug is STILL LIVE: validation output that errored, was skipped,
 // or simply ignored the marker protocol parses to VerdictPass — which the engine

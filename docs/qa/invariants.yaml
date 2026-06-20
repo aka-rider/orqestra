@@ -129,8 +129,7 @@ canaries:
     invariant: INV-P3-VALID
     summary: empty/marker-less validation output parses to VerdictPass -> StatusSuccess
     state: live
-    canary_test: TestCanary_DEFECT02_EmptyValidationParsesPass
-    package: ./internal/agent/
+    canary_test: TestCanary_DEFECT02_EmptyValidationParsesPass   # normal test — runs in `make test`
     gate_test: ""
 
   - id: DEFECT-03
@@ -140,9 +139,5 @@ canaries:
     canary_test: ""          # TODO: engine-level, needs replay-Runner + temp git
     gate_test: ""
 
-  - id: DEFECT-04
-    invariant: INV-P3-DEGRADE
-    summary: worktree commit failure skips merge but leaves StatusSuccess
-    state: live
-    canary_test: ""          # TODO: engine-level
-    gate_test: ""
+  # DEFECT-04 (worktree commit failure left StatusSuccess) was FIXED by the
+  # refactor: step_merge.go now returns StatusFailed on commit failure.
