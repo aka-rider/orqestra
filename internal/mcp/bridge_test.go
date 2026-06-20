@@ -155,6 +155,94 @@ func TestQuestionBridge_FreeformRoundTrip(t *testing.T) {
 	}
 }
 
+// sendReport dials the bridge and sends a report envelope, returning the ack.
+func sendReport(sockPath, agentID, report, summary string) error {
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	payload, _ := json.Marshal(ReportSubmission{Report: report, Summary: summary})
+	env := bridgeEnvelope{Kind: "report", AgentID: agentID, Payload: payload}
+	envData, _ := json.Marshal(env)
+	if err := writeFrame(conn, envData); err != nil {
+		return err
+	}
+	ackData, err := readFrame(conn)
+	if err != nil {
+		return err
+	}
+	var ack struct{ OK bool `json:"ok"` }
+	return json.Unmarshal(ackData, &ack)
+}
+
+func TestQuestionBridge_ReportRoundTrip(t *testing.T) {
+	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-report-%d.sock", os.Getpid()))
+	defer os.Remove(sockPath)
+	bridge := NewQuestionBridge(sockPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := bridge.Start(ctx); err != nil {
+		t.Fatalf("bridge start: %v", err)
+	}
+	defer bridge.Stop()
+
+	const agentID = "researcher"
+	const reportText = "## Goal\nTest report.\n## Codebase Facts\n- fact1"
+
+	if err := sendReport(sockPath, agentID, reportText, "test summary"); err != nil {
+		t.Fatalf("sendReport: %v", err)
+	}
+
+	// TakeReport should return the report and remove it.
+	got, ok := bridge.TakeReport(agentID)
+	if !ok {
+		t.Fatal("expected TakeReport to return true")
+	}
+	if got != reportText {
+		t.Errorf("report = %q, want %q", got, reportText)
+	}
+
+	// Second call should return nothing.
+	_, ok = bridge.TakeReport(agentID)
+	if ok {
+		t.Error("expected TakeReport to return false on second call")
+	}
+}
+
+func TestQuestionBridge_StartClearsStaleReport(t *testing.T) {
+	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-stale-%d.sock", os.Getpid()))
+	defer os.Remove(sockPath)
+	bridge := NewQuestionBridge(sockPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := bridge.Start(ctx); err != nil {
+		t.Fatalf("first bridge start: %v", err)
+	}
+
+	if err := sendReport(sockPath, "critic", "stale report", ""); err != nil {
+		t.Fatalf("sendReport: %v", err)
+	}
+
+	bridge.Stop()
+
+	// Second Start should clear the stale report.
+	if err := bridge.Start(ctx); err != nil {
+		t.Fatalf("second bridge start: %v", err)
+	}
+	defer bridge.Stop()
+
+	_, ok := bridge.TakeReport("critic")
+	if ok {
+		t.Error("expected stale report to be cleared on second Start")
+	}
+}
+
 func TestQuestionBridge_ContextCancellation(t *testing.T) {
 	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-cancel-%d.sock", os.Getpid()))
 	defer os.Remove(sockPath)

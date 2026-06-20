@@ -319,7 +319,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 	}
 
 	// Gate: open when markdown changes.
-	if snap.HasGate && snap.Gate.FinalPlanMarkdown != s.seenGateMarkdown {
+	if snap.HasGate && snap.Gate.FinalPlanMarkdown != "" && snap.Gate.FinalPlanMarkdown != s.seenGateMarkdown {
 		s.seenGateMarkdown = snap.Gate.FinalPlanMarkdown
 		if !s.awaitingPlanDecision {
 			if snap.Gate.Position.IsPlanGate() && len(s.chatHistory) > 0 {

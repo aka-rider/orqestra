@@ -12,7 +12,7 @@ researcher:
   permission_mode: default
   max_turns: 40
   timeout: 15m
-  loop_guard:
+  silence_guard:
     silence_secs: 60
   allowed_tools: [Read, Glob, Grep, Bash, WebFetch, WebSearch, "mcp__orqestra__*"]
   disallowed_tools: [AskUserQuestion, ExitPlanMode, Write, Edit, MultiEdit, NotebookEdit, EnterPlanMode, EnterWorktree, ExitWorktree, TaskCreate, TaskUpdate, TaskStop, KillShell]
@@ -71,15 +71,16 @@ researcher:
     fact. Avoid vague words (appropriate, as needed, properly, ensure, consider, various) —
     name the specific thing. Output is MARKDOWN — no JSON, no surrounding code fences.
 
-    COMPLETION: your turn ends when you emit the FACT REPORT as your final message. Write
-    it once; do not regenerate it. There is no submit step and no ExitPlanMode.
+    COMPLETION: your turn ends when the FACT REPORT is complete. Write it once, then call
+    mcp__orqestra__SubmitReport once with the full markdown in the "report" argument.
+    Do not regenerate the report. There is no ExitPlanMode.
 
 architect:
   model: large
   permission_mode: plan
   max_turns: 40
   timeout: 15m
-  loop_guard:
+  silence_guard:
     silence_secs: 60
   allowed_tools: [Read, Glob, Grep, Bash, WebFetch, WebSearch, "mcp__orqestra__*"]
   disallowed_tools: [AskUserQuestion, ExitPlanMode, Write, Edit, MultiEdit, NotebookEdit, EnterPlanMode, EnterWorktree, ExitWorktree, TaskCreate, TaskUpdate, TaskStop, KillShell]
@@ -152,15 +153,16 @@ architect:
     Notes — one bullet per finding/edit stating what changed (for the reviewer; the Worker
     ignores it).
 
-    COMPLETION: in plan mode your deliverable is the plan. Write it once and stop; do not
-    regenerate it. ExitPlanMode is unavailable — do not call it.
+    COMPLETION: in plan mode your deliverable is the plan. Write it once, then call
+    mcp__orqestra__SubmitReport once with the full markdown in the "report" argument.
+    Do not regenerate the plan. ExitPlanMode is unavailable — do not call it.
 
 critic:
   model: medium
   permission_mode: default
   max_turns: 15
   timeout: 15m
-  loop_guard:
+  silence_guard:
     silence_secs: 60
   allowed_tools: [Read, Glob, Grep, Bash, WebFetch, WebSearch, "mcp__orqestra__*"]
   disallowed_tools: [AskUserQuestion, ExitPlanMode, Write, Edit, MultiEdit, NotebookEdit, EnterPlanMode, EnterWorktree, ExitWorktree, TaskCreate, TaskUpdate, TaskStop, KillShell]
@@ -217,14 +219,19 @@ critic:
     re-plan. If you find zero blockers, say so explicitly and list what you verified — do
     not invent issues to seem thorough.
 
-    COMPLETION: produce the report ONCE, then stop — it is your final message. Zero blockers
-    is a valid, complete result. Do not regenerate the report, and never offer to implement
-    or fix the plan. There is no ExitPlanMode.
+    COMPLETION: produce the report ONCE, then call mcp__orqestra__SubmitReport once with
+    the full markdown in the "report" argument. Zero blockers is a valid, complete result.
+    Do not regenerate the report, and never offer to implement or fix the plan.
+    There is no ExitPlanMode.
 
 worker:
   model: medium
   permission_mode: full
   timeout: 45m
+  loop_guard:
+    repeat_threshold: 3
+    max_nudges: 3
+    cooldown_turns: 2
   system_prompt: |
     Execute autonomously. Do not ask questions — make reasonable judgments
     and document any assumptions in your validation output.

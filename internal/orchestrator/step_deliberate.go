@@ -25,13 +25,14 @@ type DeliberateStep struct {
 
 func (s *DeliberateStep) ID() AgentID { return "architect" }
 
-const architectFallbackPrompt = "[Orchestrator] Your session did not produce a plan file. " +
-	"Write your implementation plan now. " +
+const architectNudgePrompt = "[Orchestrator] Submit your implementation plan now by calling " +
+	"mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. " +
 	"Required: # Plan → ## Goal, ## Context, ## Constraints, ## Risks, " +
 	"## Work Packages (each with Steps + Done when), ## Verification, " +
 	"## Assumptions, ## Gotchas."
 
-const criticFallbackPrompt = "[Orchestrator] Emit your critic report now as your final message. " +
+const criticNudgePrompt = "[Orchestrator] Submit your critic report now by calling " +
+	"mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. " +
 	"Required: ## Critic Report → ### Blockers Found (Category, Severity, " +
 	"Evidence, Impact, Suggested fix), ### Verified Claims, ### Summary."
 
@@ -73,12 +74,7 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 		break
 	}
 
-	var archUsedFallback bool
-	planMarkdown, archUsedFallback, archErr = extractPlan(ctx, "architect", archSpec, archRes, archErr, architectFallbackPrompt, architectSpectrum.check, sc)
-	if archUsedFallback {
-		sc.Log.Warn("architect: model produced text output instead of writing plan file; "+
-			"model may have disobeyed plan-writing instructions", "session_id", archRes.SessionID)
-	}
+	planMarkdown, archErr = extractReport(ctx, "architect", archSpec, archRes, archErr, architectNudgePrompt, architectSpectrum.check, true, sc)
 
 	if archErr != nil {
 		sc.Obs.AgentFailed("architect", archErr)
@@ -137,9 +133,9 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 		break
 	}
 
-	// Critic runs outside plan mode: harvest its final message and gate it on the
-	// critic role-adherence spectrum (catches the "I'll start implementing" collapse).
-	criticMarkdown, criticErr = extractFinalMessage(ctx, "critic", criticSpec, criticRes, criticErr, criticFallbackPrompt, criticSpectrum.check, sc)
+	// Critic runs outside plan mode: extract via the submission → conversation → nudge
+	// ladder, gate on the role-adherence spectrum.
+	criticMarkdown, criticErr = extractReport(ctx, "critic", criticSpec, criticRes, criticErr, criticNudgePrompt, criticSpectrum.check, false, sc)
 
 	if criticErr != nil {
 		sc.Obs.AgentFailed("critic", criticErr)
@@ -157,6 +153,7 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 	revSpec := s.ArchSpec
 	revSpec.Prompt = agent.CriticContinuePrompt(planMarkdown, criticMarkdown)
 	revSpec.Resume = harness.ResumeSession(planSessionID)
+	revSpec.SilenceGuard = harness.SilenceGuardSpec{} // revision is text-only; silence nudge loops on it
 
 	revStart := time.Now()
 	revSink := SinkFromObserver("architect", sc.Obs)
@@ -168,11 +165,20 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 		return PlanOutput{}, fmt.Errorf("architect critic revision: %w", revErr)
 	}
 
-	revised, _, readErr := preferReport(sc, "architect", revRes, false)
-	if readErr != nil {
-		// Continuation may have been chat-only (no plan rewrite) — treat as no change.
-		sc.Log.Debug("architect critic revision: plan unchanged (chat continuation)", "err", readErr)
-		revised = planMarkdown
+	var revised string
+	if sc.Reports != nil {
+		if sub, ok := sc.Reports.TakeReport("architect"); ok && sub != "" {
+			revised = sub
+		}
+	}
+	if revised == "" {
+		if r, readErr := preferReport(sc, "architect", revRes); readErr == nil {
+			revised = r
+		} else {
+			// Continuation may have been chat-only (no plan rewrite) — treat as no change.
+			sc.Log.Debug("architect critic revision: plan unchanged (chat continuation)", "err", readErr)
+			revised = planMarkdown
+		}
 	}
 
 	s.writeArchRevMeta(sc, planSessionID, revStart, "done", nil, revRes.Usage)

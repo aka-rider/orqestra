@@ -486,45 +486,7 @@ func (t *Timeline) appendRowsForLines(lineStart, lineEnd, fIdx int) {
 	f := &t.frames[fIdx]
 	f.rowStart = len(t.rows)
 	for li := lineStart; li < lineEnd; li++ {
-		line := t.lines[li]
-		if line.kind == timelineLineRule || line.kind == timelineLineTool {
-			t.rows = append(t.rows, timelineRow{lineIdx: li, opaque: false, frameIdx: fIdx})
-			continue
-		}
-		cells := buildTimelineCells(line.spans)
-		if len(cells) == 0 {
-			t.rows = append(t.rows, timelineRow{lineIdx: li, opaque: false, frameIdx: fIdx})
-			continue
-		}
-		startCell := 0
-		for startCell < len(cells) {
-			lineW, lastSpace := 0, -1
-			i := startCell
-			for i < len(cells) {
-				c := cells[i]
-				if lineW+c.w > w && lineW > 0 {
-					break
-				}
-				if c.r == ' ' {
-					lastSpace = i
-				}
-				lineW += c.w
-				i++
-			}
-			if i >= len(cells) {
-				t.rows = append(t.rows, timelineRow{lineIdx: li, startCol: startCell, cells: cells[startCell:], opaque: false, frameIdx: fIdx})
-				break
-			}
-			breakAt := i
-			if lastSpace > startCell {
-				breakAt = lastSpace
-			}
-			t.rows = append(t.rows, timelineRow{lineIdx: li, startCol: startCell, cells: cells[startCell:breakAt], opaque: false, frameIdx: fIdx})
-			startCell = breakAt
-			for startCell < len(cells) && cells[startCell].r == ' ' {
-				startCell++
-			}
-		}
+		t.rows = append(t.rows, wrapLineToRows(li, t.lines[li], w, fIdx)...)
 	}
 	f.rowEnd = len(t.rows)
 }
@@ -569,45 +531,7 @@ func (t *Timeline) rebuildRows() {
 		} else {
 			// Plain frame: rebuild from lines.
 			for li := f.lineStart; li < f.lineEnd; li++ {
-				line := t.lines[li]
-				if line.kind == timelineLineRule || line.kind == timelineLineTool {
-					t.rows = append(t.rows, timelineRow{lineIdx: li, opaque: false, frameIdx: fIdx})
-					continue
-				}
-				cells := buildTimelineCells(line.spans)
-				if len(cells) == 0 {
-					t.rows = append(t.rows, timelineRow{lineIdx: li, opaque: false, frameIdx: fIdx})
-					continue
-				}
-				startCell := 0
-				for startCell < len(cells) {
-					lineW, lastSpace := 0, -1
-					i := startCell
-					for i < len(cells) {
-						c := cells[i]
-						if lineW+c.w > w && lineW > 0 {
-							break
-						}
-						if c.r == ' ' {
-							lastSpace = i
-						}
-						lineW += c.w
-						i++
-					}
-					if i >= len(cells) {
-						t.rows = append(t.rows, timelineRow{lineIdx: li, startCol: startCell, cells: cells[startCell:], opaque: false, frameIdx: fIdx})
-						break
-					}
-					breakAt := i
-					if lastSpace > startCell {
-						breakAt = lastSpace
-					}
-					t.rows = append(t.rows, timelineRow{lineIdx: li, startCol: startCell, cells: cells[startCell:breakAt], opaque: false, frameIdx: fIdx})
-					startCell = breakAt
-					for startCell < len(cells) && cells[startCell].r == ' ' {
-						startCell++
-					}
-				}
+				t.rows = append(t.rows, wrapLineToRows(li, t.lines[li], w, fIdx)...)
 			}
 		}
 		f.rowEnd = len(t.rows)

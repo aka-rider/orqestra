@@ -15,11 +15,10 @@ import (
 // View renders the pipeline screen in its alt-screen layout.
 //
 // Row layout (total = height):
-//   Row 0              : status bar (constStatusBarHeight = 1)
-//   Rows 1..transcriptH: transcript (scrollable, mouse-selectable)
-//   +streamH rows      : streaming console (live tool/partial output)
-//   +2 rows (input)    : divider + input zone
-//   +2 rows (footer)   : divider + key hints
+//   Row 0          : status bar (constStatusBarHeight = 1)
+//   body rows      : timeline (streaming/gate) or completion summary
+//   +2 rows (input): divider + input zone
+//   +2 rows (footer): divider + key hints
 func (s PipelineScreen) View(width, height int) string {
 	w := width
 	if w < minWidth {
@@ -39,12 +38,18 @@ func (s PipelineScreen) View(width, height int) string {
 	// Body area height (everything between status bar and input+footer).
 	bodyH := max(0, height-constStatusBarHeight-constPipelineInputHeight-constFooterHeight)
 
-	// Body: always the timeline view.
+	// Body: timeline for streaming/gate modes; completion summary when done.
 	timelineView := s.timeline.View()
 
-	// For streaming and completion: timeline is the entire body.
-	if s.content == ContentStreaming || s.content == ContentCompletion {
+	// For streaming: timeline is the entire body.
+	if s.content == ContentStreaming {
 		return statusBar + timelineView + inputZone + footer
+	}
+
+	// For completion: show the run summary instead of the live timeline.
+	if s.content == ContentCompletion {
+		body := lipgloss.NewStyle().MaxHeight(bodyH).Render(s.viewCompletion(width))
+		return statusBar + body + "\n" + inputZone + footer
 	}
 
 	// For interactive modes, show an overlay above the timeline

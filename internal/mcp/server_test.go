@@ -63,36 +63,62 @@ func TestHandleMCPRequest_ToolsList(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(result.Tools) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(result.Tools))
+	if len(result.Tools) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(result.Tools))
 	}
-	if result.Tools[0].Name != "AskUserQuestion" {
-		t.Errorf("tool name = %q, want AskUserQuestion", result.Tools[0].Name)
+
+	names := make(map[string]bool)
+	for _, tool := range result.Tools {
+		names[tool.Name] = true
+	}
+	for _, want := range []string{"AskUserQuestion", "SubmitReport"} {
+		if !names[want] {
+			t.Errorf("missing tool %q in tools/list", want)
+		}
 	}
 
 	// AskUserQuestion schema still valid
-	var askTool struct {
-		Name        string          `json:"name"`
-		InputSchema json.RawMessage `json:"inputSchema"`
-	}
+	var askSchema json.RawMessage
+	var submitSchema json.RawMessage
 	for _, tool := range result.Tools {
-		if tool.Name == "AskUserQuestion" {
-			askTool.InputSchema = tool.InputSchema
+		switch tool.Name {
+		case "AskUserQuestion":
+			askSchema = tool.InputSchema
+		case "SubmitReport":
+			submitSchema = tool.InputSchema
 		}
 	}
+
 	var schema struct {
 		Required   []string       `json:"required"`
 		Properties map[string]any `json:"properties"`
 	}
-	if err := json.Unmarshal(askTool.InputSchema, &schema); err != nil {
-		t.Fatalf("unmarshal schema: %v", err)
+	if err := json.Unmarshal(askSchema, &schema); err != nil {
+		t.Fatalf("unmarshal AskUserQuestion schema: %v", err)
 	}
 	if len(schema.Required) != 1 || schema.Required[0] != "question" {
-		t.Errorf("required = %v, want [question]", schema.Required)
+		t.Errorf("AskUserQuestion required = %v, want [question]", schema.Required)
 	}
 	for _, key := range []string{"question", "options", "allow_custom", "multi_select"} {
 		if _, ok := schema.Properties[key]; !ok {
-			t.Errorf("missing property %q in schema", key)
+			t.Errorf("missing property %q in AskUserQuestion schema", key)
+		}
+	}
+
+	// SubmitReport schema: required "report", optional "summary"
+	var submitSchemaObj struct {
+		Required   []string       `json:"required"`
+		Properties map[string]any `json:"properties"`
+	}
+	if err := json.Unmarshal(submitSchema, &submitSchemaObj); err != nil {
+		t.Fatalf("unmarshal SubmitReport schema: %v", err)
+	}
+	if len(submitSchemaObj.Required) != 1 || submitSchemaObj.Required[0] != "report" {
+		t.Errorf("SubmitReport required = %v, want [report]", submitSchemaObj.Required)
+	}
+	for _, key := range []string{"report", "summary"} {
+		if _, ok := submitSchemaObj.Properties[key]; !ok {
+			t.Errorf("missing property %q in SubmitReport schema", key)
 		}
 	}
 }

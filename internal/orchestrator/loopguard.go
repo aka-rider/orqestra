@@ -86,19 +86,158 @@ func (d *loopDetector) observe(tool, args string, errResult bool) loopAction {
 	return loopNudge
 }
 
-// steeringSink wraps a downstream sink, intercepts EventToolUse/EventToolResult
-// events for loop detection, and writes nudge decisions to a buffered channel.
-type steeringSink struct {
+// ErrLoopEscalated is returned when the loop breaker forcibly stops a run
+// because the loop guard exhausted all nudges.
+var ErrLoopEscalated = fmt.Errorf("loop guard: escalated after repeated identical tool calls")
+
+// preTimeoutWarning is how far before the hard deadline the pre-timeout nudge fires.
+const preTimeoutWarning = 60 * time.Second
+
+// Middleware wraps one Executor with one cross-cutting behaviour.
+// Each New* function returns a zero-field Middleware value.
+type Middleware interface {
+	Wrap(harness.Executor) harness.Executor
+}
+
+// ExecutorBuilder assembles a chain of Middleware around a base Executor.
+// With adds middleware in outermost-first order; Wrap applies them so the
+// last With call becomes the innermost wrapper around base.
+type ExecutorBuilder struct{ stack []Middleware }
+
+// NewExecutorBuilder returns an empty builder.
+func NewExecutorBuilder() *ExecutorBuilder { return &ExecutorBuilder{} }
+
+// With appends m to the builder (outermost-first order) and returns the builder.
+func (b *ExecutorBuilder) With(m Middleware) *ExecutorBuilder {
+	b.stack = append(b.stack, m)
+	return b
+}
+
+// Wrap applies the accumulated middleware stack around base, returning the
+// composed Executor. The last With call produces the innermost wrapper.
+func (b *ExecutorBuilder) Wrap(base harness.Executor) harness.Executor {
+	for i := len(b.stack) - 1; i >= 0; i-- {
+		base = b.stack[i].Wrap(base)
+	}
+	return base
+}
+
+// mergeMessages fans in two channels; nil inputs are skipped.
+// Returns the bidirectional merged channel and a wait function that blocks until
+// all pump goroutines exit. Call wait() after cancel() in each middleware's
+// shutdown to prevent goroutine leaks. Callers may also pre-fill out before
+// passing it to an inner executor (the buffer is 8).
+func mergeMessages(ctx context.Context, a, b <-chan harness.Message) (chan harness.Message, func()) {
+	out := make(chan harness.Message, 8)
+	var wg sync.WaitGroup
+	pump := func(ch <-chan harness.Message) {
+		defer wg.Done()
+		if ch == nil {
+			return
+		}
+		for {
+			select {
+			case msg, ok := <-ch:
+				if !ok {
+					return
+				}
+				select {
+				case out <- msg:
+				case <-ctx.Done():
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+	wg.Add(2)
+	go pump(a)
+	go pump(b)
+	go func() { wg.Wait(); close(out) }()
+	return out, wg.Wait
+}
+
+// -- PreTimeoutNudger -------------------------------------------------------
+
+type preTimeoutNudger struct{}
+
+// NewPreTimeoutNudger returns a Middleware that fires spec.PreTimeoutNudge into
+// the input plane 60 s before the context deadline. Passthrough when
+// PreTimeoutNudge is empty.
+func NewPreTimeoutNudger() Middleware { return preTimeoutNudger{} }
+
+func (preTimeoutNudger) Wrap(inner harness.Executor) harness.Executor {
+	return &preTimeoutNudgerExec{inner: inner}
+}
+
+type preTimeoutNudgerExec struct{ inner harness.Executor }
+
+func (e *preTimeoutNudgerExec) Run(ctx context.Context, spec harness.ProcessSpec, in <-chan harness.Message, sink harness.Sink) (harness.RunResult, error) {
+	if spec.PreTimeoutNudge == "" {
+		return e.inner.Run(ctx, spec, in, sink)
+	}
+
+	childCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	myIn := make(chan harness.Message, 16)
+	if spec.Prompt != "" {
+		myIn <- harness.Message{Text: spec.Prompt}
+		spec.Prompt = ""
+	}
+
+	var cleanupDone sync.WaitGroup
+	if deadline, ok := ctx.Deadline(); ok {
+		warnIn := time.Until(deadline) - preTimeoutWarning
+		if warnIn < 0 {
+			warnIn = 0
+		}
+		cleanupDone.Add(1)
+		go func() {
+			defer cleanupDone.Done()
+			select {
+			case <-time.After(warnIn):
+				select {
+				case myIn <- harness.Message{Text: spec.PreTimeoutNudge}:
+				default: // buffer full — drop
+				}
+			case <-childCtx.Done():
+			}
+		}()
+	}
+
+	res, err := e.inner.Run(childCtx, spec, myIn, sink)
+	cancel()
+	cleanupDone.Wait()
+	return res, err
+}
+
+// -- LoopBreaker ------------------------------------------------------------
+
+type loopBreaker struct{}
+
+// NewLoopBreaker returns a Middleware that detects repeated identical tool calls
+// and sends a nudge message to the input plane; cancels the run after MaxNudges.
+// Passthrough when spec.LoopGuard is zero.
+func NewLoopBreaker() Middleware { return loopBreaker{} }
+
+func (loopBreaker) Wrap(inner harness.Executor) harness.Executor {
+	return &loopBreakerExec{inner: inner}
+}
+
+type loopBreakerExec struct{ inner harness.Executor }
+
+// loopDetectorSink intercepts EventToolUse/EventToolResult for loop detection.
+type loopDetectorSink struct {
 	inner     harness.Sink
 	detector  *loopDetector
 	nudgeCh   chan<- loopAction
 	mu        sync.Mutex
-	lastError bool         // tracks whether last EventToolResult was an error
-	lastEvent atomic.Int64 // Unix ns of last Observe call; 0 = no events yet
+	lastError bool
 }
 
-func (s *steeringSink) Observe(ev harness.Event) {
-	s.lastEvent.Store(time.Now().UnixNano())
+func (s *loopDetectorSink) Observe(ev harness.Event) {
 	if s.inner != nil {
 		s.inner.Observe(ev)
 	}
@@ -119,215 +258,181 @@ func (s *steeringSink) Observe(ev harness.Event) {
 	}
 }
 
-// preTimeoutWarning is how far before the hard deadline the pre-timeout nudge fires.
-const preTimeoutWarning = 60 * time.Second
-
-// steeringExecutor implements loop-detection steering. When both SteerOnLoop is
-// false and PreTimeoutNudge is empty it is a transparent passthrough. Otherwise:
-//  1. Opens an input plane (myIn channel) and posts spec.Prompt as the first message.
-//  2. When SteerOnLoop=true: wraps the sink with a loop detector and silence detector.
-//  3. When PreTimeoutNudge is set: fires a role-specific message 60 s before the deadline.
-//  4. Listens for nudge/escalate signals: nudge → posts a correction message;
-//     escalate → cancels the child context and returns ErrLoopEscalated.
-//
-// Goroutine lifecycle (steerable path):
-//   - control goroutine: reads nudgeCh; exits when nudgeCh is closed (ok=false) or childCtx done.
-//   - silence goroutine: sends to nudgeCh; exits via silenceCtx.Done() (derived from childCtx).
-//   - pre-timeout goroutine: sends to myIn; exits via childCtx.Done().
-//
-// Shutdown order:
-//  1. inner.Run returns.
-//  2. silenceCancel() — stops the silence goroutine via silenceCtx (NOT childCtx, so the
-//     control goroutine remains live and can finish delivering queued nudges to myIn).
-//  3. sendersDone.Wait() — ensures no goroutine sends to nudgeCh anymore.
-//  4. close(nudgeCh) — lets the control goroutine drain all remaining items and exit.
-//  5. <-controlDone — waits for the control goroutine to finish.
-//  6. cancel() — cancels childCtx, stopping the pre-timeout goroutine.
-//  7. cleanupDone.Wait() — waits for the pre-timeout goroutine.
-//
-// This ordering guarantees:
-//   - No send-on-closed-channel panic (sendersDone before close).
-//   - Control goroutine delivers all queued nudges (including loopEscalate) before Run returns.
-type steeringExecutor struct {
-	inner harness.Executor
-}
-
-// ErrLoopEscalated is returned when the steering executor forcibly stops a run
-// because the loop guard exhausted all nudges.
-var ErrLoopEscalated = fmt.Errorf("loop guard: escalated after repeated identical tool calls")
-
-// NewSteeringExecutor returns an Executor that applies loop-guard steering when
-// spec.SteerOnLoop is true, or sends a pre-timeout nudge when spec.PreTimeoutNudge
-// is set. Otherwise it is a transparent passthrough.
-func NewSteeringExecutor(inner harness.Executor) harness.Executor {
-	return &steeringExecutor{inner: inner}
-}
-
-func (s *steeringExecutor) Run(ctx context.Context, spec harness.ProcessSpec, in <-chan harness.Message, sink harness.Sink) (harness.RunResult, error) {
-	if !spec.SteerOnLoop && spec.PreTimeoutNudge == "" {
-		return s.inner.Run(ctx, spec, in, sink)
+func (e *loopBreakerExec) Run(ctx context.Context, spec harness.ProcessSpec, in <-chan harness.Message, sink harness.Sink) (harness.RunResult, error) {
+	if (spec.LoopGuard == harness.LoopGuardSpec{}) {
+		return e.inner.Run(ctx, spec, in, sink)
 	}
 
 	childCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	myIn := make(chan harness.Message, 16)
-	if spec.Prompt != "" {
-		myIn <- harness.Message{Text: spec.Prompt}
+	// internalNudgeCh carries loopAction signals from the sink's Observe.
+	// msgCh carries harness.Message nudges for the input plane.
+	internalNudgeCh := make(chan loopAction, 4)
+	msgCh := make(chan harness.Message, 4)
+
+	detector := newLoopDetector(spec.LoopGuard)
+	lSink := &loopDetectorSink{inner: sink, detector: detector, nudgeCh: internalNudgeCh}
+
+	var escalated bool
+	controlDone := make(chan struct{})
+	go func() {
+		defer close(controlDone)
+		for {
+			select {
+			case action, ok := <-internalNudgeCh:
+				if !ok {
+					return
+				}
+				switch action {
+				case loopNudge:
+					const loopNudgeText = "You appear to be calling the same tool repeatedly " +
+						"with identical arguments. Step back: re-read what you already know, pick a " +
+						"different approach, or write your plan now to record your findings so far."
+					select {
+					case msgCh <- harness.Message{Text: loopNudgeText}:
+					case <-childCtx.Done():
+						return
+					}
+				case loopEscalate:
+					escalated = true
+					cancel()
+					return
+				}
+			case <-childCtx.Done():
+				return
+			}
+		}
+	}()
+
+	merged, mergeWait := mergeMessages(childCtx, in, msgCh)
+
+	// When LoopBreaker opens an input plane for nudges, the initial prompt must
+	// also go through it. Write it directly into merged's buffer (capacity 8) so
+	// it arrives before inner.Run starts — avoids a race where cancel() preempts
+	// the pump goroutine on a fast-returning inner executor.
+	if in == nil && spec.Prompt != "" {
+		merged <- harness.Message{Text: spec.Prompt}
 		spec.Prompt = ""
 	}
 
-	var myInOnce sync.Once
-	closeMyIn := func() { myInOnce.Do(func() { close(myIn) }) }
-	var escalated bool
+	res, err := e.inner.Run(childCtx, spec, merged, lSink)
 
-	// sendersDone tracks goroutines that write to nudgeCh; they must all exit
-	// before close(nudgeCh) to prevent send-on-closed-channel panics.
-	var sendersDone sync.WaitGroup
-
-	// cleanupDone tracks goroutines that write to myIn but not nudgeCh
-	// (pre-timeout goroutine). Waited last, after controlDone.
-	var cleanupDone sync.WaitGroup
-
-	// Set up loop detection and control goroutine only when SteerOnLoop is enabled.
-	var steerSink *steeringSink
-	var nudgeCh chan loopAction
-	controlDone := make(chan struct{})
-
-	if spec.SteerOnLoop {
-		nudgeCh = make(chan loopAction, 4)
-		detector := newLoopDetector(spec.LoopGuard)
-		steerSink = &steeringSink{inner: sink, detector: detector, nudgeCh: nudgeCh}
-
-		go func() {
-			defer close(controlDone)
-			for {
-				select {
-				case action, ok := <-nudgeCh:
-					if !ok {
-						return
-					}
-					switch action {
-					case loopNudge:
-						nudgeText := spec.PreTimeoutNudge
-						if nudgeText == "" {
-							nudgeText = "You appear to be calling the same tool repeatedly " +
-								"with identical arguments. Step back: re-read what you already know, pick a " +
-								"different approach, or write your plan now to record your findings so far."
-						}
-						select {
-						case myIn <- harness.Message{Text: nudgeText}:
-						case <-childCtx.Done():
-							return
-						}
-					case loopEscalate:
-						escalated = true
-						cancel()
-						closeMyIn()
-						return
-					}
-				case <-childCtx.Done():
-					return
-				}
-			}
-		}()
-	} else {
-		close(controlDone) // no control goroutine; make drain a no-op
-	}
-
-	// Determine which sink the inner executor sees.
-	var activeSink harness.Sink
-	if steerSink != nil {
-		activeSink = steerSink
-	} else {
-		activeSink = sink
-	}
-
-	// Pre-timeout goroutine: fires once, 60 s before the hard deadline.
-	// Writes to myIn (not nudgeCh), so it belongs in cleanupDone.
-	if spec.PreTimeoutNudge != "" {
-		if deadline, ok := ctx.Deadline(); ok {
-			warnIn := time.Until(deadline) - preTimeoutWarning
-			if warnIn < 0 {
-				warnIn = 0
-			}
-			cleanupDone.Add(1)
-			go func() {
-				defer cleanupDone.Done()
-				select {
-				case <-time.After(warnIn):
-					select {
-					case myIn <- harness.Message{Text: spec.PreTimeoutNudge}:
-					default: // buffer full — drop
-					}
-				case <-childCtx.Done():
-				}
-			}()
-		}
-	}
-
-	// Silence detector goroutine: fires when no harness events arrive for SilenceSecs.
-	// Only active when SteerOnLoop=true (steerSink tracks lastEvent).
-	// Writes to nudgeCh, so it belongs in sendersDone.
-	// The silence clock is anchored to process start (startNs): if lastEvent==0 (no events
-	// yet), we use startNs so total silence from start also triggers the nudge.
-	//
-	// silenceCancel is a separate cancel derived from childCtx: we stop only the senders
-	// before close(nudgeCh), without canceling childCtx (which would interrupt the control
-	// goroutine mid-nudge delivery and lose queued escalations).
-	silenceCtx, silenceCancel := context.WithCancel(childCtx)
-	defer silenceCancel()
-	if steerSink != nil && spec.LoopGuard.SilenceSecs > 0 {
-		silenceDur := time.Duration(spec.LoopGuard.SilenceSecs) * time.Second
-		startNs := time.Now().UnixNano()
-		sendersDone.Add(1)
-		go func() {
-			defer sendersDone.Done()
-			ticker := time.NewTicker(silenceDur / 2)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-silenceCtx.Done():
-					return
-				case <-ticker.C:
-					ns := steerSink.lastEvent.Load()
-					anchor := ns
-					if anchor == 0 {
-						anchor = startNs // anchor to process start when no event has arrived yet
-					}
-					if time.Since(time.Unix(0, anchor)) >= silenceDur {
-						select {
-						case nudgeCh <- loopNudge:
-						default:
-						}
-					}
-				}
-			}
-		}()
-	}
-
-	res, err := s.inner.Run(childCtx, spec, myIn, activeSink)
-
-	// Shutdown sequence (see comment on steeringExecutor for the rationale):
-	// 1. silenceCancel() stops the silence goroutine without canceling childCtx,
-	//    so the control goroutine can still deliver its queued nudges to myIn.
-	// 2. sendersDone.Wait() ensures nobody sends to nudgeCh after close.
-	// 3. close(nudgeCh) drains the control goroutine: it reads remaining items
-	//    (including loopEscalate), then exits when ok=false.
-	// 4. <-controlDone waits for the control goroutine to finish.
-	// 5. cancel() cancels childCtx (cleans up pre-timeout goroutine).
-	// 6. cleanupDone.Wait() waits for the pre-timeout goroutine.
-	silenceCancel()
-	sendersDone.Wait()
-	if nudgeCh != nil {
-		close(nudgeCh)
-	}
+	// Shutdown sequence (order matters):
+	// 1. close(internalNudgeCh): safe — no more Observe calls after inner.Run returns;
+	//    signals the control goroutine to drain remaining actions and exit.
+	// 2. <-controlDone: waits for the control goroutine to write any pending nudge to
+	//    msgCh and exit. Must precede cancel() so nudges are not dropped.
+	// 3. close(msgCh): safe — control goroutine has exited, no more writers to msgCh.
+	//    Signals the pump goroutine for msgCh to drain the nudge into merged and exit.
+	// 4. cancel(): cancels childCtx, stopping the pump goroutine for the upstream in.
+	// 5. mergeWait(): confirms all pump goroutines have exited.
+	close(internalNudgeCh)
 	<-controlDone
+	close(msgCh)
 	cancel()
-	cleanupDone.Wait()
+	mergeWait()
 
 	if escalated {
 		return res, ErrLoopEscalated
 	}
+	return res, err
+}
+
+// -- SilenceDetector --------------------------------------------------------
+
+type silenceDetector struct{}
+
+// NewSilenceDetector returns a Middleware that sends a nudge when no harness
+// events have arrived for spec.SilenceGuard.SilenceSecs seconds. The nudge text
+// is spec.SilenceGuard.NudgeText, falling back to spec.PreTimeoutNudge.
+// Passthrough when spec.SilenceGuard.SilenceSecs <= 0.
+func NewSilenceDetector() Middleware { return silenceDetector{} }
+
+func (silenceDetector) Wrap(inner harness.Executor) harness.Executor {
+	return &silenceDetectorExec{inner: inner}
+}
+
+type silenceDetectorExec struct{ inner harness.Executor }
+
+// silenceWatcherSink records the timestamp of every observed event.
+type silenceWatcherSink struct {
+	inner     harness.Sink
+	lastEvent atomic.Int64 // Unix ns of last Observe call; 0 = no events yet
+}
+
+func (s *silenceWatcherSink) Observe(ev harness.Event) {
+	s.lastEvent.Store(time.Now().UnixNano())
+	if s.inner != nil {
+		s.inner.Observe(ev)
+	}
+}
+
+func (e *silenceDetectorExec) Run(ctx context.Context, spec harness.ProcessSpec, in <-chan harness.Message, sink harness.Sink) (harness.RunResult, error) {
+	if spec.SilenceGuard.SilenceSecs <= 0 {
+		return e.inner.Run(ctx, spec, in, sink)
+	}
+
+	nudgeText := spec.SilenceGuard.NudgeText
+	if nudgeText == "" {
+		nudgeText = spec.PreTimeoutNudge
+	}
+
+	childCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	msgCh := make(chan harness.Message, 4)
+	wSink := &silenceWatcherSink{inner: sink}
+
+	// silenceCtx is a sub-context of childCtx: we stop the sender goroutine
+	// (via silenceCancel) before close(msgCh), without cancelling childCtx so
+	// the merge pump can still deliver any queued nudges to the inner executor.
+	silenceCtx, silenceCancel := context.WithCancel(childCtx)
+	defer silenceCancel()
+
+	var sendersDone sync.WaitGroup
+	silenceDur := time.Duration(spec.SilenceGuard.SilenceSecs) * time.Second
+	startNs := time.Now().UnixNano()
+	sendersDone.Add(1)
+	go func() {
+		defer sendersDone.Done()
+		ticker := time.NewTicker(silenceDur / 2)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-silenceCtx.Done():
+				return
+			case <-ticker.C:
+				ns := wSink.lastEvent.Load()
+				anchor := ns
+				if anchor == 0 {
+					anchor = startNs // anchor to start when no events have arrived yet
+				}
+				if time.Since(time.Unix(0, anchor)) >= silenceDur {
+					select {
+					case msgCh <- harness.Message{Text: nudgeText}:
+					default:
+					}
+				}
+			}
+		}
+	}()
+
+	merged, mergeWait := mergeMessages(childCtx, in, msgCh)
+
+	res, err := e.inner.Run(childCtx, spec, merged, wSink)
+
+	// Shutdown sequence:
+	// 1. silenceCancel(): stops the silence goroutine via silenceCtx.
+	// 2. sendersDone.Wait(): ensures nobody writes to msgCh after close.
+	// 3. close(msgCh): signals the merge pump for msgCh to exit.
+	// 4. cancel(): cancels childCtx, causing the merge pump for in to exit.
+	// 5. mergeWait(): confirms all pump goroutines have exited.
+	silenceCancel()
+	sendersDone.Wait()
+	close(msgCh)
+	cancel()
+	mergeWait()
+
 	return res, err
 }

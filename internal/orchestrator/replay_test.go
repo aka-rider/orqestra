@@ -117,14 +117,13 @@ func emitUserEvents(msgRaw json.RawMessage, sink harness.Sink) {
 }
 
 // TestLoopGuardFiresOnRealReplay replays the ExitWorktree loop fixture and
-// verifies the steeringExecutor escalates before all 15 calls complete.
+// verifies the LoopBreaker escalates before all 15 calls complete.
 func TestLoopGuardFiresOnRealReplay(t *testing.T) {
 	player := &fixturePlayer{path: "testdata/exitworktree_loop.jsonl"}
-	s := NewSteeringExecutor(player)
+	exec := NewExecutorBuilder().With(NewLoopBreaker()).Wrap(player)
 
 	spec := harness.ProcessSpec{
-		SteerOnLoop: true,
-		Prompt:      "explore the codebase",
+		Prompt: "explore the codebase",
 		LoopGuard: harness.LoopGuardSpec{
 			RepeatThreshold: 3,
 			MaxNudges:       3,
@@ -135,7 +134,7 @@ func TestLoopGuardFiresOnRealReplay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := s.Run(ctx, spec, nil, nil)
+	_, err := exec.Run(ctx, spec, nil, nil)
 	if !errors.Is(err, ErrLoopEscalated) {
 		t.Errorf("expected ErrLoopEscalated on ExitWorktree loop replay, got: %v", err)
 	}
@@ -145,11 +144,10 @@ func TestLoopGuardFiresOnRealReplay(t *testing.T) {
 // without triggering escalation.
 func TestLoopGuardPassesNormalStream(t *testing.T) {
 	player := &fixturePlayer{path: "../harness/testdata/worker_stream_sample.jsonl"}
-	s := NewSteeringExecutor(player)
+	exec := NewExecutorBuilder().With(NewLoopBreaker()).Wrap(player)
 
 	spec := harness.ProcessSpec{
-		SteerOnLoop: true,
-		Prompt:      "do work",
+		Prompt: "do work",
 		LoopGuard: harness.LoopGuardSpec{
 			RepeatThreshold: 3,
 			MaxNudges:       3,
@@ -160,7 +158,7 @@ func TestLoopGuardPassesNormalStream(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := s.Run(ctx, spec, nil, nil)
+	_, err := exec.Run(ctx, spec, nil, nil)
 	if err != nil {
 		t.Errorf("expected no error on normal stream, got: %v", err)
 	}

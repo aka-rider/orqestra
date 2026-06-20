@@ -32,13 +32,19 @@ type SandboxConfig struct {
 	Writable     bool
 }
 
-// LoopGuardSpec configures the steering executor's loop-detection thresholds.
+// LoopGuardSpec configures the LoopBreaker middleware's loop-detection thresholds.
 // Mirrors config.LoopGuard without importing the config package.
 type LoopGuardSpec struct {
 	RepeatThreshold int // identical tool calls before nudging
 	MaxNudges       int // nudges before escalating to cancel
 	CooldownTurns   int // turns to skip checking after a nudge
-	SilenceSecs     int // seconds of event-stream silence before nudging; 0 = disabled
+}
+
+// SilenceGuardSpec configures the SilenceDetector middleware.
+// Zero value disables silence detection.
+type SilenceGuardSpec struct {
+	SilenceSecs int    // seconds of event-stream silence before nudging; 0 = disabled
+	NudgeText   string // "" falls back to spec.PreTimeoutNudge
 }
 
 // EventKind identifies the type of a Runner event.

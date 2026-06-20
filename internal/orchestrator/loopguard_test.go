@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -131,17 +132,21 @@ func TestSteering_PassthroughWhenDisabled(t *testing.T) {
 	inner := &steeringInner{
 		events: []harness.Event{sessionDoneEvent()},
 	}
-	s := NewSteeringExecutor(inner)
+	// No LoopGuard, no SilenceGuard, no PreTimeoutNudge → all middleware passthrough.
+	exec := NewExecutorBuilder().
+		With(NewPreTimeoutNudger()).
+		With(NewLoopBreaker()).
+		With(NewSilenceDetector()).
+		Wrap(inner)
 
 	spec := harness.ProcessSpec{
-		SteerOnLoop: false,
-		Prompt:      "hello",
+		Prompt: "hello",
 	}
-	_, err := s.Run(context.Background(), spec, nil, nil)
+	_, err := exec.Run(context.Background(), spec, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// no messages should arrive (no input plane opened)
+	// No input plane opened; no messages via in.
 	msgs := inner.receivedMessages()
 	if len(msgs) != 0 {
 		t.Errorf("expected no messages in passthrough mode, got %v", msgs)
@@ -149,123 +154,82 @@ func TestSteering_PassthroughWhenDisabled(t *testing.T) {
 }
 
 func TestSteering_PostsInitialPrompt(t *testing.T) {
-	inner := &steeringInner{
-		events: []harness.Event{sessionDoneEvent()},
-	}
-	s := NewSteeringExecutor(inner)
+	inner := &blockingInner{msgNotify: make(chan struct{}, 4)}
+	exec := NewExecutorBuilder().With(NewLoopBreaker()).Wrap(inner)
 
 	spec := harness.ProcessSpec{
-		SteerOnLoop: true,
-		Prompt:      "research the codebase",
-		LoopGuard:   testLoopGuard,
-	}
-	_, err := s.Run(context.Background(), spec, nil, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		Prompt:    "research the codebase",
+		LoopGuard: testLoopGuard,
 	}
 
-	// Give the drain goroutine a moment.
-	time.Sleep(10 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); exec.Run(ctx, spec, nil, nil) }() //nolint:errcheck
 
-	msgs := inner.receivedMessages()
-	if len(msgs) == 0 {
-		t.Fatal("expected initial prompt to be posted as first message")
-	}
-	if msgs[0] != "research the codebase" {
-		t.Errorf("first message = %q, want 'research the codebase'", msgs[0])
-	}
-	// -p should have been blanked
-	if spec.Prompt != "research the codebase" {
-		// spec is a value — test that our local copy was updated
-	}
+	waitForMessage(t, inner, func(m string) bool { return m == "research the codebase" }, "initial prompt")
+	cancel()
+	<-done
 }
 
 func TestSteering_NudgesOnLoop(t *testing.T) {
-	// Emit 3 identical ExitWorktree calls → expect nudge message.
-	events := []harness.Event{
-		toolUseEvent("ExitWorktree", `{}`),
-		toolResultEvent(false),
-		toolUseEvent("ExitWorktree", `{}`),
-		toolResultEvent(false),
-		toolUseEvent("ExitWorktree", `{}`),
-		toolResultEvent(false),
-		sessionDoneEvent(),
+	// Three identical ExitWorktree calls trip the threshold while the inner is running.
+	// The nudge must arrive in the inner's input channel before it exits.
+	inner := &blockingInner{
+		events: []harness.Event{
+			toolUseEvent("ExitWorktree", `{}`), toolResultEvent(false),
+			toolUseEvent("ExitWorktree", `{}`), toolResultEvent(false),
+			toolUseEvent("ExitWorktree", `{}`), toolResultEvent(false),
+		},
+		msgNotify: make(chan struct{}, 4),
 	}
-	inner := &steeringInner{events: events}
-	s := NewSteeringExecutor(inner)
+	exec := NewExecutorBuilder().With(NewLoopBreaker()).Wrap(inner)
 
 	spec := harness.ProcessSpec{
-		SteerOnLoop: true,
-		Prompt:      "work",
-		LoopGuard:   testLoopGuard,
-	}
-	_, err := s.Run(context.Background(), spec, nil, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		Prompt:    "work",
+		LoopGuard: testLoopGuard,
 	}
 
-	// Wait for controller goroutine to flush.
-	time.Sleep(20 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); exec.Run(ctx, spec, nil, nil) }() //nolint:errcheck
 
-	msgs := inner.receivedMessages()
-	hasNudge := false
-	for _, m := range msgs {
-		if len(m) > 20 && m[:20] == "You appear to be cal" {
-			hasNudge = true
-		}
-	}
-	if !hasNudge {
-		t.Errorf("expected nudge message in %v", msgs)
-	}
+	waitForMessage(t, inner, func(m string) bool {
+		return strings.HasPrefix(m, "You appear to be calling")
+	}, "loop nudge")
+	cancel()
+	<-done
 }
 
 func TestSteering_EscalatesOnLoopExhaustion(t *testing.T) {
-	// Emit enough repeated calls to exhaust nudges (threshold=3, maxNudges=2).
-	// Pattern: 3 repeats → nudge, cooldown, 3 repeats → nudge, cooldown, 3 repeats → escalate.
-	events := make([]harness.Event, 0, 30)
-	addLoop := func(n int) {
-		for i := 0; i < n; i++ {
-			events = append(events, toolUseEvent("ExitWorktree", `{}`))
-			events = append(events, toolResultEvent(true))
+	// Pattern: 3 repeats → nudge 1, cooldown, 3 repeats → nudge 2 (maxNudges=2),
+	// cooldown, 3 repeats → escalate. The inner blocks; escalation cancels it for real.
+	events := make([]harness.Event, 0, 24)
+	addLoop := func() {
+		for i := 0; i < 3; i++ {
+			events = append(events, toolUseEvent("ExitWorktree", `{}`), toolResultEvent(false))
 		}
 	}
-	addLoop(3) // nudge 1 — but with errResult weight=2, threshold=3 needs 2 calls
-	// Actually with errResult weight=2 and threshold=3:
-	// call1: count=2, call2: count=4 ≥ 3 → nudge. So 2 calls with error suffice.
-	// Let's use simple non-error calls for clarity.
+	addCooldown := func() {
+		events = append(events, toolUseEvent("Glob", `{"pattern":"**"}`), toolResultEvent(false))
+	}
+	addLoop(); addCooldown()
+	addLoop(); addCooldown()
+	addLoop()
 
-	events = events[:0]
-	// loop 1 (3 calls → nudge 1)
-	for i := 0; i < 3; i++ {
-		events = append(events, toolUseEvent("ExitWorktree", `{}`), toolResultEvent(false))
-	}
-	// cooldown: 1 different call
-	events = append(events, toolUseEvent("Glob", `{"pattern":"**"}`), toolResultEvent(false))
-	// loop 2 (3 calls → nudge 2)
-	for i := 0; i < 3; i++ {
-		events = append(events, toolUseEvent("ExitWorktree", `{}`), toolResultEvent(false))
-	}
-	// cooldown: 1 different call
-	events = append(events, toolUseEvent("Glob", `{"pattern":"**"}`), toolResultEvent(false))
-	// loop 3 (3 calls → escalate, maxNudges exhausted)
-	for i := 0; i < 3; i++ {
-		events = append(events, toolUseEvent("ExitWorktree", `{}`), toolResultEvent(false))
-	}
-	// no session done — escalation cancels before it
-
-	inner := &steeringInner{events: events, err: context.Canceled}
-	s := NewSteeringExecutor(inner)
+	inner := &blockingInner{events: events}
+	exec := NewExecutorBuilder().With(NewLoopBreaker()).Wrap(inner)
 
 	spec := harness.ProcessSpec{
-		SteerOnLoop: true,
-		Prompt:      "work",
-		LoopGuard:   testLoopGuard,
+		Prompt:    "work",
+		LoopGuard: testLoopGuard,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, err := s.Run(ctx, spec, nil, nil)
+	_, err := exec.Run(ctx, spec, nil, nil)
 	if !errors.Is(err, ErrLoopEscalated) {
 		t.Errorf("expected ErrLoopEscalated, got %v", err)
 	}
@@ -314,11 +278,18 @@ func (b *blockingInner) received() []string {
 }
 
 // waitForMessage blocks until the inner has received a message matching pred,
-// or a 500 ms deadline passes. Requires b.msgNotify to be set.
+// or 500 ms passes. Requires b.msgNotify to be set.
+// For slow senders (e.g. SilenceDetector with SilenceSecs ≥ 1), use waitForMessageCtx.
 func waitForMessage(t *testing.T, b *blockingInner, pred func(string) bool, desc string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
+	waitForMessageCtx(t, b, ctx, pred, desc)
+}
+
+// waitForMessageCtx blocks until pred returns true or ctx is done.
+func waitForMessageCtx(t *testing.T, b *blockingInner, ctx context.Context, pred func(string) bool, desc string) {
+	t.Helper()
 	for {
 		for _, m := range b.received() {
 			if pred(m) {
@@ -338,18 +309,20 @@ func TestPreTimeoutNudgeFires(t *testing.T) {
 	// With a 200 ms timeout, preTimeoutWarning (60s) > timeout, so warnIn clamps to 0
 	// and the nudge fires immediately. The deadline fires shortly after.
 	inner := &blockingInner{}
-	s := NewSteeringExecutor(inner)
+	exec := NewExecutorBuilder().
+		With(NewPreTimeoutNudger()).
+		With(NewLoopBreaker()).
+		Wrap(inner)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
 	spec := harness.ProcessSpec{
-		SteerOnLoop:    true,
-		Prompt:         "do work",
-		LoopGuard:      testLoopGuard,
+		Prompt:          "do work",
+		LoopGuard:       testLoopGuard,
 		PreTimeoutNudge: "time is up",
 	}
-	_, _ = s.Run(ctx, spec, nil, nil)
+	_, _ = exec.Run(ctx, spec, nil, nil)
 
 	msgs := inner.received()
 	hasPrompt, hasNudge := false, false
@@ -374,7 +347,10 @@ func TestPreTimeoutNudgeSkippedOnEarlyExit(t *testing.T) {
 	inner := &steeringInner{
 		events: []harness.Event{sessionDoneEvent()},
 	}
-	s := NewSteeringExecutor(inner)
+	exec := NewExecutorBuilder().
+		With(NewPreTimeoutNudger()).
+		With(NewLoopBreaker()).
+		Wrap(inner)
 
 	// Use a 10-second timeout: nudge would fire at T-60s = negative → immediate,
 	// but the inner exits before anyone reads myIn, so the non-blocking send drops it.
@@ -382,16 +358,15 @@ func TestPreTimeoutNudgeSkippedOnEarlyExit(t *testing.T) {
 	defer cancel()
 
 	spec := harness.ProcessSpec{
-		SteerOnLoop:    true,
-		Prompt:         "work",
-		LoopGuard:      testLoopGuard,
+		Prompt:          "work",
+		LoopGuard:       testLoopGuard,
 		PreTimeoutNudge: "nudge",
 	}
 	// Should not block or panic.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.Run(ctx, spec, nil, nil) //nolint:errcheck
+		exec.Run(ctx, spec, nil, nil) //nolint:errcheck
 	}()
 
 	select {
@@ -402,19 +377,21 @@ func TestPreTimeoutNudgeSkippedOnEarlyExit(t *testing.T) {
 }
 
 func TestPreTimeoutNudgeNoSteerOnLoop(t *testing.T) {
-	// Worker case: SteerOnLoop=false but PreTimeoutNudge set — enters steerable path.
+	// Worker case: no LoopGuard but PreTimeoutNudge set — PreTimeoutNudger is active.
 	inner := &blockingInner{}
-	s := NewSteeringExecutor(inner)
+	exec := NewExecutorBuilder().
+		With(NewPreTimeoutNudger()).
+		With(NewLoopBreaker()).
+		Wrap(inner)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
 	spec := harness.ProcessSpec{
-		SteerOnLoop:    false,
-		Prompt:         "execute plan",
+		Prompt:          "execute plan",
 		PreTimeoutNudge: "worker nudge",
 	}
-	_, _ = s.Run(ctx, spec, nil, nil)
+	_, _ = exec.Run(ctx, spec, nil, nil)
 
 	msgs := inner.received()
 	hasPrompt, hasNudge := false, false
@@ -439,82 +416,104 @@ func TestPreTimeoutNudgeNoDeadline(t *testing.T) {
 	inner := &steeringInner{
 		events: []harness.Event{sessionDoneEvent()},
 	}
-	s := NewSteeringExecutor(inner)
+	exec := NewExecutorBuilder().
+		With(NewPreTimeoutNudger()).
+		With(NewLoopBreaker()).
+		Wrap(inner)
 
 	spec := harness.ProcessSpec{
-		SteerOnLoop:    true,
-		Prompt:         "work",
-		LoopGuard:      testLoopGuard,
+		Prompt:          "work",
+		LoopGuard:       testLoopGuard,
 		PreTimeoutNudge: "nudge",
 	}
 	// context.Background() has no deadline.
-	_, err := s.Run(context.Background(), spec, nil, nil)
+	_, err := exec.Run(context.Background(), spec, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
 func TestSilenceNudge(t *testing.T) {
-	// After one event, go silent for > SilenceSecs → nudge fires.
-	// SilenceSecs=1 means silence goroutine checks every 500ms and fires after 1s quiet.
+	// After one event, silence for > SilenceSecs → SilenceDetector fires the nudge.
+	// Only SilenceDetector in the chain; no PreTimeoutNudger so "please submit" can
+	// only arrive from silence detection (not from a zero-delay pre-timeout goroutine).
 	inner := &blockingInner{
 		events: []harness.Event{
 			toolUseEvent("Read", `{"path":"/a"}`), // seeds lastEvent
 		},
 		msgNotify: make(chan struct{}, 8),
 	}
-	s := NewSteeringExecutor(inner)
+	exec := NewExecutorBuilder().With(NewSilenceDetector()).Wrap(inner)
 
-	// 3-second deadline so the silence nudge (at ~1s) fires before the ctx deadline.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	spec := harness.ProcessSpec{
-		SteerOnLoop:    true,
-		Prompt:         "work",
-		LoopGuard:      harness.LoopGuardSpec{RepeatThreshold: 3, MaxNudges: 3, CooldownTurns: 1, SilenceSecs: 1},
-		PreTimeoutNudge: "please submit",
+		Prompt:          "work",
+		SilenceGuard:    harness.SilenceGuardSpec{SilenceSecs: 1, NudgeText: "please submit"},
 	}
 
 	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		s.Run(ctx, spec, nil, nil) //nolint:errcheck
-	}()
+	go func() { defer close(done); exec.Run(ctx, spec, nil, nil) }() //nolint:errcheck
 
-	// Wait for silence nudge to arrive (up to 2s after start).
-	waitForMessage(t, inner, func(m string) bool { return m == "please submit" }, "silence nudge")
+	waitForMessageCtx(t, inner, ctx, func(m string) bool { return m == "please submit" }, "silence nudge")
 
-	cancel() // allow Run to return
+	cancel()
 	<-done
 }
 
 func TestSilenceNudgeFiresOnTotalSilence(t *testing.T) {
-	// No events from inner → silence clock anchors to process start → nudge fires after SilenceSecs.
+	// No events at all → silence clock anchors to start time → nudge fires after SilenceSecs.
+	// Only SilenceDetector in the chain so the nudge can only come from silence detection.
 	inner := &blockingInner{
 		msgNotify: make(chan struct{}, 8),
 	}
-	s := NewSteeringExecutor(inner)
+	exec := NewExecutorBuilder().With(NewSilenceDetector()).Wrap(inner)
 
-	// 3-second deadline so the silence nudge (at ~1s) fires before ctx deadline.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	spec := harness.ProcessSpec{
-		SteerOnLoop:     true,
-		Prompt:          "work",
-		PreTimeoutNudge: "please submit",
-		LoopGuard:       harness.LoopGuardSpec{RepeatThreshold: 3, MaxNudges: 3, CooldownTurns: 1, SilenceSecs: 1},
+		Prompt:       "work",
+		SilenceGuard: harness.SilenceGuardSpec{SilenceSecs: 1, NudgeText: "please submit"},
 	}
 
 	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		s.Run(ctx, spec, nil, nil) //nolint:errcheck
-	}()
+	go func() { defer close(done); exec.Run(ctx, spec, nil, nil) }() //nolint:errcheck
 
-	// Silence nudge must fire even with zero events.
-	waitForMessage(t, inner, func(m string) bool { return m == "please submit" }, "silence nudge on total silence")
+	waitForMessageCtx(t, inner, ctx, func(m string) bool { return m == "please submit" }, "silence nudge on total silence")
+
+	cancel()
+	<-done
+}
+
+func TestSilenceNudge_UsesNudgeText(t *testing.T) {
+	// When SilenceGuard.NudgeText is set, it must be used instead of PreTimeoutNudge.
+	inner := &blockingInner{
+		events:    []harness.Event{toolUseEvent("Read", `{"path":"/a"}`)},
+		msgNotify: make(chan struct{}, 8),
+	}
+	exec := NewExecutorBuilder().With(NewSilenceDetector()).Wrap(inner)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	spec := harness.ProcessSpec{
+		Prompt:          "work",
+		SilenceGuard:    harness.SilenceGuardSpec{SilenceSecs: 1, NudgeText: "custom nudge"},
+		PreTimeoutNudge: "fallback",
+	}
+
+	done := make(chan struct{})
+	go func() { defer close(done); exec.Run(ctx, spec, nil, nil) }() //nolint:errcheck
+
+	waitForMessageCtx(t, inner, ctx, func(m string) bool { return m == "custom nudge" }, "custom NudgeText")
+
+	for _, m := range inner.received() {
+		if m == "fallback" {
+			t.Errorf("PreTimeoutNudge fallback appeared; SilenceGuard.NudgeText should take precedence")
+		}
+	}
 
 	cancel()
 	<-done

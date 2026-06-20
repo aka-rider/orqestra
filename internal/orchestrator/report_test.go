@@ -13,9 +13,9 @@ func TestPreferReport_FallsBackToReadPlan(t *testing.T) {
 		RepoPath: t.TempDir(),
 	}
 
-	// No plan file for this session → should error (allowFallback=false)
+	// No plan file for this session → should error
 	res := harness.RunResult{SessionID: "no-such-session"}
-	_, _, err := preferReport(sc, "researcher", res, false)
+	_, err := preferReport(sc, "researcher", res)
 	if err == nil {
 		t.Error("expected error when no plan file exists")
 	}
@@ -29,7 +29,7 @@ func TestPreferReport_NoSessionID(t *testing.T) {
 
 	// Empty session ID → should error immediately
 	res := harness.RunResult{SessionID: ""}
-	_, _, err := preferReport(sc, "researcher", res, false)
+	_, err := preferReport(sc, "researcher", res)
 	if err == nil {
 		t.Error("expected error when SessionID is empty")
 	}

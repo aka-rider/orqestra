@@ -56,14 +56,23 @@ func (s *ReviseStep) Run(ctx context.Context, in ReviseInput, sc StepContext) (P
 		return PlanOutput{}, fmt.Errorf("revise: %w", err)
 	}
 
-	revised, _, readErr := preferReport(sc, "architect", res, false)
-	if readErr != nil {
-		// Chat-only continuation — the architect responded without revising the plan.
-		sc.Log.Debug("revise: plan unchanged (chat continuation)", "err", readErr)
-		if chat := strings.TrimSpace(res.Output); chat != "" {
-			sc.Log.Info("architect chat response (no plan revision)", "text_len", len(chat))
+	var revised string
+	if sc.Reports != nil {
+		if sub, ok := sc.Reports.TakeReport("architect"); ok && sub != "" {
+			revised = sub
 		}
-		revised = in.Plan.Markdown
+	}
+	if revised == "" {
+		if r, readErr := preferReport(sc, "architect", res); readErr == nil {
+			revised = r
+		} else {
+			// Chat-only continuation — the architect responded without revising the plan.
+			sc.Log.Debug("revise: plan unchanged (chat continuation)", "err", readErr)
+			if chat := strings.TrimSpace(res.Output); chat != "" {
+				sc.Log.Info("architect chat response (no plan revision)", "text_len", len(chat))
+			}
+			revised = in.Plan.Markdown
+		}
 	}
 
 	sc.Obs.AgentDone(s.ID(), res.Usage)

@@ -226,13 +226,15 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		os.Exit(exitInvalidInput)
 	}
 	resSpec.AgentID = "researcher"
-	resSpec.SteerOnLoop = true
 	resSpec.Timeout = cfg.Researcher.Timeout.Duration
 	resSpec.LoopGuard = harness.LoopGuardSpec{
 		RepeatThreshold: cfg.Researcher.LoopGuard.RepeatThreshold,
 		MaxNudges:       cfg.Researcher.LoopGuard.MaxNudges,
 		CooldownTurns:   cfg.Researcher.LoopGuard.CooldownTurns,
-		SilenceSecs:     cfg.Researcher.LoopGuard.SilenceSecs,
+	}
+	resSpec.SilenceGuard = harness.SilenceGuardSpec{
+		SilenceSecs: cfg.Researcher.SilenceGuard.SilenceSecs,
+		NudgeText:   cfg.Researcher.SilenceGuard.NudgeText,
 	}
 	resSpec.PreTimeoutNudge = preTimeoutNudgeFor("researcher")
 
@@ -242,13 +244,15 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		os.Exit(exitInvalidInput)
 	}
 	archSpec.AgentID = "architect"
-	archSpec.SteerOnLoop = true
 	archSpec.Timeout = cfg.Architect.Timeout.Duration
 	archSpec.LoopGuard = harness.LoopGuardSpec{
 		RepeatThreshold: cfg.Architect.LoopGuard.RepeatThreshold,
 		MaxNudges:       cfg.Architect.LoopGuard.MaxNudges,
 		CooldownTurns:   cfg.Architect.LoopGuard.CooldownTurns,
-		SilenceSecs:     cfg.Architect.LoopGuard.SilenceSecs,
+	}
+	archSpec.SilenceGuard = harness.SilenceGuardSpec{
+		SilenceSecs: cfg.Architect.SilenceGuard.SilenceSecs,
+		NudgeText:   cfg.Architect.SilenceGuard.NudgeText,
 	}
 	archSpec.PreTimeoutNudge = preTimeoutNudgeFor("architect")
 
@@ -258,13 +262,15 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		os.Exit(exitInvalidInput)
 	}
 	criticSpec.AgentID = "critic"
-	criticSpec.SteerOnLoop = true
 	criticSpec.Timeout = cfg.Critic.Timeout.Duration
 	criticSpec.LoopGuard = harness.LoopGuardSpec{
 		RepeatThreshold: cfg.Critic.LoopGuard.RepeatThreshold,
 		MaxNudges:       cfg.Critic.LoopGuard.MaxNudges,
 		CooldownTurns:   cfg.Critic.LoopGuard.CooldownTurns,
-		SilenceSecs:     cfg.Critic.LoopGuard.SilenceSecs,
+	}
+	criticSpec.SilenceGuard = harness.SilenceGuardSpec{
+		SilenceSecs: cfg.Critic.SilenceGuard.SilenceSecs,
+		NudgeText:   cfg.Critic.SilenceGuard.NudgeText,
 	}
 	criticSpec.PreTimeoutNudge = preTimeoutNudgeFor("critic")
 
@@ -279,8 +285,13 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		os.Exit(exitInvalidInput)
 	}
 	workerSpec.AgentID = "worker"
-	workerSpec.SteerOnLoop = false
 	workerSpec.Timeout = cfg.Worker.Timeout.Duration
+	workerSpec.LoopGuard = harness.LoopGuardSpec{
+		RepeatThreshold: cfg.Worker.LoopGuard.RepeatThreshold,
+		MaxNudges:       cfg.Worker.LoopGuard.MaxNudges,
+		CooldownTurns:   cfg.Worker.LoopGuard.CooldownTurns,
+	}
+	// SilenceGuard: zero value = disabled (worker runs long Bash commands; silence is expected)
 	workerSpec.PreTimeoutNudge = preTimeoutNudgeFor("worker")
 
 	wtSpecFn := func(wtPath string) harness.ProcessSpec {
@@ -316,18 +327,21 @@ func preTimeoutNudgeFor(role string) string {
 	switch role {
 	case "researcher":
 		return "[Orchestrator] Session deadline in ~60 s. " +
-			"Stop exploring and write your gathered findings as your plan now. " +
+			"Stop exploring and submit your gathered findings now by calling " +
+			"mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. " +
 			"Required sections: ## Goal, ## Codebase Facts, " +
 			"## Constraints Discovered, ## Gotchas. Partial is fine."
 	case "architect":
 		return "[Orchestrator] Session deadline in ~60 s. " +
-			"Write your implementation plan now. " +
+			"Submit your implementation plan now by calling " +
+			"mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. " +
 			"Required: # Plan → ## Goal, ## Context, ## Constraints, ## Risks, " +
 			"## Work Packages (each with Steps + Done when), ## Verification, " +
 			"## Assumptions, ## Gotchas."
 	case "critic":
 		return "[Orchestrator] Session deadline in ~60 s. " +
-			"Write your critic report now. " +
+			"Submit your critic report now by calling " +
+			"mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. " +
 			"Required: ## Critic Report → ### Blockers Found (Category, Severity, " +
 			"Evidence, Impact, Suggested fix), ### Verified Claims, ### Summary."
 	case "worker":

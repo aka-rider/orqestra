@@ -39,9 +39,9 @@ func ResumeSession(id string) SessionRef { return SessionRef{ID: id, Valid: id !
 
 // ProcessSpec is a pure value type: two identical specs run identical processes.
 // Continuation is the explicit Resume field — not hidden session state.
-// AgentID, SteerOnLoop, Timeout, and LoopGuard are runtime orchestration knobs —
-// they do NOT enter buildSpecArgs, so identical subprocess args still imply
-// identical subprocesses.
+// AgentID, Timeout, LoopGuard, SilenceGuard, and PreTimeoutNudge are runtime
+// orchestration knobs — they do NOT enter buildSpecArgs, so identical subprocess
+// args still imply identical subprocesses.
 type ProcessSpec struct {
 	Model        ModelSpec
 	SystemPrompt string  // merged into --append-system-prompt
@@ -55,11 +55,11 @@ type ProcessSpec struct {
 	Output       OutputMode
 
 	// Orchestration runtime knobs (not passed to subprocess).
-	AgentID        string        // role label used by steering and report capture
-	SteerOnLoop    bool          // enable steering executor loop detection
-	Timeout        time.Duration // wall-clock cap; 0 means no limit
-	LoopGuard      LoopGuardSpec // thresholds for the steering executor
-	PreTimeoutNudge string       // role-specific message sent 60 s before deadline and on silence; "" = disabled
+	AgentID         string           // role label used by middleware and report capture
+	Timeout         time.Duration    // wall-clock cap; 0 means no limit
+	LoopGuard       LoopGuardSpec    // thresholds for LoopBreaker middleware; zero = disabled
+	SilenceGuard    SilenceGuardSpec // thresholds for SilenceDetector middleware; zero = disabled
+	PreTimeoutNudge string           // role-specific message sent 60 s before deadline; "" = disabled
 }
 
 // Message is a user turn sent to a running process via the input plane.

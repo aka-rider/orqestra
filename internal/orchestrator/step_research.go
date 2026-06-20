@@ -19,7 +19,8 @@ type ResearchStep struct {
 
 func (s *ResearchStep) ID() AgentID { return "researcher" }
 
-const researcherFallbackPrompt = "[Orchestrator] Emit your FACT REPORT now as your final message. " +
+const researcherNudgePrompt = "[Orchestrator] Submit your FACT REPORT now by calling " +
+	"mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. " +
 	"Required sections: ## Goal, ## Codebase Facts, ## Constraints Discovered, ## Gotchas. " +
 	"Report what exists; do not propose changes. Partial is acceptable."
 
@@ -55,18 +56,19 @@ func (s *ResearchStep) Run(ctx context.Context, in ResearchInput, sc StepContext
 		break
 	}
 
-	// Researcher runs outside plan mode (default permission): harvest its final
-	// message, gate it on the role-adherence spectrum, then inject the verbatim
-	// ## User Task section the orchestrator owns.
-	report, runErr = extractFinalMessage(ctx, "researcher", spec, res, runErr, researcherFallbackPrompt, researchSpectrum.check, sc)
-	if runErr == nil {
+	// Researcher runs outside plan mode (default permission): extract via the
+	// submission → conversation → nudge ladder, gate on the role-adherence spectrum,
+	// then inject the verbatim ## User Task section the orchestrator owns.
+	var extractErr error
+	report, extractErr = extractReport(ctx, "researcher", spec, res, runErr, researcherNudgePrompt, researchSpectrum.check, false, sc)
+	if extractErr == nil {
 		report = ensureUserTask(in.Prompt, report)
 	}
 
-	if runErr != nil {
-		sc.Obs.AgentFailed(s.ID(), runErr)
-		s.writeMeta(sc, res.SessionID, start, "failed", runErr, res.Usage)
-		return ResearchOutput{}, runErr
+	if extractErr != nil {
+		sc.Obs.AgentFailed(s.ID(), extractErr)
+		s.writeMeta(sc, res.SessionID, start, "failed", extractErr, res.Usage)
+		return ResearchOutput{}, extractErr
 	}
 
 	// Integrity artifact: researcher draft markdown.

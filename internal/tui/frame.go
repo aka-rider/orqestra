@@ -121,49 +121,45 @@ func blinkCmd(tag int) tea.Cmd {
 
 // --- Helpers shared between timeline.go and timeline_view.go ---
 
-// buildTimelineRows soft-wraps logical lines into display rows.
-func buildTimelineRows(lines []timelineLine, w int, frameOf func(lineIdx int) (frameIdx int, opaque bool)) []timelineRow {
-	rows := make([]timelineRow, 0, len(lines)+16)
-	for lineIdx, line := range lines {
-		fIdx, op := frameOf(lineIdx)
-		if line.kind == timelineLineRule || line.kind == timelineLineTool {
-			rows = append(rows, timelineRow{lineIdx: lineIdx, opaque: op, frameIdx: fIdx})
-			continue
-		}
-		cells := buildTimelineCells(line.spans)
-		if len(cells) == 0 {
-			rows = append(rows, timelineRow{lineIdx: lineIdx, opaque: op, frameIdx: fIdx})
-			continue
-		}
-		// Word-boundary soft-wrap.
-		startCell := 0
-		for startCell < len(cells) {
-			lineW, lastSpace := 0, -1
-			i := startCell
-			for i < len(cells) {
-				c := cells[i]
-				if lineW+c.w > w && lineW > 0 {
-					break
-				}
-				if c.r == ' ' {
-					lastSpace = i
-				}
-				lineW += c.w
-				i++
-			}
-			if i >= len(cells) {
-				rows = append(rows, timelineRow{lineIdx: lineIdx, startCol: startCell, cells: cells[startCell:], opaque: op, frameIdx: fIdx})
+// wrapLineToRows soft-wraps one logical line into one or more display rows.
+// li is the absolute index into Timeline.lines; fIdx is the owning frame.
+// Non-text lines (rule, tool) always produce exactly one row.
+func wrapLineToRows(li int, line timelineLine, w int, fIdx int) []timelineRow {
+	if line.kind == timelineLineRule || line.kind == timelineLineTool {
+		return []timelineRow{{lineIdx: li, opaque: false, frameIdx: fIdx}}
+	}
+	cells := buildTimelineCells(line.spans)
+	if len(cells) == 0 {
+		return []timelineRow{{lineIdx: li, opaque: false, frameIdx: fIdx}}
+	}
+	var rows []timelineRow
+	startCell := 0
+	for startCell < len(cells) {
+		lineW, lastSpace := 0, -1
+		i := startCell
+		for i < len(cells) {
+			c := cells[i]
+			if lineW+c.w > w && lineW > 0 {
 				break
 			}
-			breakAt := i
-			if lastSpace > startCell {
-				breakAt = lastSpace
+			if c.r == ' ' {
+				lastSpace = i
 			}
-			rows = append(rows, timelineRow{lineIdx: lineIdx, startCol: startCell, cells: cells[startCell:breakAt], opaque: op, frameIdx: fIdx})
-			startCell = breakAt
-			for startCell < len(cells) && cells[startCell].r == ' ' {
-				startCell++
-			}
+			lineW += c.w
+			i++
+		}
+		if i >= len(cells) {
+			rows = append(rows, timelineRow{lineIdx: li, startCol: startCell, cells: cells[startCell:], opaque: false, frameIdx: fIdx})
+			break
+		}
+		breakAt := i
+		if lastSpace > startCell {
+			breakAt = lastSpace
+		}
+		rows = append(rows, timelineRow{lineIdx: li, startCol: startCell, cells: cells[startCell:breakAt], opaque: false, frameIdx: fIdx})
+		startCell = breakAt
+		for startCell < len(cells) && cells[startCell].r == ' ' {
+			startCell++
 		}
 	}
 	return rows

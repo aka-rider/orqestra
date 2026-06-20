@@ -81,6 +81,52 @@ func ReadPlan(sessionID, planFilePath, repoCWD string, withFallback bool) (conte
 	return strings.TrimSpace(c), false, nil
 }
 
+// ReadPlanFile reads the plan file for the given session using only the definitive
+// per-session path: the stream-captured path first, then the JSONL plan_mode attachment.
+// It never falls back to scanning ~/.claude/plans/ and never reads the final message —
+// either the plan file exists for this session or the function returns an error.
+// Use this at orchestrator integrity boundaries where a stale plan from a different
+// session must never be silently accepted.
+func ReadPlanFile(sessionID, planFilePath, repoCWD string) (string, error) {
+	if sessionID == "" {
+		return "", fmt.Errorf("no session ID")
+	}
+
+	if planFilePath != "" {
+		c, readErr := readSecurePlanFile(planFilePath)
+		if readErr == nil {
+			return strings.TrimSpace(c), nil
+		}
+		slog.Debug("plan file path from stream invalid, trying JSONL attachment",
+			"path", planFilePath, "err", readErr)
+	}
+
+	cwd := repoCWD
+	if cwd == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("get cwd: %w", err)
+		}
+	}
+
+	jsonlPath, err := harness.ResolveSessionLogPath(cwd, sessionID)
+	if err != nil {
+		return "", fmt.Errorf("resolve session log for %s: %w", sessionID, err)
+	}
+
+	jsonlPlanPath, err := harness.ExtractPlanFilePath(jsonlPath)
+	if err != nil {
+		return "", fmt.Errorf("no plan file for session %s: JSONL scan failed (%w)", sessionID, err)
+	}
+
+	c, err := readSecurePlanFile(jsonlPlanPath)
+	if err != nil {
+		return "", fmt.Errorf("read plan file for session %s: %w", sessionID, err)
+	}
+	return strings.TrimSpace(c), nil
+}
+
 // readSecurePlanFile reads a plan file after verifying it resides under ~/.claude/plans/.
 func readSecurePlanFile(planFilePath string) (string, error) {
 	home, err := os.UserHomeDir()

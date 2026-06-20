@@ -82,13 +82,13 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 		sup := &Supervisor{}
 		defer sup.Shutdown(logger)
 
-		// Build executor chain: steering (outermost) → watchdog → budget → harness.Run.
+		// Build executor chain: pre-timeout → loop-break → silence → watchdog → budget → harness.Run.
 		guard := NewBudgetGuard(NewRunUsage(e.Config.Pipeline.TokenBudget))
-		exec := NewSteeringExecutor(
-			NewWatchdogExecutor(
-				NewBudgetExecutor(harness.RunFunc(harness.Run), guard, "pipeline"),
-			),
-		)
+		exec := NewExecutorBuilder().
+			With(NewPreTimeoutNudger()).
+			With(NewLoopBreaker()).
+			With(NewSilenceDetector()).
+			Wrap(NewWatchdogExecutor(NewBudgetExecutor(harness.RunFunc(harness.Run), guard, "pipeline")))
 
 		// Build step context.
 		sc := StepContext{
@@ -99,6 +99,9 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 			Sessions:  session,
 			Log:       logger,
 			RepoPath:  e.RepoPath,
+		}
+		if e.QuestionBridge != nil {
+			sc.Reports = e.QuestionBridge
 		}
 
 		// Build pipeline steps.

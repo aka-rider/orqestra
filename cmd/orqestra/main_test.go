@@ -215,7 +215,7 @@ func TestBridgeToolOpts_Constraints(t *testing.T) {
 }
 
 // TestSpecRuntimeFields verifies that bridgeToolOpts-produced options do not
-// encode orchestration runtime knobs (AgentID, SteerOnLoop, Timeout, LoopGuard)
+// encode orchestration runtime knobs (AgentID, Timeout, LoopGuard, SilenceGuard)
 // into the subprocess args — those are set by the caller after BuildProcessSpec.
 func TestSpecRuntimeFields_NotInArgs(t *testing.T) {
 	base := config.BaseAgentConfig{
@@ -227,7 +227,7 @@ func TestSpecRuntimeFields_NotInArgs(t *testing.T) {
 	args := harness.BuildTestArgs(opts...)
 
 	for _, arg := range args {
-		if strings.Contains(arg, "agent-id") || strings.Contains(arg, "steer") ||
+		if strings.Contains(arg, "agent-id") ||
 			strings.Contains(arg, "loop-guard") || strings.Contains(arg, "timeout") {
 			t.Errorf("runtime orchestration knob leaked into subprocess args: %q", arg)
 		}

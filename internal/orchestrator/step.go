@@ -19,6 +19,13 @@ type Step[In, Out any] interface {
 	Run(ctx context.Context, in In, sc StepContext) (Out, error)
 }
 
+// ReportStore retrieves agent report submissions delivered via SubmitReport.
+// TakeReport returns the report text and true if a submission exists, then
+// removes it so it is consumed exactly once.
+type ReportStore interface {
+	TakeReport(agentID string) (string, bool)
+}
+
 // StepContext carries cross-cutting capabilities by value.
 // ctx is never stored — it arrives as an argument to each Step.Run call.
 type StepContext struct {
@@ -28,17 +35,19 @@ type StepContext struct {
 	Control   Control             // P5: gate request/response + live Post handle
 	Sessions  agent.SessionDir    // session artifact directory
 	Log       *slog.Logger
-	RepoPath  string              // absolute path to the repository root; forwarded to ReadPlan
+	RepoPath  string              // absolute path to the repository root
+	Reports   ReportStore         // tier-1 report channel; nil when no bridge is configured
 }
 
-// preferReport returns the agent's output by reading the native plan file.
-// allowFallback is forwarded to agent.ReadPlan to enable last-resort JSONL text extraction.
-func preferReport(sc StepContext, agentID string, res harness.RunResult, allowFallback bool) (string, bool, error) {
-	content, usedFallback, err := agent.ReadPlan(res.SessionID, res.PlanFilePath, sc.RepoPath, allowFallback)
+// preferReport returns the plan written by the architect to its plan file.
+// Uses ReadPlanFile (stream path → JSONL attachment), never the dir-scan fallback.
+// Returns an error when no plan file exists for this session.
+func preferReport(sc StepContext, agentID string, res harness.RunResult) (string, error) {
+	content, err := agent.ReadPlanFile(res.SessionID, res.PlanFilePath, sc.RepoPath)
 	if err != nil {
-		return "", false, fmt.Errorf("read plan: %w", err)
+		return "", fmt.Errorf("read plan file for %s: %w", agentID, err)
 	}
-	return content, usedFallback, nil
+	return content, nil
 }
 
 // qualityPassOrTrim returns (report, true) if report passes qualityCheck as-is, or
@@ -61,129 +70,8 @@ func qualityPassOrTrim(report string, qualityCheck func(string) error) (string, 
 	return "", false
 }
 
-// runFallbackWithQuality runs nativeFallback and applies qualityCheck (with preamble
-// trimming) to its result. Returns error if the result still fails quality.
-func runFallbackWithQuality(
-	ctx context.Context,
-	agentID string,
-	spec harness.ProcessSpec,
-	sessionID string,
-	fallbackPrompt string,
-	qualityCheck func(string) error,
-	sc StepContext,
-) (string, bool, error) {
-	fbReport, fbUsed, fbErr := nativeFallback(ctx, agentID, spec, sessionID, fallbackPrompt, sc)
-	if fbErr != nil {
-		return "", false, fbErr
-	}
-	if qualityCheck == nil {
-		return fbReport, fbUsed, nil
-	}
-	if out, ok := qualityPassOrTrim(fbReport, qualityCheck); ok {
-		return out, fbUsed, nil
-	}
-	return "", false, fmt.Errorf("native fallback: model output does not meet format requirements after recovery")
-}
-
-// extractWithFallback extracts the agent output via preferReport. If extraction fails
-// or qualityCheck returns an error, it resumes the session via runFallbackWithQuality
-// which applies quality check (with preamble trimming) to the fallback result too.
-// qualityCheck may be nil — in that case only extraction failure triggers the fallback.
-func extractWithFallback(
-	ctx context.Context,
-	agentID string,
-	spec harness.ProcessSpec,
-	res harness.RunResult,
-	fallbackPrompt string,
-	qualityCheck func(string) error,
-	sc StepContext,
-) (string, bool, error) {
-	canFallback := ctx.Err() == nil && res.SessionID != ""
-
-	report, usedFallback, err := preferReport(sc, agentID, res, true)
-	if err != nil {
-		if canFallback {
-			return runFallbackWithQuality(ctx, agentID, spec, res.SessionID, fallbackPrompt, qualityCheck, sc)
-		}
-		return "", false, err
-	}
-
-	if qualityCheck != nil {
-		if out, ok := qualityPassOrTrim(report, qualityCheck); ok {
-			return out, usedFallback, nil
-		}
-		sc.Log.Warn("report failed quality check, attempting native fallback",
-			"agent", agentID)
-		if canFallback {
-			return runFallbackWithQuality(ctx, agentID, spec, res.SessionID, fallbackPrompt, qualityCheck, sc)
-		}
-		return "", false, fmt.Errorf("report quality: model output does not meet format requirements")
-	}
-
-	return report, usedFallback, nil
-}
-
-// extractPlan handles the post-exec plan extraction with recovery.
-// When runErr is nil or recoverable (context alive, session known), it delegates
-// to extractWithFallback, which tries JSONL extraction first and nativeFallback
-// second. Otherwise returns runErr unchanged.
-func extractPlan(
-	ctx context.Context,
-	agentID string,
-	spec harness.ProcessSpec,
-	res harness.RunResult,
-	runErr error,
-	fallbackPrompt string,
-	qualityCheck func(string) error,
-	sc StepContext,
-) (string, bool, error) {
-	if runErr == nil || (ctx.Err() == nil && res.SessionID != "") {
-		return extractWithFallback(ctx, agentID, spec, res, fallbackPrompt, qualityCheck, sc)
-	}
-	return "", false, runErr
-}
-
-// nativeFallback resumes an agent session and asks the model to write its plan
-// using Claude Code's native plan mechanism. It then extracts the result via ReadPlan.
-func nativeFallback(
-	ctx context.Context,
-	agentID string,
-	spec harness.ProcessSpec,
-	sessionID string,
-	fallbackPrompt string,
-	sc StepContext,
-) (string, bool, error) {
-	fbSpec := spec
-	fbSpec.Resume = harness.ResumeSession(sessionID)
-	fbSpec.SteerOnLoop = false
-	fbSpec.PreTimeoutNudge = ""
-	fbSpec.LoopGuard = harness.LoopGuardSpec{}
-	if spec.Timeout > 0 {
-		fbSpec.Timeout = spec.Timeout
-	} else {
-		fbSpec.Timeout = 3 * time.Minute
-	}
-	fbSpec.Prompt = fallbackPrompt
-
-	sink := SinkFromObserver(AgentID(agentID), sc.Obs)
-	fbRes, runErr := sc.Exec.Run(ctx, fbSpec, nil, sink)
-
-	report, usedFallback, err := preferReport(sc, agentID, fbRes, true)
-	if err != nil {
-		if runErr != nil {
-			return "", false, fmt.Errorf("native fallback exec: %w; plan extraction: %w", runErr, err)
-		}
-		return "", false, fmt.Errorf("native fallback plan extraction: %w", err)
-	}
-	return report, usedFallback, nil
-}
-
-// finalMessage returns an agent's final assistant text for roles that run OUTSIDE
-// plan mode (researcher, critic) and therefore never write a plan file. It prefers
-// the result event's output and falls back to the session JSONL's final message.
-// It deliberately avoids agent.ReadPlan's plan-file tiers — notably the
-// scan-~/.claude/plans fallback, which could return a stale plan from a different
-// run when no plan file exists.
+// finalMessage returns an agent's final assistant text from the run result output
+// or the session JSONL. Used as the conversation-probe tier (tier 3) in extractReport.
 func finalMessage(sc StepContext, res harness.RunResult) (string, error) {
 	if out := strings.TrimSpace(res.Output); out != "" {
 		return out, nil
@@ -205,86 +93,116 @@ func finalMessage(sc StepContext, res harness.RunResult) (string, error) {
 	return out, nil
 }
 
-// extractFinalMessage harvests an off-plan-mode agent's report from its final
-// assistant message and applies qualityCheck. On extraction or quality failure it
-// resumes the session once with fallbackPrompt and re-harvests. Mirrors
-// extractWithFallback but for roles that do not use plan files.
-func extractFinalMessage(
+// resumeForReport resumes an agent session with a nudge prompt requesting SubmitReport.
+// It zeroes per-run state (LoopGuard, SilenceGuard, PreTimeoutNudge) and defaults
+// Timeout to 3 minutes when the original spec has no timeout set.
+func resumeForReport(
+	ctx context.Context,
+	agentID string,
+	spec harness.ProcessSpec,
+	sessionID string,
+	nudgePrompt string,
+	sc StepContext,
+) (harness.RunResult, error) {
+	fbSpec := spec
+	fbSpec.Resume = harness.ResumeSession(sessionID)
+	fbSpec.PreTimeoutNudge = ""
+	fbSpec.LoopGuard = harness.LoopGuardSpec{}
+	fbSpec.SilenceGuard = harness.SilenceGuardSpec{}
+	if spec.Timeout <= 0 {
+		fbSpec.Timeout = 3 * time.Minute
+	}
+	fbSpec.Prompt = nudgePrompt
+	sink := SinkFromObserver(AgentID(agentID), sc.Obs)
+	return sc.Exec.Run(ctx, fbSpec, nil, sink)
+}
+
+const maxReportNudges = 2
+
+// extractReport is the unified report extraction ladder for all pipeline roles.
+// It tries five tiers in order and returns the first candidate that passes
+// qualityPassOrTrim. A Warn is logged whenever a tier beyond the first satisfies.
+//
+//	Tier 1: SubmitReport submission  (sc.Reports.TakeReport — if Reports != nil)
+//	Tier 2: Plan file                (preferReport — only when usesPlanFile=true)
+//	Tier 3: Conversation probe       (finalMessage — always, including on timeout)
+//	Tier 4: Nudge loop               (up to maxReportNudges resumes — only if ctx live)
+//	Tier 5: Fail closed              (wraps runErr when present)
+func extractReport(
 	ctx context.Context,
 	agentID string,
 	spec harness.ProcessSpec,
 	res harness.RunResult,
 	runErr error,
-	fallbackPrompt string,
+	nudgePrompt string,
 	qualityCheck func(string) error,
+	usesPlanFile bool,
 	sc StepContext,
 ) (string, error) {
-	canRecover := ctx.Err() == nil && res.SessionID != ""
-	if runErr != nil && !canRecover {
-		return "", runErr
-	}
-
-	report, err := finalMessage(sc, res)
-	if err != nil {
-		if canRecover {
-			return finalMessageFallback(ctx, agentID, spec, res.SessionID, fallbackPrompt, qualityCheck, sc)
+	// Tier 1: SubmitReport submission.
+	if sc.Reports != nil {
+		if sub, ok := sc.Reports.TakeReport(agentID); ok && sub != "" {
+			if out, pass := qualityPassOrTrim(sub, qualityCheck); pass {
+				return out, nil
+			}
+			sc.Log.Warn("submitted report failed quality check, trying next tier", "agent", agentID)
 		}
-		return "", err
 	}
 
-	if qualityCheck != nil {
-		if out, ok := qualityPassOrTrim(report, qualityCheck); ok {
+	// Tier 2: Plan file (architect only).
+	if usesPlanFile {
+		if plan, err := preferReport(sc, agentID, res); err == nil {
+			if out, pass := qualityPassOrTrim(plan, qualityCheck); pass {
+				sc.Log.Warn("report satisfied by plan file (tier 2)", "agent", agentID)
+				return out, nil
+			}
+			sc.Log.Warn("plan file failed quality check, trying conversation probe", "agent", agentID)
+		}
+	}
+
+	// Tier 3: Conversation probe — reachable even on timeout.
+	if msg, err := finalMessage(sc, res); err == nil {
+		if out, pass := qualityPassOrTrim(msg, qualityCheck); pass {
+			sc.Log.Warn("report satisfied by conversation probe (tier 3)", "agent", agentID)
 			return out, nil
 		}
-		sc.Log.Warn("report failed quality check, attempting recovery", "agent", agentID)
-		if canRecover {
-			return finalMessageFallback(ctx, agentID, spec, res.SessionID, fallbackPrompt, qualityCheck, sc)
+		sc.Log.Warn("conversation probe failed quality check", "agent", agentID)
+	}
+
+	// Tier 4: Nudge loop — only when the session is recoverable.
+	if ctx.Err() == nil && res.SessionID != "" {
+		for i := range maxReportNudges {
+			if ctx.Err() != nil {
+				break
+			}
+			fbRes, _ := resumeForReport(ctx, agentID, spec, res.SessionID, nudgePrompt, sc)
+
+			// Re-check tier 1 after the nudge resume.
+			if sc.Reports != nil {
+				if sub, ok := sc.Reports.TakeReport(agentID); ok && sub != "" {
+					if out, pass := qualityPassOrTrim(sub, qualityCheck); pass {
+						sc.Log.Warn("report recovered via SubmitReport after nudge",
+							"agent", agentID, "nudge", i+1)
+						return out, nil
+					}
+				}
+			}
+			// Re-check tier 3 after the nudge resume.
+			if msg, err := finalMessage(sc, fbRes); err == nil {
+				if out, pass := qualityPassOrTrim(msg, qualityCheck); pass {
+					sc.Log.Warn("report recovered via conversation after nudge",
+						"agent", agentID, "nudge", i+1)
+					return out, nil
+				}
+			}
 		}
-		return "", fmt.Errorf("%s report quality: output does not meet role requirements", agentID)
 	}
-	return report, nil
-}
 
-// finalMessageFallback resumes a session with fallbackPrompt and re-harvests the
-// final message, applying qualityCheck (with preamble trimming) to the result.
-func finalMessageFallback(
-	ctx context.Context,
-	agentID string,
-	spec harness.ProcessSpec,
-	sessionID string,
-	fallbackPrompt string,
-	qualityCheck func(string) error,
-	sc StepContext,
-) (string, error) {
-	fbSpec := spec
-	fbSpec.Resume = harness.ResumeSession(sessionID)
-	fbSpec.SteerOnLoop = false
-	fbSpec.PreTimeoutNudge = ""
-	fbSpec.LoopGuard = harness.LoopGuardSpec{}
-	if spec.Timeout > 0 {
-		fbSpec.Timeout = spec.Timeout
-	} else {
-		fbSpec.Timeout = 3 * time.Minute
+	// Tier 5: Fail closed.
+	if runErr != nil {
+		return "", fmt.Errorf("%s: %w", agentID, runErr)
 	}
-	fbSpec.Prompt = fallbackPrompt
-
-	sink := SinkFromObserver(AgentID(agentID), sc.Obs)
-	fbRes, runErr := sc.Exec.Run(ctx, fbSpec, nil, sink)
-
-	report, err := finalMessage(sc, fbRes)
-	if err != nil {
-		if runErr != nil {
-			return "", fmt.Errorf("%s recovery exec: %w; harvest: %w", agentID, runErr, err)
-		}
-		return "", fmt.Errorf("%s recovery harvest: %w", agentID, err)
-	}
-	if qualityCheck == nil {
-		return report, nil
-	}
-	if out, ok := qualityPassOrTrim(report, qualityCheck); ok {
-		return out, nil
-	}
-	return "", fmt.Errorf("%s output does not meet role requirements after recovery", agentID)
+	return "", fmt.Errorf("%s: no valid report produced", agentID)
 }
 
 // SinkFromObserver returns a harness.Sink that forwards all events to Observer.Stream.

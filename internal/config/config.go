@@ -146,26 +146,32 @@ type DefaultsConfig struct {
 	AppendSystemPrompt string   `yaml:"append_system_prompt"`
 }
 
-// LoopGuard configures the steering executor's loop-detection thresholds.
+// LoopGuard configures the LoopBreaker middleware's loop-detection thresholds.
 type LoopGuard struct {
 	RepeatThreshold int `yaml:"repeat_threshold"` // identical tool calls before nudging (default 3)
 	MaxNudges       int `yaml:"max_nudges"`        // nudges before escalating to cancel (default 3)
 	CooldownTurns   int `yaml:"cooldown_turns"`    // turns to wait after a nudge before re-checking (default 2)
-	SilenceSecs     int `yaml:"silence_secs"`      // seconds of event-stream silence before nudging; 0 = disabled
+}
+
+// SilenceGuard configures the SilenceDetector middleware.
+type SilenceGuard struct {
+	SilenceSecs int    `yaml:"silence_secs"` // seconds of event-stream silence before nudging; 0 = disabled
+	NudgeText   string `yaml:"nudge_text"`   // optional; "" falls back to the agent's PreTimeoutNudge text
 }
 
 // BaseAgentConfig holds fields shared by all agent roles.
 type BaseAgentConfig struct {
-	Model              string    `yaml:"model"`
-	SystemPrompt       string    `yaml:"system_prompt"`
-	AllowedTools       []string  `yaml:"allowed_tools"`
-	DisallowedTools    []string  `yaml:"disallowed_tools"`
-	MCPServers         *[]string `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
-	PermissionMode     string    `yaml:"permission_mode"`
-	AppendSystemPrompt string    `yaml:"append_system_prompt"`
-	Timeout            Duration  `yaml:"timeout"`
-	MaxTurns           int       `yaml:"max_turns"`
-	LoopGuard          LoopGuard `yaml:"loop_guard"`
+	Model              string       `yaml:"model"`
+	SystemPrompt       string       `yaml:"system_prompt"`
+	AllowedTools       []string     `yaml:"allowed_tools"`
+	DisallowedTools    []string     `yaml:"disallowed_tools"`
+	MCPServers         *[]string    `yaml:"mcp_servers"` // nil=all, []=none, ["x"]=only x
+	PermissionMode     string       `yaml:"permission_mode"`
+	AppendSystemPrompt string       `yaml:"append_system_prompt"`
+	Timeout            Duration     `yaml:"timeout"`
+	MaxTurns           int          `yaml:"max_turns"`
+	LoopGuard          LoopGuard    `yaml:"loop_guard"`
+	SilenceGuard       SilenceGuard `yaml:"silence_guard"`
 }
 
 type ResearcherConfig struct {

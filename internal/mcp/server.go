@@ -70,6 +70,27 @@ var askUserQuestionSchema = json.RawMessage(`{
   "required": ["question"]
 }`)
 
+var submitReportSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "report": {
+      "type": "string",
+      "description": "The full markdown deliverable for this pipeline stage. Pass the complete report — do not truncate."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Optional one-sentence summary of the report for logging purposes."
+    }
+  },
+  "required": ["report"]
+}`)
+
+// ReportCall is the parsed input from a SubmitReport tools/call invocation.
+type ReportCall struct {
+	Report  string `json:"report"`
+	Summary string `json:"summary,omitempty"`
+}
+
 // ToolCall is the parsed input from a tools/call invocation.
 type ToolCall struct {
 	Question    string       `json:"question"`
@@ -153,6 +174,11 @@ func handleMCPRequest(req jsonRPCRequest, socketPath, agentID string) *jsonRPCRe
 					"description": "Ask the user a question. Use this when you need clarification, want the user to choose between options, or need any input from the user. The user will see your question in the Orqestra TUI and can respond with text or by selecting from options you provide.",
 					"inputSchema": json.RawMessage(askUserQuestionSchema),
 				},
+				{
+					"name":        "SubmitReport",
+					"description": "Submit your final markdown deliverable to the Orqestra pipeline. Call this once when your report is complete, passing the full markdown in the \"report\" argument. This is the only reliable delivery channel — do not rely on emitting the report as your final message.",
+					"inputSchema": json.RawMessage(submitReportSchema),
+				},
 			},
 		})
 
@@ -187,6 +213,8 @@ func handleToolCall(req jsonRPCRequest, socketPath, agentID string) *jsonRPCResp
 	switch params.Name {
 	case "AskUserQuestion":
 		return handleAskUserQuestion(req, params.Arguments, socketPath, agentID)
+	case "SubmitReport":
+		return handleSubmitReport(req, params.Arguments, socketPath, agentID)
 	default:
 		return &jsonRPCResponse{
 			JSONRPC: "2.0",
@@ -217,6 +245,59 @@ func handleAskUserQuestion(req jsonRPCRequest, arguments json.RawMessage, socket
 
 	text := FormatAnswer(toolCall, answer)
 	return respondMCPToolResult(req.ID, false, text)
+}
+
+func handleSubmitReport(req jsonRPCRequest, arguments json.RawMessage, socketPath, agentID string) *jsonRPCResponse {
+	var call ReportCall
+	if err := json.Unmarshal(arguments, &call); err != nil {
+		return &jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error:   &jsonRPCError{Code: -32602, Message: fmt.Sprintf("invalid tool arguments: %v", err)},
+		}
+	}
+	if call.Report == "" {
+		return respondMCPToolResult(req.ID, true, "Error: report is required and must not be empty")
+	}
+	if err := sendReportToBridge(socketPath, agentID, call); err != nil {
+		return respondMCPToolResult(req.ID, true, fmt.Sprintf("Error delivering report to Orqestra: %v", err))
+	}
+	return respondMCPToolResult(req.ID, false, "Report submitted successfully.")
+}
+
+func sendReportToBridge(socketPath, agentID string, call ReportCall) error {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return fmt.Errorf("dial bridge socket %s: %w", socketPath, err)
+	}
+	defer conn.Close()
+
+	payload, err := json.Marshal(ReportSubmission{Report: call.Report, Summary: call.Summary})
+	if err != nil {
+		return fmt.Errorf("marshal report: %w", err)
+	}
+
+	env := bridgeEnvelope{Kind: "report", AgentID: agentID, Payload: payload}
+	envData, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("marshal report envelope: %w", err)
+	}
+	if err := writeFrame(conn, envData); err != nil {
+		return fmt.Errorf("write report frame: %w", err)
+	}
+
+	ackData, err := readFrame(conn)
+	if err != nil {
+		return fmt.Errorf("read report ack: %w", err)
+	}
+	var ack struct{ OK bool `json:"ok"` }
+	if err := json.Unmarshal(ackData, &ack); err != nil {
+		return fmt.Errorf("unmarshal report ack: %w", err)
+	}
+	if !ack.OK {
+		return fmt.Errorf("bridge rejected report submission")
+	}
+	return nil
 }
 
 func sendQuestionToBridge(socketPath, agentID string, toolCall ToolCall) (Answer, error) {

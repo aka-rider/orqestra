@@ -10,11 +10,17 @@ import (
 )
 
 // bridgeEnvelope is the framed wire format for bridge messages.
-// Kind is "question"; AgentID identifies the sending role.
+// Kind is "question" or "report"; AgentID identifies the sending role.
 type bridgeEnvelope struct {
 	Kind    string          `json:"kind"`
 	AgentID string          `json:"agent_id"`
 	Payload json.RawMessage `json:"payload"`
+}
+
+// ReportSubmission holds a report delivered by an agent via SubmitReport.
+type ReportSubmission struct {
+	Report  string `json:"report"`
+	Summary string `json:"summary,omitempty"`
 }
 
 // QuestionBridge listens on a Unix socket for questions from MCP bridge
@@ -31,6 +37,8 @@ type QuestionBridge struct {
 	done          chan struct{}
 	mu            sync.Mutex
 	stopped       bool
+	reportsMu     sync.Mutex
+	reports       map[string]ReportSubmission
 }
 
 // NewQuestionBridge creates a bridge that will listen on the given socket path.
@@ -40,6 +48,7 @@ func NewQuestionBridge(socketPath string) *QuestionBridge {
 		questions:     make(chan ToolCall, 1),
 		pendingAnswer: make(chan Answer, 1),
 		done:          make(chan struct{}),
+		reports:       make(map[string]ReportSubmission),
 	}
 }
 
@@ -55,32 +64,44 @@ func (b *QuestionBridge) Start(ctx context.Context) error {
 	}
 	b.mu.Unlock()
 
+	// Clear any reports left by a cancelled run so they don't leak into this run.
+	b.reportsMu.Lock()
+	b.reports = make(map[string]ReportSubmission)
+	b.reportsMu.Unlock()
+
 	os.Remove(b.socketPath) // fire-and-forget: may not exist
 
-	var err error
-	b.listener, err = net.Listen("unix", b.socketPath)
+	ln, err := net.Listen("unix", b.socketPath)
 	if err != nil {
 		return err
 	}
 
-	go b.acceptLoop(ctx)
+	// Capture done under mu so the spawned goroutine holds a reference to the
+	// channel valid for this run — a second Start() may replace b.done, and the
+	// old goroutine must not race on the field.
+	b.mu.Lock()
+	b.listener = ln
+	done := b.done
+	b.mu.Unlock()
+
+	go b.acceptLoop(ctx, ln, done)
 	return nil
 }
 
-func (b *QuestionBridge) acceptLoop(ctx context.Context) {
+func (b *QuestionBridge) acceptLoop(ctx context.Context, ln net.Listener, done <-chan struct{}) {
 	for {
 		select {
-		case <-b.done:
+		case <-done:
 			return
 		case <-ctx.Done():
 			return
 		default:
 		}
 
-		conn, err := b.listener.Accept()
+		conn, err := ln.Accept()
 		if err != nil {
 			select {
-			case <-b.done:
+			case <-done:
 				return
 			case <-ctx.Done():
 				return
@@ -90,11 +111,11 @@ func (b *QuestionBridge) acceptLoop(ctx context.Context) {
 			}
 		}
 
-		b.handleConnection(ctx, conn)
+		b.handleConnection(ctx, conn, done)
 	}
 }
 
-func (b *QuestionBridge) handleConnection(ctx context.Context, conn net.Conn) {
+func (b *QuestionBridge) handleConnection(ctx context.Context, conn net.Conn, done <-chan struct{}) {
 	defer conn.Close()
 
 	data, err := readFrame(conn)
@@ -111,13 +132,15 @@ func (b *QuestionBridge) handleConnection(ctx context.Context, conn net.Conn) {
 
 	switch env.Kind {
 	case "question":
-		b.handleQuestion(ctx, conn, env)
+		b.handleQuestion(ctx, conn, env, done)
+	case "report":
+		b.handleReport(conn, env)
 	default:
 		slog.Debug("question bridge unknown envelope kind", "kind", env.Kind)
 	}
 }
 
-func (b *QuestionBridge) handleQuestion(ctx context.Context, conn net.Conn, env bridgeEnvelope) {
+func (b *QuestionBridge) handleQuestion(ctx context.Context, conn net.Conn, env bridgeEnvelope, done <-chan struct{}) {
 	var question ToolCall
 	if err := json.Unmarshal(env.Payload, &question); err != nil {
 		slog.Debug("question bridge question unmarshal error", "err", err)
@@ -128,7 +151,7 @@ func (b *QuestionBridge) handleQuestion(ctx context.Context, conn net.Conn, env 
 	case b.questions <- question:
 	case <-ctx.Done():
 		return
-	case <-b.done:
+	case <-done:
 		return
 	}
 
@@ -137,7 +160,7 @@ func (b *QuestionBridge) handleQuestion(ctx context.Context, conn net.Conn, env 
 	case answer = <-b.pendingAnswer:
 	case <-ctx.Done():
 		answer = Answer{Skipped: true}
-	case <-b.done:
+	case <-done:
 		answer = Answer{Skipped: true}
 	}
 
@@ -149,6 +172,34 @@ func (b *QuestionBridge) handleQuestion(ctx context.Context, conn net.Conn, env 
 	if err := writeFrame(conn, answerData); err != nil {
 		slog.Debug("question bridge write answer error", "err", err)
 	}
+}
+
+func (b *QuestionBridge) handleReport(conn net.Conn, env bridgeEnvelope) {
+	var sub ReportSubmission
+	if err := json.Unmarshal(env.Payload, &sub); err != nil {
+		slog.Debug("question bridge report unmarshal error", "err", err)
+		return
+	}
+	b.reportsMu.Lock()
+	b.reports[env.AgentID] = sub
+	b.reportsMu.Unlock()
+
+	ack, _ := json.Marshal(map[string]bool{"ok": true})
+	if err := writeFrame(conn, ack); err != nil {
+		slog.Debug("question bridge write report ack error", "err", err)
+	}
+}
+
+// TakeReport returns and removes the report submitted by the given agent, if any.
+func (b *QuestionBridge) TakeReport(agentID string) (string, bool) {
+	b.reportsMu.Lock()
+	defer b.reportsMu.Unlock()
+	sub, ok := b.reports[agentID]
+	if !ok {
+		return "", false
+	}
+	delete(b.reports, agentID)
+	return sub.Report, true
 }
 
 // Stop closes the bridge and cleans up the socket file.
