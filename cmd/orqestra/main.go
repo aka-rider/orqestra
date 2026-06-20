@@ -216,10 +216,10 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		roSandboxCfg.Profiles = append(roSandboxCfg.Profiles, orqProfile.Snapshot())
 	}
 
-	// BuildProcessSpec inherits all options already set in resOpts/plnOpts/criticOpts
-	// (including AppendSystemPrompt from bridgeToolOpts). Do NOT add an extra
-	// WithAppendSystemPrompt here — that would overwrite the one bridgeToolOpts set
-	// with the wrong field (BaseAgentConfig.SystemPrompt ≠ AppendSystemPrompt).
+	// BuildProcessSpec inherits all options already set in resOpts/plnOpts/criticOpts,
+	// including the role system prompt that bridgeToolOpts now delivers via
+	// MergeAppendPrompts(SystemPrompt, AppendSystemPrompt). Do NOT add another
+	// WithAppendSystemPrompt here — the last one wins and would drop the role prompt.
 	resSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Researcher.Model, roSandboxCfg, resOpts...)
 	if specErr != nil {
 		slog.Error("failed to build researcher spec", "err", specErr)
@@ -268,8 +268,12 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 	}
 	criticSpec.PreTimeoutNudge = preTimeoutNudgeFor("critic")
 
+	// The worker does not route through bridgeToolOpts (it runs permission_mode: full
+	// and never asks questions), so deliver its system prompt — the VALIDATION REPORT
+	// contract — explicitly here.
 	workerSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Worker.Model, workerSandboxCfg,
-		harness.WithWorkDir(repoPath))
+		harness.WithWorkDir(repoPath),
+		harness.WithAppendSystemPrompt(harness.MergeAppendPrompts(cfg.Worker.SystemPrompt, cfg.Worker.AppendSystemPrompt)))
 	if specErr != nil {
 		slog.Error("failed to build worker spec", "err", specErr)
 		os.Exit(exitInvalidInput)
@@ -436,8 +440,12 @@ func bridgeToolOpts(base config.BaseAgentConfig) []harness.ClaudeCLIOption {
 		`{"permissions":{"allow":["mcp__orqestra__*"]}}`,
 	))
 
-	if base.AppendSystemPrompt != "" {
-		opts = append(opts, harness.WithAppendSystemPrompt(base.AppendSystemPrompt))
+	// Deliver the role's full system prompt to the model. It rides --append-system-prompt
+	// (layer 5) alongside the question-routing default, so Claude Code's base prompt and
+	// CLAUDE.md (layer 4) are preserved. Without this the role instructions never reach the
+	// model and every role collapses into plain plan-mode behavior.
+	if merged := harness.MergeAppendPrompts(base.SystemPrompt, base.AppendSystemPrompt); merged != "" {
+		opts = append(opts, harness.WithAppendSystemPrompt(merged))
 	}
 
 	return opts

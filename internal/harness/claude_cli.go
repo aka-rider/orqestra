@@ -185,10 +185,10 @@ func WithAppendSystemPrompt(text string) ClaudeCLIOption {
 	}
 }
 
-// mergeAppendPrompts concatenates non-empty prompt fragments into a single
-// --append-system-prompt value. All system prompt steering now goes through
+// MergeAppendPrompts concatenates non-empty prompt fragments into a single
+// --append-system-prompt value. All system prompt steering goes through
 // layer 5 (append) to preserve CLAUDE.md and the default prompt (layer 4).
-func mergeAppendPrompts(parts ...string) string {
+func MergeAppendPrompts(parts ...string) string {
 	var nonEmpty []string
 	for _, p := range parts {
 		if s := strings.TrimSpace(p); s != "" {

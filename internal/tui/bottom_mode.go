@@ -15,19 +15,11 @@ type bottomMode interface {
 }
 
 // streamingBottom is the bottomMode active while an agent is running.
-// It wraps the streaming console (live tool lines + partial text) and provides
-// a slot for a post-message textarea (not yet fully wired; activated later).
-type streamingBottom struct {
-	console streamingConsole
-}
+// The Timeline renders all live content; this mode only contributes the footer hint.
+type streamingBottom struct{}
 
-func (m streamingBottom) viewBottom(w, bodyH int) string {
-	return m.console.RenderFixed(bodyH, w)
-}
-
-func (m streamingBottom) footerHint() string {
-	return " [Ctrl+C] cancel"
-}
+func (m streamingBottom) viewBottom(_, _ int) string { return "" }
+func (m streamingBottom) footerHint() string         { return " [Ctrl+C] cancel" }
 
 // gateBottom is the bottomMode active when a human-gate decision is pending.
 // It wraps the HumanChatMode component that drives the plan-review conversation.

@@ -178,6 +178,115 @@ func nativeFallback(
 	return report, usedFallback, nil
 }
 
+// finalMessage returns an agent's final assistant text for roles that run OUTSIDE
+// plan mode (researcher, critic) and therefore never write a plan file. It prefers
+// the result event's output and falls back to the session JSONL's final message.
+// It deliberately avoids agent.ReadPlan's plan-file tiers — notably the
+// scan-~/.claude/plans fallback, which could return a stale plan from a different
+// run when no plan file exists.
+func finalMessage(sc StepContext, res harness.RunResult) (string, error) {
+	if out := strings.TrimSpace(res.Output); out != "" {
+		return out, nil
+	}
+	if res.SessionID == "" {
+		return "", fmt.Errorf("no session output and no session ID")
+	}
+	jsonl, err := harness.ResolveSessionLogPath(sc.RepoPath, res.SessionID)
+	if err != nil {
+		return "", fmt.Errorf("resolve session log for %s: %w", res.SessionID, err)
+	}
+	out, err := harness.ExtractFinalOutput(jsonl)
+	if err != nil {
+		return "", fmt.Errorf("extract final message for %s: %w", res.SessionID, err)
+	}
+	if out = strings.TrimSpace(out); out == "" {
+		return "", fmt.Errorf("session %s produced no final message", res.SessionID)
+	}
+	return out, nil
+}
+
+// extractFinalMessage harvests an off-plan-mode agent's report from its final
+// assistant message and applies qualityCheck. On extraction or quality failure it
+// resumes the session once with fallbackPrompt and re-harvests. Mirrors
+// extractWithFallback but for roles that do not use plan files.
+func extractFinalMessage(
+	ctx context.Context,
+	agentID string,
+	spec harness.ProcessSpec,
+	res harness.RunResult,
+	runErr error,
+	fallbackPrompt string,
+	qualityCheck func(string) error,
+	sc StepContext,
+) (string, error) {
+	canRecover := ctx.Err() == nil && res.SessionID != ""
+	if runErr != nil && !canRecover {
+		return "", runErr
+	}
+
+	report, err := finalMessage(sc, res)
+	if err != nil {
+		if canRecover {
+			return finalMessageFallback(ctx, agentID, spec, res.SessionID, fallbackPrompt, qualityCheck, sc)
+		}
+		return "", err
+	}
+
+	if qualityCheck != nil {
+		if out, ok := qualityPassOrTrim(report, qualityCheck); ok {
+			return out, nil
+		}
+		sc.Log.Warn("report failed quality check, attempting recovery", "agent", agentID)
+		if canRecover {
+			return finalMessageFallback(ctx, agentID, spec, res.SessionID, fallbackPrompt, qualityCheck, sc)
+		}
+		return "", fmt.Errorf("%s report quality: output does not meet role requirements", agentID)
+	}
+	return report, nil
+}
+
+// finalMessageFallback resumes a session with fallbackPrompt and re-harvests the
+// final message, applying qualityCheck (with preamble trimming) to the result.
+func finalMessageFallback(
+	ctx context.Context,
+	agentID string,
+	spec harness.ProcessSpec,
+	sessionID string,
+	fallbackPrompt string,
+	qualityCheck func(string) error,
+	sc StepContext,
+) (string, error) {
+	fbSpec := spec
+	fbSpec.Resume = harness.ResumeSession(sessionID)
+	fbSpec.SteerOnLoop = false
+	fbSpec.PreTimeoutNudge = ""
+	fbSpec.LoopGuard = harness.LoopGuardSpec{}
+	if spec.Timeout > 0 {
+		fbSpec.Timeout = spec.Timeout
+	} else {
+		fbSpec.Timeout = 3 * time.Minute
+	}
+	fbSpec.Prompt = fallbackPrompt
+
+	sink := SinkFromObserver(AgentID(agentID), sc.Obs)
+	fbRes, runErr := sc.Exec.Run(ctx, fbSpec, nil, sink)
+
+	report, err := finalMessage(sc, fbRes)
+	if err != nil {
+		if runErr != nil {
+			return "", fmt.Errorf("%s recovery exec: %w; harvest: %w", agentID, runErr, err)
+		}
+		return "", fmt.Errorf("%s recovery harvest: %w", agentID, err)
+	}
+	if qualityCheck == nil {
+		return report, nil
+	}
+	if out, ok := qualityPassOrTrim(report, qualityCheck); ok {
+		return out, nil
+	}
+	return "", fmt.Errorf("%s output does not meet role requirements after recovery", agentID)
+}
+
 // SinkFromObserver returns a harness.Sink that forwards all events to Observer.Stream.
 // Used by step implementations to bridge harness.Executor output to the observer bus.
 func SinkFromObserver(id AgentID, obs Observer) harness.Sink {

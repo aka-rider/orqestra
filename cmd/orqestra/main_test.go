@@ -42,6 +42,38 @@ func TestRun_Help(t *testing.T) {
 	}
 }
 
+// TestRolePromptsDelivered locks the system-prompt delivery fix: each role's
+// system_prompt from the embedded pipeline.yaml must be non-empty and ride
+// --append-system-prompt as MergeAppendPrompts(SystemPrompt, AppendSystemPrompt) —
+// the exact payload bridgeToolOpts (researcher/architect/critic) and buildEngine
+// (worker) hand to WithAppendSystemPrompt. Regression guard for the bug where the
+// role prompt was parsed into config but never delivered to the model. Asserted at
+// the merge layer so it stays stable across harness arg-building changes.
+func TestRolePromptsDelivered(t *testing.T) {
+	cfg := config.DefaultConfig()
+	for _, tt := range []struct {
+		role      string
+		base      config.BaseAgentConfig
+		signature string
+	}{
+		{"researcher", cfg.Researcher.BaseAgentConfig, "FACT REPORT"},
+		{"architect", cfg.Architect.BaseAgentConfig, "Principal Engineer"},
+		{"critic", cfg.Critic.BaseAgentConfig, "Plan Critic"},
+		{"worker", cfg.Worker.BaseAgentConfig, "VALIDATION REPORT"},
+	} {
+		t.Run(tt.role, func(t *testing.T) {
+			if tt.base.SystemPrompt == "" {
+				t.Fatalf("%s system_prompt empty in embedded config — nothing to deliver", tt.role)
+			}
+			delivered := harness.MergeAppendPrompts(tt.base.SystemPrompt, tt.base.AppendSystemPrompt)
+			if !strings.Contains(delivered, tt.signature) {
+				t.Errorf("%s delivered --append-system-prompt missing role signature %q; got %q",
+					tt.role, tt.signature, delivered)
+			}
+		})
+	}
+}
+
 // TestBridgeToolOpts_Constraints validates the CLI argument patterns produced
 // by bridgeToolOpts against Orqestra's hard constraints:
 //

@@ -4,34 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/harness"
 )
-
-func checkArchitectReport(md string) error {
-	trimmed := strings.TrimSpace(md)
-	if len(trimmed) < 100 {
-		return fmt.Errorf("architect report too short (%d chars)", len(trimmed))
-	}
-	if !strings.HasPrefix(trimmed, "# ") {
-		return fmt.Errorf("architect report does not start with an H1 heading")
-	}
-	return nil
-}
-
-func checkCriticReport(md string) error {
-	trimmed := strings.TrimSpace(md)
-	if len(trimmed) < 50 {
-		return fmt.Errorf("critic report too short (%d chars)", len(trimmed))
-	}
-	if !strings.Contains(strings.ToLower(trimmed), "## critic report") {
-		return fmt.Errorf("critic report missing '## Critic Report' section")
-	}
-	return nil
-}
 
 // DeliberateStep runs architect planning followed by critic review and revision.
 // If CriticSpec is zero (no critic configured), only the architect runs.
@@ -54,8 +31,7 @@ const architectFallbackPrompt = "[Orchestrator] Your session did not produce a p
 	"## Work Packages (each with Steps + Done when), ## Verification, " +
 	"## Assumptions, ## Gotchas."
 
-const criticFallbackPrompt = "[Orchestrator] Your session did not produce a plan file. " +
-	"Write your critic report now. " +
+const criticFallbackPrompt = "[Orchestrator] Emit your critic report now as your final message. " +
 	"Required: ## Critic Report → ### Blockers Found (Category, Severity, " +
 	"Evidence, Impact, Suggested fix), ### Verified Claims, ### Summary."
 
@@ -98,7 +74,7 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 	}
 
 	var archUsedFallback bool
-	planMarkdown, archUsedFallback, archErr = extractPlan(ctx, "architect", archSpec, archRes, archErr, architectFallbackPrompt, checkArchitectReport, sc)
+	planMarkdown, archUsedFallback, archErr = extractPlan(ctx, "architect", archSpec, archRes, archErr, architectFallbackPrompt, architectSpectrum.check, sc)
 	if archUsedFallback {
 		sc.Log.Warn("architect: model produced text output instead of writing plan file; "+
 			"model may have disobeyed plan-writing instructions", "session_id", archRes.SessionID)
@@ -161,12 +137,9 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 		break
 	}
 
-	var criticUsedFallback bool
-	criticMarkdown, criticUsedFallback, criticErr = extractPlan(ctx, "critic", criticSpec, criticRes, criticErr, criticFallbackPrompt, checkCriticReport, sc)
-	if criticUsedFallback {
-		sc.Log.Warn("critic: model produced text output instead of writing plan file; "+
-			"model may have disobeyed plan-writing instructions", "session_id", criticRes.SessionID)
-	}
+	// Critic runs outside plan mode: harvest its final message and gate it on the
+	// critic role-adherence spectrum (catches the "I'll start implementing" collapse).
+	criticMarkdown, criticErr = extractFinalMessage(ctx, "critic", criticSpec, criticRes, criticErr, criticFallbackPrompt, criticSpectrum.check, sc)
 
 	if criticErr != nil {
 		sc.Obs.AgentFailed("critic", criticErr)

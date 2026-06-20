@@ -35,8 +35,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Critic.SystemPrompt == "" {
 		t.Error("critic system prompt should be set from embedded pipeline.yaml")
 	}
-	if cfg.Critic.PermissionMode != "plan" {
-		t.Errorf("critic permission_mode = %q, want %q", cfg.Critic.PermissionMode, "plan")
+	if cfg.Critic.PermissionMode != "default" {
+		t.Errorf("critic permission_mode = %q, want %q", cfg.Critic.PermissionMode, "default")
 	}
 }
 
@@ -1034,14 +1034,15 @@ func TestLoopGuardDefaults(t *testing.T) {
 	cfg := DefaultConfig()
 
 	for _, tc := range []struct {
-		role string
-		lg   LoopGuard
-		mt   int
-		to   time.Duration
+		role   string
+		lg     LoopGuard
+		mt     int
+		wantMT int
+		to     time.Duration
 	}{
-		{"researcher", cfg.Researcher.LoopGuard, cfg.Researcher.MaxTurns, cfg.Researcher.Timeout.Duration},
-		{"architect", cfg.Architect.LoopGuard, cfg.Architect.MaxTurns, cfg.Architect.Timeout.Duration},
-		{"critic", cfg.Critic.LoopGuard, cfg.Critic.MaxTurns, cfg.Critic.Timeout.Duration},
+		{"researcher", cfg.Researcher.LoopGuard, cfg.Researcher.MaxTurns, 40, cfg.Researcher.Timeout.Duration},
+		{"architect", cfg.Architect.LoopGuard, cfg.Architect.MaxTurns, 40, cfg.Architect.Timeout.Duration},
+		{"critic", cfg.Critic.LoopGuard, cfg.Critic.MaxTurns, 15, cfg.Critic.Timeout.Duration},
 	} {
 		if tc.lg.RepeatThreshold != 3 {
 			t.Errorf("%s.LoopGuard.RepeatThreshold = %d, want 3", tc.role, tc.lg.RepeatThreshold)
@@ -1052,8 +1053,8 @@ func TestLoopGuardDefaults(t *testing.T) {
 		if tc.lg.CooldownTurns != 2 {
 			t.Errorf("%s.LoopGuard.CooldownTurns = %d, want 2", tc.role, tc.lg.CooldownTurns)
 		}
-		if tc.mt != 40 {
-			t.Errorf("%s.MaxTurns = %d, want 40", tc.role, tc.mt)
+		if tc.mt != tc.wantMT {
+			t.Errorf("%s.MaxTurns = %d, want %d", tc.role, tc.mt, tc.wantMT)
 		}
 		if tc.to != 15*time.Minute {
 			t.Errorf("%s.Timeout = %v, want 15m", tc.role, tc.to)

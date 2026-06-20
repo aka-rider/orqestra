@@ -80,13 +80,13 @@ func TestViewStreaming_FilePathsAreFullPaths(t *testing.T) {
 	}
 }
 
-// TestDrainStreamUpdates_TextLineGoesToTranscript verifies that a newline-terminated
-// EntryText is promoted to the transcript rather than queued for scrollback.
-func TestDrainStreamUpdates_TextLineGoesToTranscript(t *testing.T) {
+// TestDrainStreamUpdates_TextLineGoesToTimeline verifies that a newline-terminated
+// EntryText is promoted to the timeline as a static prose frame.
+func TestDrainStreamUpdates_TextLineGoesToTimeline(t *testing.T) {
 	s := PipelineScreen{
-		streamBuf:  orchestrator.NewStreamRing(200),
-		transcript: NewTranscript(transcriptStyles{selectionBg: selectionBg, rule: dividerStyle}),
-		streaming:  newStreamingConsole(80),
+		streamBuf: orchestrator.NewStreamRing(200),
+		timeline:  NewTimeline(timelineStyles{selectionBg: selectionBg, rule: dividerStyle}),
+		knownAgents: make(map[string]string),
 	}
 
 	updates := make(chan orchestrator.StreamEntry, 2)
@@ -95,9 +95,9 @@ func TestDrainStreamUpdates_TextLineGoesToTranscript(t *testing.T) {
 
 	s.DrainStreamUpdates(updates)
 
-	// The completed line must appear in the transcript.
-	if !s.transcript.HasContent() {
-		t.Fatal("expected transcript to have content after ingesting a completed line")
+	// The completed line must appear in the timeline.
+	if !s.timeline.HasContent() {
+		t.Fatal("expected timeline to have content after ingesting a completed line")
 	}
 }
 

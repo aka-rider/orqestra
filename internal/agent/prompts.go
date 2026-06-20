@@ -5,9 +5,16 @@ import (
 	"strings"
 )
 
+// ResearcherPrompt wraps the user task for the researcher stage, reinforcing the
+// fact-report role at the point of attention (the last thing the model reads).
+func ResearcherPrompt(userPrompt string) string {
+	return fmt.Sprintf("<user_request>\n%s\n</user_request>\n\nResearch the codebase and produce the FACT REPORT defined in your instructions for the request above. Report what exists; do not propose, plan, or implement changes.",
+		userPrompt)
+}
+
 // ArchitectPrompt builds the initial planning prompt from research facts.
 func ArchitectPrompt(userPrompt, researchFacts string) string {
-	return fmt.Sprintf("<user_request>\n%s\n</user_request>\n\n<codebase_research>\n%s\n</codebase_research>\n\nUsing the codebase research above, produce an implementation plan for the user's request.",
+	return fmt.Sprintf("<user_request>\n%s\n</user_request>\n\n<codebase_research>\n%s\n</codebase_research>\n\nUsing the codebase research above, produce THE PLAN for the user's request — a spec a separate Worker will execute. You design it; you do not write code.",
 		userPrompt, researchFacts)
 }
 

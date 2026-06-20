@@ -10,9 +10,10 @@ import (
 
 func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	switch msg.String() {
-	case "pgup", "ctrl+b", "pgdn", "ctrl+f":
-		s.transcript, _ = s.transcript.Update(msg)
-		return s, nil
+	case "pgup", "ctrl+b", "pgdown", "ctrl+f", "home", "end":
+		var cmd tea.Cmd
+		s.timeline, cmd = s.timeline.Update(msg)
+		return s, cmd
 	case "ctrl+n":
 		if s.active {
 			s.PendingIntent = ConfirmNewRunIntent{}
@@ -27,6 +28,7 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 		text := strings.TrimSpace(s.postInput.Value())
 		if text != "" {
 			s.postInput.Reset()
+			s.timeline.AppendSteer(text)
 			agentID := s.lastAgentID
 			return s, func() tea.Msg {
 				return PostMessageIntent{AgentID: agentID, Text: text}

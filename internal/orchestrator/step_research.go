@@ -3,10 +3,10 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"time"
 
+	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/harness"
 )
 
@@ -19,10 +19,9 @@ type ResearchStep struct {
 
 func (s *ResearchStep) ID() AgentID { return "researcher" }
 
-const researcherFallbackPrompt = "[Orchestrator] Your session did not produce a plan file. " +
-	"Write your gathered findings as your plan now. " +
+const researcherFallbackPrompt = "[Orchestrator] Emit your FACT REPORT now as your final message. " +
 	"Required sections: ## Goal, ## Codebase Facts, ## Constraints Discovered, ## Gotchas. " +
-	"Partial is acceptable."
+	"Report what exists; do not propose changes. Partial is acceptable."
 
 func (s *ResearchStep) Run(ctx context.Context, in ResearchInput, sc StepContext) (ResearchOutput, error) {
 	sc.Obs.PhaseChanged(PhaseResearching)
@@ -35,11 +34,10 @@ func (s *ResearchStep) Run(ctx context.Context, in ResearchInput, sc StepContext
 
 	start := time.Now()
 	spec := s.Spec
-	spec.Prompt = guardPrompt(in.Prompt, in.Prompt, "researcher")
+	spec.Prompt = guardPrompt(agent.ResearcherPrompt(in.Prompt), in.Prompt, "researcher")
 
 	var res harness.RunResult
 	var report string
-	var usedFallback bool
 	var runErr error
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -57,13 +55,12 @@ func (s *ResearchStep) Run(ctx context.Context, in ResearchInput, sc StepContext
 		break
 	}
 
-	report, usedFallback, runErr = extractPlan(ctx, "researcher", spec, res, runErr, researcherFallbackPrompt, checkResearchReport, sc)
-	if runErr == nil && !strings.Contains(strings.ToLower(report), "## user task") {
-		sc.Log.Warn("research report missing ## User Task section (canary)", "session_id", res.SessionID)
-	}
-	if usedFallback {
-		sc.Log.Warn("researcher: model produced text output instead of writing plan file; "+
-			"model may have disobeyed plan-writing instructions", "session_id", res.SessionID)
+	// Researcher runs outside plan mode (default permission): harvest its final
+	// message, gate it on the role-adherence spectrum, then inject the verbatim
+	// ## User Task section the orchestrator owns.
+	report, runErr = extractFinalMessage(ctx, "researcher", spec, res, runErr, researcherFallbackPrompt, researchSpectrum.check, sc)
+	if runErr == nil {
+		report = ensureUserTask(in.Prompt, report)
 	}
 
 	if runErr != nil {
@@ -88,33 +85,14 @@ func (s *ResearchStep) Run(ctx context.Context, in ResearchInput, sc StepContext
 	}, nil
 }
 
-// checkResearchReport returns an error if the report is empty, contains only
-// markdown headers, or is missing a required section. It does not check for the
-// ## User Task section — that is a canary warning logged by the caller.
-func checkResearchReport(report string) error {
-	trimmed := strings.TrimSpace(report)
-	if trimmed == "" {
-		return fmt.Errorf("report is empty")
+// ensureUserTask guarantees the researcher report opens with a verbatim ## User Task
+// section. The orchestrator owns the task text, so it injects this deterministically
+// rather than trusting the model to echo it (historically the most-missed section).
+func ensureUserTask(task, report string) string {
+	if strings.Contains(strings.ToLower(report), "## user task") {
+		return report
 	}
-	required := []string{"## Goal", "## Codebase Facts", "## Constraints Discovered", "## Gotchas"}
-	lower := strings.ToLower(trimmed)
-	for _, sec := range required {
-		if !strings.Contains(lower, strings.ToLower(sec)) {
-			return fmt.Errorf("report missing required section %q", sec)
-		}
-	}
-	contentLines := 0
-	for _, line := range strings.Split(trimmed, "\n") {
-		l := strings.TrimSpace(line)
-		if l == "" || (len(l) > 0 && l[0] == '#') {
-			continue
-		}
-		contentLines++
-	}
-	if contentLines < 5 {
-		return fmt.Errorf("report has only %d non-header content lines (minimum 5)", contentLines)
-	}
-	return nil
+	return "## User Task\n\n" + strings.TrimSpace(task) + "\n\n" + report
 }
 
 func (s *ResearchStep) writeMeta(sc StepContext, sessionID string, start time.Time, status string, err error, usage harness.TokenUsage) {

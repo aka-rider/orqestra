@@ -6,9 +6,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/orchestrator"
-
-	"rune/pkg/ui/components/markdownedit"
-	"rune/pkg/ui/components/textedit"
 )
 
 // HumanChatMode is the interface for human-in-the-loop chat modes during gates.
@@ -27,8 +24,9 @@ type HumanChatMode interface {
 }
 
 // PlanChatMode handles plan review gates (GateAfterResearch, GateAfterDeliberation).
+// The plan itself is shown in the Timeline as a Plan Frame; this mode provides
+// only the key-driven approve/cancel/comment interaction.
 type PlanChatMode struct {
-	view        markdownedit.Model
 	chatHistory []ChatEntry
 	pending     tea.Msg
 }
@@ -40,20 +38,9 @@ type SimpleChatMode struct {
 }
 
 // newHumanChatMode creates a HumanChatMode for the given gate request.
-func newHumanChatMode(req orchestrator.GateRequest, ui runeUI) HumanChatMode {
+func newHumanChatMode(req orchestrator.GateRequest, _ runeUI) HumanChatMode {
 	if req.Position.IsPlanGate() {
-		view := markdownedit.New(ui.keys, ui.styles, ui.caps,
-			markdownedit.WithRegistry(ui.registry),
-			markdownedit.WithResolver(ui.resolver),
-		)
-		view = view.SetReadOnly(true)
-		view = view.SetFocused(false)
-		if req.PlanFilePath != "" {
-			view = view.SetDir(req.PlanFilePath)
-		}
-		view = view.SetContent(req.FinalPlanMarkdown)
 		return &PlanChatMode{
-			view:        view,
 			chatHistory: []ChatEntry{},
 		}
 	}
@@ -62,14 +49,11 @@ func newHumanChatMode(req orchestrator.GateRequest, ui runeUI) HumanChatMode {
 	}
 }
 
-// SetSize sets the allocated display area for the markdownedit view.
-func (m *PlanChatMode) SetSize(w, h int) {
-	m.view = m.view.SetRect(textedit.Rect{W: w, H: h})
-}
+// SetSize is a no-op for PlanChatMode (plan is rendered by Timeline).
+func (m *PlanChatMode) SetSize(_, _ int) {}
 
 // Update handles messages for PlanChatMode.
-// Ctrl+A and Ctrl+C are intercepted for approve/cancel; everything else
-// (including scroll keys) is forwarded to the markdownedit view.
+// Ctrl+A and Ctrl+C are intercepted for approve/cancel.
 func (m *PlanChatMode) Update(msg tea.Msg) (HumanChatMode, tea.Cmd) {
 	if km, ok := msg.(tea.KeyPressMsg); ok {
 		switch km.String() {
@@ -81,17 +65,14 @@ func (m *PlanChatMode) Update(msg tea.Msg) (HumanChatMode, tea.Cmd) {
 			return m, nil
 		}
 	}
-	var cmd tea.Cmd
-	m.view, cmd = m.view.Update(msg)
-	return m, cmd
+	return m, nil
 }
 
-// View renders the PlanChatMode using the markdownedit component.
+// View renders any accumulated chat history above the plan.
+// The plan itself is visible in the Timeline as a Plan Frame.
 func (m *PlanChatMode) View(width int) string {
 	var b strings.Builder
-	b.WriteString(m.view.View())
 	if len(m.chatHistory) > 0 {
-		b.WriteString("\n")
 		for _, entry := range m.chatHistory {
 			b.WriteString(fmt.Sprintf("## %s\n%s\n\n", entry.Role, entry.Text))
 		}
@@ -108,7 +89,7 @@ func (m *PlanChatMode) Footer() string {
 func (m *PlanChatMode) Pending() tea.Msg { return m.pending }
 
 // SetSize is a no-op for SimpleChatMode (no sub-model with dimensions).
-func (m *SimpleChatMode) SetSize(w, h int) {}
+func (m *SimpleChatMode) SetSize(_, _ int) {}
 
 // Update handles messages for SimpleChatMode.
 func (m *SimpleChatMode) Update(msg tea.Msg) (HumanChatMode, tea.Cmd) {

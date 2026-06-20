@@ -64,9 +64,8 @@ type AgentRow struct {
 // regionBounds holds the absolute terminal rectangles for the pipeline
 // alt-screen layout. Used for mouse hit-testing to prevent panes stealing events.
 type regionBounds struct {
-	transcript image.Rectangle
-	streaming  image.Rectangle
-	input      image.Rectangle
+	timeline image.Rectangle
+	input    image.Rectangle
 }
 
 // Model is the top-level Bubble Tea model for the Orqestra TUI.
@@ -328,17 +327,17 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 // handlePipelineMouse routes mouse events for the pipeline alt-screen layout.
-// Wheel events always reach the transcript; click/motion/release are bounded
-// to the transcript region to avoid background panes stealing foreground events.
+// Wheel events always reach the timeline; click/motion/release are bounded
+// to the timeline region to avoid background panes stealing foreground events.
 func (m *Model) handlePipelineMouse(msg tea.MouseMsg) tea.Cmd {
 	var cmd tea.Cmd
 	switch msg.(type) {
 	case tea.MouseWheelMsg:
-		m.pipelineScreen.transcript, cmd = m.pipelineScreen.transcript.Update(msg)
+		m.pipelineScreen.timeline, cmd = m.pipelineScreen.timeline.Update(msg)
 	case tea.MouseClickMsg, tea.MouseReleaseMsg, tea.MouseMotionMsg:
 		pt := image.Point{X: msg.Mouse().X, Y: msg.Mouse().Y}
-		if pt.In(m.regions.transcript) {
-			m.pipelineScreen.transcript, cmd = m.pipelineScreen.transcript.Update(msg)
+		if pt.In(m.regions.timeline) {
+			m.pipelineScreen.timeline, cmd = m.pipelineScreen.timeline.Update(msg)
 		}
 	}
 	return cmd
@@ -514,6 +513,18 @@ func inputHeightChanged(prevContent, nextContent ContentMode) bool {
 
 // handlePipelineKey delegates to PipelineScreen and handles intents.
 func (m Model) handlePipelineKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Explicit copy key bindings: Cmd+Shift+C copies selection; Cmd+C copies hovered frame.
+	switch msg.String() {
+	case "super+shift+c":
+		cmd := m.pipelineScreen.timeline.CopySelected()
+		return m, cmd
+	case "super+c":
+		if m.pipelineScreen.timeline.HasSelection() {
+			cmd := m.pipelineScreen.timeline.CopySelected()
+			return m, cmd
+		}
+	}
+
 	prevContent := m.pipelineScreen.content
 	var cmd tea.Cmd
 	m.pipelineScreen, cmd = m.pipelineScreen.Update(msg)
@@ -744,26 +755,20 @@ func (m *Model) recalculateLayout() {
 		m.pipelineScreen.question = m.pipelineScreen.question.SetWidth(m.width)
 	}
 
-	// Pipeline alt-screen layout: status bar + transcript + streaming + input + footer.
+	// Pipeline alt-screen layout: status bar + timeline + input + footer.
 	if m.state == StatePipeline {
-		streamH := min(constStreamMaxHeight, m.pipelineScreen.streaming.DesiredHeight())
 		chromeH := constStatusBarHeight + inputHeight + constFooterHeight
-		transcriptH := max(0, m.height-chromeH-streamH)
+		timelineH := max(0, m.height-chromeH)
 
-		m.pipelineScreen.transcriptH = transcriptH
-		m.pipelineScreen.streamH = streamH
-		m.pipelineScreen.streaming = m.pipelineScreen.streaming.SetWidth(m.width - 2)
 		m.pipelineScreen.postInput.SetWidth(m.width)
 
 		y := constStatusBarHeight
-		m.regions.transcript = image.Rect(1, y, m.width-1, y+transcriptH) // 1-col margins
-		y += transcriptH
-		m.regions.streaming = image.Rect(1, y, m.width-1, y+streamH)
-		y += streamH
+		m.regions.timeline = image.Rect(1, y, m.width-1, y+timelineH) // 1-col margins
+		y += timelineH
 		m.regions.input = image.Rect(0, y, m.width, y+inputHeight)
 
-		m.pipelineScreen.transcript.SetRect(m.regions.transcript)
-		m.pipelineScreen.transcript.SetFullWidth(m.width)
+		m.pipelineScreen.timeline.SetRect(m.regions.timeline)
+		m.pipelineScreen.timeline.SetFullWidth(m.width)
 	}
 
 	// No header. Content gets full width. Sidebar is a bottom strip below the input zone.

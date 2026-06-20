@@ -39,31 +39,33 @@ func (s PipelineScreen) View(width, height int) string {
 	// Body area height (everything between status bar and input+footer).
 	bodyH := max(0, height-constStatusBarHeight-constPipelineInputHeight-constFooterHeight)
 
-	// For streaming content mode, use transcript + streaming console.
+	// Body: always the timeline view.
+	timelineView := s.timeline.View()
+
+	// For streaming and completion: timeline is the entire body.
 	if s.content == ContentStreaming || s.content == ContentCompletion {
-		transcriptView := s.transcript.View()
-		streamView := addLeftMargin(s.streaming.RenderFixed(s.streamH, w-2))
-		return statusBar + transcriptView + streamView + inputZone + footer
+		return statusBar + timelineView + inputZone + footer
 	}
 
-	// For interactive modes (gate, question, edit-confirm), render a body
-	// in the area normally occupied by transcript + streaming console.
-	var body string
+	// For interactive modes, show an overlay above the timeline
+	// in the body area. Timeline is still visible as context behind it.
+	var overlay string
 	switch s.content {
 	case ContentHumanGate:
 		if s.activeChat != nil {
-			body = s.activeChat.View(w)
+			overlay = s.activeChat.View(w)
 		}
 	case ContentUserQuestion:
-		body = s.question.View(w)
+		overlay = s.question.View(w)
 	case ContentEditConfirm:
-		body = s.viewEditConfirm(w)
+		overlay = s.viewEditConfirm(w)
 	}
 
-	if bodyH > 0 && body != "" {
-		body = lipgloss.NewStyle().MaxHeight(bodyH).Render(body)
+	if bodyH > 0 && overlay != "" {
+		body := lipgloss.NewStyle().MaxHeight(bodyH).Render(overlay)
+		return statusBar + body + "\n" + inputZone + footer
 	}
-	return statusBar + body + "\n" + inputZone + footer
+	return statusBar + timelineView + inputZone + footer
 }
 
 // --- Status Bar ---

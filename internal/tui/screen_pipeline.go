@@ -97,14 +97,9 @@ type PipelineScreen struct {
 	animFrame int
 
 	// Alt-screen sub-models
-	transcript  Transcript
-	streaming   streamingConsole
+	timeline    Timeline
 	lastAgentID string
-	bottom      bottomMode // sum type; nil means use streaming console directly
-
-	// Computed layout heights (set by model.recalculateLayout)
-	transcriptH int
-	streamH     int
+	bottom      bottomMode // sum type; nil means streaming mode
 
 	// rune UI bundle — passed to newHumanChatMode for markdownedit construction.
 	ui runeUI
@@ -122,14 +117,13 @@ func NewPipelineScreen(configName string, ui runeUI) PipelineScreen {
 		configName:  configName,
 		ui:          ui,
 		knownAgents: make(map[string]string),
-		transcript:  NewTranscript(transcriptStyles{selectionBg: selectionBg, rule: dividerStyle}),
-		streaming:   newStreamingConsole(80),
+		timeline:    NewTimeline(timelineStyles{selectionBg: selectionBg, rule: dividerStyle}),
 		postInput:   ta,
 	}
 }
 
-// Start prepares the screen for a new pipeline run and returns the streaming
-// console's blink command (must be batched by the caller).
+// Start prepares the screen for a new pipeline run and returns the timeline
+// blink command (must be batched by the caller).
 func (s *PipelineScreen) Start(goal string) tea.Cmd {
 	s.Reset()
 	s.goal = goal
@@ -140,9 +134,10 @@ func (s *PipelineScreen) Start(goal string) tea.Cmd {
 	s.content = ContentStreaming
 	s.active = true
 	s.postInput.Focus()
-	var blinkCmd tea.Cmd
-	s.streaming, blinkCmd = s.streaming.Start()
-	return blinkCmd
+	s.bottom = streamingBottom{}
+	var cmd tea.Cmd
+	s.timeline, cmd = s.timeline.Start()
+	return cmd
 }
 
 // Reset clears all pipeline state for a fresh run.
@@ -174,8 +169,8 @@ func (s *PipelineScreen) Reset() {
 	s.liveInput = 0
 	s.liveOutput = 0
 	s.liveStart = time.Time{}
-	s.transcript = NewTranscript(transcriptStyles{selectionBg: selectionBg, rule: dividerStyle})
-	s.streaming = newStreamingConsole(80)
+	s.timeline.Clear()
+	s.timeline.styles = timelineStyles{selectionBg: selectionBg, rule: dividerStyle}
 	s.lastAgentID = ""
 	s.bottom = nil
 	s.postInput.Reset()
@@ -202,7 +197,7 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 			}
 			switch u.Kind {
 			case orchestrator.EntryDelta:
-				s.streaming = s.streaming.AppendDelta(u.Text)
+				s.timeline.AppendDelta(u.Text)
 				if s.streamBuf != nil {
 					s.streamBuf.AppendDelta(u.Text)
 				}
@@ -220,18 +215,19 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 					line = strings.TrimRight(u.Text, "\n\r")
 				}
 				if line != "" {
-					s.transcript.Append(newTextLine(line))
-					s.streaming = s.streaming.CompletePartial()
+					s.timeline.ClearLive()
+					s.timeline.AppendProse(line)
 				}
 			case orchestrator.EntryToolUse:
 				if u.Detail != "" {
 					if s.streamBuf != nil {
 						s.streamBuf.AppendActivity(u.Tool, u.Detail)
 					}
-					s.streaming = s.streaming.AddPendingTool(stripAnsi(formatActivityLine(u.Tool, u.Detail, s.cwd)))
+					s.timeline.FlushLive()
+					s.timeline.AppendToolPending(stripAnsi(formatActivityLine(u.Tool, u.Detail, s.cwd)))
 				}
 			case orchestrator.EntryToolResult:
-				s.streaming = s.streaming.ResolveLastTool(u.ToolErr)
+				s.timeline.ResolveLastTool(u.ToolErr)
 			case orchestrator.EntryStats:
 				if s.streamBuf != nil {
 					s.streamBuf.RecordUsage(u.Stats.Input, u.Stats.Output)
@@ -268,26 +264,15 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 		prev, seen := s.knownAgents[a.AgentID]
 		curr := a.Status
 		if !seen {
-			// Emit phase separator rule + flush partial on agent transition.
-			if s.transcript.HasContent() {
-				// Promote any in-progress partial to transcript before separator.
-				if s.streamBuf != nil {
-					partial := s.streamBuf.CurrentPartial()
-					if partial != "" {
-						s.transcript.Append(newTextLine(partial))
-					}
-					s.streamBuf.FlushPartial()
-				}
-				ruleLabel := agentDisplayName(string(a.AgentID))
-				if a.Meta.ModelDisplay != "" {
-					ruleLabel += ": " + a.Meta.ModelDisplay
-				} else if a.Meta.ModelRef != "" {
-					ruleLabel += ": " + a.Meta.ModelRef
-				}
-				s.transcript.Append(newRuleLine(ruleLabel))
-				s.transcript.Append(newTextLine("")) // margin-bottom-1
+			// Flush live partial and emit phase separator rule on agent transition.
+			s.timeline.FlushLive()
+			ruleLabel := agentDisplayName(string(a.AgentID))
+			if a.Meta.ModelDisplay != "" {
+				ruleLabel += ": " + a.Meta.ModelDisplay
+			} else if a.Meta.ModelRef != "" {
+				ruleLabel += ": " + a.Meta.ModelRef
 			}
-			s.streaming = s.streaming.ClearForAgent()
+			s.timeline.AppendPhase(ruleLabel)
 			s.lastAgentID = a.AgentID
 			if s.streamBuf != nil {
 				s.streamBuf.SetAgent(a.AgentID)
@@ -318,6 +303,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 					s.reviewTokensIn += a.Input
 					s.reviewTokensOut += a.Output
 				}
+				s.timeline.ReconcilePendingTools()
 			case "failed":
 				for i := range s.agents {
 					if s.agents[i].ID == a.AgentID {
@@ -348,6 +334,9 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 			s.planFilePath = snap.Gate.PlanFilePath
 			s.activeChat = newHumanChatMode(snap.Gate, s.ui)
 			s.bottom = gateBottom{chat: s.activeChat}
+			pf := newPlanFrame(snap.Gate.FinalPlanMarkdown, s.ui)
+			pf.resize(width)
+			s.timeline.AppendPlanFrame(pf)
 		} else {
 			// Plan revised — update without reopening gate.
 			s.finalPlan = snap.Gate.FinalPlanMarkdown
@@ -406,10 +395,13 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 			case *orchestrator.Decision:
 				switch p.Type {
 				case orchestrator.DecisionApprove:
+					s.timeline.AppendSteer("approved plan")
 					s.PendingIntent = ApprovePlanIntent{}
 				case orchestrator.DecisionCancel:
+					s.timeline.AppendSteer("cancelled")
 					s.PendingIntent = CancelPlanIntent{}
 				case orchestrator.DecisionComment:
+					s.timeline.AppendSteer(p.Comment)
 					s.PendingIntent = CommentPlanIntent{Comment: p.Comment}
 				}
 			}
@@ -426,16 +418,12 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 }
 
 // UpdateSubModel passes non-key messages to focused sub-models (textareas,
-// transcript autoscroll ticks, streaming console blink ticks).
+// timeline autoscroll and blink ticks).
 func (s PipelineScreen) UpdateSubModel(msg tea.Msg) (PipelineScreen, tea.Cmd) {
 	switch msg.(type) {
-	case transcriptAutoscrollMsg:
+	case timelineAutoscrollMsg, timelineBlinkMsg:
 		var cmd tea.Cmd
-		s.transcript, cmd = s.transcript.Update(msg)
-		return s, cmd
-	case streamBlinkMsg:
-		var cmd tea.Cmd
-		s.streaming, cmd = s.streaming.Update(msg)
+		s.timeline, cmd = s.timeline.Update(msg)
 		return s, cmd
 	}
 	if s.content == ContentStreaming {

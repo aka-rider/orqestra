@@ -490,9 +490,9 @@ func TestTUI_StreamingOutput(t *testing.T) {
 		t.Error("expected streaming delta to appear in streaming console partial")
 	}
 
-	// Completed line must be in transcript.
-	if !m.pipelineScreen.transcript.HasContent() {
-		t.Error("expected transcript to have content after ingesting a completed line")
+	// Completed line must be in the timeline.
+	if !m.pipelineScreen.timeline.HasContent() {
+		t.Error("expected timeline to have content after ingesting a completed line")
 	}
 }
 
