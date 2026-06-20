@@ -249,8 +249,6 @@ func runScenario(ctx context.Context, cfg *config.Config, selfBin string, s scen
 	// Run the model using Post + Receive pattern.
 	var outputBuf strings.Builder
 	var inputTokens, outputTokens int64
-	updates := make(chan harness.Event, 256)
-	runner.SetEvents(updates)
 	if systemPrompt != "" {
 		runner.Post(systemPrompt)
 	}

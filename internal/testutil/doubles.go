@@ -24,18 +24,16 @@ type FakeCall struct {
 }
 
 // FakeRunner is a test double for harness.Runner.
+// Each Post() call consumes the next FakeCall, builds a closed buffered
+// channel containing the simulated events, and stores it for Receive().
+// Callers must call Post() before Receive() on each turn — matching the
+// contract enforced by the real Runner after the SetEvents removal.
 type FakeRunner struct {
-	Calls      []FakeCall
-	mu         sync.Mutex
-	n          int
-	events     chan harness.Event
-	done       bool
-	closed     bool
-	storedSID  string // SessionID returned by the last Post() call
-	// injected is the fan-out channel from SetEvents.
-	// A goroutine forwards events from events -> injected.
-	// Receive() always returns events, so the caller reads the source channel.
-	injected chan<- harness.Event
+	Calls     []FakeCall
+	mu        sync.Mutex
+	n         int
+	events    <-chan harness.Event
+	storedSID string
 }
 
 func (f *FakeRunner) next() FakeCall {
@@ -48,7 +46,6 @@ func (f *FakeRunner) next() FakeCall {
 	idx := f.n
 	f.n++
 	call := f.Calls[idx]
-
 	if call.OnCall != nil {
 		call.OnCall(idx)
 	}
@@ -57,57 +54,41 @@ func (f *FakeRunner) next() FakeCall {
 
 func (f *FakeRunner) Post(msg string) {
 	out := f.next()
-	if f.events == nil {
-		return
-	}
-	f.mu.Lock()
-	if f.closed {
-		f.mu.Unlock()
-		return
-	}
-	// Store the SessionID from this call so SessionID() can return it.
-	sid := out.SessionID
-	injected := f.injected
-	f.mu.Unlock()
 
-	var events []harness.Event
+	var evs []harness.Event
 	if out.Err != nil {
-		events = []harness.Event{
+		evs = []harness.Event{
 			{Kind: harness.EventError, Text: out.Err.Error(), IsError: true},
 		}
 	} else {
-		events = []harness.Event{
+		evs = []harness.Event{
 			{Kind: harness.EventSessionStart, SessionID: out.SessionID},
 			{Kind: harness.EventChunk, Text: out.Output},
 			{Kind: harness.EventUsage, Input: out.Usage.Input, Output: out.Usage.Output},
 			{Kind: harness.EventSessionDone},
 		}
 	}
-	for _, ev := range events {
-		select {
-		case f.events <- ev:
-		default:
-		}
-		if injected != nil {
-			select {
-			case injected <- ev:
-			default:
-			}
-		}
+
+	ch := make(chan harness.Event, len(evs))
+	for _, ev := range evs {
+		ch <- ev
 	}
-	// Close the channel after each Post() call so the for-range loop in
-	// runRunnerStreaming/runRunnerContinue can exit. The channel is replaced
-	// by SetEvents on the next invocation.
+	close(ch)
+
 	f.mu.Lock()
-	if !f.closed {
-		f.closed = true
-		f.storedSID = sid
-		close(f.events)
-	}
+	f.events = ch
+	f.storedSID = out.SessionID
 	f.mu.Unlock()
 }
 
 func (f *FakeRunner) Receive() <-chan harness.Event {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.events == nil {
+		ch := make(chan harness.Event)
+		close(ch)
+		return ch
+	}
 	return f.events
 }
 
@@ -128,17 +109,6 @@ func (f *FakeRunner) ExtractPlan(ctx context.Context) (string, error) {
 	return string(data), nil
 }
 
-func (f *FakeRunner) SetEvents(ch chan<- harness.Event) {
-	// Always create a new events channel for each SetEvents call so that
-	// each runRunnerStreaming/runRunnerContinue invocation gets its own
-	// channel that can be closed independently.
-	f.events = make(chan harness.Event, 256)
-	f.mu.Lock()
-	f.closed = false
-	f.injected = ch
-	f.mu.Unlock()
-}
-
 func (f *FakeRunner) SessionID() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -146,7 +116,6 @@ func (f *FakeRunner) SessionID() string {
 }
 
 func (f *FakeRunner) Cancel() error {
-	f.done = true
 	return nil
 }
 

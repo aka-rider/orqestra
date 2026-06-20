@@ -77,11 +77,6 @@ func main() {
 		cancel()
 	}()
 
-	// Start session via the Runner interface.
-	// SetEvents injects the events channel for stream capture.
-	// Post sends the initial prompt as NDJSON, which also starts the process.
-	streamUpdates := make(chan harness.Event, 512)
-	runner.SetEvents(streamUpdates)
 	runner.Post(prompt)
 	m.runner = runner
 
@@ -89,7 +84,6 @@ func main() {
 	p := tea.NewProgram(m, tea.WithContext(ctx))
 
 	// Bridge runner.Receive() → Bubble Tea message loop.
-	// The Runner.Receive() channel emits typed Event values.
 	go func() {
 		for ev := range runner.Receive() {
 			p.Send(ev)

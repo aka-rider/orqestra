@@ -41,14 +41,6 @@ func (s *stubRunner) ExtractPlan(ctx context.Context) (string, error) {
 	return "plan content", nil
 }
 
-func (s *stubRunner) SetEvents(ch chan<- harness.Event) {
-	// Create the events channel that Post() writes to.
-	// The injected ch is send-only (runner writes to it); we don't range over it.
-	if s.events == nil {
-		s.events = make(chan harness.Event, 256)
-	}
-}
-
 func (s *stubRunner) SessionID() string {
 	return "test-session"
 }

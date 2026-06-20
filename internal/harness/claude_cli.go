@@ -27,30 +27,13 @@ type TokenUsage struct {
 // Total returns the sum of input and output tokens.
 func (u TokenUsage) Total() int64 { return u.Input + u.Output }
 
-// RunResult captures the output and token usage from a CLIRunner invocation.
-// Kept for backward compatibility with existing callers.
+// RunResult captures the output and token usage from a streaming invocation.
 type RunResult struct {
-	Output       string
-	Usage        TokenUsage // zero value if the harness did not report usage
-	SessionID    string     // populated from stream-json result event when available
-	PlanFilePath string     // plan file path captured from result event (may be empty)
+	Output    string
+	Usage     TokenUsage // zero value if the harness did not report usage
+	SessionID string     // populated from EventSessionStart when available
 }
 
-// CLIRunner is the legacy interface for running claude CLI commands.
-// Deprecated: use Runner interface instead.
-type CLIRunner interface {
-	RunPrint(ctx context.Context, prompt, systemPrompt string) (RunResult, error)
-	RunStreaming(ctx context.Context, prompt, systemPrompt string, events chan<- Event) (RunResult, error)
-}
-
-// ContinuableRunner extends Runner with session continuation support.
-// Deprecated: use Runner interface instead.
-type ContinuableRunner interface {
-	Runner
-	// RunContinue resumes a previous session with a new prompt.
-	// The session retains its tool state, conversation history, and sandbox.
-	RunContinue(ctx context.Context, sessionID, prompt string, events chan<- Event) (RunResult, error)
-}
 
 // ClaudeCLI implements the Runner interface for the claude CLI binary.
 type ClaudeCLI struct {
@@ -86,8 +69,7 @@ func NewClaudeCLI(resolved config.ResolvedModel, opts ...ClaudeCLIOption) *Claud
 // NewClaudeCLIFromConfig creates a Runner from a model_ref.
 // Returns an error if modelRef is empty or cannot be resolved.
 // Model-level runtime options are applied before caller-supplied options.
-// The returned value implements both Runner and ContinuableRunner.
-func NewClaudeCLIFromConfig(cfg *config.Config, modelRef string, opts ...ClaudeCLIOption) (ContinuableRunner, error) {
+func NewClaudeCLIFromConfig(cfg *config.Config, modelRef string, opts ...ClaudeCLIOption) (Runner, error) {
 	if modelRef == "" {
 		return nil, fmt.Errorf("missing model_ref")
 	}
@@ -326,31 +308,6 @@ func (c *ClaudeCLI) ExtractPlan(ctx context.Context) (string, error) {
 	return strings.TrimSpace(content), nil
 }
 
-// SetEvents injects an events channel for stream capture. Called once
-// before Post(). If nil, events are not forwarded (nil-safe).
-func (c *ClaudeCLI) SetEvents(ch chan<- Event) {
-	sess := c.initSession()
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	// Store the channel as a regular chan Event for internal use.
-	// The caller's chan<- Event is converted to chan Event.
-	// If ch is nil, events are not forwarded (nil-safe).
-	if ch != nil {
-		sess.events = make(chan Event, 512)
-		// Fan-out: copy events from internal channel to the injected channel.
-		go func() {
-			for ev := range sess.events {
-				select {
-				case ch <- ev:
-				default:
-				}
-			}
-		}()
-	} else {
-		sess.events = make(chan Event, 512)
-	}
-}
-
 // SessionID returns the Claude session identifier extracted from the stream.
 // Empty until the first session event is parsed.
 func (c *ClaudeCLI) SessionID() string {
@@ -440,230 +397,18 @@ func (c *ClaudeCLI) startSession(s *session, initialPrompt string) {
 
 	// Drain stdout in background.
 	go func() {
-		parseStream(cmdStdout, s.events)
+		parseStreamLines(cmdStdout, s.events)
 		cmd.Wait()
 		close(s.events)
 	}()
 }
 
-// --- Legacy methods (backward compatibility) ---
-
-// RunPrint runs `claude --print -p <prompt> --append-system-prompt <systemPrompt> --output-format json`
-// and returns the output.
-func (c *ClaudeCLI) RunPrint(ctx context.Context, prompt, systemPrompt string) (RunResult, error) {
-	args := []string{"--print", "-p", prompt, "--output-format", "json"}
-	if merged := mergeAppendPrompts(systemPrompt, c.appendSystemPrompt); merged != "" {
-		args = append(args, "--append-system-prompt", merged)
-	}
-	args = append(args, c.buildFinalArgs()...)
-
-	cmd := exec.CommandContext(ctx, c.binary, args...)
-	env, err := c.buildEnv()
-	if err != nil {
-		return RunResult{}, err
-	}
-	cmd.Env = env
-	if c.workDir != "" {
-		cmd.Dir = c.workDir
-	}
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return RunResult{}, fmt.Errorf("claude CLI error: %w (stderr: %s)", err, stderr.String())
-	}
-
-	raw := stdout.String()
-
-	// Extract token usage from JSON envelope if present.
-	var envelope struct {
-		Usage *streamUsage `json:"usage"`
-	}
-	var usage TokenUsage
-	if err := json.Unmarshal([]byte(raw), &envelope); err == nil && envelope.Usage != nil {
-		usage = TokenUsage{
-			Input:  envelope.Usage.InputTokens,
-			Output: envelope.Usage.OutputTokens,
-		}
-	}
-
-	return RunResult{Output: raw, Usage: usage}, nil
-}
-
-// RunStreaming runs `claude -p <prompt> --append-system-prompt <systemPrompt> --output-format stream-json --verbose`
-// and streams displayable content to stdout. Returns the final result text.
-func (c *ClaudeCLI) RunStreaming(ctx context.Context, prompt, systemPrompt string, events chan<- Event) (RunResult, error) {
-	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"}
-	if merged := mergeAppendPrompts(systemPrompt, c.appendSystemPrompt); merged != "" {
-		args = append(args, "--append-system-prompt", merged)
-	}
-	args = append(args, c.buildFinalArgs()...)
-
-	cmd := exec.CommandContext(ctx, c.binary, args...)
-	env, err := c.buildEnv()
-	if err != nil {
-		return RunResult{}, err
-	}
-	cmd.Env = env
-	if c.workDir != "" {
-		cmd.Dir = c.workDir
-	}
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	cmdStdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return RunResult{}, fmt.Errorf("claude CLI stdout pipe error: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return RunResult{}, fmt.Errorf("claude CLI start error: %w", err)
-	}
-
-	var result string
-	var resultIsError bool
-	var usage TokenUsage
-	var sessionID string
-	var planFilePath string
-	var parseErr error
-	result, resultIsError, usage, sessionID, planFilePath, parseErr = parseStream(cmdStdout, events)
-
-	cmdErr := cmd.Wait()
-	if cmdErr != nil {
-		// If we got a result with is_error:true, surface that as the error message
-		if resultIsError && result != "" {
-			return RunResult{}, fmt.Errorf("claude CLI error: %s", result)
-		}
-		return RunResult{}, fmt.Errorf("claude CLI error: %w (stderr: %s)", cmdErr, stderr.String())
-	}
-
-	if parseErr != nil {
-		return RunResult{}, fmt.Errorf("claude CLI stream parse error: %w", parseErr)
-	}
-
-	if resultIsError {
-		return RunResult{}, fmt.Errorf("claude CLI error: %s", result)
-	}
-
-	if result == "" {
-		return RunResult{}, fmt.Errorf("claude CLI produced no result message in stream")
-	}
-
-	return RunResult{Output: result, Usage: usage, SessionID: sessionID, PlanFilePath: planFilePath}, nil
-}
-
-// RunContinue resumes a previous Claude CLI session with a follow-up prompt.
-// Used for worker self-validation: the worker validates its own work in the
-// same session that performed the implementation.
-func (c *ClaudeCLI) RunContinue(ctx context.Context, sessionID, prompt string, events chan<- Event) (RunResult, error) {
-	args := []string{"claude", "--resume", sessionID, "-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages"}
-	args = append(args, c.buildFinalArgs()...)
-
-	cmd := exec.CommandContext(ctx, c.binary, args...)
-	env, err := c.buildEnv()
-	if err != nil {
-		return RunResult{}, err
-	}
-	cmd.Env = env
-	if c.workDir != "" {
-		cmd.Dir = c.workDir
-	}
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	cmdStdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return RunResult{}, fmt.Errorf("claude CLI stdout pipe error: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return RunResult{}, fmt.Errorf("claude CLI start error: %w", err)
-	}
-
-	var result string
-	var resultIsError bool
-	var usage TokenUsage
-	var newSessionID string
-	var planFilePath string
-	var parseErr error
-	result, resultIsError, usage, newSessionID, planFilePath, parseErr = parseStream(cmdStdout, events)
-
-	cmdErr := cmd.Wait()
-	if cmdErr != nil {
-		if resultIsError && result != "" {
-			return RunResult{}, fmt.Errorf("claude CLI continue error: %s", result)
-		}
-		return RunResult{}, fmt.Errorf("claude CLI continue error: %w (stderr: %s)", cmdErr, stderr.String())
-	}
-
-	if parseErr != nil {
-		return RunResult{}, fmt.Errorf("claude CLI stream parse error: %w", parseErr)
-	}
-
-	if resultIsError {
-		return RunResult{}, fmt.Errorf("claude CLI continue error: %s", result)
-	}
-
-	return RunResult{Output: result, Usage: usage, SessionID: newSessionID, PlanFilePath: planFilePath}, nil
-}
-
 // --- Stream parsing ---
 
-// parseStream scans stream-json lines from r, dispatches display events to
-// events (nil-safe), and accumulates the result, error state, usage, session
-// ID, and plan file path from the result event. This is the single source of
-// truth for Claude CLI stream parsing — used by RunStreaming and RunContinue.
-func parseStream(r io.Reader, events chan<- Event) (result string, isError bool, usage TokenUsage, sessionID, planFilePath string, err error) {
-	var raw string
-	raw, err = parseStreamLines(r, events)
-	if err != nil {
-		return
-	}
-	// Extract result, usage, session ID, and plan file path from raw NDJSON.
-	for _, line := range strings.Split(raw, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var event struct {
-			Type         string          `json:"type"`
-			Result       string          `json:"result,omitempty"`
-			IsError      bool            `json:"is_error,omitempty"`
-			SessionID    string          `json:"session_id,omitempty"`
-			PlanFilePath string          `json:"planFilePath,omitempty"`
-			Usage        *streamUsage    `json:"usage,omitempty"`
-		}
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			continue
-		}
-		if event.Type == "result" {
-			result = event.Result
-			isError = event.IsError
-			if event.SessionID != "" {
-				sessionID = event.SessionID
-			}
-			if event.PlanFilePath != "" {
-				planFilePath = event.PlanFilePath
-			}
-			if event.Usage != nil {
-				usage = TokenUsage{
-					Input:  event.Usage.InputTokens,
-					Output: event.Usage.OutputTokens,
-				}
-			}
-		}
-	}
-	return
-}
-
 // parseStreamLines reads stream-json NDJSON from src line by line, routes each
-// parsed event through emitStreamEvents, and returns
-// the full raw NDJSON for post-processing (usage + session ID extraction).
-// events may be nil. Non-JSON lines are emitted as Text events when provided.
+// parsed event through emitStreamEvents, and accumulates raw NDJSON for callers
+// that need post-processing. events may be nil; non-JSON lines are emitted as
+// EventChunk when events is provided.
 func parseStreamLines(src io.Reader, events chan<- Event) (string, error) {
 	var rawBuf bytes.Buffer
 	scanner := bufio.NewScanner(src)
@@ -804,7 +549,7 @@ func (e *streamEvent) extractToolUse() (name string, args json.RawMessage) {
 }
 
 // emitStreamEvents converts a stream-json event into typed Event entries.
-// Used by both ClaudeCLI and SandboxCLIRunner to avoid duplicating switch logic.
+// Used by both ClaudeCLI.startSession and sandboxedRunner.init to avoid duplicating switch logic.
 func emitStreamEvents(event streamEvent, events chan<- Event) {
 	if events == nil {
 		return

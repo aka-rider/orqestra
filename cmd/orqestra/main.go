@@ -650,45 +650,14 @@ func runStreamingToWriter(
 	prompt, systemPrompt string,
 	w io.Writer,
 ) (harness.RunResult, error) {
-	if w == nil {
-		runner.SetEvents(nil)
-		runner.Post(systemPrompt)
-		runner.Post(prompt)
-		var result harness.RunResult
-		for ev := range runner.Receive() {
-			if ev.Kind == harness.EventError {
-				return result, fmt.Errorf("runner error: %s", ev.Text)
-			}
-			if ev.Kind == harness.EventUsage {
-				result.Usage = harness.TokenUsage{Input: ev.Input, Output: ev.Output}
-			}
-			if ev.Kind == harness.EventChunk && ev.Text != "" {
-				result.Output += ev.Text
-			}
-		}
-		return result, nil
-	}
-
-	updates := make(chan harness.Event, 256)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for u := range updates {
-			if u.Text != "" {
-				_, _ = io.WriteString(w, u.Text)
-			}
-		}
-	}()
-
-	runner.SetEvents(updates)
 	runner.Post(systemPrompt)
 	runner.Post(prompt)
-
 	var result harness.RunResult
 	for ev := range runner.Receive() {
+		if w != nil && ev.Text != "" {
+			_, _ = io.WriteString(w, ev.Text)
+		}
 		if ev.Kind == harness.EventError {
-			close(updates)
-			<-done
 			return result, fmt.Errorf("runner error: %s", ev.Text)
 		}
 		if ev.Kind == harness.EventUsage {
@@ -698,8 +667,6 @@ func runStreamingToWriter(
 			result.Output += ev.Text
 		}
 	}
-	close(updates)
-	<-done
 	return result, nil
 }
 

@@ -14,20 +14,9 @@ import (
 // ReadPlanFromRun reads the plan content written by Claude CLI's plan mode.
 // It locates the plan file via the session JSONL's plan_mode attachment, or
 // falls back to scanning ~/.claude/plans/ for recently modified files.
-// The returned content is normalized (# Plan header prepended if missing).
 func ReadPlanFromRun(result harness.RunResult) (string, error) {
 	if result.SessionID == "" {
 		return "", fmt.Errorf("no session ID in run result")
-	}
-
-	// If the stream captured the plan file path directly, use it.
-	if result.PlanFilePath != "" {
-		content, err := readSecurePlanFile(result.PlanFilePath)
-		if err == nil {
-			return strings.TrimSpace(content), nil
-		}
-		slog.Debug("plan file path from stream invalid, falling back to JSONL scan",
-			"path", result.PlanFilePath, "err", err)
 	}
 
 	// Resolve session JSONL and extract plan file path from plan_mode attachment.

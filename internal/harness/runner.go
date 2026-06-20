@@ -20,17 +20,14 @@ type Runner interface {
 	Post(string)
 
 	// Receive returns the single channel for all output events from the session.
-	// The channel closes when the process exits.
+	// The channel closes when the process exits. Callers are the sole consumer:
+	// forward events to observers inline rather than using a parallel consumer.
 	Receive() <-chan Event
 
 	// ExtractPlan pulls plan content from the currently running session's
 	// metadata. Uses internally stored sessionID and cwd to locate the
 	// Claude CLI JSONL log and extract the plan file path.
 	ExtractPlan(ctx context.Context) (string, error)
-
-	// SetEvents injects an events channel for stream capture. Called once
-	// before Post(). If nil, events are not forwarded (nil-safe).
-	SetEvents(chan<- Event)
 
 	// SessionID returns the Claude session identifier extracted from the
 	// stream. Empty until the first session event is parsed.
@@ -125,11 +122,13 @@ type BudgetExhaustedError struct{}
 
 func (*BudgetExhaustedError) Error() string { return "token budget exhausted" }
 
-// NewRunner creates a Runner from configuration.
-// If cfg.Sandbox is non-empty, it creates a sandbox-wrapped runner.
-// Otherwise, it creates a direct ClaudeCLI runner.
-// Both paths share the same Post/Receive/ExtractPlan/SetEvents/SessionID/Cancel implementation.
+// NewRunner creates a sandboxed Runner from configuration.
+// Sandbox configuration is required; an empty SandboxConfig returns an error.
 func NewRunner(cfg RunnerConfig, ctx context.Context) (Runner, error) {
+	if cfg.Sandbox.RepoPath == "" && len(cfg.Sandbox.Profiles) == 0 {
+		return nil, fmt.Errorf("NewRunner: sandbox configuration required (RepoPath or Profiles must be set)")
+	}
+
 	cli := &ClaudeCLI{
 		binary:             cfg.Binary,
 		workDir:            cfg.WorkDir,
@@ -175,20 +174,11 @@ func NewRunner(cfg RunnerConfig, ctx context.Context) (Runner, error) {
 		cli.extraArgs = append(cli.extraArgs, cfg.ExtraArgs...)
 	}
 
-	// If sandbox config is non-empty, wrap with sandboxedRunner.
-	if cfg.Sandbox.RepoPath != "" || len(cfg.Sandbox.Profiles) > 0 {
-		return &sandboxedRunner{
-			cli:          cli,
-			sandboxCfg:   cfg.Sandbox,
-			ctx:          ctx,
-			stdin:        nil,
-			cmd:          nil,
-			sessionID:    "",
-			initialized:  false,
-		}, nil
-	}
-
-	return cli, nil
+	return &sandboxedRunner{
+		cli:        cli,
+		sandboxCfg: cfg.Sandbox,
+		ctx:        ctx,
+	}, nil
 }
 
 // jsonStr returns a JSON array string for CLI args.
@@ -245,10 +235,6 @@ func (r *sandboxedRunner) Receive() <-chan Event {
 
 func (r *sandboxedRunner) ExtractPlan(ctx context.Context) (string, error) {
 	return r.cli.ExtractPlan(ctx)
-}
-
-func (r *sandboxedRunner) SetEvents(ch chan<- Event) {
-	r.cli.SetEvents(ch)
 }
 
 func (r *sandboxedRunner) SessionID() string {
@@ -329,25 +315,15 @@ func (r *sandboxedRunner) init() error {
 	}
 	r.cmd = cmd
 
-	// Drain stdout in background.
-	events := make(chan Event, 256)
+	// Drain stdout directly into the CLI session's events channel, mirroring
+	// ClaudeCLI.startSession. Ensure the session exists before spawning so that
+	// Receive() callers that arrive after Post() see the same channel.
+	sess := r.cli.initSession()
 	go func() {
 		defer sb.Close()
-		for ev := range events {
-			r.cli.mu.Lock()
-			sess := r.cli.session
-			r.cli.mu.Unlock()
-			if sess != nil {
-				select {
-				case sess.events <- ev:
-				default:
-				}
-			}
-		}
-	}()
-	go func() {
-		parseStreamLines(cmdStdout, events)
+		parseStreamLines(cmdStdout, sess.events)
 		_ = cmd.Wait()
+		close(sess.events)
 	}()
 
 	return nil

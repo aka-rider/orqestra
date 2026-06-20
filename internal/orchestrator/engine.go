@@ -240,16 +240,18 @@ func continuePlanner(ctx context.Context, planner *agent.Planner, sessionID, pro
 
 func runRunnerStreaming(ctx context.Context, runner harness.Runner, prompt, systemPrompt string, capture *streamCapture, out chan<- harness.Event) (harness.RunResult, error) {
 	return runWithStreamConsumer(func(events chan<- harness.Event) (harness.RunResult, error) {
-		runner.SetEvents(events)
 		if systemPrompt != "" {
-			// Send system prompt as initial message.
 			runner.Post(systemPrompt)
 		}
 		runner.Post(prompt)
-		// Wait for session to complete by reading from Receive().
-		// The result is extracted from the EventSessionDone or EventError events.
 		var result harness.RunResult
 		for ev := range runner.Receive() {
+			if events != nil {
+				select {
+				case events <- ev:
+				default:
+				}
+			}
 			if ev.Kind == harness.EventError {
 				result.Output = ev.Text
 				result.Usage = harness.TokenUsage{Input: ev.Input, Output: ev.Output}
@@ -270,10 +272,15 @@ func runRunnerStreaming(ctx context.Context, runner harness.Runner, prompt, syst
 
 func runRunnerContinue(ctx context.Context, runner harness.Runner, sessionID, prompt string, capture *streamCapture, out chan<- harness.Event) (harness.RunResult, error) {
 	return runWithStreamConsumer(func(events chan<- harness.Event) (harness.RunResult, error) {
-		runner.SetEvents(events)
 		runner.Post(prompt)
 		var result harness.RunResult
 		for ev := range runner.Receive() {
+			if events != nil {
+				select {
+				case events <- ev:
+				default:
+				}
+			}
 			if ev.Kind == harness.EventError {
 				result.Output = ev.Text
 				result.Usage = harness.TokenUsage{Input: ev.Input, Output: ev.Output}
@@ -1398,7 +1405,6 @@ planGate:
 	// commit and a session to continue.
 	semanticMsg := ""
 	if wt.Path != "" && lastSessionID != "" {
-		workerRunner.SetEvents(nil)
 		workerRunner.Post(agent.CommitMessagePrompt())
 		var msgResult harness.RunResult
 		for ev := range workerRunner.Receive() {

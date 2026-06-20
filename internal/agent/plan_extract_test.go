@@ -141,35 +141,6 @@ func TestReadPlanFromRun_EmptyPlanFile(t *testing.T) {
 	}
 }
 
-func TestReadPlanFromRun_UsesStreamPlanFilePath(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
-
-	// Create plan file under ~/.claude/plans/ directly
-	plansDir := filepath.Join(tmp, ".claude", "plans")
-	if err := os.MkdirAll(plansDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	planFile := filepath.Join(plansDir, "stream-plan.md")
-	planMD := "# Plan\n\n## Goal\nStream test.\n\n## Work Packages\n..."
-	if err := os.WriteFile(planFile, []byte(planMD), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Provide PlanFilePath directly — no JSONL needed
-	result := harness.RunResult{
-		SessionID:    "some-session",
-		PlanFilePath: planFile,
-	}
-	content, err := ReadPlanFromRun(result)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if content != planMD {
-		t.Errorf("content mismatch:\ngot:  %s\nwant: %s", content, planMD)
-	}
-}
-
 func TestReadPlanFromRun_PlanFileNeverWritten(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)

@@ -73,10 +73,6 @@ func (r *budgetedRunner) ExtractPlan(ctx context.Context) (string, error) {
 	return r.inner.ExtractPlan(ctx)
 }
 
-func (r *budgetedRunner) SetEvents(ch chan<- harness.Event) {
-	r.inner.SetEvents(ch)
-}
-
 func (r *budgetedRunner) SessionID() string {
 	return r.inner.SessionID()
 }

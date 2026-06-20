@@ -50,11 +50,16 @@ func (p *Planner) ExtractPlan(ctx context.Context) (string, error) {
 // text when the plan file is unreadable but the stream produced output. Returns a
 // hard error only when both the plan file and stream output are unavailable.
 func (p *Planner) Run(ctx context.Context, prompt string, events chan<- harness.Event) (PlanResult, error) {
-	p.runner.SetEvents(events)
 	p.runner.Post(prompt)
 
 	var result harness.RunResult
 	for ev := range p.runner.Receive() {
+		if events != nil {
+			select {
+			case events <- ev:
+			default:
+			}
+		}
 		if ev.Kind == harness.EventError {
 			return PlanResult{}, fmt.Errorf("planner run: %s", ev.Text)
 		}
@@ -103,11 +108,16 @@ func (p *Planner) Run(ctx context.Context, prompt string, events chan<- harness.
 // empty and Chat carries the model's response. Errors are returned only for runner
 // failures, never for plan-file-missing.
 func (p *Planner) Continue(ctx context.Context, sessionID, prompt string, events chan<- harness.Event) (PlanResult, error) {
-	p.runner.SetEvents(events)
 	p.runner.Post(prompt)
 
 	var result harness.RunResult
 	for ev := range p.runner.Receive() {
+		if events != nil {
+			select {
+			case events <- ev:
+			default:
+			}
+		}
 		if ev.Kind == harness.EventError {
 			return PlanResult{}, fmt.Errorf("planner continue: %s", ev.Text)
 		}
