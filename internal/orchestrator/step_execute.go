@@ -68,7 +68,7 @@ func (s *ExecuteStep) Run(ctx context.Context, in ExecuteInput, sc StepContext) 
 			s.Sup.UntrackWorktree(wt.Path)
 		}
 		sc.Obs.AgentFailed(s.ID(), err)
-		s.writeMeta(sc, res.SessionID, start, "failed", err, harness.TokenUsage{})
+		s.writeMeta(sc, res.SessionID, start, "failed", err, res.Usage)
 		return ExecuteOutput{}, fmt.Errorf("worker: %w", err)
 	}
 

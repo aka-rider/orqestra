@@ -253,8 +253,34 @@ func DetectXcodeDeveloper(home string) (*sandbox.Snapshot, error) {
 	if err := p.Allow(devDir, sandbox.Exec); err != nil {
 		return nil, fmt.Errorf("detect xcode developer dir %q: %w", devDir, err)
 	}
+
+	// macOS tool stubs (/usr/bin/git, /usr/bin/python3, …) invoke xcodebuild to
+	// locate the real binary when Xcode.app is the active developer directory.
+	// xcodebuild loads frameworks from the parent .app bundle (SharedFrameworks/,
+	// Frameworks/) — paths outside devDir — and aborts if they are not accessible.
+	// Allow the whole Xcode.app bundle so xcodebuild can map its own libraries.
+	if bundle := xcodeAppBundle(devDir); bundle != "" {
+		if err := p.AllowOptional(bundle, sandbox.Exec); err != nil {
+			return nil, fmt.Errorf("detect xcode app bundle %q: %w", bundle, err)
+		}
+	}
+
 	snap := p.Snapshot()
 	return &snap, nil
+}
+
+// xcodeAppBundle walks up from devDir and returns the first ancestor whose name
+// ends in ".app", or "" if devDir is not inside an application bundle
+// (e.g. /Library/Developer/CommandLineTools).
+func xcodeAppBundle(devDir string) string {
+	dir := filepath.Dir(devDir)
+	for dir != "/" && dir != "." {
+		if strings.HasSuffix(dir, ".app") {
+			return dir
+		}
+		dir = filepath.Dir(dir)
+	}
+	return ""
 }
 
 // DetectGo returns a profile for Go toolchain, or nil if not installed.

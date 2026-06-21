@@ -26,6 +26,10 @@ func BaseEnv(home, tmpDir, workspace string) []string {
 		userName = u.Username
 	}
 
+	hostPath := os.Getenv("PATH")
+	if hostPath == "" {
+		hostPath = "/usr/bin:/bin"
+	}
 	env := []string{
 		"HOME=" + home,
 		"TMPDIR=" + tmpDir,
@@ -37,7 +41,7 @@ func BaseEnv(home, tmpDir, workspace string) []string {
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 		"FORCE_COLOR=1",
-		"PATH=/usr/bin:/bin",
+		"PATH=" + hostPath,
 	}
 
 	// Terminal env — proxy from host if present

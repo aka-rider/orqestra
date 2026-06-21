@@ -229,7 +229,7 @@ critic:
 
 worker:
   model: medium
-  permission_mode: full
+  permission_mode: bypassPermissions
   timeout: 45m
   loop_guard:
     repeat_threshold: 3

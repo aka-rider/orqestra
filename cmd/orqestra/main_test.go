@@ -271,6 +271,41 @@ func TestLeastPrivilege_NoWildcardStar(t *testing.T) {
 	}
 }
 
+// TestWorkerPermissionArgs verifies that the worker subprocess receives both
+// --permission-mode bypassPermissions and --dangerously-skip-permissions.
+// The seatbelt sandbox is the security boundary; these flags disable Claude Code's
+// own permission prompts so headless worker execution is never blocked.
+func TestWorkerPermissionArgs(t *testing.T) {
+	cfg := config.DefaultConfig()
+
+	if cfg.Worker.PermissionMode != "bypassPermissions" {
+		t.Fatalf("worker permission_mode = %q in default config, want %q; "+
+			"update internal/config/pipeline.yaml",
+			cfg.Worker.PermissionMode, "bypassPermissions")
+	}
+
+	opts := []harness.ClaudeCLIOption{
+		harness.WithPermissionMode(cfg.Worker.PermissionMode),
+		harness.WithExtraArgs("--dangerously-skip-permissions"),
+	}
+	args := harness.BuildTestArgs(opts...)
+
+	if mode := flagValue(args, "--permission-mode"); mode != "bypassPermissions" {
+		t.Errorf("--permission-mode = %q, want %q", mode, "bypassPermissions")
+	}
+
+	hasDSP := false
+	for _, arg := range args {
+		if arg == "--dangerously-skip-permissions" {
+			hasDSP = true
+			break
+		}
+	}
+	if !hasDSP {
+		t.Error("worker args missing --dangerously-skip-permissions")
+	}
+}
+
 func flagValue(args []string, flag string) string {
 	for i, arg := range args {
 		if arg == flag && i+1 < len(args) {

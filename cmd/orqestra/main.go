@@ -278,11 +278,14 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 	}
 	criticSpec.PreTimeoutNudge = preTimeoutNudgeFor("critic")
 
-	// The worker does not route through bridgeToolOpts (it runs permission_mode: full
-	// and never asks questions), so deliver its system prompt — the VALIDATION REPORT
-	// contract — explicitly here.
+	// The worker does not route through bridgeToolOpts (it never asks questions);
+	// deliver its permission mode and system prompt explicitly. The seatbelt sandbox
+	// is the security boundary — bypassPermissions + --dangerously-skip-permissions
+	// disables Claude Code's own permission prompts so headless execution is unblocked.
 	workerSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Worker.Model, workerSandboxCfg,
 		harness.WithWorkDir(repoPath),
+		harness.WithPermissionMode(cfg.Worker.PermissionMode),
+		harness.WithExtraArgs("--dangerously-skip-permissions"),
 		harness.WithAppendSystemPrompt(harness.MergeAppendPrompts(cfg.Worker.SystemPrompt, cfg.Worker.AppendSystemPrompt)))
 	if specErr != nil {
 		slog.Error("failed to build worker spec", "err", specErr)

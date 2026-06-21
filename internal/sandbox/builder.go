@@ -105,6 +105,10 @@ func (b *ProfileBuilder) Build() (string, error) {
   (subpath "/var/folders")
   (subpath "` + b.tmpDir + `"))
 
+;; User library caches (read+write — Go build cache, npm, pip, etc.)
+(allow file-read* file-write*
+  (subpath "` + b.home + `/Library/Caches"))
+
 ;; Devices
 (allow file-read* file-write*
   (regex "^/dev/(tty.*|null|zero|random|urandom|dtracehelper)"))

@@ -236,9 +236,12 @@ func Run(ctx context.Context, spec ProcessSpec, in <-chan Message, sink Sink) (R
 
 	// Bridge channel: parseStream writes here; we forward to sinkCh with drop.
 	var parseEvents chan Event
+	var bridgeDone chan struct{}
 	if sinkCh != nil {
 		parseEvents = make(chan Event, 256)
+		bridgeDone = make(chan struct{})
 		go func() {
+			defer close(bridgeDone)
 			for ev := range parseEvents {
 				select {
 				case sinkCh <- ev:
@@ -254,9 +257,15 @@ func Run(ctx context.Context, spec ProcessSpec, in <-chan Message, sink Sink) (R
 	// Signal stdin writer that the process is done.
 	close(runDone)
 
-	// Close the parse→sink bridge; wait for the sink to drain.
+	// Close the parse→sink bridge; wait for the bridge to drain before closing sinkCh.
+	// Closing parseEvents signals the bridge goroutine to stop; <-bridgeDone waits for it
+	// to finish draining the buffer — without this join, sinkCh can be closed while the
+	// bridge goroutine is still sending, causing a send-on-closed-channel race.
 	if parseEvents != nil {
 		close(parseEvents)
+	}
+	if bridgeDone != nil {
+		<-bridgeDone
 	}
 	if sinkCh != nil {
 		close(sinkCh)
