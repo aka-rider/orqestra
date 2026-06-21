@@ -63,11 +63,10 @@ func TestSetupModel_ToggleBool(t *testing.T) {
 	}
 }
 
-
 func TestSetupModel_GateToggle(t *testing.T) {
 	m := newSetupModel()
 	m.Open(orchestrator.DefaultPipelineSetup())
-	// Move to first gate item (cursor=4, GateAfterDeliberation)
+	// Move to first gate item (cursor=setupItemGateFirst, GateAfterDeliberation)
 	for i := 0; i < setupItemGateFirst; i++ {
 		m, _ = m.Update(pressKey(tea.KeyDown))
 	}
@@ -128,5 +127,83 @@ func TestSetupModel_ViewPurity(t *testing.T) {
 	v2 := m.View()
 	if v1 != v2 {
 		t.Error("View() must be pure — same state produced different output")
+	}
+}
+
+func TestSetupModel_DeliberationIncrement(t *testing.T) {
+	m := newSetupModel()
+	m.Open(orchestrator.DefaultPipelineSetup())
+
+	// Navigate to deliberation (cursor=1)
+	m, _ = m.Update(pressKey(tea.KeyDown))
+	if m.cursor != 1 {
+		t.Fatalf("cursor = %d, want 1", m.cursor)
+	}
+	if m.setup.DeliberationRounds != 1 {
+		t.Fatalf("DeliberationRounds = %d, want 1", m.setup.DeliberationRounds)
+	}
+
+	// Right → 2
+	m, _ = m.Update(pressKey(tea.KeyRight))
+	if m.setup.DeliberationRounds != 2 {
+		t.Errorf("after right: DeliberationRounds = %d, want 2", m.setup.DeliberationRounds)
+	}
+
+	// Right → 3
+	m, _ = m.Update(pressKey(tea.KeyRight))
+	if m.setup.DeliberationRounds != 3 {
+		t.Errorf("after right: DeliberationRounds = %d, want 3", m.setup.DeliberationRounds)
+	}
+
+	// Right → clamp at 3
+	m, _ = m.Update(pressKey(tea.KeyRight))
+	if m.setup.DeliberationRounds != 3 {
+		t.Errorf("after right (clamp): DeliberationRounds = %d, want 3", m.setup.DeliberationRounds)
+	}
+
+	// Left → 2
+	m, _ = m.Update(pressKey(tea.KeyLeft))
+	if m.setup.DeliberationRounds != 2 {
+		t.Errorf("after left: DeliberationRounds = %d, want 2", m.setup.DeliberationRounds)
+	}
+
+	// Left → 1
+	m, _ = m.Update(pressKey(tea.KeyLeft))
+	if m.setup.DeliberationRounds != 1 {
+		t.Errorf("after left: DeliberationRounds = %d, want 1", m.setup.DeliberationRounds)
+	}
+
+	// Left → clamp at 1
+	m, _ = m.Update(pressKey(tea.KeyLeft))
+	if m.setup.DeliberationRounds != 1 {
+		t.Errorf("after left (clamp): DeliberationRounds = %d, want 1", m.setup.DeliberationRounds)
+	}
+}
+
+func TestSetupModel_DeliberationInConfirm(t *testing.T) {
+	m := newSetupModel()
+	m.Open(orchestrator.DefaultPipelineSetup())
+
+	// Navigate to deliberation (cursor=1)
+	m, _ = m.Update(pressKey(tea.KeyDown))
+	// Change to 3
+	m, _ = m.Update(pressKey(tea.KeyRight))
+	m, _ = m.Update(pressKey(tea.KeyRight))
+	if m.setup.DeliberationRounds != 3 {
+		t.Fatalf("DeliberationRounds = %d, want 3", m.setup.DeliberationRounds)
+	}
+
+	// Confirm
+	m, _ = m.Update(pressKey(tea.KeyEnter))
+
+	if m.IsOpen() {
+		t.Error("panel should be closed after Enter")
+	}
+	intent, ok := m.PendingIntent.(ConfirmSetupIntent)
+	if !ok {
+		t.Fatalf("PendingIntent = %T, want ConfirmSetupIntent", m.PendingIntent)
+	}
+	if intent.Setup.DeliberationRounds != 3 {
+		t.Errorf("confirmed setup.DeliberationRounds = %d, want 3", intent.Setup.DeliberationRounds)
 	}
 }

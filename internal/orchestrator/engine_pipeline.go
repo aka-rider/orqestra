@@ -108,6 +108,20 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 		steps := e.buildPipelineSteps(sup)
 		setup := resolveSetup(input)
 
+		if err := setup.Validate(); err != nil {
+			obs.Finished(Result{Status: StatusFailed}, fmt.Errorf("invalid pipeline setup: %w", err))
+			return
+		}
+
+		// Wire deliberation rounds into the step. HasCritic=false is handled by the early
+		// return inside DeliberateStep.Run, so Rounds is irrelevant in that case.
+		deliberate, ok := steps.Deliberate.(*DeliberateStep)
+		if !ok {
+			obs.Finished(Result{Status: StatusFailed}, fmt.Errorf("internal: Deliberate step is not *DeliberateStep"))
+			return
+		}
+		deliberate.Rounds = setup.DeliberationRounds
+
 		result, err := RunPipeline(ctx, setup, PipelineRunInput{
 			Prompt: input.Prompt,
 			RunID:  filepath.Base(session.Path),
