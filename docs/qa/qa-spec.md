@@ -23,6 +23,8 @@
 
 **Status** — `covered` (a real gate cites it) · `gap` (no real gate) · `defect` (a confirmed bug; a live canary proves it; see §4).
 
+**Run outcomes** — a test run yields one of three: **GREEN** (all gates pass), **RED** (a gate fails), or **NO-VERDICT** (the harness hung, timed out, crashed, or failed to build). NO-VERDICT is the **worst** — a gate that never returns is neither pass nor fail, so it silently defeats every other gate. It is treated as failure, never "probably fine." `make test` is bounded so a hang becomes a NO-VERDICT (§11, §12).
+
 ## 1. What Orqestra is (grounded)
 
 Orqestra runs a coding task through a chain of LLM agents and is **designed to complete without a human**. `[V internal/config/pipeline.yaml]` defines the roles; the Go engine drives them headless.
@@ -135,6 +137,12 @@ Keystone invariants only — one or two per pillar, not exhaustive. Format: stat
 - **Falsified by:** a code path where `Run` can block forever (the old DEFECT-01 hang) or where `EventSessionStart` is never emitted (the old DEFECT-05).
 - Seam/Layer: L1 via the replay stub through real seatbelt — `TestHarnessRun_TerminatesWhenProcessExits`. Status: **covered** (both were red pre-refactor; now green).
 
+**INV-HARNESS-VERDICT** `make test` runs under a hard wall-clock deadline and always yields a verdict: a hang/timeout becomes a bounded **NO-VERDICT** (the process group is killed), never an indefinite hang; on completion it emits a `QA-ATTEST` token.
+- Evidence: `[V internal/qarun/run.go#Run]` (deadline → SIGKILL the process group → NoVerdict); `[V cmd/qarun/main.go#main]` (QA-ATTEST on completion, NO-VERDICT exit 124); routed via `[V Makefile]`.
+- Observable: a hanging child is killed at the deadline and reported NO-VERDICT promptly (`TestRun_NoVerdictOnHang`).
+- **Falsified by:** removing the deadline/process-group kill, or routing `make test` around qarun → the harness-verdict check turns RED.
+- Seam/Layer: L1 unit (a fake hanging command). Status: **covered**.
+
 ## 4. Confirmed defects (the falsification targets)
 
 Each defect was verified red-first; the red→green transition is how a gate proves it is real. Status is reconciled against `flexible-pipeline` and is **machine-checked**: anchors and canaries live in `invariants.yaml`, and live canaries run in `make test`, so this table cannot drift silently from reality. Anchors are **symbols** (line numbers rot).
@@ -201,6 +209,7 @@ The status column is **generated** from `docs/qa/invariants.yaml` by `make qa-ve
 |-----------|--------|-------|--------|
 | INV-H1-CLOSE | P1 | L1 | covered |
 | INV-H2-SESSIONID | P1 | L1 | covered |
+| INV-HARNESS-VERDICT | P3 | L1 | covered |
 | INV-O1-FLOW | P6 | L2 | gap |
 | INV-P1-EXEC | P1 | L2 | gap |
 | INV-P1-PLANSRC | P1 | L0 | covered |
@@ -247,3 +256,20 @@ Premise to reject: *"force the model to journal in/out of the spec."* The model 
 **What `make test` does NOT guarantee:** that a `covered` test is itself non-fiction (it could be a tautology). That boundary is held by the §6 ban-list enforced by the critic. The build guarantees *structure* (anchors valid, status honest, canaries with teeth); the critic guarantees the *test is real*. Two layers, deliberately.
 
 **Honest limit:** a determined human+model can rip it all out. The goal is not prevention but to make the dishonest path **cost more than the honest one and turn the build red/attributable when taken** — the same bar Orqestra sets for its own workers.
+
+## 12. The hang, and the LLM tripwire
+
+**Post-mortem (the failure this section answers).** Across several turns the assistant reported the suite "green" without ever observing it terminate. Two causes: (a) the `TestSpecIntegrity` walk recursed into nested `.claude`/`.orqestra` worktrees (237 test files across 9 nested checkouts, with `.orqestra/…/.orqestra` nesting) → an unbounded walk → the suite hung; (b) a wall of `ok` lines was mistaken for completion. A hang is a **NO-VERDICT**: it yields neither pass nor fail, so every gate is defeated and any "green" report is a hallucination.
+
+**Fixes.**
+- *Root cause:* the integrity walk now skips `.claude`/`.orqestra` — `[V internal/qaspec/checks.go#skipDirs]`.
+- *Bound:* `make test` runs through `cmd/qarun`, which kills the process group at a deadline and reports **NO-VERDICT** instead of hanging — INV-HARNESS-VERDICT.
+- *Attestation:* on genuine completion qarun emits `QA-ATTEST commit=<sha> dur=<s> SUITE-COMPLETE`. This token is the **only** valid evidence the suite passed — it cannot exist without a run that actually finished.
+
+**The tripwire.** Green is now unfakeable without completion: a hang or partial run cannot produce a `QA-ATTEST`. Two machine checks (run in `make test` via `TestSpecIntegrity`) keep it intact:
+- **harness-verdict** — `make test` must route through `cmd/qarun`, and qarun must still emit the verdict tokens; gutting the bound or the attestation turns it RED.
+- **forbidden-claim** — prose may not assert the suite passed; such a statement is rot unless it quotes a fresh `QA-ATTEST`.
+
+And the norm (`CLAUDE.md`): never report the suite green without quoting a fresh `QA-ATTEST`; a hang/timeout is NO-VERDICT, treated as failure.
+
+**Honest limit.** A pure chat-level false claim cannot be machine-prevented. This removes the ability to *obtain* a green signal without completion and to *encode* a green claim in the repo, and binds the norm; the residue is the critic's job.

@@ -119,3 +119,11 @@ file over 500 lines is a smell — split by entity; don't pile onto a known offe
 concurrency, streaming, sandbox, harness, or orchestrator state. Never use `time.Sleep` to
 synchronize tests — use channels, contexts, or fake clocks. The full per-domain invariant matrix
 and the CLI-log debugging guide live in `.github/agent-instructions.md`.
+
+**Verdicts, not vibes.** A test run is GREEN, RED, or **NO-VERDICT** (hang/timeout/crash/build-fail).
+NO-VERDICT is the worst — a gate that never returns defeats every gate. `make test` runs through
+`cmd/qarun` under a hard deadline, so a hang becomes a bounded NO-VERDICT and a real run prints a
+`QA-ATTEST … SUITE-COMPLETE` line. **Never report `make test` green without quoting a fresh
+`QA-ATTEST`**; a hang/timeout is NO-VERDICT — treat it as failure, never "probably fine." Per-package
+`ok` lines are not completion; the spec self-defends in `make test` via
+`internal/qaspec.TestSpecIntegrity` (see `docs/qa/qa-spec.md`).

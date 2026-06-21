@@ -117,6 +117,16 @@ invariants:
       - {file: internal/harness/runner.go, symbol: EventSessionStart}
     tests: [TestHarnessRun_TerminatesWhenProcessExits]
 
+  - id: INV-HARNESS-VERDICT
+    pillar: P3
+    layer: L1
+    status: covered        # make test routes through cmd/qarun: hang -> bounded NO-VERDICT
+    anchors:
+      - {file: internal/qarun/run.go, symbol: NoVerdict}
+      - {file: cmd/qarun/main.go, symbol: QA-ATTEST}
+      - {file: Makefile, symbol: cmd/qarun}
+    tests: [TestRun_NoVerdictOnHang]
+
 # Canaries: each proves a confirmed defect (§4) is still live. A canary with a
 # canary_test is RUN by `make qa-verify` and must pass; gate_test names the real
 # gate that should replace it once the bug is fixed.

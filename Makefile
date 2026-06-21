@@ -17,8 +17,12 @@ run: build
 #   make test-sandbox     — macOS sandbox tests (requires sandbox-exec, darwin only)
 #   make e2e              — end-to-end tests (requires real claude CLI + API)
 
+# `make test` runs through cmd/qarun: the suite under a hard wall-clock deadline
+# (per-package -timeout + outer QA_DEADLINE) so a hang is a bounded NO-VERDICT,
+# never an indefinite hang. On success it prints a QA-ATTEST line — the only
+# valid proof the suite passed. Never report green without that line.
 test:
-	go test -race -coverprofile=coverage.out -covermode=atomic ./...
+	go run ./cmd/qarun
 
 # Requires: git in PATH, go build access. Runs worktree lifecycle and CLI smoke tests.
 test-integration:

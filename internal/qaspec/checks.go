@@ -16,8 +16,14 @@ var (
 	// in any evidence tier — line numbers rot; anchors must be symbols.
 	lineAnchorPattern = regexp.MustCompile(`[A-Za-z0-9_.-]+\.(?:go|ya?ml|md):[0-9]`)
 
+	// greenClaimRe / claimMetaRe back the forbidden-claim tripwire: a prose
+	// assertion that the suite passed is rot unless it quotes a real QA-ATTEST.
+	// claimMetaRe excludes meta/rule lines (which discuss the rule, not assert green).
+	greenClaimRe = regexp.MustCompile(`(?i)make test.{0,30}(✅|\bgreen\b|\bpass(?:es|ing|ed)\b)`)
+	claimMetaRe  = regexp.MustCompile(`(?i)never|without|no green|no-verdict|qa-attest|must not|forbidden|do ?n.t|do not|\bclaim|hallucinat|attest|cannot|unfakeable|only valid|proof|bound`)
+
 	validStatuses = map[string]bool{"gap": true, "covered": true, "defect": true}
-	skipDirs      = map[string]bool{".git": true, "vendor": true, "bin": true, "node_modules": true}
+	skipDirs      = map[string]bool{".git": true, "vendor": true, "bin": true, "node_modules": true, ".claude": true, ".orqestra": true}
 )
 
 // Report accumulates hard failures (a red build) and soft notes (informational).
@@ -52,6 +58,8 @@ func Static(root string) (Report, error) {
 	checkLedger(root, reg, &rep)
 	checkProseAnchors(root, &rep)
 	checkTestHygiene(root, &rep)
+	checkHarnessVerdict(root, &rep)
+	checkForbiddenClaims(root, &rep)
 	return rep, nil
 }
 
@@ -263,6 +271,77 @@ func checkTestHygiene(root string, rep *Report) {
 	if err != nil {
 		rep.failf("test-hygiene: walk: %v", err)
 	}
+}
+
+// checkHarnessVerdict protects INV-HARNESS-VERDICT: `make test` must route
+// through cmd/qarun (so a hang is a bounded NO-VERDICT, not an indefinite hang),
+// and qarun must still emit the verdict/attestation tokens. Silently gutting the
+// bound or the attestation turns this RED.
+func checkHarnessVerdict(root string, rep *Report) {
+	mk, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil {
+		rep.failf("harness-verdict: read Makefile: %v", err)
+	} else if !testTargetRoutesThrough(string(mk), "qarun") {
+		rep.failf("harness-verdict: the `make test` recipe no longer routes through cmd/qarun — a hang would be unbounded (NO-VERDICT silently defeats every gate)")
+	}
+	qr, err := os.ReadFile(filepath.Join(root, "cmd", "qarun", "main.go"))
+	if err != nil {
+		rep.failf("harness-verdict: read cmd/qarun/main.go: %v", err)
+		return
+	}
+	for _, tok := range []string{"QA-ATTEST", "NO-VERDICT"} {
+		if !strings.Contains(string(qr), tok) {
+			rep.failf("harness-verdict: cmd/qarun no longer emits %q — the verdict/attestation mechanism is broken", tok)
+		}
+	}
+}
+
+// checkForbiddenClaims is the LLM tripwire's machine half: prose must not assert
+// the suite passed (a "green" claim) — green is proven only by a fresh QA-ATTEST
+// from a completed run, never by a doc claim. Code fences and meta/rule lines
+// (which discuss the rule) are exempt via claimMetaRe.
+func checkForbiddenClaims(root string, rep *Report) {
+	for _, rel := range []string{SpecRel, "README.md", "CLAUDE.md"} {
+		data, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			continue // optional docs
+		}
+		inFence := false
+		for i, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "```") {
+				inFence = !inFence
+				continue
+			}
+			if inFence {
+				continue
+			}
+			if greenClaimRe.MatchString(line) && !claimMetaRe.MatchString(line) {
+				rep.failf("forbidden-claim: %s:%d asserts test success in prose (%q) — green is proven only by a fresh QA-ATTEST, not a doc claim", rel, i+1, strings.TrimSpace(line))
+			}
+		}
+	}
+}
+
+// testTargetRoutesThrough reports whether the `test:` target's recipe (the
+// TAB-indented lines, not comments elsewhere) contains needle.
+func testTargetRoutesThrough(makefile, needle string) bool {
+	inRecipe := false
+	for _, ln := range strings.Split(makefile, "\n") {
+		if strings.HasPrefix(ln, "test:") {
+			inRecipe = true
+			continue
+		}
+		if inRecipe {
+			if strings.HasPrefix(ln, "\t") {
+				if strings.Contains(ln, needle) {
+					return true
+				}
+				continue
+			}
+			inRecipe = false // a non-recipe line ends the target
+		}
+	}
+	return false
 }
 
 func isPathLike(p string) bool {
