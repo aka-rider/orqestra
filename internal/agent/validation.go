@@ -45,7 +45,8 @@ type ValidationOutput struct {
 // Verdict rules:
 //   - Any failed check → VerdictFail
 //   - No failures, any skipped → VerdictWarn
-//   - All passed (or no recognised checks) → VerdictPass
+//   - All checks passed (at least one) → VerdictPass
+//   - No recognised checks → VerdictFail (fail-closed: no evidence ≠ evidence of pass)
 func ParseValidationOutput(raw string) ValidationOutput {
 	var checks []CheckResult
 	for _, line := range strings.Split(raw, "\n") {
@@ -75,6 +76,11 @@ func ParseValidationOutput(raw string) ValidationOutput {
 			Outcome:   outcome,
 			Criterion: strings.TrimSpace(rest),
 		})
+	}
+
+	// Fail-closed: no marker-prefixed lines means no evidence of success.
+	if len(checks) == 0 {
+		return ValidationOutput{Checks: nil, Verdict: VerdictFail, Raw: raw}
 	}
 
 	verdict := VerdictPass

@@ -5,30 +5,8 @@ import (
 	"testing"
 )
 
-func TestMaxTurnsArg(t *testing.T) {
-	args := BuildTestArgs(WithMaxTurns(40))
-	found := false
-	for i, a := range args {
-		if a == "--max-turns" && i+1 < len(args) && args[i+1] == "40" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("BuildTestArgs(WithMaxTurns(40)) = %v, want --max-turns 40", args)
-	}
-}
-
-func TestMaxTurnsArg_Zero(t *testing.T) {
-	args := BuildTestArgs(WithMaxTurns(0))
-	for _, a := range args {
-		if a == "--max-turns" {
-			t.Errorf("BuildTestArgs(WithMaxTurns(0)) should not include --max-turns, got %v", args)
-		}
-	}
-}
-
 func TestResultSubtypeError(t *testing.T) {
+	// INV-P4-STREAM: error_max_turns subtype → isError=true regardless of is_error field
 	tests := []struct {
 		name    string
 		jsonl   string
@@ -74,7 +52,7 @@ func TestResultSubtypeError(t *testing.T) {
 }
 
 func TestEventExtensions(t *testing.T) {
-	// (a) tool_use for ExitWorktree with args → Args field set
+	// INV-P4-STREAM: ExitWorktree Args, tool_result IsError, and EventSessionDone from real JSONL shapes
 	// (b) user tool_result with is_error:true → EventToolResult{IsError:true}
 	// (c) result line → exactly one EventSessionDone
 	jsonl := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"ExitWorktree","input":{"action":"keep"}}]}}

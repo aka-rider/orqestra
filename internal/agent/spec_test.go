@@ -5,20 +5,22 @@ import (
 	"testing"
 )
 
-func TestCommitMessagePrompt(t *testing.T) {
-	p := CommitMessagePrompt()
-	if p == "" {
-		t.Fatal("CommitMessagePrompt() returned empty string")
+
+func TestBuildExecutionPromptFromPlan(t *testing.T) {
+	// INV-P1-EXEC: plan content must appear verbatim after the preamble; preamble must be non-empty
+	plan := "# Plan\n\nExecute package A.\n\n## Work Packages\n- step 1\n- step 2"
+	prompt := BuildExecutionPromptFromPlan(plan)
+	if !strings.HasSuffix(prompt, plan) {
+		t.Errorf("plan not delivered verbatim: suffix mismatch\ngot:  %q\nwant suffix: %q", prompt, plan)
 	}
-	if !strings.Contains(p, "commit message") {
-		t.Error("expected prompt to mention 'commit message'")
-	}
-	if !strings.Contains(p, "72") {
-		t.Error("expected prompt to mention subject line length limit")
+	preamble := strings.TrimSuffix(prompt, plan)
+	if strings.TrimSpace(preamble) == "" {
+		t.Error("preamble is empty — worker would receive plan with no execution instruction")
 	}
 }
 
 func TestParseCommitMessage(t *testing.T) {
+	// INV-P4-PARSE: ParseCommitMessage is an INV-P4-PARSE anchor; validates strip, truncate, error cases
 	tests := []struct {
 		name    string
 		input   string

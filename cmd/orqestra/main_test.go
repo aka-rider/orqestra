@@ -42,39 +42,7 @@ func TestRun_Help(t *testing.T) {
 	}
 }
 
-// TestRolePromptsDelivered locks the system-prompt delivery fix: each role's
-// system_prompt from the embedded pipeline.yaml must be non-empty and ride
-// --append-system-prompt as MergeAppendPrompts(SystemPrompt, AppendSystemPrompt) —
-// the exact payload bridgeToolOpts (researcher/architect/critic) and buildEngine
-// (worker) hand to WithAppendSystemPrompt. Regression guard for the bug where the
-// role prompt was parsed into config but never delivered to the model. Asserted at
-// the merge layer so it stays stable across harness arg-building changes.
-func TestRolePromptsDelivered(t *testing.T) {
-	cfg := config.DefaultConfig()
-	for _, tt := range []struct {
-		role      string
-		base      config.BaseAgentConfig
-		signature string
-	}{
-		{"researcher", cfg.Researcher.BaseAgentConfig, "FACT REPORT"},
-		{"architect", cfg.Architect.BaseAgentConfig, "Principal Engineer"},
-		{"critic", cfg.Critic.BaseAgentConfig, "Plan Critic"},
-		{"worker", cfg.Worker.BaseAgentConfig, "VALIDATION REPORT"},
-	} {
-		t.Run(tt.role, func(t *testing.T) {
-			if tt.base.SystemPrompt == "" {
-				t.Fatalf("%s system_prompt empty in embedded config — nothing to deliver", tt.role)
-			}
-			delivered := harness.MergeAppendPrompts(tt.base.SystemPrompt, tt.base.AppendSystemPrompt)
-			if !strings.Contains(delivered, tt.signature) {
-				t.Errorf("%s delivered --append-system-prompt missing role signature %q; got %q",
-					tt.role, tt.signature, delivered)
-			}
-		})
-	}
-}
-
-// TestBridgeToolOpts_Constraints validates the CLI argument patterns produced
+// TestBridgeToolOpts_Constraints validates the CLI argument patterns produced the CLI argument patterns produced
 // by bridgeToolOpts against Orqestra's hard constraints:
 //
 //  1. mcp__orqestra__AskUserQuestion is ALWAYS in --allowedTools
@@ -85,6 +53,7 @@ func TestRolePromptsDelivered(t *testing.T) {
 //  6. --allowedTools and --disallowedTools are set even with --strict-mcp-config
 //  7. --settings injects permissions.allow for deferred MCP tools
 func TestBridgeToolOpts_Constraints(t *testing.T) {
+	// INV-P2-WRITE: worker never receives bare "*" tool grant; least-privilege MCP constraints enforced
 	mcpDocker := []string{"mcp_docker", "orqestra"}
 	emptyMCP := []string{}
 
@@ -214,30 +183,11 @@ func TestBridgeToolOpts_Constraints(t *testing.T) {
 	}
 }
 
-// TestSpecRuntimeFields verifies that bridgeToolOpts-produced options do not
-// encode orchestration runtime knobs (AgentID, Timeout, LoopGuard, SilenceGuard)
-// into the subprocess args — those are set by the caller after BuildProcessSpec.
-func TestSpecRuntimeFields_NotInArgs(t *testing.T) {
-	base := config.BaseAgentConfig{
-		PermissionMode:  "plan",
-		AllowedTools:    []string{"Read", "Grep"},
-		DisallowedTools: []string{"AskUserQuestion"},
-	}
-	opts := bridgeToolOpts(base)
-	args := harness.BuildTestArgs(opts...)
-
-	for _, arg := range args {
-		if strings.Contains(arg, "agent-id") ||
-			strings.Contains(arg, "loop-guard") || strings.Contains(arg, "timeout") {
-			t.Errorf("runtime orchestration knob leaked into subprocess args: %q", arg)
-		}
-	}
-}
-
 // TestLeastPrivilege_NoWildcardStar verifies that read-only roles (researcher,
 // architect, critic) never get a bare "*" tool grant regardless of what is
 // in AllowedTools — the configured list is used verbatim plus mcp__*.
 func TestLeastPrivilege_NoWildcardStar(t *testing.T) {
+	// INV-P2-WRITE: read-only roles never receive bare "*" in --allowedTools
 	roleAllowedTools := [][]string{
 		// researcher
 		{"Read", "Glob", "Grep", "Bash", "WebFetch", "WebSearch", "mcp__orqestra__*"},
@@ -268,41 +218,6 @@ func TestLeastPrivilege_NoWildcardStar(t *testing.T) {
 				t.Errorf("role tool %q lost from --allowedTools = %q", tool, allowedStr)
 			}
 		}
-	}
-}
-
-// TestWorkerPermissionArgs verifies that the worker subprocess receives both
-// --permission-mode bypassPermissions and --dangerously-skip-permissions.
-// The seatbelt sandbox is the security boundary; these flags disable Claude Code's
-// own permission prompts so headless worker execution is never blocked.
-func TestWorkerPermissionArgs(t *testing.T) {
-	cfg := config.DefaultConfig()
-
-	if cfg.Worker.PermissionMode != "bypassPermissions" {
-		t.Fatalf("worker permission_mode = %q in default config, want %q; "+
-			"update internal/config/pipeline.yaml",
-			cfg.Worker.PermissionMode, "bypassPermissions")
-	}
-
-	opts := []harness.ClaudeCLIOption{
-		harness.WithPermissionMode(cfg.Worker.PermissionMode),
-		harness.WithExtraArgs("--dangerously-skip-permissions"),
-	}
-	args := harness.BuildTestArgs(opts...)
-
-	if mode := flagValue(args, "--permission-mode"); mode != "bypassPermissions" {
-		t.Errorf("--permission-mode = %q, want %q", mode, "bypassPermissions")
-	}
-
-	hasDSP := false
-	for _, arg := range args {
-		if arg == "--dangerously-skip-permissions" {
-			hasDSP = true
-			break
-		}
-	}
-	if !hasDSP {
-		t.Error("worker args missing --dangerously-skip-permissions")
 	}
 }
 

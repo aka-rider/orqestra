@@ -6,7 +6,7 @@ import (
 )
 
 func TestParseSessionLogStream_ExtractsActivitiesAndText(t *testing.T) {
-	// Simulate a JSONL session log with assistant text and tool use events
+	// INV-P4-STREAM: tool_use and text events extracted correctly from session log stream
 	logLines := []string{
 		`{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello world\n"}}`,
 		`{"type":"content_block_start","content_block":{"type":"tool_use","name":"Read","input":{"file_path":"go.mod"}}}`,
@@ -53,6 +53,7 @@ func TestParseSessionLogStream_ExtractsActivitiesAndText(t *testing.T) {
 }
 
 func TestParseSessionLogStream_EmptyInput(t *testing.T) {
+	// INV-P4-STREAM: empty input degrades gracefully — no events, no error
 	updates, err := ParseSessionLogStream(strings.NewReader(""))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -63,6 +64,7 @@ func TestParseSessionLogStream_EmptyInput(t *testing.T) {
 }
 
 func TestParseSessionLogStream_InvalidJSON(t *testing.T) {
+	// INV-P4-STREAM: malformed JSON lines are skipped, not fatal
 	input := "not json\n{also bad\n"
 	updates, err := ParseSessionLogStream(strings.NewReader(input))
 	if err != nil {
@@ -74,7 +76,7 @@ func TestParseSessionLogStream_InvalidJSON(t *testing.T) {
 }
 
 func TestParseSessionLogStream_AssistantMessage(t *testing.T) {
-	// Full assistant message with tool_use content blocks
+	// INV-P4-STREAM: assistant message with mixed text+tool_use content blocks
 	logLine := `{"type":"assistant","message":{"content":[{"type":"text","text":"Analyzing...\n"},{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}`
 	updates, err := ParseSessionLogStream(strings.NewReader(logLine))
 	if err != nil {

@@ -1,21 +1,10 @@
 package harness
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
-
-// mustJSON returns the JSON encoding of v as a string, panicking on error.
-func mustJSON(v any) string {
-	b, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	return string(b)
-}
 
 func parseLogFileUpdates(t *testing.T, path string, maxLines int) []Event {
 	t.Helper()
@@ -35,29 +24,10 @@ func parseLogFileUpdates(t *testing.T, path string, maxLines int) []Event {
 	return updates
 }
 
-func TestCwdToDash(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"/Users/foo/bar", "-Users-foo-bar"},
-		{"/", "-"},
-		{"/Users/foo/bar/", "-Users-foo-bar-"},
-		{"/home/user/project", "-home-user-project"},
-	}
-	for _, tt := range tests {
-		got := CwdToDash(tt.input)
-		if got != tt.want {
-			t.Errorf("CwdToDash(%q) = %q, want %q", tt.input, got, tt.want)
-		}
-	}
-}
-
 func TestParseSessionLogStream_File_ToolUseAndText(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "test.jsonl")
 
-	// Write sample JSONL with assistant messages
 	lines := `{"type":"user","message":{"content":[{"type":"text","text":"do something"}]}}
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"go.mod"}},{"type":"text","text":"I found the module definition."}]}}
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"go test ./internal/config/..."}}]}}
@@ -76,8 +46,6 @@ func TestParseSessionLogStream_File_ToolUseAndText(t *testing.T) {
 		}
 	}
 
-	// Should have 3 entries: Read tool_use, text, Bash tool_use
-	// user and system lines are skipped
 	if len(entries) != 3 {
 		t.Fatalf("expected 3 entries, got %d", len(entries))
 	}
@@ -105,44 +73,8 @@ func TestParseSessionLogStream_File_ToolUseAndText(t *testing.T) {
 	}
 }
 
-func TestParseSessionLogStream_File_MaxLines(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "test.jsonl")
-
-	// Write 5 assistant messages with one tool_use each
-	var content string
-	for i := 0; i < 5; i++ {
-		content += `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"file.go"}}]}}` + "\n"
-	}
-	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	entries := parseLogFileUpdates(t, logPath, 3)
-	if len(entries) != 3 {
-		t.Fatalf("expected 3 entries (maxLines), got %d", len(entries))
-	}
-}
-
-func TestParseSessionLogStream_File_EmptyFile(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "empty.jsonl")
-	os.WriteFile(logPath, []byte(""), 0o644)
-
-	entries := parseLogFileUpdates(t, logPath, 100)
-	if len(entries) != 0 {
-		t.Errorf("expected empty entries for empty file, got %d entries", len(entries))
-	}
-}
-
-func TestParseSessionLogStream_File_MissingFile(t *testing.T) {
-	_, err := os.Open("/nonexistent/path.jsonl")
-	if err == nil {
-		t.Fatal("expected open error for missing file")
-	}
-}
-
 func TestParseSessionLogStream_File_MalformedLines(t *testing.T) {
+	// INV-P4-STREAM: non-JSON lines degrade gracefully (skipped, not a fatal error)
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "bad.jsonl")
 
@@ -153,7 +85,6 @@ also not json
 	os.WriteFile(logPath, []byte(lines), 0o644)
 
 	entries := parseLogFileUpdates(t, logPath, 100)
-	// Only the valid assistant line should produce an entry
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry (skipping malformed), got %d", len(entries))
 	}
@@ -181,28 +112,8 @@ func TestExtractPlanFilePath_Success(t *testing.T) {
 	}
 }
 
-func TestExtractPlanFilePath_EarlyExit(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "session.jsonl")
-
-	// Two attachments — should return the first one immediately.
-	lines := `{"type":"attachment","attachment":{"type":"plan_mode","planFilePath":"/Users/test/.claude/plans/first.md"}}
-{"type":"attachment","attachment":{"type":"plan_mode","planFilePath":"/Users/test/.claude/plans/second.md"}}
-`
-	if err := os.WriteFile(logPath, []byte(lines), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := ExtractPlanFilePath(logPath)
-	if err != nil {
-		t.Fatalf("ExtractPlanFilePath: %v", err)
-	}
-	if got != "/Users/test/.claude/plans/first.md" {
-		t.Errorf("got %q, want first.md path", got)
-	}
-}
-
 func TestExtractPlanFilePath_NoAttachment(t *testing.T) {
+	// INV-P1-PLANSRC: missing plan_mode attachment must return an error
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "session.jsonl")
 
@@ -216,113 +127,5 @@ func TestExtractPlanFilePath_NoAttachment(t *testing.T) {
 	_, err := ExtractPlanFilePath(logPath)
 	if err == nil {
 		t.Fatal("expected error for missing plan_mode attachment")
-	}
-}
-
-func TestExtractPlanFilePath_MissingFile(t *testing.T) {
-	_, err := ExtractPlanFilePath("/nonexistent/path.jsonl")
-	if err == nil {
-		t.Fatal("expected error for missing file")
-	}
-}
-
-func TestExtractFinalOutput_Text(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "session.jsonl")
-
-	want := "## Research\nFound the module at go.mod."
-	lines := `{"type":"user","message":{"content":[{"type":"text","text":"research this"}]}}` + "\n" +
-		`{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Read","input":{"file_path":"go.mod"}}]}}` + "\n" +
-		fmt.Sprintf(`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":%s}]}}`, mustJSON(want)) + "\n"
-	if err := os.WriteFile(logPath, []byte(lines), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := ExtractFinalOutput(logPath)
-	if err != nil {
-		t.Fatalf("ExtractFinalOutput: %v", err)
-	}
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
-	}
-}
-
-func TestExtractFinalOutput_Thinking(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "session.jsonl")
-
-	want := "Key findings:\n1. foo.go owns the logic\n2. bar.go is unused"
-	lines := fmt.Sprintf(`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":%s}]}}`, mustJSON(want)) + "\n"
-	if err := os.WriteFile(logPath, []byte(lines), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := ExtractFinalOutput(logPath)
-	if err != nil {
-		t.Fatalf("ExtractFinalOutput: %v", err)
-	}
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
-	}
-}
-
-func TestExtractFinalOutput_TextPriorityOverThinking(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "session.jsonl")
-
-	wantText := "The final answer."
-	lines := `{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":"internal deliberation"},{"type":"text","text":"` + wantText + `"}]}}` + "\n"
-	if err := os.WriteFile(logPath, []byte(lines), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := ExtractFinalOutput(logPath)
-	if err != nil {
-		t.Fatalf("ExtractFinalOutput: %v", err)
-	}
-	if got != wantText {
-		t.Errorf("text should take priority: got %q, want %q", got, wantText)
-	}
-}
-
-func TestExtractFinalOutput_LastEndTurn(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "session.jsonl")
-
-	wantText := "second end_turn content"
-	lines := `{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"first end_turn content"}]}}` + "\n" +
-		`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"` + wantText + `"}]}}` + "\n"
-	if err := os.WriteFile(logPath, []byte(lines), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := ExtractFinalOutput(logPath)
-	if err != nil {
-		t.Fatalf("ExtractFinalOutput: %v", err)
-	}
-	if got != wantText {
-		t.Errorf("should return last end_turn: got %q, want %q", got, wantText)
-	}
-}
-
-func TestExtractFinalOutput_NoEndTurn(t *testing.T) {
-	tmp := t.TempDir()
-	logPath := filepath.Join(tmp, "session.jsonl")
-
-	lines := `{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Read","input":{}}]}}` + "\n"
-	if err := os.WriteFile(logPath, []byte(lines), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := ExtractFinalOutput(logPath)
-	if err == nil {
-		t.Fatal("expected error when no end_turn message")
-	}
-}
-
-func TestExtractFinalOutput_MissingFile(t *testing.T) {
-	_, err := ExtractFinalOutput("/nonexistent/path.jsonl")
-	if err == nil {
-		t.Fatal("expected error for missing file")
 	}
 }

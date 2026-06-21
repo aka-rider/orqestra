@@ -17,12 +17,13 @@
 invariants:
   - id: INV-P1-EXEC
     pillar: P1
-    layer: L2
-    status: gap
+    layer: L0
+    status: covered
     anchors:
       - {file: internal/agent/spec.go, symbol: BuildExecutionPromptFromPlan}
       - {file: internal/orchestrator/step_execute.go, symbol: BuildExecutionPromptFromPlan}
-    tests: []
+    tests:
+      - TestBuildExecutionPromptFromPlan
 
   - id: INV-P1-PLANSRC
     pillar: P1
@@ -31,25 +32,58 @@ invariants:
     anchors:
       - {file: internal/agent/plan_extract.go, symbol: ReadPlan}
       - {file: internal/agent/plan_extract.go, symbol: ReadPlanFile}
-    tests: [TestReadPlan_SecurityGate]
+    tests:
+      - TestReadPlan_SecurityGate
+      - TestReadPlan_EmptyPlanFile
+      - TestReadPlan_NoSessionID
+      - TestReadPlan_MissingJSONL
+      - TestReadPlan_UsesStreamPlanFilePath
+      - TestReadPlan_PlanFileNeverWritten
+      - TestReadPlan_JSONLTextFallback
+      - TestReadPlan_JSONLThinkingFallback
+      - TestReadPlan_JSONLTextBeforeThinking
+      - TestReadPlan_JSONLFallbackNoContent
+      - TestReadPlan_FallbackDisabled
+      - TestExtractPlanFilePath_Success
+      - TestExtractPlanFilePath_NoAttachment
+      - TestExtractPlanFilePath_RealFixture
+      - TestExtractPlanFilePath_NoPlanAttachment_RealFixture
 
   - id: INV-P2-WRITE
     pillar: P2
     layer: L1
-    status: gap            # real sandbox tests exist (darwin) but are not yet linked to this ID
+    status: covered
     anchors:
       - {file: internal/sandbox/sandbox.go, symbol: New}
       - {file: internal/sandbox/sandbox.go, symbol: Wrap}
-    tests: []
+    tests:
+      - TestDeny_WriteOutsideWorkspace
+      - TestDeny_ReadFileOutsideAllowlist
+      - TestSeatbelt_ReadonlyRepoWriteDenied
+      - TestSeatbelt_WorkerRepoWriteAllowed
+      - TestDeny_ExecArbitraryBinary
+      - TestAllow_WriteInWorkspace
+      - TestAllow_ReadFromProfile
+      - TestSeatbelt_ReadonlySessionWriteAllowed
+      - TestAllow_ExecFromProfile
+      - TestSandbox_NewValidation
+      - TestBaseEnv_NoLeak
+      - TestBridgeToolOpts_Constraints
+      - TestLeastPrivilege_NoWildcardStar
+      - TestClaudeCLI_InSandbox
+      - TestClaudeCLI_SandboxDeniesSSH
 
   - id: INV-P3-VALID
     pillar: P3
     layer: L1
-    status: defect
+    status: covered        # DEFECT-02 fixed: empty/marker-less output → VerdictFail (fail-closed)
     anchors:
       - {file: internal/agent/validation.go, symbol: ParseValidationOutput}
       - {file: internal/orchestrator/step_validate.go, symbol: ParseValidationOutput}
-    tests: []
+    tests:
+      - TestDeriveVerdict
+      - TestParseValidationOutput
+      - TestCanary_DEFECT02_EmptyValidationParsesPass
 
   - id: INV-P3-DEGRADE
     pillar: P3
@@ -62,35 +96,75 @@ invariants:
   - id: INV-P4-PARSE
     pillar: P4
     layer: L0
-    status: gap
+    status: covered
     anchors:
       - {file: internal/agent/validation.go, symbol: ParseValidationOutput}
       - {file: internal/agent/spec.go, symbol: ParseCommitMessage}
-    tests: []
+    tests:
+      - TestParseCommitMessage
+      - TestParseValidationOutput
+      - TestPath_EmptyString
+      - TestPath_NullByteInjection
+      - TestPath_RelativePath
+      - TestPath_DirectoryTraversal
+      - TestPath_MaxLengthExceeded
+      - TestPath_RecursiveSymlink
+      - TestPath_BrokenSymlink
+      - TestWrap_EmptyCommand
+      - TestStreamEventsFrom
 
   - id: INV-P4-STREAM
     pillar: P4
     layer: L0
-    status: gap
+    status: covered
     anchors:
       - {file: internal/harness/stream_event.go, symbol: parseStreamLines}
-    tests: []
+    tests:
+      - TestResultSubtypeError
+      - TestEventExtensions
+      - TestParseSessionLogStream_File_MalformedLines
+      - TestParseSessionLogStream_InvalidJSON
+      - TestParseSessionLogStream_ExtractsActivitiesAndText
+      - TestParseSessionLogStream_EmptyInput
+      - TestParseSessionLogStream_AssistantMessage
+      - TestStreamEventToolUse
+      - TestStreamEventTextDelta
+      - TestParseSessionLogStream_File_ToolUseAndText
+      - TestParseSessionLogStream_RealFixture
 
   - id: INV-P5-FAILCLOSED
     pillar: P5
     layer: L0
-    status: gap            # config_test covers some branches but is not yet linked to this ID
+    status: covered
     anchors:
       - {file: internal/config/config.go, symbol: validate}
-    tests: []
+    tests:
+      - TestValidate_MissingRoleModels
+      - TestValidate_ProviderType
+      - TestLoad_MissingFile
+      - TestLoad_ValidationAtLoadTime_InvalidProviderRef
+      - TestLoad_ValidationAtLoadTime_InvalidTokenLimit
+      - TestResolveModel_MissingModel
+      - TestResolveModel_MissingProvider
+      - TestResolvedTokenLimits_Conflict
+      - TestNewClaudeCLIFromConfig_EmptyModelRef
+      - TestNewClaudeCLIFromConfig_UnknownModelRef
+      - TestBuildEnv_EmptyType_Errors
+      - TestBuildEnv_UnknownType_Errors
 
   - id: INV-P5-ROUTE
     pillar: P5
     layer: L0
-    status: gap
+    status: covered
     anchors:
       - {file: internal/harness/claude_cli.go, symbol: BuildModelEnv}
-    tests: []
+    tests:
+      - TestBuildEnv_Anthropic
+      - TestBuildEnv_OpenAI
+      - TestBuildModelEnv_Native_ReturnsNilEnv
+      - TestValidate_ProviderType
+      - TestLoad_ValidationAtLoadTime_ValidConfig
+      - TestResolveModel_Success
 
   - id: INV-O1-FLOW
     pillar: P6
@@ -115,7 +189,9 @@ invariants:
     anchors:
       - {file: internal/harness/stream_event.go, symbol: EventSessionStart}
       - {file: internal/harness/runner.go, symbol: EventSessionStart}
-    tests: [TestHarnessRun_TerminatesWhenProcessExits]
+    tests:
+      - TestHarnessRun_TerminatesWhenProcessExits
+      - TestParseStream_WorkerComplete_RealFixture
 
   - id: INV-HARNESS-VERDICT
     pillar: P3
@@ -135,12 +211,10 @@ invariants:
 # by the harness refactor; their canaries were retired and INV-H1-CLOSE /
 # INV-H2-SESSIONID are now covered by TestHarnessRun_TerminatesWhenProcessExits.
 canaries:
-  - id: DEFECT-02
-    invariant: INV-P3-VALID
-    summary: empty/marker-less validation output parses to VerdictPass -> StatusSuccess
-    state: live
-    canary_test: TestCanary_DEFECT02_EmptyValidationParsesPass   # normal test — runs in `make test`
-    gate_test: ""
+  # DEFECT-02 (empty validation → VerdictPass) was FIXED 2026-06-21:
+  # ParseValidationOutput now returns VerdictFail when no markers are found.
+  # Gate: TestParseValidationOutput "empty output" and "LLM ignored format" cases.
+  # INV-P3-VALID flipped to covered. Canary retired.
 
   - id: DEFECT-03
     invariant: INV-P3-DEGRADE

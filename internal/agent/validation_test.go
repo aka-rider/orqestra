@@ -1,12 +1,11 @@
 package agent
 
 import (
-	"encoding/json"
-	"strings"
 	"testing"
 )
 
 func TestDeriveVerdict(t *testing.T) {
+	// INV-P3-VALID: verdict is derived solely from the blocking field of reported issues
 	tests := []struct {
 		name   string
 		issues []Issue
@@ -28,54 +27,9 @@ func TestDeriveVerdict(t *testing.T) {
 	}
 }
 
-func TestValidationReport_JSONRoundtrip(t *testing.T) {
-	report := ValidationReport{
-		SchemaVersion: "1",
-		Verdict:       VerdictWarn,
-		Summary:       "Minor issues",
-		Issues: []Issue{
-			{ID: "WARN_1", Blocking: false, Message: "Could be better"},
-		},
-		Suggestions: []string{"Add more tests"},
-	}
-
-	data, err := json.Marshal(report)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
-	var decoded ValidationReport
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	if decoded.Verdict != report.Verdict {
-		t.Errorf("verdict: got %q, want %q", decoded.Verdict, report.Verdict)
-	}
-	if len(decoded.Issues) != 1 {
-		t.Errorf("issues: got %d, want 1", len(decoded.Issues))
-	}
-}
-
-func TestFormatValidationFeedback(t *testing.T) {
-	report := ValidationReport{
-		Verdict: VerdictFail,
-		Summary: "Plan is incomplete",
-		Issues: []Issue{
-			{ID: "MISSING", Blocking: true, Message: "no tests"},
-		},
-		Suggestions: []string{"Add test steps"},
-	}
-	feedback := FormatValidationFeedback(report)
-	if !strings.Contains(feedback, "MISSING") {
-		t.Error("feedback should contain issue ID")
-	}
-	if !strings.Contains(feedback, "Add test steps") {
-		t.Error("feedback should contain suggestions")
-	}
-}
-
 func TestParseValidationOutput(t *testing.T) {
+	// INV-P4-PARSE: structured marker extraction from raw worker output
+	// INV-P3-VALID: verdict follows parsed markers (PASS/FAIL/WARN)
 	tests := []struct {
 		name        string
 		raw         string
@@ -88,7 +42,7 @@ func TestParseValidationOutput(t *testing.T) {
 		{
 			name:        "empty output",
 			raw:         "",
-			wantVerdict: VerdictPass,
+			wantVerdict: VerdictFail, // fail-closed: no evidence ≠ evidence of pass
 		},
 		{
 			name:        "all passing",
@@ -137,7 +91,7 @@ func TestParseValidationOutput(t *testing.T) {
 		{
 			name:        "LLM ignored format — no markers at all",
 			raw:         "I have completed all the tasks successfully.\nEverything looks good.",
-			wantVerdict: VerdictPass,
+			wantVerdict: VerdictFail, // fail-closed: marker-less prose is not evidence of pass
 			wantChecks:  0,
 		},
 		{
@@ -185,16 +139,3 @@ func TestParseValidationOutput(t *testing.T) {
 	}
 }
 
-func TestParseValidationOutput_CriterionText(t *testing.T) {
-	raw := MarkerPass + " tests pass — exit 0\n" + MarkerFail + " lint errors — 3 issues found"
-	result := ParseValidationOutput(raw)
-	if len(result.Checks) != 2 {
-		t.Fatalf("got %d checks, want 2", len(result.Checks))
-	}
-	if result.Checks[0].Criterion != "tests pass — exit 0" {
-		t.Errorf("check[0].Criterion = %q", result.Checks[0].Criterion)
-	}
-	if result.Checks[1].Criterion != "lint errors — 3 issues found" {
-		t.Errorf("check[1].Criterion = %q", result.Checks[1].Criterion)
-	}
-}

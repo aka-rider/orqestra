@@ -53,6 +53,7 @@ func setupPlanFile(t *testing.T, sessionID, planContent string) string {
 
 
 func TestReadPlan_NoSessionID(t *testing.T) {
+	// INV-P1-PLANSRC: missing session ID is an integrity error, not a default
 	_, _, err := ReadPlan("", "", "", false)
 	if err == nil {
 		t.Fatal("expected error for missing session ID")
@@ -63,6 +64,7 @@ func TestReadPlan_NoSessionID(t *testing.T) {
 }
 
 func TestReadPlan_MissingJSONL(t *testing.T) {
+	// INV-P1-PLANSRC: missing session JSONL is an integrity error
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	cwd, err := os.Getwd()
@@ -119,6 +121,7 @@ func TestReadPlan_SecurityGate(t *testing.T) {
 }
 
 func TestReadPlan_EmptyPlanFile(t *testing.T) {
+	// INV-P1-PLANSRC: empty plan file is an integrity error, not a valid empty plan
 	sessionID := "test-empty"
 	setupPlanFile(t, sessionID, "")
 	cwd, err := os.Getwd()
@@ -133,6 +136,7 @@ func TestReadPlan_EmptyPlanFile(t *testing.T) {
 }
 
 func TestReadPlan_UsesStreamPlanFilePath(t *testing.T) {
+	// INV-P1-PLANSRC: plan is read from planFilePath when provided directly
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
@@ -161,6 +165,7 @@ func TestReadPlan_UsesStreamPlanFilePath(t *testing.T) {
 }
 
 func TestReadPlan_PlanFileNeverWritten(t *testing.T) {
+	// INV-P1-PLANSRC: agent that received no plan_mode attachment → integrity error
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
@@ -243,6 +248,7 @@ func setupGhostPlan(t *testing.T, sessionID string, extraLines ...string) (ghost
 }
 
 func TestReadPlan_JSONLTextFallback(t *testing.T) {
+	// INV-P1-PLANSRC: when plan file unwritten, text content from JSONL used as fallback
 	wantText := "## Goal\nAdd feature X.\n\n## Codebase Facts\n- file: foo.go"
 	textLine := fmt.Sprintf(`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":%q}]}}`, wantText)
 	_, cwd := setupGhostPlan(t, "test-text-fallback", textLine)
@@ -260,6 +266,7 @@ func TestReadPlan_JSONLTextFallback(t *testing.T) {
 }
 
 func TestReadPlan_JSONLThinkingFallback(t *testing.T) {
+	// INV-P1-PLANSRC: thinking content used as fallback when text absent
 	wantThinking := "Key findings:\n1. screen_prompt.go uses textarea.Model\n2. clipboard dep exists"
 	thinkingLine := fmt.Sprintf(`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":%q}]}}`, wantThinking)
 	_, cwd := setupGhostPlan(t, "test-thinking-fallback", thinkingLine)
@@ -277,6 +284,7 @@ func TestReadPlan_JSONLThinkingFallback(t *testing.T) {
 }
 
 func TestReadPlan_JSONLTextBeforeThinking(t *testing.T) {
+	// INV-P1-PLANSRC: text content takes priority over thinking in fallback
 	wantText := "## Plan\nThe text output."
 	mixedLine := fmt.Sprintf(`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":"raw internal deliberation"},{"type":"text","text":%q}]}}`, wantText)
 	_, cwd := setupGhostPlan(t, "test-text-priority", mixedLine)
@@ -294,7 +302,7 @@ func TestReadPlan_JSONLTextBeforeThinking(t *testing.T) {
 }
 
 func TestReadPlan_JSONLFallbackNoContent(t *testing.T) {
-	// No assistant end_turn in JSONL — fallback finds nothing, error is returned.
+	// INV-P1-PLANSRC: no end_turn and no plan file → integrity error (not silent empty)
 	_, cwd := setupGhostPlan(t, "test-fallback-empty")
 
 	_, _, err := ReadPlan("test-fallback-empty", "", cwd, true)
@@ -307,6 +315,7 @@ func TestReadPlan_JSONLFallbackNoContent(t *testing.T) {
 }
 
 func TestReadPlan_FallbackDisabled(t *testing.T) {
+	// INV-P1-PLANSRC: withFallback=false rejects JSONL content — plan file is required
 	wantText := "## Plan\nContent that should not be recovered."
 	textLine := fmt.Sprintf(`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":%q}]}}`, wantText)
 	_, cwd := setupGhostPlan(t, "test-fallback-disabled", textLine)

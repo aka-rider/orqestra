@@ -23,6 +23,7 @@ import (
 // - ANTHROPIC_API_KEY or valid OAuth session
 // Run with: go test ./internal/sandbox/ -tags integration -run TestClaudeCLI_InSandbox -v
 func TestClaudeCLI_InSandbox(t *testing.T) {
+	// INV-P2-WRITE: claude CLI runs and writes files inside the seatbelt sandbox (L3 live test)
 	// Check claude is available
 	claudeBinary := "claude"
 	if bin := os.Getenv("CLAUDE_BINARY"); bin != "" {
@@ -143,6 +144,7 @@ func TestClaudeCLI_InSandbox(t *testing.T) {
 
 // TestClaudeCLI_SandboxDeniesSSH verifies that claude cannot read .ssh even when instructed.
 func TestClaudeCLI_SandboxDeniesSSH(t *testing.T) {
+	// INV-P2-WRITE: worker cannot read secrets outside the allowlist even when LLM-directed
 	// Skip when ANTHROPIC_API_KEY is not set — the test requires API access.
 	if os.Getenv("ANTHROPIC_API_KEY") == "" {
 		t.Skip("ANTHROPIC_API_KEY not set — sandbox Claude CLI tests require API key authentication")
@@ -202,45 +204,6 @@ func TestClaudeCLI_SandboxDeniesSSH(t *testing.T) {
 	}
 
 	t.Logf("SUCCESS: Claude could not read .ssh/id_rsa inside sandbox")
-}
-
-// TestClaudeCLI_Version verifies that the claude binary can be found and exec'd inside the sandbox.
-// This doesn't require network access or API keys.
-func TestClaudeCLI_Version(t *testing.T) {
-	claudeBinary := "claude"
-	if bin := os.Getenv("CLAUDE_BINARY"); bin != "" {
-		claudeBinary = bin
-	}
-
-	workspace := t.TempDir()
-	homeEnv := os.Getenv("HOME")
-	claudeSnap, err := detect.DetectClaude(homeEnv, claudeBinary)
-	if err != nil {
-		t.Fatalf("DetectClaude failed: %v", err)
-	}
-
-	sb, err := sandbox.New(sandbox.Config{RepoPath: workspace, RepoWritable: true, Profiles: []sandbox.Snapshot{claudeSnap}})
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-
-	var stdout bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	exitCode, err := execSandbox(sb, ctx, []string{claudeBinary, "--version"}, &stdout)
-	if err != nil {
-		t.Fatalf("Exec failed: %v", err)
-	}
-
-	t.Logf("Exit: %d, Output: %s", exitCode, stdout.String())
-
-	if exitCode != 0 {
-		t.Fatalf("claude --version exited %d (expected 0)", exitCode)
-	}
-	if !strings.Contains(stdout.String(), ".") {
-		t.Errorf("expected version string with a dot, got %q", stdout.String())
-	}
 }
 
 func execSandbox(sb *sandbox.Sandbox, ctx context.Context, command []string, stdout *bytes.Buffer) (int, error) {

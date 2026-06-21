@@ -5,9 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -151,62 +148,6 @@ func runPipelineSync(ctx context.Context, setup PipelineSetup, steps PipelineSte
 	ctrl := NewControl(obs)
 	sc := testStepContext(obs, ctrl)
 	return RunPipeline(ctx, setup, PipelineRunInput{Prompt: "test prompt", RunID: "test-run"}, sc, steps)
-}
-
-// --- Git helpers (retained for skipped merge tests) ---
-
-func initGitRepo(t *testing.T) string {
-	t.Helper()
-	repo := t.TempDir()
-	runGit(t, repo, "init", "-b", "main")
-	runGit(t, repo, "config", "user.email", "test@example.com")
-	runGit(t, repo, "config", "user.name", "Test User")
-	filePath := filepath.Join(repo, "file.txt")
-	if err := os.WriteFile(filePath, []byte("base\n"), 0o644); err != nil {
-		t.Fatalf("write initial file: %v", err)
-	}
-	runGit(t, repo, "add", "file.txt")
-	runGit(t, repo, "commit", "-m", "initial")
-	return repo
-}
-
-func runGit(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return strings.TrimSpace(string(out))
-}
-
-func gitBranchExists(t *testing.T, repoPath, branch string) bool {
-	t.Helper()
-	cmd := exec.Command("git", "rev-parse", "--verify", branch)
-	cmd.Dir = repoPath
-	return cmd.Run() == nil
-}
-
-func gitAnyWorktreeBranchExists(t *testing.T, repoPath string) bool {
-	t.Helper()
-	out, err := exec.Command("git", "-C", repoPath, "branch").CombinedOutput()
-	if err != nil {
-		t.Fatalf("git branch: %v", err)
-	}
-	return strings.Contains(string(out), "orqestra-run-")
-}
-
-func newSessionDirFactory(t *testing.T) RunDirFactory {
-	t.Helper()
-	root := t.TempDir()
-	return func(slug string) (agent.SessionDir, error) {
-		dir := filepath.Join(root, slug)
-		if err := os.Mkdir(dir, 0o755); err != nil {
-			return agent.SessionDir{}, err
-		}
-		return agent.SessionDir{Path: dir}, nil
-	}
 }
 
 // --- Active tests ---
@@ -548,20 +489,6 @@ func TestEngine_Run_NoGate(t *testing.T) {
 	}
 }
 
-// --- Skipped tests (require git repo or complex infrastructure) ---
-
-func TestEngine_MergeErrorFailsAndPreservesWorktree(t *testing.T) {
-	t.Skip("needs rewrite for ProcessSpec path — requires real git repo and merge operations")
-}
-
-func TestEngine_MergeConflictFailsAndPreservesWorktree(t *testing.T) {
-	t.Skip("needs rewrite for ProcessSpec path — requires real git repo and merge operations")
-}
-
-func TestEngine_WorkerFailurePreservesWorktree(t *testing.T) {
-	t.Skip("needs rewrite for ProcessSpec path — requires real git repo and worktree operations")
-}
-
 // --- No-dead-knobs invariant tests ---
 // Each test asserts that a surfaced PipelineSetup knob actually changes pipeline behavior.
 
@@ -647,46 +574,3 @@ func TestNoDeadKnob_GateAfterDeliberation_SkippedWhenDisabled(t *testing.T) {
 	}
 }
 
-func TestEngine_PlanFileBeforeGate(t *testing.T) {
-	t.Skip("needs rewrite — ArtifactSink capture requires sessionDir integration")
-}
-
-func TestEngine_PhaseOrder_WithCritic(t *testing.T) {
-	t.Skip("critic is embedded in DeliberateStep — requires full DeliberateStep integration")
-}
-
-func TestEngine_DecisionComment_CommitsDialog(t *testing.T) {
-	t.Skip("skipped: tests plan-history git repo integration, removed in v6 gate replacement")
-}
-
-func TestEngine_DecisionComment_ChatOnly(t *testing.T) {
-	t.Skip("skipped: tests plan-history git repo integration, removed in v6 gate replacement")
-}
-
-func TestEngine_CriticRevision_AlwaysCommitted(t *testing.T) {
-	t.Skip("skipped: tests plan-history git repo integration, removed in v6 gate replacement")
-}
-
-func TestEngine_FullConversation_Integrity(t *testing.T) {
-	t.Skip("skipped: tests plan-history git repo integration, removed in v6 gate replacement")
-}
-
-func TestEngine_DecisionEdit_CommitsDialog(t *testing.T) {
-	t.Skip("skipped: tests plan-history git repo integration, removed in v6 gate replacement")
-}
-
-func TestGate_DecisionEditEmptyComment_NoArchitect(t *testing.T) {
-	t.Skip("needs rewrite for RunPipeline path — architect re-engagement is now in ReviseStep")
-}
-
-func TestGate_DecisionEditAutoApprove_ProceedsToWorker(t *testing.T) {
-	t.Skip("needs rewrite for RunPipeline path — AutoApprove is not yet handled in gate loop")
-}
-
-func TestEngine_CriticStreamFallback(t *testing.T) {
-	t.Skip("needs rewrite — critic stream fallback is internal to DeliberateStep")
-}
-
-func TestEngine_RunLog_Created(t *testing.T) {
-	t.Skip("needs rewrite — run log is created in engine_pipeline.go; requires RunDirFactory wiring")
-}

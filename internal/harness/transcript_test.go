@@ -35,6 +35,7 @@ func transcriptFixture(t *testing.T, scenario, file string) string {
 // real minimized+sanitized session JSONL captured from a live claude CLI run.
 // This is a Tier-A hermetic test: no claude binary, no network.
 func TestExtractPlanFilePath_RealFixture(t *testing.T) {
+	// INV-P1-PLANSRC: plan file path extracted from real session JSONL attachment
 	fixturePath := transcriptFixture(t, "plan-mode", "session.jsonl")
 
 	got, err := ExtractPlanFilePath(fixturePath)
@@ -55,6 +56,7 @@ func TestExtractPlanFilePath_RealFixture(t *testing.T) {
 // TestExtractPlanFilePath_NoPlanAttachment_RealFixture runs ExtractPlanFilePath
 // against a real session JSONL that contains no plan_mode attachment.
 func TestExtractPlanFilePath_NoPlanAttachment_RealFixture(t *testing.T) {
+	// INV-P1-PLANSRC: missing plan_mode attachment → error, not silent empty result
 	fixturePath := transcriptFixture(t, "no-plan", "session.jsonl")
 
 	_, err := ExtractPlanFilePath(fixturePath)
@@ -69,6 +71,7 @@ func TestExtractPlanFilePath_NoPlanAttachment_RealFixture(t *testing.T) {
 // TestParseSessionLogStream_RealFixture runs ParseSessionLogStream against a
 // real minimized session JSONL fixture with assistant and user messages.
 func TestParseSessionLogStream_RealFixture(t *testing.T) {
+	// INV-P4-STREAM: real session JSONL parsed into structured events without error
 	fixturePath := transcriptFixture(t, "plan-mode", "session.jsonl")
 
 	f, err := os.Open(fixturePath)
@@ -99,6 +102,7 @@ func TestParseSessionLogStream_RealFixture(t *testing.T) {
 // against a captured worker stream fixture and verifies it extracts the
 // session_id and result from the real stream format.
 func TestParseStream_WorkerComplete_RealFixture(t *testing.T) {
+	// INV-H2-SESSIONID: session_id extracted from real worker stream is non-empty
 	fixturePath := transcriptFixture(t, "worker-complete", "stream.jsonl")
 
 	f, err := os.Open(fixturePath)

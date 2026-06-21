@@ -211,15 +211,15 @@ The status column is **generated** from `docs/qa/invariants.yaml` by `make qa-ve
 | INV-H2-SESSIONID | P1 | L1 | covered |
 | INV-HARNESS-VERDICT | P3 | L1 | covered |
 | INV-O1-FLOW | P6 | L2 | gap |
-| INV-P1-EXEC | P1 | L2 | gap |
+| INV-P1-EXEC | P1 | L0 | covered |
 | INV-P1-PLANSRC | P1 | L0 | covered |
-| INV-P2-WRITE | P2 | L1 | gap |
+| INV-P2-WRITE | P2 | L1 | covered |
 | INV-P3-DEGRADE | P3 | L1 | defect |
-| INV-P3-VALID | P3 | L1 | defect |
-| INV-P4-PARSE | P4 | L0 | gap |
-| INV-P4-STREAM | P4 | L0 | gap |
-| INV-P5-FAILCLOSED | P5 | L0 | gap |
-| INV-P5-ROUTE | P5 | L0 | gap |
+| INV-P3-VALID | P3 | L1 | covered |
+| INV-P4-PARSE | P4 | L0 | covered |
+| INV-P4-STREAM | P4 | L0 | covered |
+| INV-P5-FAILCLOSED | P5 | L0 | covered |
+| INV-P5-ROUTE | P5 | L0 | covered |
 
 <!-- END GENERATED LEDGER -->
 
