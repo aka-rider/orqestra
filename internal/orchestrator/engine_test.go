@@ -28,26 +28,6 @@ func (s *fakeStep[In, Out]) Run(ctx context.Context, in In, sc StepContext) (Out
 	return s.fn(ctx, in, sc)
 }
 
-// fakeResearchStep returns a step that emits a fixed draft.
-func fakeResearchStep(draft string) Step[ResearchInput, ResearchOutput] {
-	return &fakeStep[ResearchInput, ResearchOutput]{
-		agentID: "researcher",
-		fn: func(ctx context.Context, in ResearchInput, sc StepContext) (ResearchOutput, error) {
-			return ResearchOutput{DraftMarkdown: draft}, nil
-		},
-	}
-}
-
-// fakeResearchStepErr returns a step that returns an error.
-func fakeResearchStepErr(err error) Step[ResearchInput, ResearchOutput] {
-	return &fakeStep[ResearchInput, ResearchOutput]{
-		agentID: "researcher",
-		fn: func(ctx context.Context, in ResearchInput, sc StepContext) (ResearchOutput, error) {
-			return ResearchOutput{}, err
-		},
-	}
-}
-
 // fakeDeliberateStep returns a step that emits a fixed plan.
 func fakeDeliberateStep(markdown string) Step[DeliberateInput, PlanOutput] {
 	return &fakeStep[DeliberateInput, PlanOutput]{
@@ -92,12 +72,11 @@ func fakeValidateStep(output string) Step[ValidateInput, ValidateOutput] {
 	}
 }
 
-// testStepContext builds a StepContext with an ObsStore, Control, and NoopArtifactSink.
-func testStepContext(obs *ObsStore, ctrl Control) StepContext {
+// noopStepContext returns a StepContext with nil Executor — engine routing tests
+// don't call sc.Exec.Run(); nil makes any accidental call panic visibly.
+func noopStepContext(obs Observer, ctrl Control) StepContext {
 	return StepContext{
-		Exec: harness.RunFunc(func(_ context.Context, _ harness.ProcessSpec, _ <-chan harness.Message, _ harness.Sink) (harness.RunResult, error) {
-			return harness.RunResult{}, nil
-		}),
+		Exec:      nil,
 		Obs:       obs,
 		Artifacts: NoopArtifactSink(),
 		Control:   ctrl,
@@ -111,7 +90,6 @@ const validPlanMarkdown = "# Plan\n\n## Goal\nTest.\n\n## Work Packages\n\n### 1
 // defaultTestSteps returns a PipelineSteps wired with fake steps for most tests.
 func defaultTestSteps() PipelineSteps {
 	return PipelineSteps{
-		Research:   fakeResearchStep("## Draft"),
 		Deliberate: fakeDeliberateStep(validPlanMarkdown),
 		Revise:     fakeReviseStep(),
 		Execute:    fakeExecuteStep("done"),
@@ -146,19 +124,20 @@ func driveGate(t *testing.T, obs *ObsStore, ctrl Control, pos HumanGatePosition,
 func runPipelineSync(ctx context.Context, setup PipelineSetup, steps PipelineSteps) (Result, error) {
 	obs := NewObsStore()
 	ctrl := NewControl(obs)
-	sc := testStepContext(obs, ctrl)
+	sc := noopStepContext(obs, ctrl)
 	return RunPipeline(ctx, setup, PipelineRunInput{Prompt: "test prompt", RunID: "test-run"}, sc, steps)
 }
 
 // --- Active tests ---
 
 func TestEngine_PlanApprovalGate(t *testing.T) {
+	// INV-O1-FLOW: gate blocks pipeline; DecisionApprove resumes it → StatusSuccess.
 	obs := NewObsStore()
 	ctrl := NewControl(obs)
-	sc := testStepContext(obs, ctrl)
+	sc := noopStepContext(obs, ctrl)
 
 	setup := PipelineSetup{
-		Research: true, Execution: true, Validation: true,
+		Execution: true, Validation: true,
 		HumanGates: HumanGateSet{GateAfterDeliberation},
 	}
 	steps := defaultTestSteps()
@@ -177,12 +156,13 @@ func TestEngine_PlanApprovalGate(t *testing.T) {
 }
 
 func TestEngine_CancelAtGate(t *testing.T) {
+	// INV-O1-FLOW: DecisionCancel at gate → StatusCancelled.
 	obs := NewObsStore()
 	ctrl := NewControl(obs)
-	sc := testStepContext(obs, ctrl)
+	sc := noopStepContext(obs, ctrl)
 
 	setup := PipelineSetup{
-		Research: true, Execution: true, Validation: true,
+		Execution: true, Validation: true,
 		HumanGates: HumanGateSet{GateAfterDeliberation},
 	}
 	steps := defaultTestSteps()
@@ -201,39 +181,14 @@ func TestEngine_CancelAtGate(t *testing.T) {
 }
 
 func TestEngine_SkipGateway(t *testing.T) {
-	// No gates in setup → pipeline completes without blocking.
+	// INV-O1-FLOW: no HumanGates → pipeline completes without blocking.
 	setup := PipelineSetup{
-		Research: true, Execution: true, Validation: true,
+		Execution: true, Validation: true,
 		HumanGates: nil,
 	}
 	result, err := runPipelineSync(context.Background(), setup, defaultTestSteps())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Status != StatusSuccess {
-		t.Errorf("status = %q, want %q", result.Status, StatusSuccess)
-	}
-}
-
-func TestEngine_NoGate(t *testing.T) {
-	// Explicit HumanGates: nil → no gate fires.
-	obs := NewObsStore()
-	ctrl := NewControl(obs)
-	sc := testStepContext(obs, ctrl)
-
-	setup := PipelineSetup{
-		Research: true, Execution: true, Validation: true,
-		HumanGates: nil,
-	}
-
-	result, err := RunPipeline(context.Background(), setup, PipelineRunInput{Prompt: "Add feature X", RunID: "run-1"}, sc, defaultTestSteps())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	snap := obs.Snapshot()
-	if snap.HasGate {
-		t.Error("expected no gate to be open when HumanGates is empty")
 	}
 	if result.Status != StatusSuccess {
 		t.Errorf("status = %q, want %q", result.Status, StatusSuccess)
@@ -253,18 +208,10 @@ func TestEngine_PhaseOrder(t *testing.T) {
 		mu.Unlock()
 	}}
 
-	sc := StepContext{
-		Exec: harness.RunFunc(func(_ context.Context, _ harness.ProcessSpec, _ <-chan harness.Message, _ harness.Sink) (harness.RunResult, error) {
-			return harness.RunResult{}, nil
-		}),
-		Obs:       recordingObs,
-		Artifacts: NoopArtifactSink(),
-		Control:   ctrl,
-		Log:       slog.Default(),
-	}
+	sc := noopStepContext(recordingObs, ctrl)
 
 	setup := PipelineSetup{
-		Research: true, Execution: true, Validation: true,
+		Execution: true, Validation: true,
 		HumanGates: nil,
 	}
 
@@ -277,7 +224,7 @@ func TestEngine_PhaseOrder(t *testing.T) {
 	got := append([]Phase(nil), phases...)
 	mu.Unlock()
 
-	expected := []Phase{PhaseResearching, PhasePlanning, PhaseExecuting, PhaseSelfValidating}
+	expected := []Phase{PhasePlanning, PhaseExecuting, PhaseSelfValidating}
 	if len(got) != len(expected) {
 		t.Fatalf("phases = %v, want %v", got, expected)
 	}
@@ -311,18 +258,10 @@ func TestEngine_NoExecute(t *testing.T) {
 		mu.Unlock()
 	}}
 
-	sc := StepContext{
-		Exec: harness.RunFunc(func(_ context.Context, _ harness.ProcessSpec, _ <-chan harness.Message, _ harness.Sink) (harness.RunResult, error) {
-			return harness.RunResult{}, nil
-		}),
-		Obs:       recordingObs,
-		Artifacts: NoopArtifactSink(),
-		Control:   ctrl,
-		Log:       slog.Default(),
-	}
+	sc := noopStepContext(recordingObs, ctrl)
 
 	setup := PipelineSetup{
-		Research: true, Execution: false, Validation: false,
+		Execution: false, Validation: false,
 		HumanGates: nil,
 	}
 
@@ -351,7 +290,7 @@ func TestEngine_ValidationFailureDetection(t *testing.T) {
 	steps.Validate = fakeValidateStep(agent.MarkerFail + " tests failed")
 
 	setup := PipelineSetup{
-		Research: true, Execution: true, Validation: true,
+		Execution: true, Validation: true,
 		HumanGates: nil,
 	}
 
@@ -370,7 +309,7 @@ func TestEngine_ValidationSuccessDetection(t *testing.T) {
 	steps.Validate = fakeValidateStep(agent.MarkerPass + " tests pass\n" + agent.MarkerPass + " build ok")
 
 	setup := PipelineSetup{
-		Research: true, Execution: true, Validation: true,
+		Execution: true, Validation: true,
 		HumanGates: nil,
 	}
 
@@ -387,12 +326,13 @@ func TestEngine_ValidationSuccessDetection(t *testing.T) {
 }
 
 func TestEngine_DecisionEdit(t *testing.T) {
+	// INV-O1-FLOW: DecisionEdit at gate → re-run with edited content → DecisionApprove → StatusSuccess.
 	obs := NewObsStore()
 	ctrl := NewControl(obs)
-	sc := testStepContext(obs, ctrl)
+	sc := noopStepContext(obs, ctrl)
 
 	setup := PipelineSetup{
-		Research: true, Execution: true, Validation: true,
+		Execution: true, Validation: true,
 		HumanGates: HumanGateSet{GateAfterDeliberation},
 	}
 	steps := defaultTestSteps()
@@ -445,16 +385,21 @@ func TestEngine_DecisionEdit(t *testing.T) {
 func TestEngine_BudgetExhausted(t *testing.T) {
 	budgetErr := fmt.Errorf("%w: used 100 of 50", harness.ErrBudgetExhausted)
 	steps := defaultTestSteps()
-	steps.Research = fakeResearchStepErr(budgetErr)
+	steps.Deliberate = &fakeStep[DeliberateInput, PlanOutput]{
+		agentID: "architect",
+		fn: func(_ context.Context, _ DeliberateInput, _ StepContext) (PlanOutput, error) {
+			return PlanOutput{}, budgetErr
+		},
+	}
 
 	setup := PipelineSetup{
-		Research: true, Execution: true, Validation: true,
+		Execution: true, Validation: true,
 		HumanGates: nil,
 	}
 
 	_, err := runPipelineSync(context.Background(), setup, steps)
 	if err == nil {
-		t.Fatal("expected error when researcher budget is exhausted")
+		t.Fatal("expected error when deliberation budget is exhausted")
 	}
 	if !errors.Is(err, harness.ErrBudgetExhausted) {
 		t.Errorf("expected ErrBudgetExhausted in error chain, got: %v", err)
@@ -479,7 +424,7 @@ func TestEngine_Run_NoGate(t *testing.T) {
 	// We can't test end-to-end without the binary, so just verify Start returns a handle.
 	handle := engine.Start(ctx, Input{
 		Prompt: "test",
-		Setup:  PipelineSetup{Research: false, Execution: false, Validation: false},
+		Setup:  PipelineSetup{Execution: false, Validation: false},
 	})
 	if handle.Obs == nil {
 		t.Fatal("Start returned nil ObsStore")
@@ -492,30 +437,6 @@ func TestEngine_Run_NoGate(t *testing.T) {
 // --- No-dead-knobs invariant tests ---
 // Each test asserts that a surfaced PipelineSetup knob actually changes pipeline behavior.
 
-func TestNoDeadKnob_ResearchFalse_NoResearchPhase(t *testing.T) {
-	researchCalled := false
-	steps := defaultTestSteps()
-	steps.Research = &fakeStep[ResearchInput, ResearchOutput]{
-		agentID: "researcher",
-		fn: func(_ context.Context, _ ResearchInput, _ StepContext) (ResearchOutput, error) {
-			researchCalled = true
-			return ResearchOutput{DraftMarkdown: "draft"}, nil
-		},
-	}
-
-	setup := PipelineSetup{Research: false, Execution: false, Validation: false, HumanGates: nil}
-	result, err := runPipelineSync(context.Background(), setup, steps)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Status != StatusSuccess {
-		t.Errorf("status = %q, want success", result.Status)
-	}
-	if researchCalled {
-		t.Error("Research:false must not invoke the research step")
-	}
-}
-
 func TestNoDeadKnob_ValidationFalse_NoValidationPhase(t *testing.T) {
 	validateCalled := false
 	steps := defaultTestSteps()
@@ -527,7 +448,7 @@ func TestNoDeadKnob_ValidationFalse_NoValidationPhase(t *testing.T) {
 		},
 	}
 
-	setup := PipelineSetup{Research: true, Execution: true, Validation: false, HumanGates: nil}
+	setup := PipelineSetup{Execution: true, Validation: false, HumanGates: nil}
 	_, err := runPipelineSync(context.Background(), setup, steps)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -538,14 +459,15 @@ func TestNoDeadKnob_ValidationFalse_NoValidationPhase(t *testing.T) {
 }
 
 func TestNoDeadKnob_GateAfterDeliberation_FiresWhenEnabled(t *testing.T) {
+	// INV-O1-FLOW: GateAfterDeliberation in HumanGates → gate fires and blocks.
 	obs := NewObsStore()
 	ctrl := NewControl(obs)
 
 	setup := PipelineSetup{
-		Research: false, Execution: false, Validation: false,
+		Execution: false, Validation: false,
 		HumanGates: HumanGateSet{GateAfterDeliberation},
 	}
-	sc := testStepContext(obs, ctrl)
+	sc := noopStepContext(obs, ctrl)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -558,19 +480,4 @@ func TestNoDeadKnob_GateAfterDeliberation_FiresWhenEnabled(t *testing.T) {
 	}
 }
 
-func TestNoDeadKnob_GateAfterDeliberation_SkippedWhenDisabled(t *testing.T) {
-	// With no gates in HumanGates, the pipeline should complete without waiting.
-	setup := PipelineSetup{
-		Research: false, Execution: false, Validation: false,
-		HumanGates: nil,
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	_, err := runPipelineSync(ctx, setup, defaultTestSteps())
-	if err != nil {
-		t.Fatalf("unexpected error (gate fired when disabled?): %v", err)
-	}
-}
 

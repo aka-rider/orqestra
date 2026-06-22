@@ -8,18 +8,15 @@ import (
 type HumanGatePosition int
 
 const (
-	GateAfterResearch     HumanGatePosition = iota
-	GateAfterDeliberation
+	GateAfterDeliberation HumanGatePosition = iota
 )
 
 // IsPlanGate reports whether this gate position requires plan review (rich gate).
-func (p HumanGatePosition) IsPlanGate() bool { return p == GateAfterResearch || p == GateAfterDeliberation }
+func (p HumanGatePosition) IsPlanGate() bool { return p == GateAfterDeliberation }
 
 // String returns a human-readable name for the gate position.
 func (p HumanGatePosition) String() string {
 	switch p {
-	case GateAfterResearch:
-		return "after research"
 	case GateAfterDeliberation:
 		return "after deliberation"
 	default:
@@ -56,7 +53,6 @@ func (h HumanGateSet) Toggle(pos HumanGatePosition) HumanGateSet {
 type RestartPhase string
 
 const (
-	RestartResearch     RestartPhase = "research"
 	RestartDeliberation RestartPhase = "deliberation"
 	RestartExecution    RestartPhase = "execution"
 	RestartValidation   RestartPhase = "validation"

@@ -23,7 +23,7 @@ type HumanChatMode interface {
 	SetSize(w, h int)
 }
 
-// PlanChatMode handles plan review gates (GateAfterResearch, GateAfterDeliberation).
+// PlanChatMode handles the plan review gate (GateAfterDeliberation).
 // The plan itself is shown in the Timeline as a Plan Frame; this mode provides
 // only the key-driven approve/cancel/comment interaction.
 type PlanChatMode struct {

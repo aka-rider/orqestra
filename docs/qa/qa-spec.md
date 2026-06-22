@@ -85,16 +85,16 @@ Keystone invariants only — one or two per pillar, not exhaustive. Format: stat
 ### P3 — Truthfulness (family)
 
 **INV-P3-VALID** A run is reported `StatusSuccess` only if validation actually ran **and** produced evidence of passing checks. Validation that errored, was skipped, or produced no recognized checks must **not** yield success.
-- Evidence: current behavior **violates this** — `[V internal/agent/validation.go#ParseValidationOutput]` (`""`/unrecognized → `VerdictPass`); the run status maps from that verdict in `[V internal/orchestrator/step_validate.go]`.
-- Observable: feed empty or marker-less validation output → status must not be success.
-- **Falsified by:** the code as it stands → see **DEFECT-02** (canary `TestCanary_DEFECT02_EmptyValidationParsesPass`).
-- Seam/Layer: L0 (parser) + L1 (status mapping). Status: **defect**.
+- Evidence: `[V internal/agent/validation.go#ParseValidationOutput]` fails closed — `""`/marker-less output → `VerdictFail` (no evidence ≠ evidence of pass); the run status maps from that verdict in `[V internal/orchestrator/step_validate.go]`.
+- Observable: feed empty or marker-less validation output → verdict is fail, status is not success.
+- **Falsified by:** changing the no-recognized-checks default back to `VerdictPass` → `TestParseValidationOutput` (empty case) turns RED. Also the validator's role gate (**INV-ROLE-VALIDATE**).
+- Seam/Layer: L0 (parser) + L1 (status mapping). Status: **covered** (DEFECT-02 fixed 2026-06-21).
 
 **INV-P3-DEGRADE** When isolation, commit, or merge is degraded or fails, the run surfaces it via an **event** and does not report success.
-- Evidence: commit/merge failure now → `StatusFailed` `[V internal/orchestrator/step_merge.go]` (DEFECT-04 fixed); but worktree-create failure still silently falls back to the direct repo with only a `slog.Warn`, no event `[V internal/orchestrator/step_execute.go#WorktreeSpecFn]`.
-- Observable: inject worktree-create failure → an `Event` is emitted and isolation loss is visible.
-- **Falsified by:** the create-failure path as it stands → see **DEFECT-03**.
-- Seam/Layer: L1 (real temp git). Status: **defect**.
+- Evidence: commit/merge failure → `StatusFailed` `[V internal/orchestrator/step_integrate.go]` (DEFECT-04 fixed); worktree-create failure now fails closed — `[V internal/orchestrator/step_execute.go#WorktreeSpecFn]` calls `Observer.AgentFailed` and returns an error instead of silently using the live repo (DEFECT-03 fixed 2026-06-22).
+- Observable: inject worktree-create failure → a worker-failure `Event` is emitted and the run returns an error.
+- **Falsified by:** restoring the silent direct-repo fallback on `worktree.Create` failure → `TestExecuteStep_WorktreeFailure_EmitsEvent` turns RED.
+- Seam/Layer: L1 (real temp git). Status: **covered**.
 
 ### P4 — Hostile-input handling
 
@@ -124,10 +124,20 @@ Keystone invariants only — one or two per pillar, not exhaustive. Format: stat
 
 ### P6 — Autonomy (narrow, corrected)
 
-**INV-O1-FLOW** `--auto-approve` drives all phases to completion without blocking on a decision channel; cancellation propagates and terminates the run.
+**INV-O1-FLOW** `--auto-approve` drives all phases to completion without blocking on a decision channel; cancellation propagates and terminates the run. **Router only** — this is the phase/gate state machine, legitimately covered by the engine tests, which use `fakeStep`/`noopStepContext` stand-ins. It is **not** `real_wiring` and must never be read as "the real pipeline works"; that claim belongs to the per-agent gates below.
 - Evidence: gate is taken only when not auto-approving `[V internal/orchestrator/events.go#AutoApprove]`.
 - **Falsified by:** an unconditional decision-channel read on the auto path.
-- Seam/Layer: L2 (replay binary). Status: **gap**.
+- Seam/Layer: L1 (router, fake steps). Status: **covered** (router); real wiring → **INV-ROLE-***.
+
+### Per-agent capability gates (INV-ROLE-* — every agent is independently validated)
+
+Each pipeline agent owns a **covered + `real_wiring`** invariant: a fast, isolated test that exercises the agent's REAL capability against real machinery — never a fake. `checkRoleCoverage` requires one per role and `checkRealWiring` forbids satisfying any of them with a `fakeStep`/`noopStepContext`/`Exec: nil` test (`[V internal/qaspec/checks.go#checkRoleCoverage]`, `[V internal/qaspec/checks.go#checkRealWiring]`). A break in one agent lights up exactly one gate in seconds, without running the full pipeline.
+
+- **INV-ROLE-RESEARCH** / **INV-ROLE-CRITIC** — the read-only agents run as a real `claude` subprocess under seatbelt via the replay stub; the harness spawns them, stream-parses output, and captures the session id. Evidence `[V internal/orchestrator/step.go#runReportAgent]`, `[V internal/harness/exec.go#Run]`. **Falsified by:** a broken role spec, subprocess spawn, sandbox wrap, or stream parser → `TestRole_Researcher_RealRun` / `TestRole_Critic_RealRun` RED.
+- **INV-ROLE-ARCH** — secure plan sourcing: an in-root `~/.claude/plans` plan is delivered verbatim; an out-of-root path is rejected. Evidence `[V internal/agent/plan_extract.go#ReadPlanFile]`, `[V internal/agent/plan_extract.go#readSecurePlanFile]`. **Falsified by:** removing the allowed-prefix gate → `TestRole_Architect_PlanFileSecurity` RED.
+- **INV-ROLE-WORKER** — the worker writes inside its workspace under the real seatbelt sandbox but is denied writes outside it. Evidence `[V internal/orchestrator/step_execute.go#ExecuteStep]`, `[V internal/sandbox/sandbox.go#New]`. **Falsified by:** a worker profile that grants out-of-workspace writes → `TestRole_Worker_WritesInWorkspaceDeniedOutside` RED.
+- **INV-ROLE-VALIDATE** — the validator fails closed (see INV-P3-VALID). Evidence `[V internal/agent/validation.go#ParseValidationOutput]`. **Falsified by:** `VerdictPass` default → `TestParseValidationOutput` RED.
+- **INV-MERGE-LIFECYCLE** — real git: create an isolated worktree, commit the worker's change, merge it onto the target branch, and clean up branch+dir. Evidence `[V internal/worktree/worktree.go#Create]`, `[V internal/worktree/worktree.go#MergeInto]`. **Falsified by:** a break in any leg (create/commit/merge-landing/cleanup) → `TestRole_Merge_Lifecycle` RED.
 
 ### Spine (cross-cutting — P1 / truthfulness)
 
@@ -150,13 +160,13 @@ Each defect was verified red-first; the red→green transition is how a gate pro
 | ID | Pillar | Defect | Status | Anchor |
 |----|--------|--------|--------|--------|
 | DEFECT-01 | P1 | Sandboxed runner never closed its event channel (+ `SetEvents`/`Receive` split-brain) → main flow hangs after Claude exits. | **fixed** — `harness.Run` returns exactly once. Gate `TestHarnessRun_TerminatesWhenProcessExits` (INV-H1-CLOSE) now green. | `internal/harness/exec.go#Run` |
-| DEFECT-02 | P3 | Validation that errored or produced no `✕` marker parses to `VerdictPass` → `StatusSuccess` with no passing evidence. | **live** — canary `TestCanary_DEFECT02_EmptyValidationParsesPass` runs in `make test`. | `internal/agent/validation.go#ParseValidationOutput` |
-| DEFECT-03 | P3 | `worktree.Create` failure silently falls back to the direct repo, only a `slog.Warn`, no event — isolation degraded invisibly. | **live** — `step_execute.go` "falling back to direct repo". | `internal/orchestrator/step_execute.go#WorktreeSpecFn` |
-| DEFECT-04 | P3 | Worktree commit failure skipped the merge but left `StatusSuccess`. | **fixed** — `step_merge.go` returns `StatusFailed` on commit failure. | `internal/orchestrator/step_merge.go` |
+| DEFECT-02 | P3 | Validation that errored or produced no `✕` marker parses to `VerdictPass` → `StatusSuccess` with no passing evidence. | **fixed** — `ParseValidationOutput` fails closed to `VerdictFail`. Gate `TestParseValidationOutput` (INV-P3-VALID / INV-ROLE-VALIDATE). | `internal/agent/validation.go#ParseValidationOutput` |
+| DEFECT-03 | P3 | `worktree.Create` failure silently falls back to the direct repo, only a `slog.Warn`, no event — isolation degraded invisibly. | **fixed** — `ExecuteStep` emits `AgentFailed` and returns an error. Gate `TestExecuteStep_WorktreeFailure_EmitsEvent` (INV-P3-DEGRADE). | `internal/orchestrator/step_execute.go#WorktreeSpecFn` |
+| DEFECT-04 | P3 | Worktree commit failure skipped the merge but left `StatusSuccess`. | **fixed** — `step_integrate.go` returns `StatusFailed` on commit failure. | `internal/orchestrator/step_integrate.go` |
 | DEFECT-05 | P1 | `SessionID` never set / `EventSessionStart` never emitted → plan extraction + validation continuation break. | **fixed** — `parseStreamLines` emits `EventSessionStart`. Gate (INV-H2-SESSIONID) now green. | `internal/harness/stream_event.go#EventSessionStart` |
 | DEFECT-06 | P5 | Sandboxed runner hardcoded `"claude"`, ignoring the `binary` config knob. | **fixed** — `harness.Run` honors `spec.Binary`. | `internal/harness/exec.go#Run` |
 
-**What this proves (the spec-vs-code test):** the gates are anchored to the **spec**, not the code. When `flexible-pipeline` refactored the harness severely and fixed the bugs, the contract gate `TestHarnessRun_TerminatesWhenProcessExits` flipped **red→green** by adapting only its plumbing (`Receive()` → `harness.Run`) — its assertion (no hang, session id captured) unchanged; the DEFECT-01/05 canaries correctly stopped reproducing and were retired; the anchor check named every moved symbol so the registry could be re-pointed. DEFECT-02/03 survived the refactor and remain flagged, their canary/anchor still live.
+**What this proves (the spec-vs-code test):** the gates are anchored to the **spec**, not the code. When `flexible-pipeline` refactored the harness severely and fixed the bugs, the contract gate `TestHarnessRun_TerminatesWhenProcessExits` flipped **red→green** by adapting only its plumbing (`Receive()` → `harness.Run`) — its assertion (no hang, session id captured) unchanged; the DEFECT-01/05 canaries correctly stopped reproducing and were retired; the anchor check named every moved symbol so the registry could be re-pointed. DEFECT-02/03 were subsequently fixed and fail closed; their canaries were retired and replaced by the gates `TestParseValidationOutput` (INV-P3-VALID) and `TestExecuteStep_WorktreeFailure_EmitsEvent` (INV-P3-DEGRADE). No canary is currently live.
 
 ## 5. Layered seam architecture
 
@@ -210,16 +220,23 @@ The status column is **generated** from `docs/qa/invariants.yaml` by `make qa-ve
 | INV-H1-CLOSE | P1 | L1 | covered |
 | INV-H2-SESSIONID | P1 | L1 | covered |
 | INV-HARNESS-VERDICT | P3 | L1 | covered |
-| INV-O1-FLOW | P6 | L2 | gap |
+| INV-MERGE-LIFECYCLE | P3 | L1 | covered |
+| INV-O1-FLOW | P6 | L1 | covered |
 | INV-P1-EXEC | P1 | L0 | covered |
 | INV-P1-PLANSRC | P1 | L0 | covered |
 | INV-P2-WRITE | P2 | L1 | covered |
-| INV-P3-DEGRADE | P3 | L1 | defect |
+| INV-P3-DEGRADE | P3 | L1 | covered |
 | INV-P3-VALID | P3 | L1 | covered |
 | INV-P4-PARSE | P4 | L0 | covered |
 | INV-P4-STREAM | P4 | L0 | covered |
 | INV-P5-FAILCLOSED | P5 | L0 | covered |
 | INV-P5-ROUTE | P5 | L0 | covered |
+| INV-ROLE-ARCH | P1 | L1 | covered |
+| INV-ROLE-CRITIC | P6 | L1 | covered |
+| INV-ROLE-INTEGRATOR | P3 | L1 | covered |
+| INV-ROLE-RESEARCH | P6 | L1 | covered |
+| INV-ROLE-VALIDATE | P3 | L0 | covered |
+| INV-ROLE-WORKER | P2 | L1 | covered |
 
 <!-- END GENERATED LEDGER -->
 

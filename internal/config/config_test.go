@@ -19,6 +19,7 @@ func TestValidate_MissingRoleModels(t *testing.T) {
 		{"missing architect model", func(c *Config) { c.Architect.Model = "" }, "architect"},
 		{"missing worker model", func(c *Config) { c.Worker.Model = "" }, "worker"},
 		{"missing critic model", func(c *Config) { c.Critic.Model = "" }, "critic"},
+		{"missing integrator model", func(c *Config) { c.Integrator.Model = "" }, "integrator"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -296,7 +297,8 @@ func TestValidate_ProviderType(t *testing.T) {
 				Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
 				Architect:  ArchitectConfig{BaseAgentConfig: BaseAgentConfig{Model: "large"}},
 				Worker:     WorkerConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
-				Critic:     CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Critic:      CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Integrator:  IntegratorConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
 				Providers: map[string]ProviderConfig{
 					"local": {BaseURL: "http://localhost:11434", Type: ""},
 				},
@@ -314,7 +316,8 @@ func TestValidate_ProviderType(t *testing.T) {
 				Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
 				Architect:  ArchitectConfig{BaseAgentConfig: BaseAgentConfig{Model: "large"}},
 				Worker:     WorkerConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
-				Critic:     CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Critic:      CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Integrator:  IntegratorConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
 				Providers: map[string]ProviderConfig{
 					"local": {BaseURL: "http://localhost:11434", Type: "copilot-proxy"},
 				},
@@ -332,7 +335,8 @@ func TestValidate_ProviderType(t *testing.T) {
 				Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
 				Architect:  ArchitectConfig{BaseAgentConfig: BaseAgentConfig{Model: "large"}},
 				Worker:     WorkerConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
-				Critic:     CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Critic:      CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Integrator:  IntegratorConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
 				Providers: map[string]ProviderConfig{
 					"proxy": {BaseURL: "http://127.0.0.1:4141", Type: ProviderTypeNative},
 				},
@@ -350,7 +354,8 @@ func TestValidate_ProviderType(t *testing.T) {
 				Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
 				Architect:  ArchitectConfig{BaseAgentConfig: BaseAgentConfig{Model: "large"}},
 				Worker:     WorkerConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
-				Critic:     CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Critic:      CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Integrator:  IntegratorConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
 				Providers: map[string]ProviderConfig{
 					"local": {Type: ProviderTypeAnthropic},
 				},
@@ -368,7 +373,8 @@ func TestValidate_ProviderType(t *testing.T) {
 				Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
 				Architect:  ArchitectConfig{BaseAgentConfig: BaseAgentConfig{Model: "large"}},
 				Worker:     WorkerConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
-				Critic:     CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Critic:      CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Integrator:  IntegratorConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
 				Providers: map[string]ProviderConfig{
 					"local": {Type: ProviderTypeOpenAI},
 				},
@@ -386,7 +392,8 @@ func TestValidate_ProviderType(t *testing.T) {
 				Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
 				Architect:  ArchitectConfig{BaseAgentConfig: BaseAgentConfig{Model: "large"}},
 				Worker:     WorkerConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
-				Critic:     CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Critic:      CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Integrator:  IntegratorConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
 				Providers: map[string]ProviderConfig{
 					"anthropic-native": {Type: ProviderTypeNative},
 				},
@@ -404,7 +411,8 @@ func TestValidate_ProviderType(t *testing.T) {
 				Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
 				Architect:  ArchitectConfig{BaseAgentConfig: BaseAgentConfig{Model: "large"}},
 				Worker:     WorkerConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
-				Critic:     CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Critic:      CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Integrator:  IntegratorConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
 				Providers: map[string]ProviderConfig{
 					"local": {BaseURL: "http://192.168.50.212:11434", Type: ProviderTypeOpenAI},
 				},
@@ -422,7 +430,8 @@ func TestValidate_ProviderType(t *testing.T) {
 				Researcher: ResearcherConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
 				Architect:  ArchitectConfig{BaseAgentConfig: BaseAgentConfig{Model: "large"}},
 				Worker:     WorkerConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
-				Critic:     CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Critic:      CriticConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
+				Integrator:  IntegratorConfig{BaseAgentConfig: BaseAgentConfig{Model: "medium"}},
 				Providers: map[string]ProviderConfig{
 					"local": {BaseURL: "http://localhost:4141", Type: ProviderTypeAnthropic},
 				},

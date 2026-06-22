@@ -44,7 +44,7 @@ type RunCompleteness struct {
 	MissingAgents    []string
 	FailedAgents     []string
 	MissingArtifacts []ArtifactRequirement
-	RestartPhase     string // "research"|"deliberation"|"execution"|"validation" or ""
+	RestartPhase     string // "deliberation"|"execution"|"validation" or ""
 	Reason           string
 }
 
@@ -151,16 +151,8 @@ func AnalyzeRunCompleteness(runPath string) RunCompleteness {
 		return c
 	}
 
-	if intended.Research {
-		if !dirHasPlans(runPath, "research") {
-			c.Complete = false
-			c.RestartPhase = "research"
-			c.Reason = "research phase incomplete (no research/plan-v*.md)"
-			return c
-		}
-	}
-
-	// Deliberation always runs — it is not gated by the Research flag.
+	// Deliberation is the first stage and always runs (the architect researches on
+	// demand via subagent; there is no standalone research phase to check).
 	if !dirHasPlans(runPath, "deliberation") {
 		c.Complete = false
 		c.RestartPhase = "deliberation"
@@ -190,9 +182,9 @@ func AnalyzeRunCompleteness(runPath string) RunCompleteness {
 	return c
 }
 
-// runPhases is a local struct for decoding run_config.json.
+// runPhases is a local struct for decoding run_config.json. A legacy "research"
+// key in older run_config.json files is harmlessly ignored (unknown field).
 type runPhases struct {
-	Research   bool `json:"research"`
 	Execution  bool `json:"execution"`
 	Validation bool `json:"validation"`
 }

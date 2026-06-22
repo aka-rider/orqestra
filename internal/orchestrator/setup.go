@@ -3,8 +3,10 @@ package orchestrator
 import "fmt"
 
 // PipelineSetup configures which pipeline phases run and which gates fire.
+// Deliberation always runs (it produces the plan); Execution and Validation are
+// optional. There is no Research toggle — the architect researches on demand via the
+// orqestra-researcher subagent.
 type PipelineSetup struct {
-	Research           bool
 	Execution          bool
 	Validation         bool
 	DeliberationRounds int
@@ -14,7 +16,6 @@ type PipelineSetup struct {
 // DefaultPipelineSetup returns the default pipeline configuration.
 func DefaultPipelineSetup() PipelineSetup {
 	return PipelineSetup{
-		Research:           true,
 		Execution:          true,
 		Validation:         true,
 		DeliberationRounds: 1,
@@ -22,11 +23,10 @@ func DefaultPipelineSetup() PipelineSetup {
 	}
 }
 
-// Validate checks invariant constraints on PipelineSetup.
+// Validate checks invariant constraints on PipelineSetup. Deliberation always runs and
+// a plan is a valid terminal output, so a plan-only run (Execution=Validation=false) is
+// legal — the only constraint is the deliberation-rounds range.
 func (p PipelineSetup) Validate() error {
-	if !p.Research && !p.Execution && !p.Validation {
-		return fmt.Errorf("at least one of Research, Execution, Validation must be enabled")
-	}
 	if p.DeliberationRounds < 1 || p.DeliberationRounds > 3 {
 		return fmt.Errorf("DeliberationRounds must be in [1,3], got %d", p.DeliberationRounds)
 	}
@@ -36,7 +36,7 @@ func (p PipelineSetup) Validate() error {
 // isZeroSetup reports whether s is the zero value (no fields set by the caller).
 // Can't use == because HumanGateSet is a slice.
 func isZeroSetup(s PipelineSetup) bool {
-	return !s.Research && !s.Execution && !s.Validation && s.DeliberationRounds == 0 && len(s.HumanGates) == 0
+	return !s.Execution && !s.Validation && s.DeliberationRounds == 0 && len(s.HumanGates) == 0
 }
 
 // resolveSetup converts user Input into a PipelineSetup.

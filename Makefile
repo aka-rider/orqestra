@@ -32,8 +32,11 @@ test-integration:
 test-sandbox:
 	go test -tags 'darwin integration' -race -v ./internal/sandbox/...
 
+# Live e2e (real claude + API) is NOT yet implemented — there is no TestE2E, so
+# the old `go test -run TestE2E` recipe passed by vacuity (zero tests = green).
+# Until a real L3 lane exists, this target must not masquerade as coverage.
 test-e2e:
-	go test -tags e2e ./internal/harness/ -v -count=1 -run TestE2E -timeout 120s
+	@echo "test-e2e: no live e2e (L3) tests implemented yet — placeholder, not coverage. See docs/qa/qa-spec.md §5."
 
 lint:
 	go vet ./...

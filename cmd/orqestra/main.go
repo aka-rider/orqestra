@@ -166,13 +166,25 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		return harness.WithInlineMCPServer("orqestra", selfBin, []string{"mcp-bridge", "--socket", socketPath, "--agent-id", agentID})
 	}
 
+	// The researcher is no longer a standalone stage: it is an inline subagent the
+	// planners spawn on demand via the Agent tool. Build its definition once from the
+	// curated researcher persona (cfg.Researcher) and attach it to architect + critic.
+	// Model is intentionally OMITTED → "inherit": cfg.Researcher.Model is an orqestra
+	// alias the CLI cannot read, and models are env-routed, so the subagent inherits
+	// the parent's model. The subagent has no MCP — it returns its report as its final
+	// message (its prompt's COMPLETION clause says so).
+	researcherDef := harness.AgentDef{
+		Description:     cfg.Researcher.Description,
+		Prompt:          cfg.Researcher.SystemPrompt,
+		Tools:           cfg.Researcher.AllowedTools,
+		DisallowedTools: cfg.Researcher.DisallowedTools,
+	}
+
 	// Build per-agent ClaudeCLIOptions for BuildProcessSpec.
-	resOpts := append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Researcher.BaseAgentConfig)...)
-	resOpts = append(resOpts, bridgeOptFor("researcher"), harness.WithMaxTurns(cfg.Researcher.MaxTurns))
 	plnOpts := append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Architect.BaseAgentConfig)...)
-	plnOpts = append(plnOpts, bridgeOptFor("architect"), harness.WithMaxTurns(cfg.Architect.MaxTurns))
+	plnOpts = append(plnOpts, bridgeOptFor("architect"), harness.WithMaxTurns(cfg.Architect.MaxTurns), harness.WithInlineAgent("orqestra-researcher", researcherDef))
 	criticOpts := append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Critic.BaseAgentConfig)...)
-	criticOpts = append(criticOpts, bridgeOptFor("critic"), harness.WithMaxTurns(cfg.Critic.MaxTurns))
+	criticOpts = append(criticOpts, bridgeOptFor("critic"), harness.WithMaxTurns(cfg.Critic.MaxTurns), harness.WithInlineAgent("orqestra-researcher", researcherDef))
 
 	// Worker sandbox environment (model-specific env vars for API keys etc.)
 	resolved, resolveErr := cfg.ResolveModel(cfg.Worker.Model)
@@ -183,6 +195,18 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 	modelEnv, modelEnvErr := harness.BuildModelEnv(resolved, cfg.ResolveUtilityModel())
 	if modelEnvErr != nil {
 		slog.Error("invalid model configuration", "err", modelEnvErr)
+		os.Exit(exitInvalidInput)
+	}
+
+	// Integrator sandbox environment (model env for conflict-resolution mode).
+	integratorResolved, intResolveErr := cfg.ResolveModel(cfg.Integrator.Model)
+	if intResolveErr != nil {
+		slog.Error("failed to resolve integrator model", "err", intResolveErr)
+		os.Exit(exitInvalidInput)
+	}
+	integratorEnv, intEnvErr := harness.BuildModelEnv(integratorResolved, cfg.ResolveUtilityModel())
+	if intEnvErr != nil {
+		slog.Error("invalid integrator model configuration", "err", intEnvErr)
 		os.Exit(exitInvalidInput)
 	}
 
@@ -216,29 +240,10 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		roSandboxCfg.Profiles = append(roSandboxCfg.Profiles, orqProfile.Snapshot())
 	}
 
-	// BuildProcessSpec inherits all options already set in resOpts/plnOpts/criticOpts,
+	// BuildProcessSpec inherits all options already set in plnOpts/criticOpts,
 	// including the role system prompt that bridgeToolOpts now delivers via
 	// MergeAppendPrompts(SystemPrompt, AppendSystemPrompt). Do NOT add another
 	// WithAppendSystemPrompt here — the last one wins and would drop the role prompt.
-	resSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Researcher.Model, roSandboxCfg, resOpts...)
-	if specErr != nil {
-		slog.Error("failed to build researcher spec", "err", specErr)
-		os.Exit(exitInvalidInput)
-	}
-	resSpec.AgentID = "researcher"
-	resSpec.ExpectsReport = true
-	resSpec.Timeout = cfg.Researcher.Timeout.Duration
-	resSpec.LoopGuard = harness.LoopGuardSpec{
-		RepeatThreshold: cfg.Researcher.LoopGuard.RepeatThreshold,
-		MaxNudges:       cfg.Researcher.LoopGuard.MaxNudges,
-		CooldownTurns:   cfg.Researcher.LoopGuard.CooldownTurns,
-	}
-	resSpec.SilenceGuard = harness.SilenceGuardSpec{
-		SilenceSecs: cfg.Researcher.SilenceGuard.SilenceSecs,
-		NudgeText:   cfg.Researcher.SilenceGuard.NudgeText,
-	}
-	resSpec.PreTimeoutNudge = preTimeoutNudgeFor("researcher")
-
 	archSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Architect.Model, roSandboxCfg, plnOpts...)
 	if specErr != nil {
 		slog.Error("failed to build architect spec", "err", specErr)
@@ -310,15 +315,56 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		return spec
 	}
 
+	// Integrator commit-message spec: RO sandbox, no tools, fresh process.
+	integratorCommitOpts := []harness.ClaudeCLIOption{
+		harness.WithWorkDir(repoPath),
+		harness.WithNoTools(),
+		harness.WithAppendSystemPrompt(harness.MergeAppendPrompts(cfg.Integrator.SystemPrompt, cfg.Integrator.AppendSystemPrompt)),
+	}
+	commitMsgSpec, commitSpecErr := harness.BuildProcessSpec(cfg, cfg.Integrator.Model, roSandboxCfg, integratorCommitOpts...)
+	if commitSpecErr != nil {
+		slog.Error("failed to build integrator commit-msg spec", "err", commitSpecErr)
+		os.Exit(exitInvalidInput)
+	}
+	commitMsgSpec.AgentID = "integrator"
+	commitMsgSpec.Timeout = cfg.Integrator.Timeout.Duration
+
+	// Integrator conflict-resolution spec fn: worktree-writable sandbox, Read/Edit tools.
+	integratorConflictSpecFn := func(wtPath string) harness.ProcessSpec {
+		conflictSandboxCfg := harness.SandboxConfig{
+			RepoPath:     repoPath,
+			Profiles:     sandboxProfiles,
+			Env:          integratorEnv,
+			Writable:     false,
+			WorktreePath: wtPath,
+		}
+		conflictOpts := []harness.ClaudeCLIOption{
+			harness.WithWorkDir(wtPath),
+			harness.WithPermissionMode(cfg.Integrator.PermissionMode),
+			harness.WithAllowedTools(cfg.Integrator.AllowedTools),
+			harness.WithDisallowedTools(cfg.Integrator.DisallowedTools),
+			harness.WithAppendSystemPrompt(harness.MergeAppendPrompts(cfg.Integrator.SystemPrompt, cfg.Integrator.AppendSystemPrompt)),
+		}
+		conflictSpec, conflictSpecErr := harness.BuildProcessSpec(cfg, cfg.Integrator.Model, conflictSandboxCfg, conflictOpts...)
+		if conflictSpecErr != nil {
+			slog.Error("failed to build integrator conflict spec", "err", conflictSpecErr, "wt", wtPath)
+			return harness.ProcessSpec{}
+		}
+		conflictSpec.AgentID = "integrator"
+		conflictSpec.Timeout = cfg.Integrator.Timeout.Duration
+		return conflictSpec
+	}
+
 	return &orchestrator.Engine{
 		Config:   cfg,
 		RepoPath: repoPath,
 		Specs: orchestrator.ProcessSpecs{
-			Researcher:     resSpec,
-			Architect:      archSpec,
-			Critic:         criticSpec,
-			Worker:         workerSpec,
-			WorktreeSpecFn: wtSpecFn,
+			Architect:                archSpec,
+			Critic:                   criticSpec,
+			Worker:                   workerSpec,
+			WorktreeSpecFn:           wtSpecFn,
+			Integrator:               commitMsgSpec,
+			IntegratorConflictSpecFn: integratorConflictSpecFn,
 		},
 		RunDirFactory:  orchestrator.DefaultRunDirFactory(repoPath),
 		QuestionBridge: bridge,

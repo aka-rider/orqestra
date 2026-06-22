@@ -42,13 +42,17 @@ type RunDirFactory func(slug string) (agent.SessionDir, error)
 
 // ProcessSpecs holds per-role ProcessSpec values for the RunPipeline path.
 type ProcessSpecs struct {
-	Researcher harness.ProcessSpec
 	Architect  harness.ProcessSpec
 	Critic     harness.ProcessSpec
 	Worker     harness.ProcessSpec
 	// WorktreeSpecFn returns a spec for the worker scoped to the given worktree path.
 	// If nil, Worker spec is used with direct repo access.
 	WorktreeSpecFn func(wtPath string) harness.ProcessSpec
+	// Integrator is used for the commit-message generation mode (no tools, RO sandbox).
+	Integrator harness.ProcessSpec
+	// IntegratorConflictSpecFn returns a spec for the integrator's conflict-resolution
+	// mode scoped to the given worktree path (Read/Edit tools, worktree-writable sandbox).
+	IntegratorConflictSpecFn func(wtPath string) harness.ProcessSpec
 }
 
 // Engine is the hardcoded Go orchestrator that runs the full pipeline.

@@ -44,14 +44,20 @@ func (s *ExecuteStep) Run(ctx context.Context, in ExecuteInput, sc StepContext) 
 		var wtErr error
 		wt, wtErr = worktree.Create(ctx, s.RepoPath, sc.Sessions.Path, in.RunID)
 		if wtErr != nil {
-			sc.Log.Warn("worktree creation failed — falling back to direct repo", "err", wtErr)
-			wt = worktree.Worktree{}
-		} else {
-			if s.Sup != nil {
-				s.Sup.TrackWorktree(wt)
-			}
-			spec = s.WorktreeSpecFn(wt.Path)
+			// Isolation was requested (WorktreeSpecFn set) but could not be
+			// established. This is an integrity boundary: silently running the
+			// worker against the live repo would lose isolation without the
+			// pipeline or user ever learning a worktree was skipped (DEFECT-03).
+			// Fail closed — surface the failure, never fall back to the direct repo.
+			isoErr := fmt.Errorf("worktree isolation requested but creation failed: %w", wtErr)
+			sc.Obs.AgentFailed(s.ID(), isoErr)
+			s.writeMeta(sc, "", start, "failed", isoErr, harness.TokenUsage{})
+			return ExecuteOutput{}, fmt.Errorf("worker: %w", isoErr)
 		}
+		if s.Sup != nil {
+			s.Sup.TrackWorktree(wt)
+		}
+		spec = s.WorktreeSpecFn(wt.Path)
 	}
 
 	execPrompt := agent.BuildExecutionPromptFromPlan(in.FinalPlan)

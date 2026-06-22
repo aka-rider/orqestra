@@ -20,19 +20,16 @@ type setupModel struct {
 
 // setupItem order mirrors the rendered list.
 const (
-	setupItemResearch       = 0
-	setupItemDeliberation   = 1
-	setupItemExecution      = 2
-	setupItemValidation     = 3
-	setupItemGateFirst      = 4 // GateAfterDeliberation
-	setupItemGateSecond     = 5 // GateAfterResearch
-	numSetupItems           = 6
+	setupItemDeliberation = 0
+	setupItemExecution    = 1
+	setupItemValidation   = 2
+	setupItemGateFirst    = 3 // GateAfterDeliberation
+	numSetupItems         = 4
 )
 
-// gateOrder maps cursor positions 4-5 to HumanGatePosition values.
-var gateOrder = [2]orchestrator.HumanGatePosition{
+// gateOrder maps gate cursor positions (from setupItemGateFirst) to HumanGatePosition values.
+var gateOrder = [1]orchestrator.HumanGatePosition{
 	orchestrator.GateAfterDeliberation,
-	orchestrator.GateAfterResearch,
 }
 
 func newSetupModel() setupModel {
@@ -85,8 +82,6 @@ func (s setupModel) Update(msg tea.KeyPressMsg) (setupModel, tea.Cmd) {
 
 func (s setupModel) changeValue(key string) setupModel {
 	switch s.cursor {
-	case setupItemResearch:
-		s.setup.Research = !s.setup.Research
 	case setupItemDeliberation:
 		switch key {
 		case "left":
@@ -160,16 +155,14 @@ func (s setupModel) View() string {
 		b.WriteString(fmt.Sprintf("%s%-24s%s\n", cur, label+":", v))
 	}
 
-	renderBool(setupItemResearch, "Research", s.setup.Research)
 	renderInt(setupItemDeliberation, "Deliberation", s.setup.DeliberationRounds)
 	renderBool(setupItemExecution, "Execution", s.setup.Execution)
 	renderBool(setupItemValidation, "Validation", s.setup.Validation)
 
 	b.WriteString("\n" + setupDimStyle.Render("  Human Review:") + "\n")
 
-	gateLabels := [2]string{
+	gateLabels := [1]string{
 		"After Deliberation",
-		"After Research",
 	}
 	for i, gate := range gateOrder {
 		idx := setupItemGateFirst + i

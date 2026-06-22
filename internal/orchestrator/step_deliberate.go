@@ -32,7 +32,7 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 	sc.Obs.PhaseChanged(PhasePlanning)
 
 	archPrompt := guardPrompt(
-		agent.ArchitectPrompt(in.OriginalPrompt, in.Draft),
+		agent.ArchitectPrompt(in.OriginalPrompt),
 		in.OriginalPrompt,
 		"architect",
 	)

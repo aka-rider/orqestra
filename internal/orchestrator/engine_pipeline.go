@@ -140,13 +140,6 @@ func (e *Engine) buildPipelineSteps(sup *Supervisor) PipelineSteps {
 	archMeta := resolveAgentMeta(e.Config, e.Config.Architect.Model)
 	critMeta := resolveAgentMeta(e.Config, e.Config.Critic.Model)
 	workMeta := resolveAgentMeta(e.Config, e.Config.Worker.Model)
-	resMeta := resolveAgentMeta(e.Config, e.Config.Researcher.Model)
-
-	research := &ResearchStep{
-		Spec:     e.Specs.Researcher,
-		Meta:     resMeta,
-		Attempts: max(e.Config.Retry.ResearcherAttempts, 1),
-	}
 
 	deliberate := &DeliberateStep{
 		ArchSpec:       e.Specs.Architect,
@@ -177,16 +170,21 @@ func (e *Engine) buildPipelineSteps(sup *Supervisor) PipelineSteps {
 		ValidationRetries: max(e.Config.Retry.WorkerValidationRetries, 1),
 	}
 
-	merge := &MergeStep{
-		Sup: sup,
+	integrateMeta := resolveAgentMeta(e.Config, e.Config.Integrator.Model)
+
+	integrate := &IntegrateStep{
+		CommitMsgSpec:    e.Specs.Integrator,
+		ConflictSpecFn:   e.Specs.IntegratorConflictSpecFn,
+		Meta:             integrateMeta,
+		Sup:              sup,
+		ResolveConflicts: e.Config.Integrator.ResolveConflicts,
 	}
 
 	return PipelineSteps{
-		Research:   research,
 		Deliberate: deliberate,
 		Revise:     revise,
 		Execute:    execute,
 		Validate:   validate,
-		Merge:      merge,
+		Integrate:  integrate,
 	}
 }

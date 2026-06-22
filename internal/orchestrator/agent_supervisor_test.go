@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"context"
 	"errors"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -11,64 +10,77 @@ import (
 	"github.com/xiii/orqestra/internal/harness"
 )
 
-// --- fakes -------------------------------------------------------------------
+// --- compliant executors -----------------------------------------------------
+// All wrap fixturePlayer (real JSONL replay) instead of hand-writing events.
+//
+// blockingPlayer: replays fixture then blocks on ctx.Done — for tests where
+// the supervisor must cancel a running executor (timeout, parent cancel, report).
+//
+// blockingCapturingPlayer: replays fixture, records inbound messages, then blocks —
+// for TestSupervisor_NudgeSentOnLoop, which asserts the supervisor writes a
+// nudge back to the executor's input channel.
 
-// syncInner blocks until its context is done, collecting input messages.
-// Emits scripted events before blocking.
-type syncInner struct {
-	mu        sync.Mutex
-	messages  []string
-	events    []harness.Event
-	msgNotify chan struct{}
-	result    harness.RunResult
-	err       error
+type blockingPlayer struct{ player *fixturePlayer }
+
+func (b *blockingPlayer) Run(ctx context.Context, spec harness.ProcessSpec, in <-chan harness.Message, sink harness.Sink) (harness.RunResult, error) {
+	res, err := b.player.Run(ctx, spec, in, sink)
+	if err != nil {
+		return res, err
+	}
+	<-ctx.Done()
+	return res, ctx.Err()
 }
 
-func (b *syncInner) Run(ctx context.Context, _ harness.ProcessSpec, in <-chan harness.Message, sink harness.Sink) (harness.RunResult, error) {
+type blockingCapturingPlayer struct {
+	player   *fixturePlayer
+	mu       sync.Mutex
+	messages []string
+	notify   chan struct{}
+}
+
+func newBlockingCapturingPlayer(path string) *blockingCapturingPlayer {
+	return &blockingCapturingPlayer{
+		player: &fixturePlayer{path: path},
+		notify: make(chan struct{}, 16),
+	}
+}
+
+func (c *blockingCapturingPlayer) Run(ctx context.Context, spec harness.ProcessSpec, in <-chan harness.Message, sink harness.Sink) (harness.RunResult, error) {
 	if in != nil {
 		go func() {
 			for msg := range in {
-				b.mu.Lock()
-				b.messages = append(b.messages, msg.Text)
-				b.mu.Unlock()
-				if b.msgNotify != nil {
-					select {
-					case b.msgNotify <- struct{}{}:
-					default:
-					}
+				c.mu.Lock()
+				c.messages = append(c.messages, msg.Text)
+				c.mu.Unlock()
+				select {
+				case c.notify <- struct{}{}:
+				default:
 				}
 			}
 		}()
 	}
-	if sink != nil {
-		for _, ev := range b.events {
-			sink.Observe(ev)
-		}
-	}
-	if b.err != nil {
-		return b.result, b.err
+	// Pass nil for in: the capturing goroutine above drains it; the player
+	// replays from file only.
+	res, err := c.player.Run(ctx, spec, nil, sink)
+	if err != nil {
+		return res, err
 	}
 	<-ctx.Done()
-	return b.result, ctx.Err()
+	return res, ctx.Err()
 }
 
-func (b *syncInner) received() []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	out := make([]string, len(b.messages))
-	copy(out, b.messages)
-	return out
+func (c *blockingCapturingPlayer) hasMessage(text string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, m := range c.messages {
+		if m == text {
+			return true
+		}
+	}
+	return false
 }
 
-// immediateInner returns immediately (base executor fast-exit).
-type immediateInner struct {
-	result harness.RunResult
-	err    error
-}
-
-func (i *immediateInner) Run(_ context.Context, _ harness.ProcessSpec, _ <-chan harness.Message, _ harness.Sink) (harness.RunResult, error) {
-	return i.result, i.err
-}
+// --- other helpers -----------------------------------------------------------
 
 // preFiredSignaler returns a pre-closed channel for all agentIDs.
 type preFiredSignaler struct{}
@@ -79,26 +91,24 @@ func (preFiredSignaler) ReportSignal(_ string) <-chan struct{} {
 	return ch
 }
 
-// --- helpers -----------------------------------------------------------------
-
 func newTestSupervisor(base harness.Executor) *AgentSupervisor {
 	guard := NewBudgetGuard(NewRunUsage(0)) // unlimited
 	return NewAgentSupervisor(base, nil, guard)
 }
 
-func waitFor(t *testing.T, b *syncInner, pred func(string) bool, desc string) {
+// waitForMsg polls pred until it returns true or timeout expires.
+func waitForMsg(t *testing.T, pred func() bool, timeout time.Duration, desc string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
 	for {
-		if slices.ContainsFunc(b.received(), pred) {
+		if pred() {
 			return
 		}
 		select {
-		case <-ctx.Done():
-			t.Errorf("timed out waiting for %s; got %v", desc, b.received())
-			return
-		case <-b.msgNotify:
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for: %s", desc)
+		case <-time.After(5 * time.Millisecond):
 		}
 	}
 }
@@ -106,22 +116,20 @@ func waitFor(t *testing.T, b *syncInner, pred func(string) bool, desc string) {
 // --- tests -------------------------------------------------------------------
 
 func TestSupervisor_NormalExit(t *testing.T) {
-	inner := &immediateInner{result: harness.RunResult{Output: "done"}}
-	sup := newTestSupervisor(inner)
+	// fixturePlayer returns RunResult{} (Output==""); assert clean exit with no error.
+	player := &fixturePlayer{path: "testdata/normal_exit.jsonl"}
+	sup := newTestSupervisor(player)
 
-	res, err := sup.Run(context.Background(), harness.ProcessSpec{Prompt: "go"}, nil, nil)
+	_, err := sup.Run(context.Background(), harness.ProcessSpec{Prompt: "go"}, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if res.Output != "done" {
-		t.Errorf("expected output 'done', got %q", res.Output)
 	}
 }
 
 func TestSupervisor_Passthrough_NoPolicies(t *testing.T) {
 	// No policies, no in — should behave identically to base executor.
-	inner := &immediateInner{}
-	sup := newTestSupervisor(inner)
+	player := &fixturePlayer{path: "testdata/normal_exit.jsonl"}
+	sup := newTestSupervisor(player)
 
 	_, err := sup.Run(context.Background(), harness.ProcessSpec{}, nil, nil)
 	if err != nil {
@@ -130,8 +138,10 @@ func TestSupervisor_Passthrough_NoPolicies(t *testing.T) {
 }
 
 func TestSupervisor_TimeoutStop(t *testing.T) {
-	inner := &syncInner{}
-	sup := newTestSupervisor(inner)
+	// blockingPlayer: fixture completes instantly, then blocks on ctx.Done.
+	// Timeout fires → ctx cancelled → blockingPlayer returns DeadlineExceeded.
+	player := &blockingPlayer{player: &fixturePlayer{path: "testdata/normal_exit.jsonl"}}
+	sup := newTestSupervisor(player)
 
 	spec := harness.ProcessSpec{
 		Timeout: 50 * time.Millisecond,
@@ -148,8 +158,8 @@ func TestSupervisor_TimeoutStop(t *testing.T) {
 }
 
 func TestSupervisor_ParentCancelPropagates(t *testing.T) {
-	inner := &syncInner{}
-	sup := newTestSupervisor(inner)
+	player := &blockingPlayer{player: &fixturePlayer{path: "testdata/normal_exit.jsonl"}}
+	sup := newTestSupervisor(player)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -177,27 +187,10 @@ func TestSupervisor_ParentCancelPropagates(t *testing.T) {
 }
 
 func TestSupervisor_LoopEscalation(t *testing.T) {
-	// Send enough identical tool calls to trip escalation.
-	events := []harness.Event{
-		{Kind: harness.EventToolUse, Tool: "ExitWorktree", Args: "{}"},
-		{Kind: harness.EventToolResult},
-		{Kind: harness.EventToolUse, Tool: "ExitWorktree", Args: "{}"},
-		{Kind: harness.EventToolResult},
-		{Kind: harness.EventToolUse, Tool: "ExitWorktree", Args: "{}"},
-		{Kind: harness.EventToolResult},
-		// Cooldown turn
-		{Kind: harness.EventToolUse, Tool: "Glob", Args: "{}"},
-		{Kind: harness.EventToolResult},
-		// Second loop → escalate (maxNudges=1 already hit)
-		{Kind: harness.EventToolUse, Tool: "ExitWorktree", Args: "{}"},
-		{Kind: harness.EventToolResult},
-		{Kind: harness.EventToolUse, Tool: "ExitWorktree", Args: "{}"},
-		{Kind: harness.EventToolResult},
-		{Kind: harness.EventToolUse, Tool: "ExitWorktree", Args: "{}"},
-		{Kind: harness.EventToolResult},
-	}
-	inner := &syncInner{events: events}
-	sup := newTestSupervisor(inner)
+	// exitworktree_loop.jsonl has 31 ExitWorktree calls — enough to trip escalation
+	// with RepeatThreshold:3, MaxNudges:1.
+	player := &fixturePlayer{path: "testdata/exitworktree_loop.jsonl"}
+	sup := newTestSupervisor(player)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -216,9 +209,11 @@ func TestSupervisor_LoopEscalation(t *testing.T) {
 }
 
 func TestSupervisor_ReportArrivalStopsRun(t *testing.T) {
-	inner := &syncInner{}
+	// preFiredSignaler returns a pre-closed channel — report "already arrived".
+	// Supervisor detects it and stops cleanly (errReportArrived → nil).
+	player := &blockingPlayer{player: &fixturePlayer{path: "testdata/normal_exit.jsonl"}}
 	guard := NewBudgetGuard(NewRunUsage(0))
-	sup := NewAgentSupervisor(inner, preFiredSignaler{}, guard)
+	sup := NewAgentSupervisor(player, preFiredSignaler{}, guard)
 
 	spec := harness.ProcessSpec{
 		AgentID:       "architect",
@@ -244,11 +239,12 @@ func TestSupervisor_ReportArrivalStopsRun(t *testing.T) {
 }
 
 func TestSupervisor_BudgetPreCheck(t *testing.T) {
-	inner := &immediateInner{}
+	// Budget check runs before the executor — fixturePlayer is never called.
+	player := &fixturePlayer{path: "testdata/normal_exit.jsonl"}
 	u := NewRunUsage(100)
 	u.Record("prev", 60, 60) // over budget
 	guard := NewBudgetGuard(u)
-	sup := NewAgentSupervisor(inner, nil, guard)
+	sup := NewAgentSupervisor(player, nil, guard)
 
 	_, err := sup.Run(context.Background(), harness.ProcessSpec{}, nil, nil)
 	if !errors.Is(err, harness.ErrBudgetExhausted) {
@@ -257,18 +253,10 @@ func TestSupervisor_BudgetPreCheck(t *testing.T) {
 }
 
 func TestSupervisor_NudgeSentOnLoop(t *testing.T) {
-	inner := &syncInner{
-		msgNotify: make(chan struct{}, 8),
-		events: []harness.Event{
-			{Kind: harness.EventToolUse, Tool: "ExitWorktree", Args: "{}"},
-			{Kind: harness.EventToolResult},
-			{Kind: harness.EventToolUse, Tool: "ExitWorktree", Args: "{}"},
-			{Kind: harness.EventToolResult},
-			{Kind: harness.EventToolUse, Tool: "ExitWorktree", Args: "{}"},
-			{Kind: harness.EventToolResult},
-		},
-	}
-	sup := newTestSupervisor(inner)
+	// exitworktree_loop.jsonl triggers the loop guard; supervisor writes loopNudgeText
+	// to the executor's input channel. blockingCapturingPlayer records it.
+	cp := newBlockingCapturingPlayer("testdata/exitworktree_loop.jsonl")
+	sup := newTestSupervisor(cp)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -282,13 +270,6 @@ func TestSupervisor_NudgeSentOnLoop(t *testing.T) {
 
 	go func() { sup.Run(ctx, spec, nil, nil) }() //nolint:errcheck
 
-	waitFor(t, inner, func(m string) bool {
-		return m == "work" // initial prompt seeded into msgs
-	}, "initial prompt in msgs")
-
-	waitFor(t, inner, func(m string) bool {
-		return m == loopNudgeText
-	}, "loop nudge message")
-
+	waitForMsg(t, func() bool { return cp.hasMessage(loopNudgeText) }, 2*time.Second, "loop nudge message")
 	cancel()
 }

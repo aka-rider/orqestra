@@ -17,16 +17,6 @@ type PipelineRunInput struct {
 	RunID  string // unique ID for this run; used in worktree commit messages
 }
 
-// ResearchInput is the input to the research step.
-type ResearchInput struct{ Prompt string }
-
-// ResearchOutput is the output of the research step.
-type ResearchOutput struct {
-	DraftMarkdown string
-	SessionID     string
-	Usage         harness.TokenUsage
-}
-
 // PlanOutput is the shared type returned by both Deliberate and Revise steps.
 type PlanOutput struct {
 	Markdown  string
@@ -36,7 +26,6 @@ type PlanOutput struct {
 
 // DeliberateInput is the input to the deliberation step.
 type DeliberateInput struct {
-	Draft         string
 	OriginalPrompt string
 }
 
@@ -73,28 +62,30 @@ type ValidateOutput struct {
 	Parsed agent.ValidationOutput
 }
 
-// MergeInput is the input to the worktree merge step.
-type MergeInput struct {
+// IntegrateInput is the input to the worktree integrate step.
+type IntegrateInput struct {
 	Worktree     worktree.Worktree
 	RunID        string
-	SessionID    string // last worker/validator session, for commit-msg generation
+	PlanMarkdown string // final approved plan; used to extract a goal for the commit message
 	TargetBranch string
 }
 
-// MergeOutput is the output of the merge step.
-type MergeOutput struct{ Status RunStatus }
+// IntegrateOutput is the output of the integrate step.
+type IntegrateOutput struct {
+	Status        RunStatus
+	ConflictFiles []string // populated on conflict give-up
+}
 
 // --- Steps container ---
 
 // PipelineSteps holds the concrete step implementations for RunPipeline.
-// Validate and Merge are optional (nil = skip).
+// Validate and Integrate are optional (nil = skip).
 type PipelineSteps struct {
-	Research   Step[ResearchInput, ResearchOutput]
 	Deliberate Step[DeliberateInput, PlanOutput]
-	Revise     Step[ReviseInput, PlanOutput]    // used inside gate loop
+	Revise     Step[ReviseInput, PlanOutput]       // used inside gate loop
 	Execute    Step[ExecuteInput, ExecuteOutput]
-	Validate   Step[ValidateInput, ValidateOutput] // nil = skip
-	Merge      Step[MergeInput, MergeOutput]        // nil = skip
+	Validate   Step[ValidateInput, ValidateOutput]    // nil = skip
+	Integrate  Step[IntegrateInput, IntegrateOutput]  // nil = skip
 }
 
 // --- RunPipeline ---
@@ -105,38 +96,11 @@ type PipelineSteps struct {
 func RunPipeline(ctx context.Context, setup PipelineSetup, in PipelineRunInput,
 	sc StepContext, steps PipelineSteps) (Result, error) {
 
-	// --- Research ---
-	var draft ResearchOutput
-	if setup.Research {
-		sc.Obs.PhaseChanged(PhaseResearching)
-		var err error
-		draft, err = steps.Research.Run(ctx, ResearchInput{Prompt: in.Prompt}, sc)
-		if err != nil {
-			return Result{Status: StatusFailed}, fmt.Errorf("research: %w", err)
-		}
-
-		// --- Optional gate after research ---
-		if setup.HumanGates.Active(GateAfterResearch) {
-			dec, gateErr := sc.Control.Gate(ctx, GateRequest{
-				Position:          GateAfterResearch,
-				FinalPlanMarkdown: draft.DraftMarkdown,
-			})
-			if gateErr != nil {
-				return Result{Status: StatusFailed}, fmt.Errorf("gate-after-research: %w", gateErr)
-			}
-			if dec.Type == DecisionCancel {
-				return Result{Status: StatusCancelled}, nil
-			}
-		}
-	} else {
-		// Research skipped: pass the prompt directly as the draft for deliberation.
-		draft = ResearchOutput{DraftMarkdown: in.Prompt}
-	}
-
 	// --- Deliberation (architect + critic) ---
+	// There is no standalone research stage: the architect researches on demand via the
+	// orqestra-researcher subagent, starting from the raw user prompt.
 	sc.Obs.PhaseChanged(PhasePlanning)
 	plan, err := steps.Deliberate.Run(ctx, DeliberateInput{
-		Draft:          draft.DraftMarkdown,
 		OriginalPrompt: in.Prompt,
 	}, sc)
 	if err != nil {
@@ -200,24 +164,24 @@ func RunPipeline(ctx context.Context, setup PipelineSetup, in PipelineRunInput,
 		valOutput = val.Output
 	}
 
-	// --- Merge ---
-	mergeStatus := StatusSuccess
-	if steps.Merge != nil {
-		merge, mergeErr := steps.Merge.Run(ctx, MergeInput{
+	// --- Integrate (commit + merge) ---
+	integrateStatus := StatusSuccess
+	if steps.Integrate != nil {
+		intResult, intErr := steps.Integrate.Run(ctx, IntegrateInput{
 			Worktree:     exec.Worktree,
 			RunID:        in.RunID,
-			SessionID:    exec.SessionID,
+			PlanMarkdown: plan.Markdown,
 			TargetBranch: exec.TargetBranch,
 		}, sc)
-		if mergeErr != nil {
-			return Result{Status: StatusFailed}, fmt.Errorf("merge: %w", mergeErr)
+		if intErr != nil {
+			return Result{Status: StatusFailed}, fmt.Errorf("integrate: %w", intErr)
 		}
-		mergeStatus = merge.Status
+		integrateStatus = intResult.Status
 	}
 
-	sc.Obs.Complete(mergeStatus)
+	sc.Obs.Complete(integrateStatus)
 	return Result{
-		Status:           mergeStatus,
+		Status:           integrateStatus,
 		FinalPlan:        plan.Markdown,
 		WorkerValidation: valOutput,
 	}, nil

@@ -12,10 +12,12 @@ func ResearcherPrompt(userPrompt string) string {
 		userPrompt)
 }
 
-// ArchitectPrompt builds the initial planning prompt from research facts.
-func ArchitectPrompt(userPrompt, researchFacts string) string {
-	return fmt.Sprintf("<user_request>\n%s\n</user_request>\n\n<codebase_research>\n%s\n</codebase_research>\n\nUsing the codebase research above, produce THE PLAN for the user's request — a spec a separate Worker will execute. You design it; you do not write code.",
-		userPrompt, researchFacts)
+// ArchitectPrompt builds the initial planning prompt. The architect starts from the
+// raw user request and discovers the codebase on demand via the orqestra-researcher
+// subagent — there is no upfront research report.
+func ArchitectPrompt(userPrompt string) string {
+	return fmt.Sprintf("<user_request>\n%s\n</user_request>\n\nProduce THE PLAN for the user's request — a spec a separate Worker will execute. Discover the codebase by spawning the orqestra-researcher subagent (Agent tool) as needed. You design the plan; you do not write code.",
+		userPrompt)
 }
 
 // ArchitectRevisionPrompt builds a cold-start revision prompt (no session to resume).

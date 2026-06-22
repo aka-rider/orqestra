@@ -51,6 +51,7 @@ type ProcessSpec struct {
 	Binary       string     // "" => "claude"
 	ExtraArgs    []string   // permission-mode, allowed/disallowed tools, MCP, etc.
 	Inline       []InlineMCP
+	Agents       []InlineAgent // inline subagent definitions serialized into --agents
 	Sandbox      SandboxConfig
 	Output       OutputMode
 
@@ -384,7 +385,35 @@ func buildSpecArgs(spec ProcessSpec, hasInputPlane bool) []string {
 		args = mergeInlineMCP(args, spec.Inline)
 	}
 
+	// Serialize inline subagent definitions into --agents. Appended unconditionally
+	// alongside ExtraArgs/Inline, so it survives --resume (the validator path).
+	if len(spec.Agents) > 0 {
+		args = appendAgentsArg(args, spec.Agents)
+	}
+
 	return args
+}
+
+// appendAgentsArg serializes inline subagent definitions into a single
+// --agents <json> flag of shape {"<name>": {AgentDef…}}. The names are map keys, so
+// encoding/json emits them in sorted order — deterministic output (CLAUDE.md).
+func appendAgentsArg(args []string, agents []InlineAgent) []string {
+	defs := make(map[string]AgentDef, len(agents))
+	for _, a := range agents {
+		if a.Name == "" {
+			continue
+		}
+		defs[a.Name] = a.Def
+	}
+	if len(defs) == 0 {
+		return args
+	}
+	data, err := json.Marshal(defs)
+	if err != nil {
+		// fire-and-forget: defs holds only strings/[]string, so json.Marshal cannot fail
+		return args
+	}
+	return append(args, "--agents", string(data))
 }
 
 // mergeInlineMCP merges named inline MCP server definitions into an existing

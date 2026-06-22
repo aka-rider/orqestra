@@ -16,13 +16,8 @@ func TestPipelineSetup_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "all disabled is invalid",
-			setup:   PipelineSetup{Research: false, Execution: false, Validation: false},
-			wantErr: true,
-		},
-		{
-			name:    "research only is valid",
-			setup:   PipelineSetup{Research: true, DeliberationRounds: 1},
+			name:    "plan-only (no execution/validation) is valid",
+			setup:   PipelineSetup{Execution: false, Validation: false, DeliberationRounds: 1},
 			wantErr: false,
 		},
 		{
@@ -37,27 +32,27 @@ func TestPipelineSetup_Validate(t *testing.T) {
 		},
 		{
 			name:    "rounds=0 invalid",
-			setup:   PipelineSetup{Research: true, DeliberationRounds: 0},
+			setup:   PipelineSetup{Execution: true, DeliberationRounds: 0},
 			wantErr: true,
 		},
 		{
 			name:    "rounds=1 valid",
-			setup:   PipelineSetup{Research: true, DeliberationRounds: 1},
+			setup:   PipelineSetup{Execution: true, DeliberationRounds: 1},
 			wantErr: false,
 		},
 		{
 			name:    "rounds=3 valid",
-			setup:   PipelineSetup{Research: true, DeliberationRounds: 3},
+			setup:   PipelineSetup{Execution: true, DeliberationRounds: 3},
 			wantErr: false,
 		},
 		{
 			name:    "rounds=4 invalid",
-			setup:   PipelineSetup{Research: true, DeliberationRounds: 4},
+			setup:   PipelineSetup{Execution: true, DeliberationRounds: 4},
 			wantErr: true,
 		},
 		{
 			name:    "rounds=-1 invalid",
-			setup:   PipelineSetup{Research: true, DeliberationRounds: -1},
+			setup:   PipelineSetup{Execution: true, DeliberationRounds: -1},
 			wantErr: true,
 		},
 	}
@@ -78,9 +73,9 @@ func TestIsZeroSetup_DeliberationRounds(t *testing.T) {
 		t.Error("zero PipelineSetup should be zero")
 	}
 
-	// Research=true alone breaks zero-ness.
-	if isZeroSetup(PipelineSetup{Research: true}) {
-		t.Error("PipelineSetup{Research:true} should not be zero")
+	// Execution=true alone breaks zero-ness.
+	if isZeroSetup(PipelineSetup{Execution: true}) {
+		t.Error("PipelineSetup{Execution:true} should not be zero")
 	}
 
 	// DeliberationRounds=1 alone breaks zero-ness (caller explicitly set it).

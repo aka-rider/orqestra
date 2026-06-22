@@ -43,23 +43,27 @@ func TestSetupModel_ToggleBool(t *testing.T) {
 	m := newSetupModel()
 	m.Open(orchestrator.DefaultPipelineSetup())
 
-	// cursor 0 = Research
-	if !m.setup.Research {
-		t.Fatal("Research should start enabled")
+	// Navigate to Execution (cursor 1; cursor 0 is the Deliberation int).
+	m, _ = m.Update(pressKey(tea.KeyDown))
+	if m.cursor != setupItemExecution {
+		t.Fatalf("cursor = %d, want %d (Execution)", m.cursor, setupItemExecution)
+	}
+	if !m.setup.Execution {
+		t.Fatal("Execution should start enabled")
 	}
 	m, _ = m.Update(pressKey(tea.KeyLeft))
-	if m.setup.Research {
-		t.Error("Research should be disabled after Left")
+	if m.setup.Execution {
+		t.Error("Execution should be disabled after Left")
 	}
 	m, _ = m.Update(pressKey(tea.KeyRight))
-	if !m.setup.Research {
-		t.Error("Research should be re-enabled after Right")
+	if !m.setup.Execution {
+		t.Error("Execution should be re-enabled after Right")
 	}
 
 	// Space also toggles
 	m, _ = m.Update(pressSpace())
-	if m.setup.Research {
-		t.Error("Research should be disabled after Space")
+	if m.setup.Execution {
+		t.Error("Execution should be disabled after Space")
 	}
 }
 
@@ -134,10 +138,9 @@ func TestSetupModel_DeliberationIncrement(t *testing.T) {
 	m := newSetupModel()
 	m.Open(orchestrator.DefaultPipelineSetup())
 
-	// Navigate to deliberation (cursor=1)
-	m, _ = m.Update(pressKey(tea.KeyDown))
-	if m.cursor != 1 {
-		t.Fatalf("cursor = %d, want 1", m.cursor)
+	// Deliberation is the first item (cursor 0).
+	if m.cursor != setupItemDeliberation {
+		t.Fatalf("cursor = %d, want %d", m.cursor, setupItemDeliberation)
 	}
 	if m.setup.DeliberationRounds != 1 {
 		t.Fatalf("DeliberationRounds = %d, want 1", m.setup.DeliberationRounds)
@@ -184,9 +187,7 @@ func TestSetupModel_DeliberationInConfirm(t *testing.T) {
 	m := newSetupModel()
 	m.Open(orchestrator.DefaultPipelineSetup())
 
-	// Navigate to deliberation (cursor=1)
-	m, _ = m.Update(pressKey(tea.KeyDown))
-	// Change to 3
+	// Deliberation is the first item (cursor 0). Change to 3.
 	m, _ = m.Update(pressKey(tea.KeyRight))
 	m, _ = m.Update(pressKey(tea.KeyRight))
 	if m.setup.DeliberationRounds != 3 {

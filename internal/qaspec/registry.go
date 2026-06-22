@@ -28,13 +28,26 @@ type Anchor struct {
 }
 
 // Invariant is one registry entry. Status is gap | covered | defect.
+//
+// Role names the pipeline agent whose real capability this invariant gates
+// (researcher | architect | critic | worker | validator), or "" for a
+// cross-cutting invariant. Every agent role MUST own at least one covered,
+// real_wiring invariant — enforced by checkRoleCoverage.
+//
+// RealWiring marks an invariant whose coverage MUST come from a test that
+// exercises real production machinery (sandbox, git, worktree, a real
+// harness.Run subprocess, or a real parser on real input) — never a fake step
+// or a no-op executor. Enforced by checkRealWiring so "covered" cannot be
+// satisfied by a fake.
 type Invariant struct {
-	ID      string   `yaml:"id"`
-	Pillar  string   `yaml:"pillar"`
-	Layer   string   `yaml:"layer"`
-	Status  string   `yaml:"status"`
-	Anchors []Anchor `yaml:"anchors"`
-	Tests   []string `yaml:"tests"`
+	ID         string   `yaml:"id"`
+	Pillar     string   `yaml:"pillar"`
+	Layer      string   `yaml:"layer"`
+	Status     string   `yaml:"status"`
+	Role       string   `yaml:"role,omitempty"`
+	RealWiring bool     `yaml:"real_wiring,omitempty"`
+	Anchors    []Anchor `yaml:"anchors"`
+	Tests      []string `yaml:"tests"`
 }
 
 // Canary records a confirmed defect and the test that proves it is still live.

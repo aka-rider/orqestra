@@ -135,6 +135,7 @@ type Config struct {
 	Architect      ArchitectConfig           `yaml:"architect"`
 	Critic         CriticConfig              `yaml:"critic"`
 	Worker         WorkerConfig              `yaml:"worker"`
+	Integrator     IntegratorConfig          `yaml:"integrator"`
 	Retry          RetryConfig               `yaml:"retry"`
 	Sandbox        SandboxConfig             `yaml:"sandbox"`
 }
@@ -162,6 +163,7 @@ type SilenceGuard struct {
 // BaseAgentConfig holds fields shared by all agent roles.
 type BaseAgentConfig struct {
 	Model              string       `yaml:"model"`
+	Description        string       `yaml:"description"` // one-line role summary; used for inline-subagent definitions
 	SystemPrompt       string       `yaml:"system_prompt"`
 	AllowedTools       []string     `yaml:"allowed_tools"`
 	DisallowedTools    []string     `yaml:"disallowed_tools"`
@@ -191,6 +193,13 @@ type CriticConfig struct {
 type WorkerConfig struct {
 	BaseAgentConfig `yaml:",inline"`
 	Parallelism     int `yaml:"parallelism"` // max concurrent workers per wave; 0 or 1 = sequential
+}
+
+// IntegratorConfig is used for the integrator agent that commits and merges
+// the worker's changes into the base branch after a pipeline run.
+type IntegratorConfig struct {
+	BaseAgentConfig  `yaml:",inline"`
+	ResolveConflicts bool `yaml:"resolve_conflicts"` // attempt LLM conflict resolution (default true)
 }
 
 type RetryConfig struct {
@@ -284,6 +293,7 @@ func (c *Config) applyDefaults() {
 		&c.Architect.BaseAgentConfig,
 		&c.Critic.BaseAgentConfig,
 		&c.Worker.BaseAgentConfig,
+		&c.Integrator.BaseAgentConfig,
 	}
 	for _, a := range agents {
 		if len(a.DisallowedTools) == 0 && len(c.Defaults.DisallowedTools) > 0 {
@@ -318,6 +328,9 @@ func (c *Config) validate() error {
 	if c.Critic.Model == "" {
 		return fmt.Errorf("missing mandatory critic.model parameter")
 	}
+	if c.Integrator.Model == "" {
+		return fmt.Errorf("missing mandatory integrator.model parameter")
+	}
 
 	// Verify pipeline model refs resolve to defined model entries.
 	for _, ref := range []struct{ role, ref string }{
@@ -325,6 +338,7 @@ func (c *Config) validate() error {
 		{"architect", c.Architect.Model},
 		{"critic", c.Critic.Model},
 		{"worker", c.Worker.Model},
+		{"integrator", c.Integrator.Model},
 		{"small", "small"},
 	} {
 		if _, key := c.lookupModel(ref.ref); key == "" {

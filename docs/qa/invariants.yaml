@@ -83,15 +83,15 @@ invariants:
     tests:
       - TestDeriveVerdict
       - TestParseValidationOutput
-      - TestCanary_DEFECT02_EmptyValidationParsesPass
 
   - id: INV-P3-DEGRADE
     pillar: P3
     layer: L1
-    status: defect
+    status: covered        # DEFECT-03 fixed 2026-06-22: worktree-create failure now fails closed
     anchors:
       - {file: internal/orchestrator/step_execute.go, symbol: WorktreeSpecFn}
-    tests: []
+    tests:
+      - TestExecuteStep_WorktreeFailure_EmitsEvent
 
   - id: INV-P4-PARSE
     pillar: P4
@@ -166,13 +166,117 @@ invariants:
       - TestLoad_ValidationAtLoadTime_ValidConfig
       - TestResolveModel_Success
 
+  # INV-O1-FLOW is the ROUTER invariant only: auto-approve drives phases without
+  # blocking and cancellation propagates. It is legitimately covered by the engine
+  # tests, which use fakeStep/noopStepContext stand-ins — so it is NOT real_wiring
+  # and must never claim the real pipeline works. Per-agent real wiring lives in the
+  # INV-ROLE-* invariants below (enforced by checkRoleCoverage + checkRealWiring).
   - id: INV-O1-FLOW
     pillar: P6
-    layer: L2
-    status: gap
+    layer: L1
+    status: covered
     anchors:
       - {file: internal/orchestrator/events.go, symbol: AutoApprove}
-    tests: []
+    tests:
+      - TestEngine_PlanApprovalGate
+      - TestEngine_CancelAtGate
+      - TestEngine_SkipGateway
+      - TestEngine_DecisionEdit
+      - TestEngine_PhaseOrder
+      - TestEngine_ValidationFailureDetection
+      - TestEngine_ValidationSuccessDetection
+      - TestNoDeadKnob_GateAfterDeliberation_FiresWhenEnabled
+
+  # ── Per-agent capability gates (INV-ROLE-*) ───────────────────────────────────
+  # Every pipeline agent owns a covered + real_wiring invariant: a fast, isolated
+  # test that exercises the agent's REAL capability against real machinery (seatbelt
+  # sandbox, real git/worktree, a real harness.Run subprocess via the replay stub,
+  # or a real parser on real input) — never a fake step or no-op executor.
+  # checkRoleCoverage requires one per role; checkRealWiring forbids satisfying them
+  # with a fake. A break in any single agent lights up exactly one gate in seconds,
+  # without running the full pipeline.
+
+  - id: INV-ROLE-RESEARCH
+    pillar: P6
+    layer: L1
+    status: covered
+    role: researcher
+    real_wiring: true
+    anchors:
+      - {file: internal/orchestrator/step.go, symbol: runReportAgent}
+      - {file: internal/harness/exec.go, symbol: Run}
+    tests:
+      - TestRole_Researcher_RealRun
+
+  - id: INV-ROLE-ARCH
+    pillar: P1
+    layer: L1
+    status: covered
+    role: architect
+    real_wiring: true
+    anchors:
+      - {file: internal/agent/plan_extract.go, symbol: ReadPlanFile}
+      - {file: internal/agent/plan_extract.go, symbol: readSecurePlanFile}
+    tests:
+      - TestRole_Architect_PlanFileSecurity
+
+  - id: INV-ROLE-CRITIC
+    pillar: P6
+    layer: L1
+    status: covered
+    role: critic
+    real_wiring: true
+    anchors:
+      - {file: internal/orchestrator/step_deliberate.go, symbol: DeliberateStep}
+      - {file: internal/harness/exec.go, symbol: Run}
+    tests:
+      - TestRole_Critic_RealRun
+
+  - id: INV-ROLE-WORKER
+    pillar: P2
+    layer: L1
+    status: covered
+    role: worker
+    real_wiring: true
+    anchors:
+      - {file: internal/orchestrator/step_execute.go, symbol: ExecuteStep}
+      - {file: internal/sandbox/sandbox.go, symbol: New}
+    tests:
+      - TestRole_Worker_WritesInWorkspaceDeniedOutside
+
+  - id: INV-ROLE-VALIDATE
+    pillar: P3
+    layer: L0
+    status: covered
+    role: validator
+    real_wiring: true
+    anchors:
+      - {file: internal/agent/validation.go, symbol: ParseValidationOutput}
+    tests:
+      - TestParseValidationOutput
+
+  - id: INV-MERGE-LIFECYCLE
+    pillar: P3
+    layer: L1
+    status: covered
+    real_wiring: true
+    anchors:
+      - {file: internal/worktree/worktree.go, symbol: Create}
+      - {file: internal/worktree/worktree.go, symbol: MergeInto}
+    tests:
+      - TestRole_Merge_Lifecycle
+
+  - id: INV-ROLE-INTEGRATOR
+    pillar: P3
+    layer: L1
+    status: covered
+    role: integrator
+    real_wiring: true
+    anchors:
+      - {file: internal/worktree/worktree.go, symbol: MergeBaseIntoWorktree}
+      - {file: internal/worktree/worktree.go, symbol: ResolutionClean}
+    tests:
+      - TestRole_Integrator_MergeAndResolve
 
   - id: INV-H1-CLOSE
     pillar: P1
@@ -210,18 +314,10 @@ invariants:
 # DEFECT-01 (channel never closes) and DEFECT-05 (session id never set) were FIXED
 # by the harness refactor; their canaries were retired and INV-H1-CLOSE /
 # INV-H2-SESSIONID are now covered by TestHarnessRun_TerminatesWhenProcessExits.
-canaries:
-  # DEFECT-02 (empty validation → VerdictPass) was FIXED 2026-06-21:
-  # ParseValidationOutput now returns VerdictFail when no markers are found.
-  # Gate: TestParseValidationOutput "empty output" and "LLM ignored format" cases.
-  # INV-P3-VALID flipped to covered. Canary retired.
-
-  - id: DEFECT-03
-    invariant: INV-P3-DEGRADE
-    summary: worktree.Create failure silently falls back to the direct repo, no event emitted
-    state: live           # still present post-refactor (step_execute.go: "falling back to direct repo")
-    canary_test: ""          # TODO: engine-level, needs replay-Runner + temp git
-    gate_test: ""
-
-  # DEFECT-04 (worktree commit failure left StatusSuccess) was FIXED by the
-  # refactor: step_merge.go now returns StatusFailed on commit failure.
+# All confirmed defects have been fixed; no canary is currently live.
+#   DEFECT-02 (empty validation → VerdictPass)         fixed 2026-06-21 → INV-P3-VALID covered
+#   DEFECT-03 (worktree create failure silent fallback) fixed 2026-06-22 → INV-P3-DEGRADE covered
+#   DEFECT-04 (worktree commit failure left Success)    fixed by harness refactor
+#   DEFECT-01/05 (channel/session id)                   fixed by harness refactor
+# Gates: TestParseValidationOutput, TestExecuteStep_WorktreeFailure_EmitsEvent.
+canaries: []

@@ -30,6 +30,8 @@ func TestDeriveVerdict(t *testing.T) {
 func TestParseValidationOutput(t *testing.T) {
 	// INV-P4-PARSE: structured marker extraction from raw worker output
 	// INV-P3-VALID: verdict follows parsed markers (PASS/FAIL/WARN)
+	// INV-ROLE-VALIDATE: the validator agent fails closed — empty/marker-less
+	// output derives VerdictFail (no evidence ≠ evidence of pass), on real input.
 	tests := []struct {
 		name        string
 		raw         string

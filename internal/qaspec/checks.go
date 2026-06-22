@@ -60,6 +60,8 @@ func Static(root string) (Report, error) {
 	checkTestHygiene(root, &rep)
 	checkHarnessVerdict(root, &rep)
 	checkForbiddenClaims(root, &rep)
+	checkRealWiring(root, reg, cited, &rep)
+	checkRoleCoverage(reg, &rep)
 	return rep, nil
 }
 
@@ -320,6 +322,105 @@ func checkForbiddenClaims(root string, rep *Report) {
 			}
 		}
 	}
+}
+
+// canonicalRoles is the pipeline's agent set. checkRoleCoverage requires each
+// to own ≥1 covered, real_wiring invariant — so every agent's real capability
+// is gated by a non-fake test, not assumed.
+var canonicalRoles = []string{"researcher", "architect", "critic", "worker", "validator", "integrator"}
+
+// realWiringMarkers are substrings that prove a test exercises real production
+// machinery: the seatbelt sandbox, real git/worktree, a real harness.Run
+// subprocess driven through the replay stub, or a real parser on real input.
+var realWiringMarkers = []string{
+	"sandbox.New", "sandbox.Wrap", "NewToolProfile",
+	"worktree.Create", "worktree.Worktree", "worktree.CurrentBranch",
+	"worktree.MergeBaseIntoWorktree", "worktree.ResolutionClean",
+	"harness.Run", "replayclaude", "ORQESTRA_REPLAY_FILE",
+	"ReadPlanFile", "ReadPlan(", "ParseValidationOutput",
+}
+
+// fakeWiringMarkers are the banned fake/no-op seams. A file containing any of
+// these is testing the router with stand-ins, NOT the real pipeline — it cannot
+// satisfy a real_wiring invariant.
+var fakeWiringMarkers = []string{"fakeStep", "noopStepContext", "Exec: nil", "Exec:nil"}
+
+// checkRealWiring protects real_wiring invariants: a covered, real_wiring
+// invariant must be cited by at least one test file that touches a real seam AND
+// is free of the fake/no-op markers. This makes "covered by a fake" a red build
+// — it is what catches the INV-O1-FLOW-style lie where pipeline coverage is
+// claimed against engine_test.go's fakeStep/noopStepContext stand-ins.
+func checkRealWiring(root string, reg Registry, cited map[string][]string, rep *Report) {
+	cache := map[string]string{}
+	read := func(rel string) string {
+		if body, ok := cache[rel]; ok {
+			return body
+		}
+		data, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			cache[rel] = ""
+			return ""
+		}
+		cache[rel] = string(data)
+		return string(data)
+	}
+	for _, inv := range reg.Invariants {
+		if !inv.RealWiring || inv.Status != "covered" {
+			continue
+		}
+		files := uniq(cited[inv.ID])
+		if len(files) == 0 {
+			rep.failf("%s: real_wiring+covered but no test cites it (add a `// %s` comment to the real-wiring gate)", inv.ID, inv.ID)
+			continue
+		}
+		realFound := false
+		for _, rel := range files {
+			body := read(rel)
+			if body == "" || containsAny(body, fakeWiringMarkers) {
+				continue // fake-tainted or unreadable — cannot prove real wiring
+			}
+			if containsAny(body, realWiringMarkers) {
+				realFound = true
+				break
+			}
+		}
+		if !realFound {
+			rep.failf("%s: real_wiring+covered but no citing test exercises a real seam free of fakes "+
+				"(every cite is fake-tainted or lacks a sandbox/git/worktree/harness.Run/parser marker) — "+
+				"a fake cannot satisfy a wiring invariant", inv.ID)
+		}
+	}
+}
+
+// checkRoleCoverage enforces that every pipeline agent owns a validated, non-fake
+// capability gate: each canonical role must have ≥1 invariant that is both
+// status=covered and real_wiring. A role with no such invariant is an unguarded
+// agent — RED, naming the role.
+func checkRoleCoverage(reg Registry, rep *Report) {
+	covered := map[string]bool{}
+	for _, inv := range reg.Invariants {
+		if inv.Role == "" {
+			continue
+		}
+		if inv.Status == "covered" && inv.RealWiring {
+			covered[inv.Role] = true
+		}
+	}
+	for _, role := range canonicalRoles {
+		if !covered[role] {
+			rep.failf("role %q has no covered+real_wiring invariant — every agent must have a validated, non-fake capability gate (add an INV-ROLE-* entry)", role)
+		}
+	}
+}
+
+// containsAny reports whether s contains any of the needles.
+func containsAny(s string, needles []string) bool {
+	for _, n := range needles {
+		if strings.Contains(s, n) {
+			return true
+		}
+	}
+	return false
 }
 
 // testTargetRoutesThrough reports whether the `test:` target's recipe (the

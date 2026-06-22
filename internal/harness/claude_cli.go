@@ -37,6 +37,7 @@ type ClaudeCLI struct {
 	extraArgs          []string
 	binary             string                  // path to claude binary, defaults to "claude"
 	inlineMCPServers   map[string]inlineMCPDef // MCP servers injected at runtime
+	inlineAgents       map[string]AgentDef     // subagent definitions injected via --agents
 	appendSystemPrompt string                  // text appended to default system prompt via --append-system-prompt
 	workDir            string                  // working directory for subprocess; empty inherits process CWD
 }
@@ -104,6 +105,11 @@ func (c *ClaudeCLI) toSpec(sandbox SandboxConfig) ProcessSpec {
 		inline = append(inline, InlineMCP{Name: name, Command: def.Command, Args: def.Args})
 	}
 
+	var agents []InlineAgent
+	for name, def := range c.inlineAgents {
+		agents = append(agents, InlineAgent{Name: name, Def: def})
+	}
+
 	return ProcessSpec{
 		Model:        ms,
 		SystemPrompt: c.appendSystemPrompt,
@@ -111,6 +117,7 @@ func (c *ClaudeCLI) toSpec(sandbox SandboxConfig) ProcessSpec {
 		Binary:       c.binary,
 		ExtraArgs:    append([]string(nil), c.extraArgs...),
 		Inline:       inline,
+		Agents:       agents,
 		Sandbox:      sandbox,
 	}
 }
@@ -238,6 +245,19 @@ func WithInlineMCPServer(name, command string, args []string) ClaudeCLIOption {
 			c.inlineMCPServers = make(map[string]inlineMCPDef)
 		}
 		c.inlineMCPServers[name] = inlineMCPDef{Command: command, Args: args}
+	}
+}
+
+// WithInlineAgent registers an inline subagent definition, serialized into the
+// `claude --agents <json>` flag at invocation time. Mirrors WithInlineMCPServer.
+// The parent agent spawns it via the Agent tool — which must be in the parent's
+// allowed tools, or spawning is impossible.
+func WithInlineAgent(name string, def AgentDef) ClaudeCLIOption {
+	return func(c *ClaudeCLI) {
+		if c.inlineAgents == nil {
+			c.inlineAgents = make(map[string]AgentDef)
+		}
+		c.inlineAgents[name] = def
 	}
 }
 
