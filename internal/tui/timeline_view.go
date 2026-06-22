@@ -17,8 +17,8 @@ func (t Timeline) View() string {
 
 	selMin, selMax := normaliseTimelineSel(t.anchor, t.cursor)
 
-	// Build the set of dim tool frame indices (oldest tools, beyond brightCount).
-	dimToolFrames := t.dimToolFrameSet()
+	// Build the set of dim tool frame indices (oldest tools, beyond constToolFrameMax).
+	dimToolFrames := t.dimToolFrameSet(t.expanded)
 
 	// Count how many tool frames are dimmed (for the summary line).
 	dimCount := len(dimToolFrames)
@@ -134,8 +134,12 @@ func (t Timeline) View() string {
 }
 
 // dimToolFrameSet returns a set of frame indices that should be dimmed.
-// The most recent constToolBrightCount tool frames are bright; older ones are dim.
-func (t Timeline) dimToolFrameSet() map[int]bool {
+// When expanded is false, the most recent constToolFrameMax tool frames are bright;
+// older ones are dim. When expanded is true, all tool frames are shown (nil map).
+func (t Timeline) dimToolFrameSet(expanded bool) map[int]bool {
+	if expanded {
+		return nil
+	}
 	// Collect tool frame indices in order.
 	var toolIdxs []int
 	for i, f := range t.frames {
@@ -143,11 +147,11 @@ func (t Timeline) dimToolFrameSet() map[int]bool {
 			toolIdxs = append(toolIdxs, i)
 		}
 	}
-	if len(toolIdxs) <= constToolBrightCount {
+	if len(toolIdxs) <= constToolFrameMax {
 		return nil
 	}
 	dim := make(map[int]bool)
-	cutoff := len(toolIdxs) - constToolBrightCount
+	cutoff := len(toolIdxs) - constToolFrameMax
 	for _, idx := range toolIdxs[:cutoff] {
 		dim[idx] = true
 	}

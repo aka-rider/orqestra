@@ -24,6 +24,9 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 	case "ctrl+r":
 		s.PendingIntent = NavigateToRunsListIntent{}
 		return s, nil
+	case "ctrl+o":
+		s.SetToolFrameExpanded(!s.toolFrameExpanded)
+		return s, nil
 	case "enter":
 		text := strings.TrimSpace(s.postInput.Value())
 		if text != "" {
@@ -174,6 +177,23 @@ func (s PipelineScreen) viewFooter() string {
 		}
 		return keyStyle.Render(hint) + ctrlCHint
 	default:
-		return keyStyle.Render(" [⏎] post  [^N] new run  [^R] runs  ") + ctrlCHint
+		// Count tool frames for footer hint.
+		var toolCount int
+		for _, f := range s.timeline.frames {
+			if f.kind == frameKindTool {
+				toolCount++
+			}
+		}
+		hasOverflow := toolCount > constToolFrameMax
+
+		baseHint := " [⏎] post  [^N] new run  [^R] runs"
+		if s.active && hasOverflow {
+			if s.toolFrameExpanded {
+				baseHint += "  [^O] collapse"
+			} else {
+				baseHint += "  [^O] expand"
+			}
+		}
+		return keyStyle.Render(baseHint) + ctrlCHint
 	}
 }

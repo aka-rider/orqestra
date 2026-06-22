@@ -294,8 +294,8 @@ func TestTimeline_View_ToolStatus(t *testing.T) {
 
 func TestTimeline_View_DimToolCollapse(t *testing.T) {
 	tl := newTestTimeline(80, 40)
-	// Append more tools than constToolBrightCount.
-	for i := range constToolBrightCount + 3 {
+	// Append more tools than constToolFrameMax.
+	for i := range constToolFrameMax + 3 {
 		tl.AppendToolPending(strings.Repeat("x", i+1))
 		tl.ResolveLastTool(false)
 	}

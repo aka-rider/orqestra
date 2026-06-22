@@ -7,9 +7,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// constToolBrightCount is the maximum number of recent tool frames shown bright.
+// constToolFrameMax is the maximum number of recent tool frames shown bright.
 // Older tool frames are folded into a dim "+N more tools" summary.
-const constToolBrightCount = 10
+const constToolFrameMax = 8
 
 // Timeline is a scrollable, mouse-selectable, append-only log of Frames.
 // It replaces the separate Transcript + streamingConsole combination.
@@ -56,6 +56,10 @@ type Timeline struct {
 	fullWidth     int // terminal width for full-width rule rendering
 
 	styles timelineStyles
+
+	// Expanded controls whether tool frames beyond constToolFrameMax are shown
+	// or collapsed behind a dim "+N more tools" summary.
+	expanded bool
 }
 
 // NewTimeline creates a timeline with the given style config.

@@ -42,6 +42,9 @@ type PipelineScreen struct {
 	active       bool
 	ctrlCPending bool
 
+	// Tool frame collapse state — true when the user has toggled expanded mode.
+	toolFrameExpanded bool
+
 	// Active content mode (mutually exclusive)
 	content ContentMode
 
@@ -166,6 +169,7 @@ func (s *PipelineScreen) Reset() {
 	s.hasEditComment = false
 	s.editorRunning = false
 	s.animFrame = 0
+	s.toolFrameExpanded = false
 	s.liveInput = 0
 	s.liveOutput = 0
 	s.liveStart = time.Time{}
@@ -175,6 +179,13 @@ func (s *PipelineScreen) Reset() {
 	s.bottom = nil
 	s.postInput.Reset()
 	s.postInput.Blur()
+}
+
+// SetToolFrameExpanded sets the tool frame expanded/collapsed state and
+// syncs it to the timeline's own expanded field.
+func (s *PipelineScreen) SetToolFrameExpanded(expanded bool) {
+	s.toolFrameExpanded = expanded
+	s.timeline.expanded = expanded
 }
 
 // SetStreamBuf sets the shared stream buffer for live output.
@@ -353,6 +364,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 
 	// Terminal: pipeline finished.
 	if snap.Terminal.Done && s.active && !s.awaitingPlanDecision {
+		s.SetToolFrameExpanded(true) // auto-expand tool frame on turn end
 		s.content = ContentCompletion
 		s.active = false
 		if snap.Terminal.Err != nil {
@@ -481,4 +493,3 @@ func (s PipelineScreen) HandleCtrlCCancel() PipelineScreen {
 	}
 	return s
 }
-
