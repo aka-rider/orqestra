@@ -12,9 +12,6 @@ var (
 			Foreground(lipgloss.Color("14")).
 			Bold(true)
 
-	elapsedStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("244"))
-
 	dimStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240"))
 
@@ -23,17 +20,11 @@ var (
 			Foreground(lipgloss.Color("15")).
 			Bold(true)
 
-	stepStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("7"))
-
 	passStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("2"))
 
 	warnStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("3"))
-
-	failStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("1"))
 
 	// Input/footer styles
 	keyStyle = lipgloss.NewStyle().
@@ -45,9 +36,6 @@ var (
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("1")).
 			Bold(true)
-
-	streamStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("7"))
 
 	// Runs history styles
 	selectedStyle = lipgloss.NewStyle().
@@ -83,10 +71,6 @@ var (
 	fpStatusStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240")).
 			Faint(true)
-
-	fpBorderStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("12"))
 
 	// Question (AskUserQuestion) styles
 	questionHintStyle = lipgloss.NewStyle().

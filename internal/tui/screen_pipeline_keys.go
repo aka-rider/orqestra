@@ -151,9 +151,9 @@ func (s PipelineScreen) handleEditConfirmKey(msg tea.KeyPressMsg) (PipelineScree
 	return s, nil
 }
 
-func (s PipelineScreen) viewFooter() string {
+func (s PipelineScreen) viewFooter(ctrlCPending bool) string {
 	ctrlCHint := "[^C] cancel"
-	if s.ctrlCPending {
+	if ctrlCPending {
 		ctrlCHint = warnStyle.Render("[^C] EXIT")
 	}
 

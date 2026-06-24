@@ -288,7 +288,7 @@ func TestUserQuestion_TabHintRendered(t *testing.T) {
 func TestUserQuestion_FooterIncludesTab(t *testing.T) {
 	for _, multi := range []bool{false, true} {
 		s := setupUserQuestionScreen(multi)
-		f := s.viewFooter()
+		f := s.viewFooter(false)
 		if !strings.Contains(f, "[Tab] add context") {
 			t.Errorf("multi=%v: expected [Tab] add context in footer, got: %s", multi, f)
 		}
@@ -311,115 +311,53 @@ func TestUserQuestion_MultiSelectToggleVisible(t *testing.T) {
 	}
 }
 
-// --- Status Bar Tests ---
+// --- Agent summary tests (replaced the removed live status bar) ---
 
-func TestViewStatusLine_Empty(t *testing.T) {
-	s := PipelineScreen{}
-	out := s.viewStatusLine(80)
-	if out != "" {
-		t.Errorf("expected empty status line with no agents, got: %q", out)
+func TestAgentSummaryLine(t *testing.T) {
+	a := orchestrator.AgentSnapshot{
+		AgentID: "architect",
+		Meta:    orchestrator.AgentMeta{ModelDisplay: "qwen3.6"},
+		Input:   236000,
+		Output:  456000,
+	}
+	got := agentSummaryLine("Done:", "✓", a, 3*time.Minute+28*time.Second)
+	for _, want := range []string{"Done:", "✓", "architect", "(qwen3.6)", "↑236k", "↓456k", "3m28s"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("agentSummaryLine = %q, want substring %q", got, want)
+		}
+	}
+
+	// Falls back to ModelRef when ModelDisplay is empty; omits elapsed when zero.
+	a2 := orchestrator.AgentSnapshot{AgentID: "worker", Meta: orchestrator.AgentMeta{ModelRef: "opus"}}
+	if got := agentSummaryLine("Failed:", "✗", a2, 0); !strings.Contains(got, "(opus)") {
+		t.Errorf("expected ModelRef fallback (opus), got %q", got)
 	}
 }
 
-func TestViewStatusLine_ConfigName(t *testing.T) {
-	s := PipelineScreen{configName: "orqestra.yaml"}
-	out := s.viewStatusLine(80)
-	if !strings.Contains(out, "orqestra.yaml") {
-		t.Errorf("expected config name in status line, got: %q", out)
-	}
-}
+// TestApplySnapshot_AppendsDoneSummary verifies the end-of-agent summary line is
+// appended to the transcript (with real tokens) when an agent transitions to done.
+func TestApplySnapshot_AppendsDoneSummary(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.content = ContentStreaming
+	m.width = 120
+	m.height = 40
+	m.recalculateLayout() // sets the timeline rect so appended rows are built
 
-func TestViewStatusLine_AgentChain(t *testing.T) {
-	s := PipelineScreen{
-		active: true,
-		agents: []AgentRow{
-			{ID: "researcher", State: AgentStateDone},
-			{ID: "architect", State: AgentStateDone},
-			{ID: "worker", State: AgentStateRunning, ModelDisplay: "claude-opus-4", ContextWindow: 200000},
+	meta := orchestrator.AgentMeta{ModelDisplay: "qwen3.6"}
+	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
+		Agents: []orchestrator.AgentSnapshot{{AgentID: "architect", Status: "running", Meta: meta}},
+	}, m.width)
+	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
+		Agents: []orchestrator.AgentSnapshot{
+			{AgentID: "architect", Status: "done", Meta: meta, Input: 236000, Output: 456000},
 		},
-		liveInput:  12000,
-		liveOutput: 8000,
-		liveStart:  time.Now().Add(-30 * time.Second),
-	}
-	out := s.viewStatusLine(120)
+	}, m.width)
 
-	if !strings.Contains(out, "✓rese") {
-		t.Errorf("expected ✓rese for done researcher, got: %q", out)
-	}
-	if !strings.Contains(out, "✓arch") {
-		t.Errorf("expected ✓arch for done architect, got: %q", out)
-	}
-	if !strings.Contains(out, "▶work") {
-		t.Errorf("expected ▶work for running worker, got: %q", out)
-	}
-	if !strings.Contains(out, "claude-opus-4") {
-		t.Errorf("expected model name in status line, got: %q", out)
-	}
-	if !strings.Contains(out, "↑12k") {
-		t.Errorf("expected input tokens ↑12k, got: %q", out)
-	}
-	if !strings.Contains(out, "↓8.0k") {
-		t.Errorf("expected output tokens ↓8.0k, got: %q", out)
-	}
-}
-
-func TestViewStatusLine_Truncation(t *testing.T) {
-	s := PipelineScreen{
-		active: true,
-		agents: []AgentRow{
-			{ID: "researcher", State: AgentStateDone},
-			{ID: "architect", State: AgentStateDone},
-			{ID: "critic", State: AgentStateDone},
-			{ID: "worker", State: AgentStateRunning, ModelDisplay: "claude-opus-4", ContextWindow: 200000},
-		},
-		liveInput:  50000,
-		liveOutput: 30000,
-		liveStart:  time.Now().Add(-60 * time.Second),
-	}
-	out := s.viewStatusLine(40)
-
-	if out == "" {
-		t.Error("expected non-empty status line even at narrow width")
-	}
-}
-
-func TestViewStatusLine_ShimmerCycles(t *testing.T) {
-	s := PipelineScreen{
-		active:    true,
-		agents:    []AgentRow{{ID: "worker", State: AgentStateRunning}},
-		liveStart: time.Now(),
-	}
-
-	results := map[string]bool{}
-	for i := 0; i < 5; i++ {
-		s.animFrame = i
-		out := s.viewStatusLine(80)
-		results[out] = true
-	}
-	if len(results) != 1 {
-		t.Errorf("expected stable status bar, got %d unique outputs", len(results))
-	}
-}
-
-func TestFormatTokenCompact(t *testing.T) {
-	tests := []struct {
-		input int64
-		want  string
-	}{
-		{0, "0"},
-		{999, "999"},
-		{1000, "1.0k"},
-		{1500, "1.5k"},
-		{9999, "10.0k"},
-		{10000, "10k"},
-		{123456, "123k"},
-		{1000000, "1.0M"},
-		{1500000, "1.5M"},
-	}
-	for _, tt := range tests {
-		got := formatTokenCompact(tt.input)
-		if got != tt.want {
-			t.Errorf("formatTokenCompact(%d) = %q, want %q", tt.input, got, tt.want)
+	out := m.pipelineScreen.timeline.View()
+	for _, want := range []string{"Done:", "architect", "qwen3.6", "236k", "456k"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("timeline missing %q after agent done; got:\n%s", want, out)
 		}
 	}
 }

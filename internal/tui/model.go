@@ -38,27 +38,19 @@ const (
 type AgentState string
 
 const (
-	AgentStateRunning   AgentState = "running"
-	AgentStateDone      AgentState = "done"
-	AgentStateWaiting   AgentState = "waiting"
-	AgentStateFailed    AgentState = "failed"
-	AgentStateCancelled AgentState = "cancelled"
-	AgentStateGate      AgentState = "gate"
-	AgentStateSkipped   AgentState = "skipped"
+	AgentStateRunning AgentState = "running"
+	AgentStateDone    AgentState = "done"
+	AgentStateFailed  AgentState = "failed"
 )
 
-// AgentRow tracks a single agent's status in the sidebar.
+// AgentRow tracks a single agent's status and completion totals.
 type AgentRow struct {
-	ID            string
-	State         AgentState
-	Elapsed       time.Duration
-	StartedAt     time.Time
-	InputTokens   int64
-	OutputTokens  int64
-	ModelRef      string // config key used for this agent
-	ModelDisplay  string // short display name (e.g. "claude-opus-4")
-	Provider      string // provider name from config
-	ContextWindow int64  // context window in tokens (0 = unknown)
+	ID           string
+	State        AgentState
+	Elapsed      time.Duration
+	StartedAt    time.Time
+	InputTokens  int64
+	OutputTokens int64
 }
 
 // regionBounds holds the absolute terminal rectangles for the pipeline
@@ -106,8 +98,6 @@ type Model struct {
 	// Setup panel state.
 	setupScreen    setupModel
 	confirmedSetup orchestrator.PipelineSetup
-	activeChat     HumanChatMode
-	contentMode    ContentMode
 }
 
 // NewModel creates the initial TUI model. Returns an error if the rune UI
@@ -210,7 +200,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pipelineScreen.hasEditComment = false
 			m.pipelineScreen.content = ContentEditConfirm
 			m.recalculateLayout()
-			m.pipelineScreen.SyncLiveMetrics()
 			return m, nil
 		}
 		return m, nil
@@ -220,8 +209,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.recalculateLayout()
 		switch m.state {
-		case StatePipeline:
-			m.pipelineScreen.SyncLiveMetrics()
 		case StateRunsList:
 			m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width())
 		case StateRunDetail:
@@ -246,7 +233,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
 			}
 			m.recalculateLayout() // refresh streaming console height after drain
-			m.pipelineScreen.SyncLiveMetrics()
 			return m, tickCmd()
 		case m.pipelineScreen.active:
 			// Background ingest — user is in runs list; transcript updates silently.
@@ -285,7 +271,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if inputHeightChanged(prevContent, content) {
 				m.recalculateLayout()
 			}
-			m.pipelineScreen.SyncLiveMetrics()
 		}
 		if !snap.Terminal.Done {
 			return m, notifyCmd(m.obs.NotifyCh())
@@ -406,7 +391,6 @@ func (m Model) handleRunsListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if m.prevState == StatePipeline && (m.pipelineScreen.active || m.obs != nil) {
 				m.state = StatePipeline
 				m.recalculateLayout()
-				m.pipelineScreen.SyncLiveMetrics()
 				return m, nil
 			}
 			m.state = StatePrompt
@@ -575,7 +559,6 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 		})
 		m.pipelineScreen.awaitingPlanDecision = false
 		m.pipelineScreen.content = ContentStreaming
-		m.pipelineScreen.SyncLiveMetrics()
 		return m, batch(nil)
 	case EditPlanIntent:
 		m.ctrl.Submit(orchestrator.Decision{
@@ -703,8 +686,7 @@ func (m Model) View() tea.View {
 	case StatePrompt:
 		content = m.promptScreen.View(m.effectiveWidth(), m.height)
 	case StatePipeline:
-		m.pipelineScreen.ctrlCPending = m.ctrlCPending
-		content = m.pipelineScreen.View(m.effectiveWidth(), m.height)
+		content = m.pipelineScreen.View(m.effectiveWidth(), m.height, m.ctrlCPending)
 	case StateRunsList:
 		content = m.runsListScreen.View(m.effectiveWidth(), m.height)
 	case StateRunDetail:
@@ -758,14 +740,14 @@ func (m *Model) recalculateLayout() {
 		m.pipelineScreen.question = m.pipelineScreen.question.SetWidth(m.width)
 	}
 
-	// Pipeline alt-screen layout: status bar + timeline + input + footer.
+	// Pipeline alt-screen layout: timeline + input + footer (no status bar).
 	if m.state == StatePipeline {
-		chromeH := constStatusBarHeight + inputHeight + constFooterHeight
+		chromeH := inputHeight + constFooterHeight
 		timelineH := max(0, m.height-chromeH)
 
 		m.pipelineScreen.postInput.SetWidth(m.width)
 
-		y := constStatusBarHeight
+		y := 0
 		m.regions.timeline = image.Rect(1, y, m.width-1, y+timelineH) // 1-col margins
 		y += timelineH
 		m.regions.input = image.Rect(0, y, m.width, y+inputHeight)
@@ -808,7 +790,7 @@ func (m *Model) recalculateLayout() {
 	if m.state == StatePipeline &&
 		m.pipelineScreen.content == ContentHumanGate &&
 		m.pipelineScreen.activeChat != nil {
-		bodyH := max(0, m.height-constStatusBarHeight-constPipelineInputHeight-constFooterHeight)
+		bodyH := max(0, m.height-constPipelineInputHeight-constFooterHeight)
 		m.pipelineScreen.activeChat.SetSize(m.width, bodyH)
 	}
 

@@ -383,28 +383,32 @@ func TestTUI_CompletionValidation(t *testing.T) {
 	}
 }
 
-func TestTUI_SidebarTokens(t *testing.T) {
+// TestTUI_PipelineViewPurity locks the Stage 0a invariant: Model.View() is a pure
+// render. It must be idempotent (two consecutive renders identical) and the ctrl+C
+// footer state must flow through the View render parameter, not a field that View
+// mutates at render time (the old model.go:706 `pipelineScreen.ctrlCPending = …` bug).
+func TestTUI_PipelineViewPurity(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
 	m.pipelineScreen.active = true
 	m.width = 120
 	m.height = 40
-	m.pipelineScreen.agents = []AgentRow{
-		{ID: "researcher", State: AgentStateDone, Elapsed: 3 * time.Second, InputTokens: 1218, OutputTokens: 402},
-		{ID: "architect", State: AgentStateRunning, StartedAt: time.Now().Add(-24 * time.Second), InputTokens: 0, OutputTokens: 0, ModelDisplay: "claude-opus-4"},
-	}
 	m.recalculateLayout()
-	m.pipelineScreen.SyncLiveMetrics()
 
-	view := viewString(m)
-
-	// Status bar shows agent chain with state icons
-	if !strings.Contains(view, "✓rese") {
-		t.Error("expected status bar to show done researcher with ✓ icon")
+	// Idempotent: rendering twice with no intervening Update yields identical output.
+	if out1, out2 := viewString(m), viewString(m); out1 != out2 {
+		t.Fatal("View() is not idempotent: two consecutive renders differ")
 	}
-	if !strings.Contains(view, "▶arch") {
-		t.Error("expected status bar to show running architect with ▶ icon")
+
+	// ctrlCPending flows through the render path, not a stored/mutated field.
+	m.ctrlCPending = false
+	if v := viewString(m); !strings.Contains(v, "[^C] cancel") {
+		t.Errorf("ctrlCPending=false: expected '[^C] cancel' footer, got:\n%s", v)
+	}
+	m.ctrlCPending = true
+	if v := viewString(m); !strings.Contains(v, "EXIT") {
+		t.Errorf("ctrlCPending=true: expected 'EXIT' footer, got:\n%s", v)
 	}
 }
 
@@ -478,7 +482,6 @@ func TestTUI_StreamingOutput(t *testing.T) {
 	m.pipelineScreen.DrainStreamUpdates(updates)
 
 	m.recalculateLayout()
-	m.pipelineScreen.SyncLiveMetrics()
 
 	// Completed line goes to transcript (visible in View).
 	view := viewString(m)
@@ -631,20 +634,6 @@ func TestTUI_RestartClearsErrorAndAgents(t *testing.T) {
 		t.Errorf("expected lastErr cleared on new pipeline start, got %v", model2.pipelineScreen.lastErr)
 	}
 	model2.cancel()
-}
-
-func TestTUI_ConfigNameInHeader(t *testing.T) {
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentStreaming
-	m.pipelineScreen.goal = "test"
-	m.width = 120
-	m.height = 40
-
-	view := viewString(m)
-	if !strings.Contains(view, "test.yaml") {
-		t.Error("expected config name 'test.yaml' in pipeline header")
-	}
 }
 
 func TestTUI_PlanGateBlocksOverwrite(t *testing.T) {

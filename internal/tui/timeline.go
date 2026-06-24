@@ -225,6 +225,31 @@ func (t *Timeline) AppendSteer(text string) {
 	}
 }
 
+// AppendAgentSummary appends an end-of-agent summary line (done/failed) as a
+// static meta frame, e.g. "Done: ✓ architect (qwen3.6)  ↑236k ↓456k  3m28s".
+func (t *Timeline) AppendAgentSummary(text string) {
+	if text == "" {
+		return
+	}
+	lineIdx := len(t.lines)
+	t.lines = append(t.lines, timelineLine{
+		kind:  timelineLineText,
+		spans: []timelineSpan{{text: text, style: phaseStyle}},
+	})
+	fIdx := len(t.frames)
+	t.frames = append(t.frames, frame{
+		kind:      frameKindSteer,
+		rawSource: text,
+		lineStart: lineIdx,
+		lineEnd:   lineIdx + 1,
+		planIdx:   -1,
+	})
+	t.appendRowsForLines(lineIdx, lineIdx+1, fIdx)
+	if t.follow {
+		t.scrollToBottom()
+	}
+}
+
 // AppendPlanFrame appends a Plan Frame to the Timeline.
 // The plan frame must already have resize(w) called at the current width.
 func (t *Timeline) AppendPlanFrame(pf planFrame) {

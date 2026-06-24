@@ -327,7 +327,9 @@ func (p PromptInput) View() string {
 		if p.Focused() && (len(cursorOffsets) > 0 || len(selections) > 0) {
 			textedit.ApplyOverlays(lineCells, cursorOffsets, selections)
 		}
-		renderedLines = append(renderedLines, textedit.CellsToString(lineCells, selStyle, cursorStyle))
+		// matchStyle/activeMatchStyle are no-ops here: the prompt input has no
+		// search-match highlighting (mirrors rune's own no-search callers).
+		renderedLines = append(renderedLines, textedit.CellsToString(lineCells, selStyle, cursorStyle, lipgloss.NewStyle(), lipgloss.NewStyle()))
 	}
 
 	for len(renderedLines) < contentH {

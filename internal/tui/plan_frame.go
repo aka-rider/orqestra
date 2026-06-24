@@ -66,9 +66,6 @@ func (pf *planFrame) resize(w int) {
 	pf.cachedWidth = w
 }
 
-// height returns the number of display rows at the current cached width.
-func (pf planFrame) height() int { return len(pf.cachedRows) }
-
 // rows returns the cached display rows. Caller must have called resize(w) first.
 func (pf planFrame) rows() []timelineRow { return pf.cachedRows }
 

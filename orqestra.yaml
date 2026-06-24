@@ -24,7 +24,9 @@ critic:
 worker:
   model: qwen
   timeout: 30m
-  parallelism: 0
+
+integrator:
+  model: qwen
 
 sandbox:
   max_lifetime: 35m

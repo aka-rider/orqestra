@@ -35,12 +35,11 @@ type ChatEntry struct {
 
 // PipelineScreen manages the pipeline execution view.
 type PipelineScreen struct {
-	configName   string
-	goal         string
-	phase        orchestrator.Phase
-	startTime    time.Time
-	active       bool
-	ctrlCPending bool
+	configName string
+	goal       string
+	phase      orchestrator.Phase
+	startTime  time.Time
+	active     bool
 
 	// Tool frame collapse state — true when the user has toggled expanded mode.
 	toolFrameExpanded bool
@@ -85,16 +84,10 @@ type PipelineScreen struct {
 	lastErr          error
 	workerValidation string
 	hasValidation    bool
-	mergeErrorMsg    string
 
 	// Live stream (written by orchestrator, polled by TUI on tick)
 	streamBuf *orchestrator.StreamRing
 	cwd       string
-
-	// Live metrics polled from streamBuf on each tick
-	liveInput  int64
-	liveOutput int64
-	liveStart  time.Time
 
 	// Animation frame counter (for spinner)
 	animFrame int
@@ -151,7 +144,6 @@ func (s *PipelineScreen) Reset() {
 	s.hasPlan = false
 	s.workerValidation = ""
 	s.hasValidation = false
-	s.mergeErrorMsg = ""
 	s.streamBuf = nil
 	s.awaitingPlanDecision = false
 	s.seenGateMarkdown = ""
@@ -170,9 +162,6 @@ func (s *PipelineScreen) Reset() {
 	s.editorRunning = false
 	s.animFrame = 0
 	s.toolFrameExpanded = false
-	s.liveInput = 0
-	s.liveOutput = 0
-	s.liveStart = time.Time{}
 	s.timeline.Clear()
 	s.timeline.styles = timelineStyles{selectionBg: selectionBg, rule: dividerStyle}
 	s.lastAgentID = ""
@@ -239,11 +228,6 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 				}
 			case orchestrator.EntryToolResult:
 				s.timeline.ResolveLastTool(u.ToolErr)
-			case orchestrator.EntryStats:
-				if s.streamBuf != nil {
-					s.streamBuf.RecordUsage(u.Stats.Input, u.Stats.Output)
-					s.streamBuf.AppendStats(u.Stats.Input, u.Stats.Output)
-				}
 			}
 		default:
 			return
@@ -251,15 +235,23 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 	}
 }
 
-// SyncLiveMetrics polls live token metrics from the stream buffer.
-// Called from Update paths (ticks, obs notifications, resize) — never from View().
-func (s *PipelineScreen) SyncLiveMetrics() {
-	if s.streamBuf != nil && s.active {
-		in, out, start := s.streamBuf.SnapshotUsage()
-		s.liveInput = in
-		s.liveOutput = out
-		s.liveStart = start
+// agentSummaryLine formats the end-of-agent transcript summary line, e.g.
+// "Done: ✓ architect (qwen3.6)  ↑236k ↓456k  3m28s". Tokens and elapsed are the
+// real values reported at agent completion.
+func agentSummaryLine(prefix, icon string, a orchestrator.AgentSnapshot, elapsed time.Duration) string {
+	model := a.Meta.ModelDisplay
+	if model == "" {
+		model = a.Meta.ModelRef
 	}
+	line := prefix + " " + icon + " " + agentDisplayName(a.AgentID)
+	if model != "" {
+		line += " (" + model + ")"
+	}
+	line += "  ↑" + formatTokens(a.Input) + " ↓" + formatTokens(a.Output)
+	if elapsed > 0 {
+		line += "  " + elapsed.Round(time.Second).String()
+	}
+	return line
 }
 
 // ApplySnapshot updates the screen from an ObsStore snapshot, detecting state
@@ -289,13 +281,9 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 				s.streamBuf.SetAgent(a.AgentID)
 			}
 			s.agents = append(s.agents, AgentRow{
-				ID:            a.AgentID,
-				State:         AgentStateRunning,
-				StartedAt:     a.StartTime,
-				ModelRef:      a.Meta.ModelRef,
-				ModelDisplay:  a.Meta.ModelDisplay,
-				Provider:      a.Meta.Provider,
-				ContextWindow: a.Meta.ContextWindow,
+				ID:        a.AgentID,
+				State:     AgentStateRunning,
+				StartedAt: a.StartTime,
 			})
 			s.knownAgents[a.AgentID] = curr
 		} else if prev != curr {
@@ -315,6 +303,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 					s.reviewTokensOut += a.Output
 				}
 				s.timeline.ReconcilePendingTools()
+				s.timeline.AppendAgentSummary(agentSummaryLine("Done:", "✓", a, elapsed))
 			case "failed":
 				for i := range s.agents {
 					if s.agents[i].ID == a.AgentID {
@@ -324,6 +313,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 				if a.Error != "" {
 					s.lastErr = errors.New(a.Error)
 				}
+				s.timeline.AppendAgentSummary(agentSummaryLine("Failed:", "✗", a, a.EndTime.Sub(a.StartTime)))
 			}
 			s.knownAgents[a.AgentID] = curr
 		}
