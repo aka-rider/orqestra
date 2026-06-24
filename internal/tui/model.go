@@ -7,10 +7,12 @@ import (
 	"os"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/orchestrator"
+	"github.com/xiii/orqestra/internal/tui/keymap"
 )
 
 // AppState represents the top-level TUI mode.
@@ -77,6 +79,9 @@ type Model struct {
 	// Engine
 	engine *orchestrator.Engine
 
+	// keys is the single source of truth for key bindings (validated at startup).
+	keys keymap.Bindings
+
 	// Shared rune setup bundle (built once, threaded into prompt/gate sub-models)
 	runeUI runeUI
 
@@ -107,8 +112,13 @@ func NewModel(engine *orchestrator.Engine, configName string) (Model, error) {
 	if err != nil {
 		return Model{}, fmt.Errorf("init rune UI: %w", err)
 	}
+	keys := keymap.Default()
+	if err := keys.ValidateNoPhysicalKeyCollisions(); err != nil {
+		return Model{}, fmt.Errorf("validate keymap: %w", err)
+	}
 	return Model{
 		state:             StatePrompt,
+		keys:              keys,
 		promptScreen:      NewPromptScreen(ui),
 		pipelineScreen:    NewPipelineScreen(configName, ui),
 		engine:            engine,
@@ -330,7 +340,7 @@ func (m *Model) handlePipelineMouse(msg tea.MouseMsg) tea.Cmd {
 
 // handleKey processes key events.
 func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "ctrl+c" {
+	if key.Matches(msg, m.keys.Cancel) {
 		// Second Ctrl+C within the time gate → cancel and quit immediately.
 		if m.ctrlCPending && time.Now().Before(m.ctrlCDeadline) {
 			if m.cancel != nil {
@@ -501,11 +511,11 @@ func inputHeightChanged(prevContent, nextContent ContentMode) bool {
 // handlePipelineKey delegates to PipelineScreen and handles intents.
 func (m Model) handlePipelineKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Explicit copy key bindings: Cmd+Shift+C copies selection; Cmd+C copies hovered frame.
-	switch msg.String() {
-	case "super+shift+c":
+	switch {
+	case key.Matches(msg, m.keys.CopySelection):
 		cmd := m.pipelineScreen.timeline.CopySelected()
 		return m, cmd
-	case "super+c":
+	case key.Matches(msg, m.keys.Copy):
 		if m.pipelineScreen.timeline.HasSelection() {
 			cmd := m.pipelineScreen.timeline.CopySelected()
 			return m, cmd
