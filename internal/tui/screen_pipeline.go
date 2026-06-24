@@ -136,6 +136,10 @@ func (s *PipelineScreen) Start(goal string) tea.Cmd {
 	s.bottom = streamingBottom{}
 	var cmd tea.Cmd
 	s.timeline, cmd = s.timeline.Start()
+	// Post the opening prompt to the timeline through the same path every later
+	// message uses, so the user's first input is visible (bug: first prompt was
+	// never shown). Full Chat unification (deleting PromptScreen) follows.
+	s.timeline.AppendSteer(goal)
 	return cmd
 }
 
