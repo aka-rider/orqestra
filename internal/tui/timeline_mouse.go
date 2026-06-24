@@ -4,6 +4,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/xiii/orqestra/internal/tui/frame"
 )
 
 const timelineAutoscrollDelay = 40 * time.Millisecond
@@ -48,21 +50,20 @@ func (t Timeline) handleMouse(msg tea.MouseMsg) (Timeline, tea.Cmd) {
 			t.selecting = false
 			t.autoscrollDir = 0
 			t.dragSeq++
-			if !timelinePosEqual(t.anchor, t.cursor) {
-				// Drag selection: set hasSel (no auto-copy; explicit copy only).
+			if t.anchor != t.cursor {
+				// Drag selection: mark it (explicit copy only, no auto-copy).
 				t.hasSel = true
 			} else {
-				// Click (no drag): copy the whole frame.
+				// Click (no drag): copy the whole frame under the cursor.
 				t.hasSel = false
-				rowIdx := t.screenRowIdx(m.X, m.Y)
-				return t, t.CopyFrame(rowIdx)
+				return t, t.CopyFrame(t.screenRowIdx(m.X, m.Y))
 			}
 		}
 	}
 	return t, nil
 }
 
-// handleAutoscrollTick drives continuous autoscroll while button held outside rect.
+// handleAutoscrollTick drives continuous autoscroll while a drag holds outside rect.
 func (t Timeline) handleAutoscrollTick(msg timelineAutoscrollMsg) (Timeline, tea.Cmd) {
 	if msg.seq != t.dragSeq || !t.selecting || t.autoscrollDir == 0 {
 		return t, nil
@@ -90,59 +91,29 @@ func (t Timeline) handleWheel(delta int) Timeline {
 	return t
 }
 
-// screenToPos converts terminal coordinates to a logical position.
-// For opaque rows: clamp to line boundaries (col 0 or line length) for
-// line-granular selection.
-func (t Timeline) screenToPos(screenX, screenY int) timelinePos {
+// screenToPos converts terminal coordinates to a visual selection position.
+func (t Timeline) screenToPos(x, y int) selPos {
 	if len(t.rows) == 0 {
-		return timelinePos{}
+		return selPos{}
 	}
-	rowIdx := t.screenRowIdx(screenX, screenY)
-	row := t.rows[rowIdx]
-
-	if row.opaque {
-		// Line-granular: snap to line start or end.
-		mid := t.rect.Min.X + t.rect.Dx()/2
-		if screenX < mid {
-			return timelinePos{line: row.lineIdx, col: 0}
-		}
-		return timelinePos{line: row.lineIdx, col: len(row.cells)}
-	}
-
-	localX := screenX - t.rect.Min.X
-	if localX < 1 {
-		localX = 0
-	} else {
-		localX-- // account for 1-char left margin
-	}
-	runeCol := row.startCol + visualToTimelineRuneCol(row.cells, localX)
-	return timelinePos{line: row.lineIdx, col: runeCol}
+	ri := t.screenRowIdx(x, y)
+	localX := max(0, x-t.rect.Min.X)
+	return selPos{row: ri, col: visualToRuneCol(t.rows[ri].cells, localX)}
 }
 
-// screenRowIdx converts screen Y to a row index in t.rows.
-func (t Timeline) screenRowIdx(_, screenY int) int {
-	localY := screenY - t.rect.Min.Y
-	rowIdx := t.top + localY
-	if rowIdx < 0 {
-		rowIdx = 0
-	}
-	if rowIdx >= len(t.rows) {
-		rowIdx = len(t.rows) - 1
-	}
-	if rowIdx < 0 {
-		rowIdx = 0
-	}
-	return rowIdx
+// screenRowIdx converts screen Y to a flat row index.
+func (t Timeline) screenRowIdx(_, y int) int {
+	return clamp(t.top+(y-t.rect.Min.Y), 0, max(0, len(t.rows)-1))
 }
 
-// visualToTimelineRuneCol maps a visual offset to a rune-column index.
-func visualToTimelineRuneCol(cells []timelineCell, visX int) int {
+// visualToRuneCol maps a visual column offset to a rune-column index in cells.
+func visualToRuneCol(cells []frame.Cell, visX int) int {
 	x := 0
 	for i, c := range cells {
 		if x >= visX {
 			return i
 		}
-		x += c.w
+		x += c.W
 	}
 	return len(cells)
 }

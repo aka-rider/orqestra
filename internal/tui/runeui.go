@@ -9,6 +9,8 @@ import (
 	"rune/pkg/ui/components/textedit"
 	"rune/pkg/ui/keymap"
 	"rune/pkg/ui/styles"
+
+	"github.com/xiii/orqestra/internal/tui/frame"
 )
 
 // runeUI holds the shared rune setup bundle built once at startup.
@@ -72,4 +74,15 @@ func newRuneUI() (runeUI, error) {
 		resolver: resolver,
 		caps:     caps,
 	}, nil
+}
+
+// mdDeps bundles the markdownedit dependencies for building frame.Plan items.
+func (u runeUI) mdDeps() frame.MDDeps {
+	return frame.MDDeps{
+		Keys:     u.keys,
+		Styles:   u.styles,
+		Registry: u.registry,
+		Resolver: u.resolver,
+		Caps:     u.caps,
+	}
 }

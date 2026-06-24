@@ -178,13 +178,7 @@ func (s PipelineScreen) viewFooter(ctrlCPending bool) string {
 		return keyStyle.Render(hint) + ctrlCHint
 	default:
 		// Count tool frames for footer hint.
-		var toolCount int
-		for _, f := range s.timeline.frames {
-			if f.kind == frameKindTool {
-				toolCount++
-			}
-		}
-		hasOverflow := toolCount > constToolFrameMax
+		hasOverflow := s.timeline.ToolCount() > constToolFrameMax
 
 		baseHint := " [⏎] post  [^N] new run  [^R] runs"
 		if s.active && hasOverflow {

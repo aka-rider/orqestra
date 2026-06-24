@@ -8,6 +8,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
+	"github.com/xiii/orqestra/internal/tui/frame"
+	"github.com/xiii/orqestra/internal/tui/keymap"
 )
 
 
@@ -37,7 +39,7 @@ func TestFileHyperlink_RelativePath(t *testing.T) {
 }
 
 func setupTestPipelineScreen() PipelineScreen {
-	s := NewPipelineScreen("test", runeUI{})
+	s := NewPipelineScreen("test", runeUI{}, keymap.Default())
 	s.cwd = "/test/dir"
 	sb := orchestrator.NewStreamRing(50)
 	sb.SetAgent("researcher")
@@ -85,7 +87,7 @@ func TestViewStreaming_FilePathsAreFullPaths(t *testing.T) {
 func TestDrainStreamUpdates_TextLineGoesToTimeline(t *testing.T) {
 	s := PipelineScreen{
 		streamBuf: orchestrator.NewStreamRing(200),
-		timeline:  NewTimeline(timelineStyles{selectionBg: selectionBg, rule: dividerStyle}),
+		timeline:  NewTimeline(keymap.Default(), timelineStyles{selectionBg: selectionBg, rule: dividerStyle}, frame.MDDeps{}),
 		knownAgents: make(map[string]string),
 	}
 
@@ -117,7 +119,7 @@ func TestViewCompletion_ShowsAgentSummary(t *testing.T) {
 }
 
 func setupEditConfirmScreen() PipelineScreen {
-	s := NewPipelineScreen("test", runeUI{})
+	s := NewPipelineScreen("test", runeUI{}, keymap.Default())
 	s.content = ContentEditConfirm
 	s.awaitingPlanDecision = true
 	s.hasPlan = true
@@ -239,7 +241,7 @@ func setupUserQuestionScreen(multi bool) PipelineScreen {
 			{Label: "No", Hint: "because..."},
 		},
 	}
-	s := NewPipelineScreen("test", runeUI{})
+	s := NewPipelineScreen("test", runeUI{}, keymap.Default())
 	s.content = ContentUserQuestion
 	s.question = newUserQuestion(q, 80)
 	s.hasQuestion = true

@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/orchestrator"
+	"github.com/xiii/orqestra/internal/tui/keymap"
 )
 
 var ansiEscRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
@@ -35,6 +36,7 @@ type ChatEntry struct {
 
 // PipelineScreen manages the pipeline execution view.
 type PipelineScreen struct {
+	keys       keymap.Bindings
 	configName string
 	goal       string
 	phase      orchestrator.Phase
@@ -104,16 +106,17 @@ type PipelineScreen struct {
 }
 
 // NewPipelineScreen creates a new pipeline screen.
-func NewPipelineScreen(configName string, ui runeUI) PipelineScreen {
+func NewPipelineScreen(configName string, ui runeUI, keys keymap.Bindings) PipelineScreen {
 	ta := textarea.New()
 	ta.Placeholder = "post to steer the model"
 	ta.SetHeight(1)
 	ta.CharLimit = 4096
 	return PipelineScreen{
+		keys:        keys,
 		configName:  configName,
 		ui:          ui,
 		knownAgents: make(map[string]string),
-		timeline:    NewTimeline(timelineStyles{selectionBg: selectionBg, rule: dividerStyle}),
+		timeline:    NewTimeline(keys, timelineStyles{selectionBg: selectionBg, rule: dividerStyle}, ui.mdDeps()),
 		postInput:   ta,
 	}
 }
@@ -335,9 +338,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 			s.planFilePath = snap.Gate.PlanFilePath
 			s.activeChat = newHumanChatMode(snap.Gate, s.ui)
 			s.bottom = gateBottom{chat: s.activeChat}
-			pf := newPlanFrame(snap.Gate.FinalPlanMarkdown, s.ui)
-			pf.resize(width)
-			s.timeline.AppendPlanFrame(pf)
+			s.timeline.AppendPlan(snap.Gate.FinalPlanMarkdown)
 		} else {
 			// Plan revised — update without reopening gate.
 			s.finalPlan = snap.Gate.FinalPlanMarkdown
@@ -357,6 +358,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 		s.SetToolFrameExpanded(true) // auto-expand tool frame on turn end
 		s.content = ContentCompletion
 		s.active = false
+		s.timeline.Stop() // halt the live blink loop (bug: ⏺ blinked forever)
 		if snap.Terminal.Err != nil {
 			s.lastErr = snap.Terminal.Err
 		}

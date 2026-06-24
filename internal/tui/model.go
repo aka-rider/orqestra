@@ -120,7 +120,7 @@ func NewModel(engine *orchestrator.Engine, configName string) (Model, error) {
 		state:             StatePrompt,
 		keys:              keys,
 		promptScreen:      NewPromptScreen(ui),
-		pipelineScreen:    NewPipelineScreen(configName, ui),
+		pipelineScreen:    NewPipelineScreen(configName, ui, keys),
 		engine:            engine,
 		runeUI:            ui,
 		runsListScreen:    NewRunsListScreen(),
@@ -763,7 +763,6 @@ func (m *Model) recalculateLayout() {
 		m.regions.input = image.Rect(0, y, m.width, y+inputHeight)
 
 		m.pipelineScreen.timeline.SetRect(m.regions.timeline)
-		m.pipelineScreen.timeline.SetFullWidth(m.width)
 	}
 
 	// No header. Content gets full width. Sidebar is a bottom strip below the input zone.
