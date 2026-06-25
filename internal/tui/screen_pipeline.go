@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/orchestrator"
@@ -62,6 +63,7 @@ type PipelineScreen struct {
 	editConfirmComment textarea.Model
 	hasEditComment     bool
 	editorRunning      bool
+	editorFilePath     string // temp file the external editor edits in place
 
 	// Post-message input (always visible during ContentStreaming)
 	postInput textarea.Model
@@ -97,7 +99,6 @@ type PipelineScreen struct {
 	// Alt-screen sub-models
 	timeline    Timeline
 	lastAgentID string
-	bottom      bottomMode // sum type; nil means streaming mode
 
 	// rune UI bundle — passed to newHumanChatMode for markdownedit construction.
 	ui runeUI
@@ -130,10 +131,8 @@ func (s *PipelineScreen) Start(goal string) tea.Cmd {
 	if wd, err := os.Getwd(); err == nil { // fire-and-forget: cwd is display-only; missing it just omits file hyperlinks
 		s.cwd = wd
 	}
-	s.content = ContentStreaming
 	s.active = true
-	s.postInput.Focus()
-	s.bottom = streamingBottom{}
+	s.enterStreaming()
 	var cmd tea.Cmd
 	s.timeline, cmd = s.timeline.Start()
 	// Post the opening prompt to the timeline through the same path every later
@@ -172,9 +171,17 @@ func (s *PipelineScreen) Reset() {
 	s.timeline.Clear()
 	s.timeline.styles = timelineStyles{selectionBg: selectionBg, rule: dividerStyle}
 	s.lastAgentID = ""
-	s.bottom = nil
 	s.postInput.Reset()
 	s.postInput.Blur()
+}
+
+// enterStreaming returns the screen to the live streaming mode with the Chat
+// input focused. Every path back to streaming goes through here, so "streaming
+// with an unfocused input" — the prompt silently dropping keys — is an
+// unrepresentable transition (was bug: the ^E edit-confirm path forgot to focus).
+func (s *PipelineScreen) enterStreaming() {
+	s.content = ContentStreaming
+	s.postInput.Focus()
 }
 
 // SetToolFrameExpanded sets the tool frame expanded/collapsed state and
@@ -341,7 +348,6 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 			s.hasPlan = snap.Gate.Position.IsPlanGate()
 			s.planFilePath = snap.Gate.PlanFilePath
 			s.activeChat = newHumanChatMode(snap.Gate, s.ui)
-			s.bottom = gateBottom{chat: s.activeChat}
 			s.timeline.AppendPlan(snap.Gate.FinalPlanMarkdown)
 		} else {
 			// Plan revised — update without reopening gate.
@@ -354,7 +360,6 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 		s.content = ContentUserQuestion
 		s.question = newUserQuestion(snap.UserQuestion, width)
 		s.hasQuestion = true
-		s.bottom = questionBottom{q: s.question}
 	}
 
 	// Terminal: pipeline finished.
@@ -381,9 +386,8 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		s.question, cmd = s.question.Update(msg)
 		if s.question.Done() {
 			answer := s.question.Answer()
-			s.content = ContentStreaming
 			s.hasQuestion = false
-			s.postInput.Focus()
+			s.enterStreaming()
 			s.PendingIntent = SubmitQuestionAnswerIntent{Answer: answer}
 		}
 		return s, cmd
@@ -391,14 +395,27 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		if s.activeChat == nil {
 			return s, nil
 		}
+		// ^E opens the plan in $EDITOR. Intercepted here, above the chat, because
+		// editing is a page-level concern (write temp → ExecProcess → read back),
+		// not part of the approve/cancel conversation.
+		if key.Matches(msg, s.keys.OpenPlanInEditor) && s.hasPlan && s.finalPlan != "" {
+			path, err := planTempFile(s.finalPlan)
+			if err != nil {
+				s.lastErr = err // fail closed: stay in the gate, surface the error, change nothing
+				return s, nil
+			}
+			s.editorFilePath = path
+			s.editorRunning = true
+			s.PendingIntent = OpenExternalEditorIntent{FilePath: path}
+			return s, nil
+		}
 		var cmd tea.Cmd
 		s.activeChat, cmd = s.activeChat.Update(msg)
 		if pending := s.activeChat.Pending(); pending != nil {
 			s.activeChat = nil
-			s.content = ContentStreaming
 			s.awaitingPlanDecision = false
 			s.seenGateMarkdown = "" // allow next gate to re-trigger
-			s.postInput.Focus()
+			s.enterStreaming()
 			switch p := pending.(type) {
 			case *orchestrator.Decision:
 				switch p.Type {
@@ -481,8 +498,8 @@ func (s PipelineScreen) HandleCtrlCCancel() PipelineScreen {
 	case ContentUserQuestion:
 		s.question = s.question.Cancel()
 		answer := s.question.Answer()
-		s.content = ContentStreaming
 		s.hasQuestion = false
+		s.enterStreaming()
 		s.PendingIntent = SubmitQuestionAnswerIntent{Answer: answer}
 	default:
 		s.PendingIntent = CancelPipelineIntent{}

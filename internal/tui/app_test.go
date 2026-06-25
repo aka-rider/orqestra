@@ -698,7 +698,7 @@ func TestTUI_EditorReturn(t *testing.T) {
 	}
 	tmpFile.Close()
 
-	m.pipelineScreen.planFilePath = tmpFile.Name()
+	m.pipelineScreen.editorFilePath = tmpFile.Name()
 
 	// Simulate editor return — should show confirmation prompt, NOT immediate DecisionEdit
 	result, cmd := m.Update(editorReturnMsg{err: nil})

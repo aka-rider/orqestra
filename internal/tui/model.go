@@ -2,9 +2,11 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"os"
+	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -183,15 +185,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case editorReturnMsg:
 		m.pipelineScreen.editorRunning = false
 		if msg.err != nil {
-			m.pipelineScreen.lastErr = msg.err
+			m.pipelineScreen.lastErr = msg.err // fail closed: keep the original plan
 			return m, nil
 		}
-		if m.pipelineScreen.planFilePath != "" {
+		if path := m.pipelineScreen.editorFilePath; path != "" {
 			return m, func() tea.Msg {
-				data, err := os.ReadFile(m.pipelineScreen.planFilePath)
+				data, err := os.ReadFile(path)
 				if err != nil {
 					return editorPlanReadMsg{err: fmt.Errorf("read plan after editor: %w", err)}
 				}
+				_ = os.Remove(path) // fire-and-forget: best-effort cleanup of the temp file after read-back
 				return editorPlanReadMsg{content: string(data)}
 			}
 		}
@@ -199,10 +202,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case editorPlanReadMsg:
 		if msg.err != nil {
-			m.pipelineScreen.lastErr = msg.err
+			m.pipelineScreen.lastErr = msg.err // fail closed: keep the original plan
 			return m, nil
 		}
 		edited := msg.content
+		if strings.TrimSpace(edited) == "" {
+			// Fail closed: an empty file is a corrupt/aborted edit — keep the plan.
+			m.pipelineScreen.lastErr = errors.New("edited plan was empty — keeping the original")
+			return m, nil
+		}
 		if edited != m.pipelineScreen.finalPlan {
 			// Show confirmation prompt instead of immediate DecisionEdit
 			m.pipelineScreen.pendingEditContent = edited
@@ -568,7 +576,7 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 			AutoApprove:   i.AutoApprove,
 		})
 		m.pipelineScreen.awaitingPlanDecision = false
-		m.pipelineScreen.content = ContentStreaming
+		m.pipelineScreen.enterStreaming()
 		return m, batch(nil)
 	case EditPlanIntent:
 		m.ctrl.Submit(orchestrator.Decision{

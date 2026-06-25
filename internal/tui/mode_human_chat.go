@@ -82,7 +82,7 @@ func (m *PlanChatMode) View(width int) string {
 
 // Footer returns the footer hint for PlanChatMode.
 func (m *PlanChatMode) Footer() string {
-	return "[^A] approve  [^C] abort  [↑↓/PgUp/PgDn] scroll"
+	return "[^A] approve  [^E] edit  [^C] abort  [↑↓/PgUp/PgDn] scroll"
 }
 
 // Pending returns the pending decision for PlanChatMode.

@@ -82,7 +82,7 @@ func (s PipelineScreen) handleEditConfirmKey(msg tea.KeyPressMsg) (PipelineScree
 			s.pendingEditContent = ""
 			s.hasEditComment = false
 			s.awaitingPlanDecision = false
-			s.content = ContentStreaming
+			s.enterStreaming()
 			return s, nil
 		}
 		if !msg.Mod.Contains(tea.ModCtrl) && !msg.Mod.Contains(tea.ModAlt) && !msg.Mod.Contains(tea.ModMeta) {
@@ -131,7 +131,7 @@ func (s PipelineScreen) handleEditConfirmKey(msg tea.KeyPressMsg) (PipelineScree
 			s.pendingEditContent = ""
 			s.hasEditComment = false
 			s.awaitingPlanDecision = false
-			s.content = ContentStreaming
+			s.enterStreaming()
 			return s, nil
 		}
 		// "No" — discard edit, return to gate
