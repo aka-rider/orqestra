@@ -183,7 +183,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case editorReturnMsg:
-		m.pipelineScreen.editorRunning = false
 		if msg.err != nil {
 			m.pipelineScreen.lastErr = msg.err // fail closed: keep the original plan
 			return m, nil

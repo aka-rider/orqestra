@@ -61,7 +61,6 @@ type PipelineScreen struct {
 	editConfirmCursor  int
 	editConfirmComment textarea.Model
 	hasEditComment     bool
-	editorRunning      bool
 	editorFilePath     string // temp file the external editor edits in place
 
 	// Post-message input (always visible during ContentStreaming)
@@ -70,7 +69,6 @@ type PipelineScreen struct {
 	// Plan tracking
 	finalPlan            string
 	hasPlan              bool
-	planFilePath         string
 	seenGateMarkdown     string
 	awaitingPlanDecision bool
 
@@ -164,7 +162,6 @@ func (s *PipelineScreen) Reset() {
 	s.pendingEditContent = ""
 	s.editConfirmCursor = 0
 	s.hasEditComment = false
-	s.editorRunning = false
 	s.animFrame = 0
 	s.toolFrameExpanded = false
 	s.timeline.Clear()
@@ -275,7 +272,6 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 				return s, nil
 			}
 			s.editorFilePath = path
-			s.editorRunning = true
 			s.PendingIntent = OpenExternalEditorIntent{FilePath: path}
 			return s, nil
 		}

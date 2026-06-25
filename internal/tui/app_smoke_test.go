@@ -136,7 +136,7 @@ func TestLayout_EditorReturnError(t *testing.T) {
 	m.pipelineScreen.content = ContentStreaming
 	m.pipelineScreen.hasPlan = true
 	m.pipelineScreen.finalPlan = "# Plan"
-	m.pipelineScreen.editorRunning = true
+	m.pipelineScreen.editorFilePath = "/tmp/orqestra-plan-test.md"
 	m.pipelineScreen.goal = "test goal"
 	m.pipelineScreen.phase = orchestrator.Phase("executing")
 	m.width = 120
@@ -148,9 +148,6 @@ func TestLayout_EditorReturnError(t *testing.T) {
 
 	if model.pipelineScreen.lastErr == nil {
 		t.Fatal("expected lastErr to be set after editor error")
-	}
-	if model.pipelineScreen.editorRunning {
-		t.Error("expected editorRunning to be false after editor return")
 	}
 
 	defer func() {

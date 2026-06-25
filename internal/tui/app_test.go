@@ -152,42 +152,34 @@ func TestTUI_PlanApprove(t *testing.T) {
 	}
 }
 
+// ^E on the plan gate writes the plan to a temp file and asks the app to open
+// $EDITOR; the gate stays open while editing happens out-of-band (D8).
 func TestTUI_PlanEditOpensExternalEditor(t *testing.T) {
-	t.Skip("skipped: PlanEditOpensExternalEditor flow replaced by HumanChatMode in v6")
+	const plan = "# Plan\n\n## Goal\nOriginal"
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentHumanGate
+	m.pipelineScreen.activeChat = newHumanChatMode(orchestrator.GateRequest{Position: orchestrator.GateAfterDeliberation}, m.runeUI)
 	m.pipelineScreen.hasPlan = true
-	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nOriginal"
-	m.pipelineScreen.planFilePath = "/tmp/test-plan.md"
+	m.pipelineScreen.finalPlan = plan
 
-	// Press Ctrl+E — should emit OpenExternalEditorIntent, not ContentPlanEdit
 	result, _ := sendCtrl(m, 'e')
 	model := result.(Model)
 
-	// Content mode must NOT have changed to a removed state
 	if model.pipelineScreen.content != ContentHumanGate {
 		t.Errorf("expected ContentHumanGate (unchanged), got %d", model.pipelineScreen.content)
 	}
-	if !model.pipelineScreen.editorRunning {
-		t.Error("expected editorRunning=true after Ctrl+E")
+	path := model.pipelineScreen.editorFilePath
+	if path == "" {
+		t.Fatal("expected editorFilePath to be set after ^E")
 	}
-}
-
-func TestTUI_PlanEditCtrlShiftEOpensExternalEditor(t *testing.T) {
-	t.Skip("skipped: PlanEditCtrlShiftEOpensExternalEditor flow replaced by HumanChatMode in v6")
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentHumanGate
-	m.pipelineScreen.hasPlan = true
-	m.pipelineScreen.planFilePath = "/tmp/test-plan.md"
-
-	// ctrl+shift+e should also open external editor
-	result, _ := sendCtrlShift(m, 'e')
-	model := result.(Model)
-
-	if !model.pipelineScreen.editorRunning {
-		t.Error("expected editorRunning=true after Ctrl+Shift+E")
+	defer os.Remove(path)
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read temp plan: %v", err)
+	}
+	if string(got) != plan {
+		t.Errorf("temp plan = %q, want %q", got, plan)
 	}
 }
 

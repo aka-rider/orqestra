@@ -104,7 +104,6 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 			s.content = ContentHumanGate
 			s.finalPlan = snap.Gate.FinalPlanMarkdown
 			s.hasPlan = snap.Gate.Position.IsPlanGate()
-			s.planFilePath = snap.Gate.PlanFilePath
 			s.activeChat = newHumanChatMode(snap.Gate, s.ui)
 			s.timeline.AppendPlan(snap.Gate.FinalPlanMarkdown)
 		} else {
