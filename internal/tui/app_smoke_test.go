@@ -22,11 +22,10 @@ func hydratedModels(t *testing.T) map[string]Model {
 
 	models := make(map[string]Model)
 
-	// StatePipeline + ContentHumanGate
+	// StatePipeline + plan gate (awaiting decision)
 	{
 		m := base()
 		m.state = StatePipeline
-		m.pipelineScreen.content = ContentHumanGate
 		m.pipelineScreen.hasPlan = true
 		m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nDo the thing."
 		m.pipelineScreen.awaitingPlanDecision = true

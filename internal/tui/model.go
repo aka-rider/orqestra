@@ -31,10 +31,9 @@ const (
 type ContentMode int
 
 const (
-	ContentStreaming  ContentMode = iota // streaming + the always-present chat (hosts questions)
+	ContentStreaming  ContentMode = iota // streaming + the always-present chat (hosts questions and gates)
 	ContentCompletion                    // QA report, summary
 	ContentEditConfirm                   // Ctrl+E edit confirmation prompt
-	ContentHumanGate                     // human-in-the-loop plan gate
 )
 
 // AgentState classifies an agent's execution state.
@@ -785,13 +784,4 @@ func (m *Model) recalculateLayout() {
 		m.promptScreen.width = m.width
 		m.promptScreen.height = m.height
 	}
-
-	// Propagate gate body dimensions to the active chat view (markdownedit).
-	if m.state == StatePipeline &&
-		m.pipelineScreen.content == ContentHumanGate &&
-		m.pipelineScreen.activeChat != nil {
-		bodyH := max(0, m.height-constPipelineInputHeight-constFooterHeight)
-		m.pipelineScreen.activeChat.SetSize(m.width, bodyH)
-	}
-
 }

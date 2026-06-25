@@ -51,15 +51,10 @@ func (s PipelineScreen) View(width, height int, ctrlCPending bool) string {
 		return body + "\n" + inputZone + footer
 	}
 
-	// For interactive modes, show an overlay above the timeline
-	// in the body area. Timeline is still visible as context behind it.
+	// The edit-confirm dialog overlays the body above the timeline. The plan gate
+	// needs no overlay — its plan is in the timeline and its keys go to the chat.
 	var overlay string
-	switch s.content {
-	case ContentHumanGate:
-		if s.activeChat != nil {
-			overlay = s.activeChat.View(w)
-		}
-	case ContentEditConfirm:
+	if s.content == ContentEditConfirm {
 		overlay = s.editConfirm.View(w)
 	}
 
@@ -79,11 +74,6 @@ func (s PipelineScreen) viewInputZone() string {
 			return keyStyle.Render(" [Tab/Enter] save context | [Esc] discard")
 		}
 		return keyStyle.Render(" [Enter] confirm | [Tab] add context | [Esc] discard")
-	case ContentHumanGate:
-		if s.activeChat != nil {
-			return keyStyle.Render(s.activeChat.Footer())
-		}
-		return ""
 	case ContentCompletion:
 		if s.lastErr != nil {
 			return errorStyle.Render(fmt.Sprintf(" Error: %v", s.lastErr))

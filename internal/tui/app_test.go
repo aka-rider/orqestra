@@ -13,6 +13,7 @@ import (
 	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
+	"github.com/xiii/orqestra/internal/tui/keymap"
 )
 
 // testModel creates a Model suitable for testing with a minimal mock engine.
@@ -127,28 +128,52 @@ func TestTUI_PlanApproval(t *testing.T) {
 	}
 	m.pipelineScreen.ApplySnapshot(snap, m.width)
 
-	if m.pipelineScreen.content != ContentHumanGate {
-		t.Errorf("expected ContentHumanGate, got %d", m.pipelineScreen.content)
+	if !m.pipelineScreen.awaitingPlanDecision {
+		t.Error("expected the gate to open (awaitingPlanDecision)")
 	}
 	if !m.pipelineScreen.hasPlan {
 		t.Error("expected hasPlan=true")
 	}
 }
 
-func TestTUI_PlanApprove(t *testing.T) {
-	t.Skip("skipped: PlanApprove flow replaced by HumanChatMode in v6")
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.content = ContentHumanGate
-	m.pipelineScreen.hasPlan = true
-	m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nTest"
-	// channel removed — test checks state only
+// ^A at a plan gate approves it (a hard gate over the always-focused chat):
+// the gate closes and an ApprovePlanIntent is queued.
+func TestGate_ApproveClosesGateAndEmitsIntent(t *testing.T) {
+	s := NewPipelineScreen("test", runeUI{}, keymap.Default())
+	s.awaitingPlanDecision = true
+	s.hasPlan = true
+	s.finalPlan = "# Plan\n\n## Goal\nTest"
 
-	result, _ := sendCtrl(m, 'a')
-	model := result.(Model)
+	s, _ = s.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
 
-	if model.pipelineScreen.content != ContentStreaming {
-		t.Errorf("expected ContentStreaming after approve, got %d", model.pipelineScreen.content)
+	if s.awaitingPlanDecision {
+		t.Error("expected the gate closed after ^A")
+	}
+	if _, ok := s.PendingIntent.(ApprovePlanIntent); !ok {
+		t.Fatalf("expected ApprovePlanIntent, got %T", s.PendingIntent)
+	}
+}
+
+// Typing a reply at a plan gate revises it (a soft gate): the gate closes and a
+// CommentPlanIntent carries the real typed text — not the old "user comment" stub.
+func TestGate_ReplyRevisesWithRealComment(t *testing.T) {
+	s := NewPipelineScreen("test", runeUI{}, keymap.Default())
+	s.awaitingPlanDecision = true
+	s.hasPlan = true
+	s.finalPlan = "# Plan"
+	s.chat.input.SetValue("tighten the error handling")
+
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	intent, ok := s.PendingIntent.(CommentPlanIntent)
+	if !ok {
+		t.Fatalf("expected CommentPlanIntent, got %T", s.PendingIntent)
+	}
+	if intent.Comment != "tighten the error handling" {
+		t.Errorf("comment = %q, want the typed text", intent.Comment)
+	}
+	if s.awaitingPlanDecision {
+		t.Error("expected the gate closed after a reply")
 	}
 }
 
@@ -158,16 +183,15 @@ func TestTUI_PlanEditOpensExternalEditor(t *testing.T) {
 	const plan = "# Plan\n\n## Goal\nOriginal"
 	m := testModel()
 	m.state = StatePipeline
-	m.pipelineScreen.content = ContentHumanGate
-	m.pipelineScreen.activeChat = newHumanChatMode(orchestrator.GateRequest{Position: orchestrator.GateAfterDeliberation}, m.keys)
+	m.pipelineScreen.awaitingPlanDecision = true
 	m.pipelineScreen.hasPlan = true
 	m.pipelineScreen.finalPlan = plan
 
 	result, _ := sendCtrl(m, 'e')
 	model := result.(Model)
 
-	if model.pipelineScreen.content != ContentHumanGate {
-		t.Errorf("expected ContentHumanGate (unchanged), got %d", model.pipelineScreen.content)
+	if !model.pipelineScreen.awaitingPlanDecision {
+		t.Error("expected the gate to stay open (awaitingPlanDecision) after ^E")
 	}
 	path := model.pipelineScreen.editorFilePath
 	if path == "" {
@@ -639,7 +663,7 @@ func TestTUI_PlanGateBlocksOverwrite(t *testing.T) {
 		},
 	}, m.width)
 
-	if m.pipelineScreen.content != ContentHumanGate {
+	if !m.pipelineScreen.awaitingPlanDecision {
 		t.Fatalf("expected ContentHumanGate, got %d", m.pipelineScreen.content)
 	}
 	if !m.pipelineScreen.awaitingPlanDecision {
@@ -657,7 +681,7 @@ func TestTUI_PlanGateBlocksOverwrite(t *testing.T) {
 	}, m.width)
 
 	// Gate must NOT be overwritten
-	if m.pipelineScreen.content != ContentHumanGate {
+	if !m.pipelineScreen.awaitingPlanDecision {
 		t.Errorf("gate was overwritten by stale phase change: content=%d", m.pipelineScreen.content)
 	}
 	// Phase should not be updated while gate is active
@@ -669,7 +693,7 @@ func TestTUI_PlanGateBlocksOverwrite(t *testing.T) {
 func TestTUI_EditorReturn(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
-	m.pipelineScreen.content = ContentHumanGate
+	m.pipelineScreen.awaitingPlanDecision = true
 	m.pipelineScreen.hasPlan = true
 	m.pipelineScreen.finalPlan = "# Plan\n\nOriginal content"
 	// channel removed — test checks state only
@@ -738,7 +762,7 @@ func TestTUI_DrainLoopPlanGate(t *testing.T) {
 	result, cmd := m.Update(obsNotifyMsg{})
 	model := result.(Model)
 
-	if model.pipelineScreen.content != ContentHumanGate {
+	if !model.pipelineScreen.awaitingPlanDecision {
 		t.Errorf("expected ContentHumanGate after obsNotifyMsg, got %d", model.pipelineScreen.content)
 	}
 	if !model.pipelineScreen.awaitingPlanDecision {
@@ -776,7 +800,7 @@ func TestTUI_ChannelCloseDoesNotOverwriteGate(t *testing.T) {
 	result, _ := m.Update(obsNotifyMsg{})
 	m = result.(Model)
 
-	if m.pipelineScreen.content != ContentHumanGate {
+	if !m.pipelineScreen.awaitingPlanDecision {
 		t.Fatalf("expected ContentHumanGate after gate opened, got %d", m.pipelineScreen.content)
 	}
 	if !m.pipelineScreen.awaitingPlanDecision {
@@ -788,7 +812,7 @@ func TestTUI_ChannelCloseDoesNotOverwriteGate(t *testing.T) {
 	result, _ = m.Update(obsNotifyMsg{})
 	model := result.(Model)
 
-	if model.pipelineScreen.content != ContentHumanGate {
+	if !model.pipelineScreen.awaitingPlanDecision {
 		t.Errorf("terminal done overwrote gate: expected ContentHumanGate, got %d", model.pipelineScreen.content)
 	}
 }
@@ -832,39 +856,6 @@ func TestTUI_ShiftEnterNewline(t *testing.T) {
 	}
 	model3.cancel()
 }
-
-func TestTUI_ChatResponse(t *testing.T) {
-	t.Skip("skipped: ChatResponse flow replaced by HumanChatMode in v6")
-}
-
-
-func TestTUI_ReviewTokenAccumulation(t *testing.T) {
-	m := testModel()
-	m.state = StatePipeline
-	m.pipelineScreen.chatHistory = []ChatEntry{{Role: ChatRoleUser, Text: "q1"}}
-
-	// Architect appears running first (snapshot-based registration).
-	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
-		Agents: []orchestrator.AgentSnapshot{
-			{AgentID: "architect", Status: "running"},
-		},
-	}, m.width)
-
-	// Architect done — review tokens should accumulate because chatHistory is non-empty.
-	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
-		Agents: []orchestrator.AgentSnapshot{
-			{AgentID: "architect", Status: "done", Input: 1000, Output: 500},
-		},
-	}, m.width)
-
-	if m.pipelineScreen.reviewTokensIn != 1000 {
-		t.Errorf("reviewTokensIn = %d, want 1000", m.pipelineScreen.reviewTokensIn)
-	}
-	if m.pipelineScreen.reviewTokensOut != 500 {
-		t.Errorf("reviewTokensOut = %d, want 500", m.pipelineScreen.reviewTokensOut)
-	}
-}
-
 
 // TestApplySnapshot_TerminalErrShowsInCompletion verifies that a pipeline failure
 // reported via obs.Finished is visible in the completion screen — the real path

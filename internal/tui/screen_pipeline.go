@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/orchestrator"
 	"github.com/xiii/orqestra/internal/tui/frame"
@@ -17,21 +16,6 @@ var ansiEscRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 func stripAnsi(s string) string {
 	return ansiEscRe.ReplaceAllString(s, "")
-}
-
-// ChatRole identifies who authored a ChatEntry.
-type ChatRole string
-
-const (
-	ChatRoleUser      ChatRole = "you"
-	ChatRoleArchitect ChatRole = "architect"
-)
-
-// ChatEntry is one turn in the user-architect conversation during plan review.
-type ChatEntry struct {
-	Role          ChatRole
-	Text          string
-	HasPlanChange bool // true if this entry accompanies a plan revision
 }
 
 // PipelineScreen manages the pipeline execution view.
@@ -46,14 +30,9 @@ type PipelineScreen struct {
 	// Tool frame collapse state — true when the user has toggled expanded mode.
 	toolFrameExpanded bool
 
-	// Active content mode (mutually exclusive)
+	// Active content mode: streaming (hosts the chat — plain, a question, or a
+	// plan gate), completion, or the edit-confirm dialog.
 	content ContentMode
-
-	// Plan-gate sub-model (valid when content == ContentHumanGate)
-	activeChat HumanChatMode
-
-	// AskUserQuestion is hosted by the chat (s.chat.question) — the chat models
-	// its own openness, so there is no separate question field or content mode.
 
 	// Edit-confirmation sub-model (valid when content == ContentEditConfirm)
 	editConfirm    editConfirmModel
@@ -71,11 +50,6 @@ type PipelineScreen struct {
 	// Agent tracking for status bar
 	agents      []AgentRow
 	knownAgents map[string]string
-
-	// Plan-review conversation
-	chatHistory     []ChatEntry
-	reviewTokensIn  int64
-	reviewTokensOut int64
 
 	// Completion state
 	lastErr          error
@@ -142,10 +116,6 @@ func (s *PipelineScreen) Reset() {
 	s.awaitingPlanDecision = false
 	s.seenGateMarkdown = ""
 	s.knownAgents = make(map[string]string)
-	s.activeChat = nil
-	s.chatHistory = nil
-	s.reviewTokensIn = 0
-	s.reviewTokensOut = 0
 	s.active = false
 	s.phase = ""
 	s.editConfirm = editConfirmModel{}
@@ -165,6 +135,14 @@ func (s *PipelineScreen) Reset() {
 func (s *PipelineScreen) enterStreaming() {
 	s.content = ContentStreaming
 	s.chat.Focus()
+}
+
+// closeGate ends a plan gate and resumes the live flow. seenGateMarkdown is
+// cleared so the next gate (e.g. a revised plan) re-triggers.
+func (s *PipelineScreen) closeGate() {
+	s.awaitingPlanDecision = false
+	s.seenGateMarkdown = ""
+	s.enterStreaming()
 }
 
 // inputZoneHeight is the number of rows the bottom input zone needs: one line
@@ -246,49 +224,11 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 // Update handles key events for the pipeline screen.
 func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	switch s.content {
-	case ContentHumanGate:
-		if s.activeChat == nil {
-			return s, nil
-		}
-		// ^E opens the plan in $EDITOR. Intercepted here, above the chat, because
-		// editing is a page-level concern (write temp → ExecProcess → read back),
-		// not part of the approve/cancel conversation.
-		if key.Matches(msg, s.keys.OpenPlanInEditor) && s.hasPlan && s.finalPlan != "" {
-			path, err := planTempFile(s.finalPlan)
-			if err != nil {
-				s.lastErr = err // fail closed: stay in the gate, surface the error, change nothing
-				return s, nil
-			}
-			s.editorFilePath = path
-			s.PendingIntent = OpenExternalEditorIntent{FilePath: path}
-			return s, nil
-		}
-		var cmd tea.Cmd
-		s.activeChat, cmd = s.activeChat.Update(msg)
-		if pending := s.activeChat.Pending(); pending != nil {
-			s.activeChat = nil
-			s.awaitingPlanDecision = false
-			s.seenGateMarkdown = "" // allow next gate to re-trigger
-			s.enterStreaming()
-			switch p := pending.(type) {
-			case *orchestrator.Decision:
-				switch p.Type {
-				case orchestrator.DecisionApprove:
-					s.timeline.Append(frame.NewSteer("approved plan", dimStyle))
-					s.PendingIntent = ApprovePlanIntent{}
-				case orchestrator.DecisionCancel:
-					s.timeline.Append(frame.NewSteer("cancelled", dimStyle))
-					s.PendingIntent = CancelPlanIntent{}
-				case orchestrator.DecisionComment:
-					s.timeline.Append(frame.NewSteer(p.Comment, dimStyle))
-					s.PendingIntent = CommentPlanIntent{Comment: p.Comment}
-				}
-			}
-		}
-		return s, cmd
 	case ContentCompletion:
 		return s.handleCompletionKey(msg)
 	case ContentStreaming:
+		// Streaming hosts the chat, which may be plain, answering a question, or
+		// at a plan gate; handleStreamingKey routes to the right one.
 		return s.handleStreamingKey(msg)
 	case ContentEditConfirm:
 		return s.handleEditConfirmKey(msg)
@@ -322,34 +262,14 @@ func (s PipelineScreen) UpdateSubModel(msg tea.Msg) (PipelineScreen, tea.Cmd) {
 // HandleCtrlCCancel handles the first Ctrl+C press by emitting the appropriate
 // cancel intent based on current content mode.
 func (s PipelineScreen) HandleCtrlCCancel() PipelineScreen {
-	switch s.content {
-	case ContentHumanGate:
-		s.awaitingPlanDecision = false
-		if s.activeChat != nil {
-			s.activeChat, _ = s.activeChat.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
-			if pending := s.activeChat.Pending(); pending != nil {
-				switch p := pending.(type) {
-				case *orchestrator.Decision:
-					switch p.Type {
-					case orchestrator.DecisionApprove:
-						s.PendingIntent = ApprovePlanIntent{}
-					case orchestrator.DecisionCancel:
-						s.PendingIntent = CancelPlanIntent{}
-					case orchestrator.DecisionComment:
-						s.PendingIntent = CommentPlanIntent{Comment: p.Comment}
-					}
-				}
-			}
-		} else {
-			s.PendingIntent = CancelPlanIntent{}
-		}
-	case ContentStreaming:
-		// With a question open, the first ^C skips it; otherwise it cancels the run.
-		if s.chat.QuestionOpen() {
-			s = s.resolveQuestion(s.chat.question.Cancel())
-		} else {
-			s.PendingIntent = CancelPipelineIntent{}
-		}
+	switch {
+	case s.content == ContentStreaming && s.chat.QuestionOpen():
+		// A question open → the first ^C skips it.
+		s = s.resolveQuestion(s.chat.question.Cancel())
+	case s.content == ContentStreaming && s.awaitingPlanDecision:
+		// At a plan gate → ^C aborts the plan.
+		s.closeGate()
+		s.PendingIntent = CancelPlanIntent{}
 	default:
 		s.PendingIntent = CancelPipelineIntent{}
 	}

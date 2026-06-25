@@ -71,10 +71,6 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 						s.agents[i].OutputTokens = a.Output
 					}
 				}
-				if a.AgentID == "architect" && len(s.chatHistory) > 0 {
-					s.reviewTokensIn += a.Input
-					s.reviewTokensOut += a.Output
-				}
 				s.timeline.ReconcilePendingTools()
 				s.timeline.Append(frame.NewSummary(agentSummaryLine("Done:", "✓", a, elapsed), phaseStyle))
 			case "failed":
@@ -92,23 +88,18 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 		}
 	}
 
-	// Gate: open when markdown changes.
+	// Gate: open on the always-focused chat when the plan markdown changes. The
+	// plan goes to the timeline; the chat takes the approve/edit/revise keys. No
+	// separate mode — awaitingPlanDecision is the gate's only state.
 	if snap.HasGate && snap.Gate.FinalPlanMarkdown != "" && snap.Gate.FinalPlanMarkdown != s.seenGateMarkdown {
 		s.seenGateMarkdown = snap.Gate.FinalPlanMarkdown
 		if !s.awaitingPlanDecision {
-			if snap.Gate.Position.IsPlanGate() && len(s.chatHistory) > 0 {
-				s.chatHistory = append(s.chatHistory, ChatEntry{
-					Role: ChatRoleArchitect, Text: "(plan ready for review)",
-				})
-			}
 			s.awaitingPlanDecision = true
-			s.content = ContentHumanGate
 			s.finalPlan = snap.Gate.FinalPlanMarkdown
 			s.hasPlan = snap.Gate.Position.IsPlanGate()
-			s.activeChat = newHumanChatMode(snap.Gate, s.keys)
 			s.timeline.Append(frame.NewPlan(snap.Gate.FinalPlanMarkdown, s.md))
 		} else {
-			// Plan revised — update without reopening gate.
+			// Plan revised — update without reopening the gate.
 			s.finalPlan = snap.Gate.FinalPlanMarkdown
 		}
 	}

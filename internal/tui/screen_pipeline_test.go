@@ -199,8 +199,8 @@ func TestEditConfirm_No(t *testing.T) {
 	if s.PendingIntent != nil {
 		t.Errorf("expected no PendingIntent, got %T", s.PendingIntent)
 	}
-	if s.content != ContentHumanGate {
-		t.Errorf("expected ContentHumanGate, got %d", s.content)
+	if !s.awaitingPlanDecision {
+		t.Error("expected the gate to reopen (awaitingPlanDecision) after discard")
 	}
 	if s.editConfirm.pending != "" {
 		t.Errorf("expected pendingEditContent cleared, got %q", s.editConfirm.pending)
@@ -219,8 +219,8 @@ func TestEditConfirm_EscapeReturns(t *testing.T) {
 	if s.PendingIntent != nil {
 		t.Errorf("expected no PendingIntent, got %T", s.PendingIntent)
 	}
-	if s.content != ContentHumanGate {
-		t.Errorf("expected ContentHumanGate, got %d", s.content)
+	if !s.awaitingPlanDecision {
+		t.Error("expected the gate to reopen (awaitingPlanDecision) after discard")
 	}
 	if s.editConfirm.pending != "" {
 		t.Errorf("expected pendingEditContent cleared, got %q", s.editConfirm.pending)
