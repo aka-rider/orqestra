@@ -214,13 +214,16 @@ func (b *QuestionBridge) RegisterSession(agentID, sessionID string) {
 	b.reportsMu.Unlock()
 }
 
-// ReportSignal returns a channel that is closed when a report arrives for the
-// given key (sessionID when non-empty, else agentID). If a report has already
-// arrived, the returned channel is pre-closed. Callers must not close it.
-// Call RegisterSession before ReportSignal to ensure the slot is fresh.
-func (b *QuestionBridge) ReportSignal(key string) <-chan struct{} {
+// ReportSignal returns a channel that is closed when a report arrives for agentID.
+// The correlation key is resolved internally from the agent's current session
+// (reportKey(agentID, sessions[agentID])) — the same derivation handleReport uses
+// to store — so callers never thread a session ID through this path. If a report
+// has already arrived, the returned channel is pre-closed. Callers must not close
+// it. Call RegisterSession before ReportSignal to ensure the slot is fresh.
+func (b *QuestionBridge) ReportSignal(agentID string) <-chan struct{} {
 	b.reportsMu.Lock()
 	defer b.reportsMu.Unlock()
+	key := reportKey(agentID, b.sessions[agentID])
 	if _, ok := b.reports[key]; ok {
 		// Report already in hand — return a pre-closed channel.
 		ch := make(chan struct{})
@@ -235,11 +238,15 @@ func (b *QuestionBridge) ReportSignal(key string) <-chan struct{} {
 	return ch
 }
 
-// TakeReport returns and removes the report for the given key, if any.
-// key is the value returned by reportKey(agentID, sessionID).
-func (b *QuestionBridge) TakeReport(key string) (string, bool) {
+// TakeReport returns and removes the report submitted by agentID, if any.
+// The correlation key is resolved internally from the agent's current session
+// (reportKey(agentID, sessions[agentID])) — identical to handleReport's storage
+// derivation — so report harvesting never depends on a separately-captured
+// RunResult.SessionID that may be empty after an early stop.
+func (b *QuestionBridge) TakeReport(agentID string) (string, bool) {
 	b.reportsMu.Lock()
 	defer b.reportsMu.Unlock()
+	key := reportKey(agentID, b.sessions[agentID])
 	sub, ok := b.reports[key]
 	if !ok {
 		return "", false

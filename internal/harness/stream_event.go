@@ -212,12 +212,17 @@ func parseStream(r io.Reader, events chan<- Event) (result string, isError bool,
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
 			continue
 		}
+		// Capture session_id from the first event that carries one (the system/init
+		// event leads the stream). Keeping this outside the result-type guard means
+		// RunResult.SessionID survives an early stop — e.g. the report-arrival SIGKILL
+		// where the terminal result event never arrives. The result event, when it
+		// does arrive, simply confirms the same id last.
+		if event.SessionID != "" {
+			sessionID = event.SessionID
+		}
 		if event.Type == "result" {
 			result = event.Result
 			isError = event.IsError || strings.HasPrefix(event.Subtype, "error_")
-			if event.SessionID != "" {
-				sessionID = event.SessionID
-			}
 			if event.PlanFilePath != "" {
 				planFilePath = event.PlanFilePath
 			}

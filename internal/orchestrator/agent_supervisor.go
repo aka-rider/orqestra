@@ -19,10 +19,12 @@ type ReportSignaler interface {
 	// RegisterSession re-arms the correlation slot for agentID with the given
 	// sessionID. Call on EventSessionStart, before calling ReportSignal.
 	RegisterSession(agentID, sessionID string)
-	// ReportSignal returns a channel closed when a report arrives for key
-	// (which is reportKey(agentID, sessionID)). Returns a pre-closed channel if
-	// the report has already arrived. Callers must not close the channel.
-	ReportSignal(key string) <-chan struct{}
+	// ReportSignal returns a channel closed when a report arrives for agentID.
+	// The bridge resolves the correlation key from the agent's registered session
+	// internally, so the supervisor never threads a session ID through this path.
+	// Returns a pre-closed channel if the report has already arrived. Callers must
+	// not close the channel.
+	ReportSignal(agentID string) <-chan struct{}
 }
 
 // AgentSupervisor is the single owner of the agent lifecycle.
@@ -82,6 +84,13 @@ func (s *AgentSupervisor) Run(
 	// EventSessionStart delivers a session ID via sessionC. A nil channel never
 	// fires in select, so the case is a no-op until bound.
 	var reportSig <-chan struct{}
+
+	// capturedSID holds the session ID observed from EventSessionStart. When the
+	// run stops early (report arrival) the base executor's result event may never
+	// arrive, leaving res.SessionID empty; we patch it from capturedSID before
+	// returning so the session id is propagated to every caller (resume, artifacts,
+	// TUI log viewer) regardless of how the run ended.
+	var capturedSID string
 
 	// Decide whether to open an input plane.
 	// Pure passthrough: no policies, no caller-supplied in, and no report machinery —
@@ -181,15 +190,18 @@ func (s *AgentSupervisor) Run(
 		case <-ctx.Done():
 			// Timeout, parent cancel, or our own cancelCause — join the base.
 			oc := <-runDone
+			if oc.res.SessionID == "" {
+				oc.res.SessionID = capturedSID
+			}
 			s.recordUsage(spec.AgentID, oc.res)
 			return s.resolveErr(ctx, oc.res, oc.err)
 
 		case sid := <-sessionC:
-			// Session ID arrived non-lossily. Re-arm the bridge slot and bind
-			// reportSig. After this, the case below becomes live.
-			key := reportKey(spec.AgentID, sid)
+			// Session ID arrived non-lossily. Remember it, re-arm the bridge slot,
+			// and bind reportSig. After this, the case below becomes live.
+			capturedSID = sid
 			s.reports.RegisterSession(spec.AgentID, sid)
-			reportSig = s.reports.ReportSignal(key)
+			reportSig = s.reports.ReportSignal(spec.AgentID)
 
 		case <-reportSig:
 			// Report arrived: cancel with the report sentinel so resolveErr
@@ -214,6 +226,9 @@ func (s *AgentSupervisor) Run(
 			}
 
 		case oc := <-runDone:
+			if oc.res.SessionID == "" {
+				oc.res.SessionID = capturedSID
+			}
 			s.recordUsage(spec.AgentID, oc.res)
 			if ctx.Err() != nil {
 				// A prior cancelCause call beat us here — resolve via cause.

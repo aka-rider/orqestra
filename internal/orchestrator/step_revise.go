@@ -58,7 +58,7 @@ func (s *ReviseStep) Run(ctx context.Context, in ReviseInput, sc StepContext) (P
 
 	var revised string
 	if sc.Reports != nil {
-		if sub, ok := sc.Reports.TakeReport(reportKey(string(s.ID()), res.SessionID)); ok && sub != "" {
+		if sub, ok := sc.Reports.TakeReport(string(s.ID())); ok && sub != "" {
 			revised = sub
 		}
 	}

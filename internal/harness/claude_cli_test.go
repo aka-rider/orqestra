@@ -24,8 +24,10 @@ func TestBuildEnv_Anthropic(t *testing.T) {
 	assertEnvContains(t, env, "ANTHROPIC_BASE_URL=http://localhost:4141")
 	assertEnvContains(t, env, "ANTHROPIC_MODEL=claude-sonnet-4.6")
 	assertEnvContains(t, env, "ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4.6")
+	// The configured api_key must be emitted so the subprocess authenticates
+	// against the configured endpoint instead of falling back to subscription OAuth.
+	assertEnvContains(t, env, "ANTHROPIC_API_KEY=test-key")
 	assertEnvNotContains(t, env, "ANTHROPIC_AUTH_TOKEN")
-	assertEnvNotContains(t, env, "ANTHROPIC_API_KEY")
 }
 
 func TestBuildEnv_OpenAI(t *testing.T) {
@@ -44,8 +46,34 @@ func TestBuildEnv_OpenAI(t *testing.T) {
 	assertEnvContains(t, env, "ANTHROPIC_BASE_URL=http://192.168.50.212:11434")
 	assertEnvContains(t, env, "ANTHROPIC_MODEL=qwen36")
 	assertEnvContains(t, env, "ANTHROPIC_DEFAULT_SONNET_MODEL=qwen36")
-	assertEnvNotContains(t, env, "ANTHROPIC_API_KEY")
+	assertEnvContains(t, env, "ANTHROPIC_API_KEY=sk-test")
 	assertEnvNotContains(t, env, "ANTHROPIC_AUTH_TOKEN")
+}
+
+// TestBuildModelEnv_KeylessEmitsSentinel verifies that a non-native provider with
+// no configured api_key still emits a non-empty ANTHROPIC_API_KEY (the local
+// sentinel). This is the core billing fix: a non-empty key forces the claude CLI
+// to authenticate against the configured ANTHROPIC_BASE_URL instead of silently
+// falling back to the on-disk subscription OAuth (which would bill api.anthropic.com).
+func TestBuildModelEnv_KeylessEmitsSentinel(t *testing.T) {
+	for _, typ := range []string{config.ProviderTypeOpenAI, config.ProviderTypeAnthropic} {
+		t.Run(typ, func(t *testing.T) {
+			env, err := BuildModelEnv(config.ResolvedModel{
+				BaseURL: "http://192.168.50.212:11434",
+				APIKey:  "", // keyless local endpoint (e.g. Ollama)
+				Model:   "qwen3.6",
+				Type:    typ,
+			}, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			assertEnvContains(t, env, "ANTHROPIC_API_KEY="+localAuthSentinel)
+			// Sentinel must be non-empty, else the CLI falls back to OAuth.
+			if localAuthSentinel == "" {
+				t.Fatal("localAuthSentinel must be non-empty to prevent OAuth fallback")
+			}
+		})
+	}
 }
 
 func TestBuildEnv_EmptyType_Errors(t *testing.T) {

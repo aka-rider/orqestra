@@ -63,8 +63,9 @@ func TestExtractReport_SubmitReportTierOneShot(t *testing.T) {
 	const agentID = "architect"
 	const validPlan = "# Plan\n\n## Goal\nAdd a flag.\n\n## Work Packages\n### 1. Edit main.go\n"
 
-	// Key is reportKey(agentID, res.SessionID) = res.SessionID when non-empty.
-	store := &fakeReportStore{reports: map[string]string{"fake-session-abc": validPlan}}
+	// TakeReport is keyed by agentID; the store resolves the session internally,
+	// so report harvesting no longer depends on res.SessionID.
+	store := &fakeReportStore{reports: map[string]string{agentID: validPlan}}
 
 	sc := StepContext{
 		Log:     slog.Default(),

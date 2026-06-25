@@ -230,6 +230,49 @@ func TestQuestionBridge_ReportRoundTrip(t *testing.T) {
 	}
 }
 
+func TestQuestionBridge_TakeReport_ByAgentID_AfterSessionRegistered(t *testing.T) {
+	// Regression for the architect "no valid report produced" race: the report is
+	// stored under the session-id key (handleReport looks up sessions[agentID]),
+	// and harvesting must succeed when keyed by agentID alone — even though the
+	// caller's RunResult.SessionID is empty after an early stop.
+	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-sess-corr-%d.sock", os.Getpid()))
+	defer os.Remove(sockPath)
+	bridge := NewQuestionBridge(sockPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	runBridge(t, ctx, bridge, sockPath)
+
+	const agentID = "architect"
+	const sessionID = "sess-real-xyz"
+	const reportText = "## Goal\nShip it.\n## Work Packages\n- one"
+
+	// Supervisor observed EventSessionStart and re-armed the slot with the real id.
+	bridge.RegisterSession(agentID, sessionID)
+
+	// ReportSignal keyed by agentID must arm the waiter for the session key.
+	sig := bridge.ReportSignal(agentID)
+
+	if err := sendReport(sockPath, agentID, reportText, ""); err != nil {
+		t.Fatalf("sendReport: %v", err)
+	}
+
+	select {
+	case <-sig:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReportSignal(agentID) did not fire after a report stored under the session key")
+	}
+
+	// Harvest by agentID — resolves sessions[agentID] internally; no RunResult.SessionID needed.
+	got, ok := bridge.TakeReport(agentID)
+	if !ok {
+		t.Fatal("expected TakeReport(agentID) to find the session-keyed report")
+	}
+	if got != reportText {
+		t.Errorf("report = %q, want %q", got, reportText)
+	}
+}
+
 func TestQuestionBridge_RegisterSessionClearsStaleReport(t *testing.T) {
 	// Run() no longer clears stale state. RegisterSession does.
 	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-stale-%d.sock", os.Getpid()))

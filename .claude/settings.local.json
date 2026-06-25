@@ -14,7 +14,8 @@
       "Bash(make test-integration *)",
       "Bash(make test-sandbox *)",
       "Bash(go list *)",
-      "Bash(xargs ls -la)"
+      "Bash(xargs ls -la)",
+      "Bash(xargs ls -lt)"
     ]
   }
 }

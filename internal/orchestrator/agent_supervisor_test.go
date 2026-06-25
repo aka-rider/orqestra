@@ -107,6 +107,23 @@ func (p *sessionEmittingBlocker) Run(ctx context.Context, _ harness.ProcessSpec,
 	return harness.RunResult{SessionID: p.sessionID}, ctx.Err()
 }
 
+// sessionEmittingEmptyResultBlocker emits EventSessionStart with sessionID via the
+// sink, then blocks until ctx is cancelled and returns an EMPTY-SessionID result —
+// modelling the report-arrival SIGKILL case where the terminal result event never
+// arrives so the base executor cannot report a session ID. The supervisor must
+// patch it from the session start it observed.
+type sessionEmittingEmptyResultBlocker struct {
+	sessionID string
+}
+
+func (p *sessionEmittingEmptyResultBlocker) Run(ctx context.Context, _ harness.ProcessSpec, _ <-chan harness.Message, sink harness.Sink) (harness.RunResult, error) {
+	if sink != nil {
+		sink.Observe(harness.Event{Kind: harness.EventSessionStart, SessionID: p.sessionID})
+	}
+	<-ctx.Done()
+	return harness.RunResult{SessionID: ""}, ctx.Err()
+}
+
 func newTestSupervisor(base harness.Executor) *AgentSupervisor {
 	guard := NewBudgetGuard(NewRunUsage(0)) // unlimited
 	return NewAgentSupervisor(base, nil, guard)
@@ -249,6 +266,45 @@ func TestSupervisor_ReportArrivalStopsRun(t *testing.T) {
 	case err := <-done:
 		if err != nil {
 			t.Errorf("report-arrival stop: expected nil error, got %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Run did not return after report signal fired")
+	}
+}
+
+func TestSupervisor_ReportArrival_PropagatesSessionID(t *testing.T) {
+	// Regression: on a report-arrival stop the base executor returns an empty
+	// SessionID (no result event). The supervisor must propagate the session ID it
+	// observed from EventSessionStart so report correlation, --resume, artifacts,
+	// and the TUI log viewer all keep working.
+	player := &sessionEmittingEmptyResultBlocker{sessionID: "sess-from-init"}
+	guard := NewBudgetGuard(NewRunUsage(0))
+	sup := NewAgentSupervisor(player, preFiredSignaler{}, guard)
+
+	spec := harness.ProcessSpec{
+		AgentID:       "architect",
+		ExpectsReport: true,
+		Prompt:        "plan it",
+		LoopGuard:     harness.LoopGuardSpec{RepeatThreshold: 3, MaxNudges: 1, CooldownTurns: 1},
+	}
+
+	type result struct {
+		res harness.RunResult
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		res, err := sup.Run(context.Background(), spec, nil, nil)
+		done <- result{res, err}
+	}()
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Errorf("report-arrival stop: expected nil error, got %v", r.err)
+		}
+		if r.res.SessionID != "sess-from-init" {
+			t.Errorf("SessionID = %q, want %q (patched from observed EventSessionStart)", r.res.SessionID, "sess-from-init")
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("Run did not return after report signal fired")

@@ -269,9 +269,33 @@ func WithWorkDir(dir string) ClaudeCLIOption {
 
 // --- Environment and args ---
 
+// localAuthSentinel is the non-empty placeholder ANTHROPIC_API_KEY emitted for a
+// non-native provider that declares no api_key (e.g. a local Ollama / llama.cpp
+// endpoint that needs no auth). A non-empty key forces the claude CLI into
+// key-auth against the configured ANTHROPIC_BASE_URL instead of silently falling
+// back to the on-disk subscription OAuth — which would bill api.anthropic.com
+// while the user believes the run is local. The local endpoint ignores the value;
+// an endpoint that does require a real key will fail closed (401) rather than fall
+// back. See plan: silent-subscription-billing fix.
+const localAuthSentinel = "orqestra-local"
+
+// modelAuthToken returns the ANTHROPIC_API_KEY to emit for a non-native provider:
+// the configured key when present, else the local sentinel.
+func modelAuthToken(apiKey string) string {
+	if apiKey != "" {
+		return apiKey
+	}
+	return localAuthSentinel
+}
+
 // BuildModelEnv returns the environment variables needed to route the claude binary
 // to the given model. Used by sandbox runners that exec claude inside a container.
 // Returns an error if the provider type is empty or unknown — no fallback to native.
+//
+// For non-native providers it always emits a non-empty ANTHROPIC_API_KEY (the
+// configured key or localAuthSentinel) so the configured base URL is actually used
+// and an unreachable/keyless endpoint fails closed instead of silently billing the
+// user's subscription.
 func BuildModelEnv(resolved config.ResolvedModel, utility *config.ResolvedModel) ([]string, error) {
 	switch resolved.Type {
 	case config.ProviderTypeNative:
@@ -282,6 +306,7 @@ func BuildModelEnv(resolved config.ResolvedModel, utility *config.ResolvedModel)
 			"ANTHROPIC_BASE_URL=" + resolved.BaseURL,
 			"ANTHROPIC_MODEL=" + resolved.Model,
 			"ANTHROPIC_DEFAULT_SONNET_MODEL=" + resolved.Model,
+			"ANTHROPIC_API_KEY=" + modelAuthToken(resolved.APIKey),
 		}
 		if utility != nil {
 			env = append(env,
@@ -296,6 +321,7 @@ func BuildModelEnv(resolved config.ResolvedModel, utility *config.ResolvedModel)
 			"ANTHROPIC_BASE_URL=" + baseURL,
 			"ANTHROPIC_MODEL=" + resolved.Model,
 			"ANTHROPIC_DEFAULT_SONNET_MODEL=" + resolved.Model,
+			"ANTHROPIC_API_KEY=" + modelAuthToken(resolved.APIKey),
 		}
 		if utility != nil {
 			env = append(env,

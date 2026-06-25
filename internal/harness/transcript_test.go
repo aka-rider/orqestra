@@ -130,3 +130,30 @@ func TestParseStream_WorkerComplete_RealFixture(t *testing.T) {
 		t.Errorf("unexpected negative token usage: input=%d output=%d", usage.Input, usage.Output)
 	}
 }
+
+// TestParseStream_SessionID_SurvivesMissingResult verifies that the session_id is
+// captured from the leading system/init event even when the terminal result event
+// never arrives — the report-arrival SIGKILL case. Before the fix, session_id was
+// read only from the result event, so an early stop left RunResult.SessionID empty
+// and report correlation missed.
+func TestParseStream_SessionID_SurvivesMissingResult(t *testing.T) {
+	// INV-H2-SESSIONID: session_id survives a truncated (no-result) stream.
+	const truncated = `{"type":"system","subtype":"init","session_id":"sess-early-123","model":"qwen3.6","tools":["Read"]}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]},"session_id":"sess-early-123"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]},"session_id":"sess-early-123"}`
+
+	result, isError, _, sessionID, _, parseErr := parseStream(strings.NewReader(truncated), nil)
+	if parseErr != nil {
+		t.Fatalf("parseStream: %v", parseErr)
+	}
+	if sessionID != "sess-early-123" {
+		t.Errorf("session_id = %q, want %q (captured from init event despite no result event)", sessionID, "sess-early-123")
+	}
+	// No result event: result text is empty and isError stays false (not an error result).
+	if result != "" {
+		t.Errorf("expected empty result for truncated stream, got %q", result)
+	}
+	if isError {
+		t.Error("truncated (no-result) stream must not be reported as an error result")
+	}
+}
