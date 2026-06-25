@@ -9,10 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
-	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/orchestrator"
 	"github.com/xiii/orqestra/internal/tui/keymap"
 )
@@ -21,19 +19,19 @@ import (
 type AppState int
 
 const (
-	StatePrompt            AppState = iota // full-screen prompt entry
-	StatePipeline                          // 3-zone split layout (pipeline running/done)
-	StateRunsList                          // historical runs list
-	StateRunDetail                         // detail view for a single historical run
+	StatePrompt    AppState = iota // full-screen prompt entry
+	StatePipeline                  // 3-zone split layout (pipeline running/done)
+	StateRunsList                  // historical runs list
+	StateRunDetail                 // detail view for a single historical run
 )
 
 // ContentMode represents what the content zone shows during pipeline execution.
 type ContentMode int
 
 const (
-	ContentStreaming  ContentMode = iota // streaming + the always-present chat (hosts questions and gates)
-	ContentCompletion                    // QA report, summary
-	ContentEditConfirm                   // Ctrl+E edit confirmation prompt
+	ContentStreaming   ContentMode = iota // streaming + the always-present chat (hosts questions and gates)
+	ContentCompletion                     // QA report, summary
+	ContentEditConfirm                    // Ctrl+E edit confirmation prompt
 )
 
 // AgentState classifies an agent's execution state.
@@ -86,10 +84,10 @@ type Model struct {
 	runeUI runeUI
 
 	// Per-screen sub-models
-	promptScreen      PromptScreen
-	pipelineScreen    PipelineScreen
-	runsListScreen    RunsListScreen
-	runDetailScreen   RunDetailScreen
+	promptScreen    PromptScreen
+	pipelineScreen  PipelineScreen
+	runsListScreen  RunsListScreen
+	runDetailScreen RunDetailScreen
 
 	// Global UI state
 	ctrlCPending  bool
@@ -117,16 +115,16 @@ func NewModel(engine *orchestrator.Engine, configName string) (Model, error) {
 		return Model{}, fmt.Errorf("validate keymap: %w", err)
 	}
 	return Model{
-		state:             StatePrompt,
-		keys:              keys,
-		promptScreen:      NewPromptScreen(ui, keys),
-		pipelineScreen:    NewPipelineScreen(configName, ui, keys),
-		engine:            engine,
-		runeUI:            ui,
-		runsListScreen:    NewRunsListScreen(keys),
-		runDetailScreen:   NewRunDetailScreen(keys),
-		setupScreen:       newSetupModel(keys),
-		confirmedSetup:    orchestrator.DefaultPipelineSetup(),
+		state:           StatePrompt,
+		keys:            keys,
+		promptScreen:    NewPromptScreen(ui, keys),
+		pipelineScreen:  NewPipelineScreen(configName, ui, keys),
+		engine:          engine,
+		runeUI:          ui,
+		runsListScreen:  NewRunsListScreen(keys),
+		runDetailScreen: NewRunDetailScreen(keys),
+		setupScreen:     newSetupModel(keys),
+		confirmedSetup:  orchestrator.DefaultPipelineSetup(),
 	}, nil
 }
 
@@ -307,372 +305,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
-}
-
-// handleMouse routes mouse events to the active screen's viewport.
-func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	switch m.state {
-	case StatePipeline:
-		cmd = m.handlePipelineMouse(msg)
-	case StateRunsList:
-		m.runsListScreen, cmd = m.runsListScreen.HandleMouse(msg)
-	case StateRunDetail:
-		m.runDetailScreen, cmd = m.runDetailScreen.HandleMouse(msg)
-	}
-	return m, cmd
-}
-
-// handlePipelineMouse routes mouse events for the pipeline alt-screen layout.
-// Wheel events always reach the timeline; click/motion/release are bounded
-// to the timeline region to avoid background panes stealing foreground events.
-func (m *Model) handlePipelineMouse(msg tea.MouseMsg) tea.Cmd {
-	var cmd tea.Cmd
-	switch msg.(type) {
-	case tea.MouseWheelMsg:
-		m.pipelineScreen.timeline, cmd = m.pipelineScreen.timeline.Update(msg)
-	case tea.MouseClickMsg, tea.MouseReleaseMsg, tea.MouseMotionMsg:
-		pt := image.Point{X: msg.Mouse().X, Y: msg.Mouse().Y}
-		if pt.In(m.regions.timeline) {
-			m.pipelineScreen.timeline, cmd = m.pipelineScreen.timeline.Update(msg)
-		}
-	}
-	return cmd
-}
-
-// handleKey processes key events.
-func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, m.keys.Cancel) {
-		// Second Ctrl+C within the time gate → cancel and quit immediately.
-		if m.ctrlCPending && time.Now().Before(m.ctrlCDeadline) {
-			if m.cancel != nil {
-				m.cancel()
-			}
-			return m, tea.Quit
-		}
-		// Pipeline is idle or completed → quit immediately (nothing to cancel)
-		pipelineActive := m.state == StatePipeline &&
-			m.pipelineScreen.active &&
-			m.pipelineScreen.content != ContentCompletion
-		if !pipelineActive {
-			return m, tea.Quit
-		}
-		// First Ctrl+C with active pipeline → cancel and start time gate
-		m.ctrlCPending = true
-		m.ctrlCDeadline = time.Now().Add(3 * time.Second)
-		timeoutCmd := tea.Tick(3*time.Second, func(time.Time) tea.Msg {
-			return ctrlCTimeoutMsg{}
-		})
-		// Dispatch cancel to the active pipeline screen
-		prevInputH := m.pipelineScreen.inputZoneHeight()
-		m.pipelineScreen = m.pipelineScreen.HandleCtrlCCancel()
-		if m.pipelineScreen.inputZoneHeight() != prevInputH {
-			m.recalculateLayout()
-		}
-		// Process any intent emitted by the cancel handler
-		if intent := m.pipelineScreen.PendingIntent; intent != nil {
-			m.pipelineScreen.PendingIntent = nil
-			return m.processIntent(intent, timeoutCmd)
-		}
-		return m, timeoutCmd
-	}
-
-	switch m.state {
-	case StatePrompt:
-		return m.handlePromptKey(msg)
-	case StatePipeline:
-		return m.handlePipelineKey(msg)
-	case StateRunsList:
-		return m.handleRunsListKey(msg)
-	case StateRunDetail:
-		return m.handleRunDetailKey(msg)
-	}
-	return m, nil
-}
-
-// handleRunsListKey delegates to RunsListScreen and handles intents.
-func (m Model) handleRunsListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	m.runsListScreen, cmd = m.runsListScreen.Update(msg)
-	if intent := m.runsListScreen.PendingIntent; intent != nil {
-		m.runsListScreen.PendingIntent = nil
-		switch i := intent.(type) {
-		case NavigateBackIntent:
-			// Return to where we came from. If a pipeline is still live, go back
-			// to its view (the tick/anim loops stayed alive while we were away).
-			if m.prevState == StatePipeline && (m.pipelineScreen.active || m.obs != nil) {
-				m.state = StatePipeline
-				m.recalculateLayout()
-				return m, nil
-			}
-			m.state = StatePrompt
-			m.recalculateLayout()
-			return m, nil
-		case NavigateToRunDetailIntent:
-			if i.RunIndex < 0 || i.RunIndex >= len(m.runsListScreen.runs) {
-				return m, nil
-			}
-			detail, err := orchestrator.LoadRunDetail(m.runsListScreen.runs[i.RunIndex].Path)
-			if err != nil {
-				m.lastErr = err
-				return m, nil
-			}
-			m.runDetailScreen.SetDetail(detail)
-			m.runDetailScreen.LoadStepLog()
-			m.state = StateRunDetail
-			m.recalculateLayout()
-			m.runDetailScreen.SyncViewports()
-			return m, nil
-		}
-	}
-	return m, cmd
-}
-
-// handleRunDetailKey delegates to RunDetailScreen and handles intents.
-func (m Model) handleRunDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	m.runDetailScreen, cmd = m.runDetailScreen.Update(msg)
-	if intent := m.runDetailScreen.PendingIntent; intent != nil {
-		m.runDetailScreen.PendingIntent = nil
-		switch intent.(type) {
-		case NavigateBackIntent:
-			m.state = StateRunsList
-			m.recalculateLayout()
-			m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width())
-			return m, nil
-		case RestartRunIntent:
-			return m.processIntent(intent, cmd)
-		}
-	}
-	return m, cmd
-}
-
-// handlePromptKey delegates to PromptScreen and handles intents.
-func (m Model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// When the setup panel is open, route all keys to it.
-	if m.setupScreen.IsOpen() {
-		var cmd tea.Cmd
-		m.setupScreen, cmd = m.setupScreen.Update(msg)
-		if intent := m.setupScreen.PendingIntent; intent != nil {
-			m.setupScreen.PendingIntent = nil
-			if ci, ok := intent.(ConfirmSetupIntent); ok {
-				m.confirmedSetup = ci.Setup
-			}
-		}
-		return m, cmd
-	}
-
-	prevHeight := m.promptScreen.DesiredInputHeight(m.height)
-	var cmd tea.Cmd
-	m.promptScreen, cmd = m.promptScreen.Update(msg)
-	if m.promptScreen.DesiredInputHeight(m.height) != prevHeight {
-		m.recalculateLayout()
-	}
-	if intent := m.promptScreen.PendingIntent; intent != nil {
-		m.promptScreen.PendingIntent = nil
-		switch i := intent.(type) {
-		case StartPipelineIntent:
-			// If we have a restart context, start a restart pipeline instead.
-			if m.lastRestartRunPath != "" {
-				runPath := m.lastRestartRunPath
-				phase := m.lastRestartPhase
-				m.lastRestartRunPath = ""
-				m.lastRestartPhase = ""
-				blinkCmd := m.pipelineScreen.Start(i.Prompt)
-				m.state = StatePipeline
-				m.recalculateLayout()
-				pipelineCmd := m.startPipelineRestart(i.Prompt, runPath, phase)
-				return m, tea.Batch(blinkCmd, pipelineCmd, animTickCmd())
-			}
-			blinkCmd := m.pipelineScreen.Start(i.Prompt)
-			m.state = StatePipeline
-			m.recalculateLayout()
-			pipelineCmd := m.startPipeline(i.Prompt)
-			return m, tea.Batch(blinkCmd, pipelineCmd, animTickCmd())
-		case NavigateToRunsListIntent:
-			m.navigateToRunsList()
-			return m, nil
-		case ToggleSetupIntent:
-			if m.setupScreen.IsOpen() {
-				m.setupScreen.Close()
-			} else {
-				m.setupScreen.Open(m.confirmedSetup)
-			}
-			return m, nil
-		}
-	}
-	return m, cmd
-}
-
-// handlePipelineKey delegates to PipelineScreen and handles intents.
-func (m Model) handlePipelineKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// Explicit copy key bindings: Cmd+Shift+C copies selection; Cmd+C copies hovered frame.
-	switch {
-	case key.Matches(msg, m.keys.CopySelection):
-		cmd := m.pipelineScreen.timeline.CopySelected()
-		return m, cmd
-	case key.Matches(msg, m.keys.Copy):
-		if m.pipelineScreen.timeline.HasSelection() {
-			cmd := m.pipelineScreen.timeline.CopySelected()
-			return m, cmd
-		}
-	}
-
-	prevInputH := m.pipelineScreen.inputZoneHeight()
-	var cmd tea.Cmd
-	m.pipelineScreen, cmd = m.pipelineScreen.Update(msg)
-	if m.pipelineScreen.inputZoneHeight() != prevInputH {
-		m.recalculateLayout()
-	}
-	if intent := m.pipelineScreen.PendingIntent; intent != nil {
-		m.pipelineScreen.PendingIntent = nil
-		return m.processIntent(intent, cmd)
-	}
-	return m, cmd
-}
-
-// processIntent executes a pipeline screen intent and optionally batches with
-// an additional command (e.g. the Ctrl+C timeout tick).
-func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.Cmd) {
-	batch := func(cmd tea.Cmd) tea.Cmd {
-		if extraCmd != nil && cmd != nil {
-			return tea.Batch(cmd, extraCmd)
-		}
-		if extraCmd != nil {
-			return extraCmd
-		}
-		return cmd
-	}
-	switch i := intent.(type) {
-	case SubmitQuestionAnswerIntent:
-		if m.engine != nil {
-			ans := i.Answer
-			return m, batch(func() tea.Msg {
-				m.engine.SendAnswer(ans)
-				return nil
-			})
-		}
-		return m, batch(nil)
-	case ApprovePlanIntent:
-		m.ctrl.Submit(orchestrator.Decision{Type: orchestrator.DecisionApprove})
-		return m, batch(nil)
-	case ConfirmEditIntent:
-		m.ctrl.Submit(orchestrator.Decision{
-			Type:          orchestrator.DecisionEdit,
-			EditedContent: i.EditedContent,
-			Comment:       i.Comment,
-			AutoApprove:   i.AutoApprove,
-		})
-		m.pipelineScreen.awaitingPlanDecision = false
-		m.pipelineScreen.enterStreaming()
-		return m, batch(nil)
-	case EditPlanIntent:
-		m.ctrl.Submit(orchestrator.Decision{
-			Type:          orchestrator.DecisionEdit,
-			EditedContent: i.ModifiedMarkdown,
-		})
-		return m, batch(nil)
-	case CommentPlanIntent:
-		m.ctrl.Submit(orchestrator.Decision{
-			Type:    orchestrator.DecisionComment,
-			Comment: i.Comment,
-		})
-		return m, batch(nil)
-	case CancelPlanIntent:
-		m.ctrl.Submit(orchestrator.Decision{Type: orchestrator.DecisionCancel})
-		return m, batch(nil)
-	case CancelPipelineIntent:
-		if m.cancel != nil {
-			m.cancel()
-		}
-		return m, batch(nil)
-	case NavigateToPromptIntent:
-		m.pipelineScreen.Reset()
-		m.state = StatePrompt
-		m.promptScreen.Reset()
-		if i.PreFillGoal != "" {
-			m.promptScreen.SetValue(i.PreFillGoal)
-		}
-		return m, batch(nil)
-	case NavigateToRunsListIntent:
-		m.navigateToRunsList()
-		return m, batch(nil)
-	case ConfirmNewRunIntent:
-		if m.cancel != nil {
-			m.cancel()
-		}
-		goal := m.pipelineScreen.goal
-		m.pipelineScreen.Reset()
-		m.state = StatePrompt
-		m.promptScreen.Reset()
-		if goal != "" {
-			m.promptScreen.SetValue(goal)
-		}
-		return m, batch(nil)
-	case OpenExternalEditorIntent:
-		return m, batch(openExternalEditor(i.FilePath))
-	case RestartRunIntent:
-		m.lastRestartRunPath = i.RunPath
-		m.lastRestartPhase = i.Phase
-		m.pipelineScreen.Reset()
-		m.state = StatePrompt
-		m.promptScreen.Reset()
-		// Pre-fill with a restart prompt that includes the missing agent context.
-		prompt := "Restart run from phase: " + string(i.Phase)
-		m.promptScreen.SetValue(prompt)
-		return m, batch(nil)
-	case PostMessageIntent:
-		if m.ctrl != nil && i.Text != "" {
-			text := i.Text
-			agentID := orchestrator.AgentID(i.AgentID)
-			return m, batch(func() tea.Msg {
-				if ch := m.ctrl.Input(agentID); ch != nil {
-					ch <- harness.Message{Text: text}
-				}
-				return nil
-			})
-		}
-		return m, batch(nil)
-	}
-	return m, batch(nil)
-}
-
-// startPipeline launches the orchestrator and returns a command to start listening.
-func (m *Model) startPipeline(prompt string) tea.Cmd {
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancel = cancel
-
-	handle := m.engine.Start(ctx, orchestrator.Input{
-		Prompt: prompt,
-		Setup:  m.confirmedSetup,
-	})
-	m.obs = handle.Obs
-	m.ctrl = handle.Ctrl
-	m.lastRev = 0
-	m.pipelineScreen.SetStreamBuf(orchestrator.NewStreamRing(200))
-
-	return tea.Batch(notifyCmd(handle.Obs.NotifyCh()), tickCmd())
-}
-
-// startPipelineRestart launches the orchestrator for a restart run and returns
-// a command to start listening. The restart context is passed through the Input.
-func (m *Model) startPipelineRestart(prompt, runPath string, phase orchestrator.RestartPhase) tea.Cmd {
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancel = cancel
-
-	handle := m.engine.Start(ctx, orchestrator.Input{
-		Prompt: prompt,
-		RestartFrom: orchestrator.RestartInput{
-			RunPath: runPath,
-			Phase:   phase,
-		},
-	})
-	m.obs = handle.Obs
-	m.ctrl = handle.Ctrl
-	m.lastRev = 0
-	m.pipelineScreen.SetStreamBuf(orchestrator.NewStreamRing(200))
-
-	return tea.Batch(notifyCmd(handle.Obs.NotifyCh()), tickCmd())
 }
 
 // View renders the current screen.
