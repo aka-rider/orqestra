@@ -12,7 +12,7 @@ import (
 )
 
 func newTestTimeline(w, h int) Timeline {
-	t := NewTimeline(keymap.Default(), timelineStyles{selectionBg: "#264F78", rule: dividerStyle}, frame.MDDeps{})
+	t := NewTimeline(keymap.Default(), timelineStyles{selectionBg: "#264F78"})
 	t.SetRect(image.Rect(0, 0, w, h))
 	return t
 }
@@ -21,7 +21,7 @@ func newTestTimeline(w, h int) Timeline {
 
 func TestTimeline_AppendProse_AddsFrame(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.AppendProse("hello world")
+	tl.Append(frame.NewProse("hello world"))
 	if !tl.HasContent() {
 		t.Fatal("expected content after AppendProse")
 	}
@@ -33,17 +33,9 @@ func TestTimeline_AppendProse_AddsFrame(t *testing.T) {
 	}
 }
 
-func TestTimeline_AppendProse_EmptySkipped(t *testing.T) {
-	tl := newTestTimeline(80, 20)
-	tl.AppendProse("")
-	if tl.HasContent() {
-		t.Error("empty prose should not produce frames")
-	}
-}
-
 func TestTimeline_AppendProse_StripTrailingNewline(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.AppendProse("line\n")
+	tl.Append(frame.NewProse("line\n"))
 	if len(tl.frames) != 1 {
 		t.Fatalf("expected 1 frame, got %d", len(tl.frames))
 	}
@@ -57,7 +49,7 @@ func TestTimeline_AppendProse_StripTrailingNewline(t *testing.T) {
 
 func TestTimeline_AppendPhase_AddsRuleFrame(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.AppendPhase("researcher: claude-opus")
+	tl.Append(frame.NewPhase("researcher: claude-opus", dividerStyle))
 	if len(tl.frames) != 1 {
 		t.Fatalf("expected 1 frame, got %d", len(tl.frames))
 	}
@@ -125,20 +117,12 @@ func TestTimeline_ReconcilePendingTools(t *testing.T) {
 
 func TestTimeline_AppendSteer(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.AppendSteer("approved plan")
+	tl.Append(frame.NewSteer("approved plan", dimStyle))
 	if len(tl.frames) != 1 {
 		t.Fatalf("expected 1 frame, got %d", len(tl.frames))
 	}
 	if !strings.Contains(tl.View(), "you: approved plan") {
 		t.Error("steer frame should render as 'you: …'")
-	}
-}
-
-func TestTimeline_AppendSteer_EmptySkipped(t *testing.T) {
-	tl := newTestTimeline(80, 20)
-	tl.AppendSteer("")
-	if tl.HasContent() {
-		t.Error("empty steer should not produce a frame")
 	}
 }
 
@@ -187,7 +171,7 @@ func TestTimeline_FlushLive_Empty(t *testing.T) {
 
 func TestTimeline_Clear(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.AppendProse("some content")
+	tl.Append(frame.NewProse("some content"))
 	tl.AppendDelta("live")
 	tl.Clear()
 	if tl.HasContent() {
@@ -206,7 +190,7 @@ func TestTimeline_Clear(t *testing.T) {
 func TestTimeline_AutoFollow(t *testing.T) {
 	tl := newTestTimeline(80, 5)
 	for i := range 20 {
-		tl.AppendProse(strings.Repeat("x", i+1))
+		tl.Append(frame.NewProse(strings.Repeat("x", i+1)))
 	}
 	if !tl.AtBottom() {
 		t.Errorf("expected AtBottom after auto-follow, top=%d rows=%d h=%d", tl.top, len(tl.rows), tl.rect.Dy())
@@ -216,7 +200,7 @@ func TestTimeline_AutoFollow(t *testing.T) {
 func TestTimeline_ScrollToTop(t *testing.T) {
 	tl := newTestTimeline(80, 5)
 	for range 20 {
-		tl.AppendProse("line")
+		tl.Append(frame.NewProse("line"))
 	}
 	tl.ScrollToTop()
 	if tl.top != 0 {
@@ -230,7 +214,7 @@ func TestTimeline_ScrollToTop(t *testing.T) {
 func TestTimeline_ScrollToBottom(t *testing.T) {
 	tl := newTestTimeline(80, 5)
 	for range 20 {
-		tl.AppendProse("line")
+		tl.Append(frame.NewProse("line"))
 	}
 	tl.ScrollToTop()
 	tl.ScrollToBottom()
@@ -275,7 +259,7 @@ func TestTimeline_View_DimToolCollapse(t *testing.T) {
 func TestTimeline_ScrollKeys(t *testing.T) {
 	tl := newTestTimeline(80, 5)
 	for range 30 {
-		tl.AppendProse("a long line to force scrolling")
+		tl.Append(frame.NewProse("a long line to force scrolling"))
 	}
 	tl.ScrollToTop()
 	topBefore := tl.top
@@ -343,7 +327,7 @@ func TestTimeline_Stop_HaltsBlink(t *testing.T) {
 
 func TestTimeline_SelectedText_SingleLine(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.AppendProse("hello world")
+	tl.Append(frame.NewProse("hello world"))
 	tl.hasSel = true
 	tl.anchor = selPos{row: 0, col: 6}
 	tl.cursor = selPos{row: 0, col: 11}
@@ -354,7 +338,7 @@ func TestTimeline_SelectedText_SingleLine(t *testing.T) {
 
 func TestTimeline_SelectedText_Empty(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.AppendProse("hello")
+	tl.Append(frame.NewProse("hello"))
 	tl.hasSel = false
 	if tl.SelectedText() != "" {
 		t.Error("SelectedText should be empty when no selection")
@@ -366,7 +350,7 @@ func TestTimeline_SelectedText_Empty(t *testing.T) {
 func TestTimeline_Resize_StableRowCount(t *testing.T) {
 	tl := newTestTimeline(80, 20)
 	for range 10 {
-		tl.AppendProse("short")
+		tl.Append(frame.NewProse("short"))
 	}
 	rowsBefore := len(tl.rows)
 	tl.SetRect(image.Rect(0, 0, 40, 20))
@@ -377,7 +361,7 @@ func TestTimeline_Resize_StableRowCount(t *testing.T) {
 
 func TestTimeline_Resize_PreservesContent(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.AppendProse("this line is visible")
+	tl.Append(frame.NewProse("this line is visible"))
 	tl.SetRect(image.Rect(0, 0, 40, 20))
 	if !strings.Contains(tl.View(), "this line is visible") {
 		t.Error("resize should not destroy prose content")
@@ -388,11 +372,11 @@ func TestTimeline_Resize_PreservesContent(t *testing.T) {
 
 func TestTimeline_MixedFrames(t *testing.T) {
 	tl := newTestTimeline(80, 40)
-	tl.AppendPhase("researcher")
-	tl.AppendProse("Here is my research.")
+	tl.Append(frame.NewPhase("researcher", dividerStyle))
+	tl.Append(frame.NewProse("Here is my research."))
 	tl.AppendToolPending("read /tmp/data.json")
 	tl.ResolveLastTool(false)
-	tl.AppendSteer("approved plan")
+	tl.Append(frame.NewSteer("approved plan", dimStyle))
 
 	if len(tl.frames) != 4 {
 		t.Fatalf("expected 4 frames, got %d", len(tl.frames))

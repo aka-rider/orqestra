@@ -2,11 +2,9 @@ package tui
 
 import (
 	"image"
-	"strings"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 
 	"github.com/xiii/orqestra/internal/tui/frame"
 	"github.com/xiii/orqestra/internal/tui/keymap"
@@ -16,11 +14,10 @@ import (
 // ones fold into a dim "+N more tools" summary unless expanded.
 const constToolFrameMax = 8
 
-// timelineStyles holds the Timeline's own colors — selection background and the
-// phase-rule style. Per-frame styling lives on the frames themselves.
+// timelineStyles holds the Timeline's own colors. Per-frame styling lives on
+// the frames themselves — the Timeline only owns the selection background.
 type timelineStyles struct {
 	selectionBg string
-	rule        lipgloss.Style
 }
 
 // rowRef is one wrapped display row plus the index of the frame it came from.
@@ -69,14 +66,13 @@ type Timeline struct {
 
 	keys     keymap.Bindings
 	styles   timelineStyles
-	md       frame.MDDeps
 	expanded bool
 }
 
-// NewTimeline creates a timeline with the given bindings, styles, and the
-// markdownedit dependencies used to build Plan frames.
-func NewTimeline(keys keymap.Bindings, styles timelineStyles, md frame.MDDeps) Timeline {
-	return Timeline{follow: true, keys: keys, styles: styles, md: md}
+// NewTimeline creates a timeline with the given bindings and styles. Frames are
+// built by callers and handed to Append — the Timeline never constructs them.
+func NewTimeline(keys keymap.Bindings, styles timelineStyles) Timeline {
+	return Timeline{follow: true, keys: keys, styles: styles}
 }
 
 // --- Content API (called from Update paths) ---
@@ -107,49 +103,16 @@ func (t *Timeline) FlushLive() {
 	if t.liveText == "" {
 		return
 	}
-	t.appendStatic(frame.NewProse(t.liveText))
+	t.Append(frame.NewProse(t.liveText))
 	t.liveText = ""
 }
 
-// AppendProse appends a completed prose line.
-func (t *Timeline) AppendProse(text string) {
-	text = strings.TrimRight(text, "\n\r")
-	if text == "" {
-		return
-	}
-	t.appendStatic(frame.NewProse(text))
-}
-
-// AppendPhase appends a phase-separator rule.
-func (t *Timeline) AppendPhase(label string) {
-	t.appendStatic(frame.NewPhase(label, t.styles.rule))
-}
-
-// AppendSteer appends a user-action line ("you: …").
-func (t *Timeline) AppendSteer(text string) {
-	if text == "" {
-		return
-	}
-	t.appendStatic(frame.NewSteer(text, dimStyle))
-}
-
-// AppendAgentSummary appends an end-of-agent meta line.
-func (t *Timeline) AppendAgentSummary(text string) {
-	if text == "" {
-		return
-	}
-	t.appendStatic(frame.NewSummary(text, phaseStyle))
-}
-
-// AppendToolPending appends a new pending Tool frame. Callers FlushLive first.
+// AppendToolPending appends a new pending Tool frame and tracks it so a later
+// result can resolve it. The pending → ok/err transition is live tool state the
+// Timeline owns; callers FlushLive first. Plain content frames go through Append.
 func (t *Timeline) AppendToolPending(text string) {
 	t.toolIdx = append(t.toolIdx, len(t.frames))
-	t.appendStatic(frame.NewTool(text, toolFrameStyles()))
-}
-
-// AppendPlan appends a Plan frame rendered via markdownedit at the current width.
-func (t *Timeline) AppendPlan(markdown string) {
-	t.appendStatic(frame.NewPlan(markdown, t.md))
+	t.Append(frame.NewTool(text, toolFrameStyles()))
 }
 
 // ResolveLastTool resolves the most recent pending Tool frame to ok or error.
@@ -296,7 +259,11 @@ func (t Timeline) contentWidth() int { return t.rect.Dx() }
 
 // appendStatic lays out a frame at the current width, stores it, and appends its
 // rows to the flat cache.
-func (t *Timeline) appendStatic(f frame.StaticFrame) {
+// Append adds any StaticFrame to the timeline. This is the single content entry
+// point: the Timeline does not know or care which concrete frame it is — the
+// caller builds it (NewProse, NewPhase, NewSteer, NewAnswer, NewPlan, …). New
+// frame kinds need no new Timeline method.
+func (t *Timeline) Append(f frame.StaticFrame) {
 	f = f.SetWidth(t.contentWidth())
 	idx := len(t.frames)
 	t.frames = append(t.frames, f)

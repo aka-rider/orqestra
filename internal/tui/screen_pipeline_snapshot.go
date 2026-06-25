@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/xiii/orqestra/internal/orchestrator"
+	"github.com/xiii/orqestra/internal/tui/frame"
 )
 
 // agentSummaryLine formats the end-of-agent transcript summary line, e.g.
@@ -47,7 +48,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 			} else if a.Meta.ModelRef != "" {
 				ruleLabel += ": " + a.Meta.ModelRef
 			}
-			s.timeline.AppendPhase(ruleLabel)
+			s.timeline.Append(frame.NewPhase(ruleLabel, dividerStyle))
 			s.lastAgentID = a.AgentID
 			if s.streamBuf != nil {
 				s.streamBuf.SetAgent(a.AgentID)
@@ -75,7 +76,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 					s.reviewTokensOut += a.Output
 				}
 				s.timeline.ReconcilePendingTools()
-				s.timeline.AppendAgentSummary(agentSummaryLine("Done:", "✓", a, elapsed))
+				s.timeline.Append(frame.NewSummary(agentSummaryLine("Done:", "✓", a, elapsed), phaseStyle))
 			case "failed":
 				for i := range s.agents {
 					if s.agents[i].ID == a.AgentID {
@@ -85,7 +86,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 				if a.Error != "" {
 					s.lastErr = errors.New(a.Error)
 				}
-				s.timeline.AppendAgentSummary(agentSummaryLine("Failed:", "✗", a, a.EndTime.Sub(a.StartTime)))
+				s.timeline.Append(frame.NewSummary(agentSummaryLine("Failed:", "✗", a, a.EndTime.Sub(a.StartTime)), phaseStyle))
 			}
 			s.knownAgents[a.AgentID] = curr
 		}
@@ -105,7 +106,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 			s.finalPlan = snap.Gate.FinalPlanMarkdown
 			s.hasPlan = snap.Gate.Position.IsPlanGate()
 			s.activeChat = newHumanChatMode(snap.Gate, s.keys)
-			s.timeline.AppendPlan(snap.Gate.FinalPlanMarkdown)
+			s.timeline.Append(frame.NewPlan(snap.Gate.FinalPlanMarkdown, s.md))
 		} else {
 			// Plan revised — update without reopening gate.
 			s.finalPlan = snap.Gate.FinalPlanMarkdown

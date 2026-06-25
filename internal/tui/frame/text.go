@@ -1,6 +1,10 @@
 package frame
 
-import "charm.land/lipgloss/v2"
+import (
+	"strings"
+
+	"charm.land/lipgloss/v2"
+)
 
 // textFrame is the shared mechanism for every plain, word-wrapped transcript
 // item: prose, a user steer line, an end-of-agent summary, an answered
@@ -21,8 +25,9 @@ func (t textFrame) SetWidth(w int) StaticFrame {
 func (t textFrame) Rows() []Row { return t.rows }
 
 // NewProse is a completed assistant prose line, rendered in the default style.
+// A prose line carries no trailing newline — that is row separation, not content.
 func NewProse(text string) StaticFrame {
-	return textFrame{spans: []Span{{Text: text}}}
+	return textFrame{spans: []Span{{Text: strings.TrimRight(text, "\n\r")}}}
 }
 
 // NewSteer is a user action echoed into the transcript (post/approve/comment),

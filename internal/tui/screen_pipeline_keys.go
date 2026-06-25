@@ -6,6 +6,7 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"github.com/xiii/orqestra/internal/tui/frame"
 )
 
 func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
@@ -31,7 +32,7 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 		text := strings.TrimSpace(s.postInput.Value())
 		if text != "" {
 			s.postInput.Reset()
-			s.timeline.AppendSteer(text)
+			s.timeline.Append(frame.NewSteer(text, dimStyle))
 			agentID := s.lastAgentID
 			return s, func() tea.Msg {
 				return PostMessageIntent{AgentID: agentID, Text: text}

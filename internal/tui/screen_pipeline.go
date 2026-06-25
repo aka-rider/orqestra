@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/orchestrator"
+	"github.com/xiii/orqestra/internal/tui/frame"
 	"github.com/xiii/orqestra/internal/tui/keymap"
 )
 
@@ -93,6 +94,10 @@ type PipelineScreen struct {
 	timeline    Timeline
 	lastAgentID string
 
+	// md builds Plan frames (markdownedit) handed to the timeline; the timeline
+	// itself is frame-agnostic, so the deps live here with the frame builders.
+	md frame.MDDeps
+
 	PendingIntent tea.Msg
 }
 
@@ -106,7 +111,8 @@ func NewPipelineScreen(configName string, ui runeUI, keys keymap.Bindings) Pipel
 		keys:        keys,
 		configName:  configName,
 		knownAgents: make(map[string]string),
-		timeline:    NewTimeline(keys, timelineStyles{selectionBg: selectionBg, rule: dividerStyle}, ui.mdDeps()),
+		md:          ui.mdDeps(),
+		timeline:    NewTimeline(keys, timelineStyles{selectionBg: selectionBg}),
 		postInput:   ta,
 	}
 }
@@ -127,7 +133,7 @@ func (s *PipelineScreen) Start(goal string) tea.Cmd {
 	// Post the opening prompt to the timeline through the same path every later
 	// message uses, so the user's first input is visible (bug: first prompt was
 	// never shown). Full Chat unification (deleting PromptScreen) follows.
-	s.timeline.AppendSteer(goal)
+	s.timeline.Append(frame.NewSteer(goal, dimStyle))
 	return cmd
 }
 
@@ -154,7 +160,7 @@ func (s *PipelineScreen) Reset() {
 	s.animFrame = 0
 	s.toolFrameExpanded = false
 	s.timeline.Clear()
-	s.timeline.styles = timelineStyles{selectionBg: selectionBg, rule: dividerStyle}
+	s.timeline.styles = timelineStyles{selectionBg: selectionBg}
 	s.lastAgentID = ""
 	s.postInput.Reset()
 	s.postInput.Blur()
@@ -215,7 +221,7 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 				}
 				if line != "" {
 					s.timeline.ClearLive()
-					s.timeline.AppendProse(line)
+					s.timeline.Append(frame.NewProse(line))
 				}
 			case orchestrator.EntryToolUse:
 				if u.Detail != "" {
@@ -242,6 +248,7 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 		s.question, cmd = s.question.Update(msg)
 		if s.question.Done() {
 			answer := s.question.Answer()
+			s.timeline.Append(frame.NewAnswer(s.question.QuestionText(), s.question.AnswerSummary(), phaseStyle, dimStyle))
 			s.hasQuestion = false
 			s.enterStreaming()
 			s.PendingIntent = SubmitQuestionAnswerIntent{Answer: answer}
@@ -275,13 +282,13 @@ func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 			case *orchestrator.Decision:
 				switch p.Type {
 				case orchestrator.DecisionApprove:
-					s.timeline.AppendSteer("approved plan")
+					s.timeline.Append(frame.NewSteer("approved plan", dimStyle))
 					s.PendingIntent = ApprovePlanIntent{}
 				case orchestrator.DecisionCancel:
-					s.timeline.AppendSteer("cancelled")
+					s.timeline.Append(frame.NewSteer("cancelled", dimStyle))
 					s.PendingIntent = CancelPlanIntent{}
 				case orchestrator.DecisionComment:
-					s.timeline.AppendSteer(p.Comment)
+					s.timeline.Append(frame.NewSteer(p.Comment, dimStyle))
 					s.PendingIntent = CommentPlanIntent{Comment: p.Comment}
 				}
 			}
@@ -353,6 +360,7 @@ func (s PipelineScreen) HandleCtrlCCancel() PipelineScreen {
 	case ContentUserQuestion:
 		s.question = s.question.Cancel()
 		answer := s.question.Answer()
+		s.timeline.Append(frame.NewAnswer(s.question.QuestionText(), s.question.AnswerSummary(), phaseStyle, dimStyle))
 		s.hasQuestion = false
 		s.enterStreaming()
 		s.PendingIntent = SubmitQuestionAnswerIntent{Answer: answer}

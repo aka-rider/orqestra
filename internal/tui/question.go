@@ -87,6 +87,35 @@ func (m userQuestionModel) Done() bool { return m.done }
 // Answer returns the final answer (only meaningful after Done()).
 func (m userQuestionModel) Answer() mcp.Answer { return m.answer }
 
+// QuestionText returns the prompt, for echoing the answered question to the timeline.
+func (m userQuestionModel) QuestionText() string { return m.q.Question }
+
+// AnswerSummary is a concise human display of the chosen answer for the timeline
+// (distinct from mcp.FormatAnswer, which is verbose guidance written for the model).
+func (m userQuestionModel) AnswerSummary() string {
+	switch {
+	case m.answer.Skipped:
+		return "skipped"
+	case m.answer.FreeformText != "":
+		return m.answer.FreeformText
+	}
+	var labels []string
+	for _, idx := range m.answer.SelectedIndices {
+		if idx < 0 || idx >= len(m.q.Options) {
+			continue
+		}
+		label := m.q.Options[idx].Label
+		if c, ok := m.answer.CustomTexts[idx]; ok && strings.TrimSpace(c) != "" {
+			label += " (" + strings.TrimSpace(c) + ")"
+		}
+		labels = append(labels, label)
+	}
+	if len(labels) == 0 {
+		return "confirmed"
+	}
+	return strings.Join(labels, ", ")
+}
+
 // Cancel marks the question as skipped (used by parent Ctrl+C handling).
 func (m userQuestionModel) Cancel() userQuestionModel {
 	if m.activeEditor >= 0 {

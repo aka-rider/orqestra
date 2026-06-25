@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"image"
 	"strings"
 	"testing"
 	"time"
@@ -8,7 +9,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
-	"github.com/xiii/orqestra/internal/tui/frame"
 	"github.com/xiii/orqestra/internal/tui/keymap"
 )
 
@@ -87,7 +87,7 @@ func TestViewStreaming_FilePathsAreFullPaths(t *testing.T) {
 func TestDrainStreamUpdates_TextLineGoesToTimeline(t *testing.T) {
 	s := PipelineScreen{
 		streamBuf: orchestrator.NewStreamRing(200),
-		timeline:  NewTimeline(keymap.Default(), timelineStyles{selectionBg: selectionBg, rule: dividerStyle}, frame.MDDeps{}),
+		timeline:  NewTimeline(keymap.Default(), timelineStyles{selectionBg: selectionBg}),
 		knownAgents: make(map[string]string),
 	}
 
@@ -258,6 +258,24 @@ func TestUserQuestion_HandleCtrlCCancel_EmitsSkipIntent(t *testing.T) {
 	}
 	if !intent.Answer.Skipped {
 		t.Errorf("expected Skipped:true")
+	}
+}
+
+// Answering a question posts the answered question to the timeline as a frame
+// (the original-request "AskUserQuestion (Answered) is a new Frame -> timeline").
+func TestUserQuestion_AnswerPostsFrameToTimeline(t *testing.T) {
+	s := setupUserQuestionScreen(false)
+	s.timeline.SetRect(image.Rect(0, 0, 80, 20))
+
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})  // move to "No"
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyEnter}) // confirm
+
+	if s.content != ContentStreaming {
+		t.Fatalf("expected ContentStreaming after answering, got %v", s.content)
+	}
+	view := s.timeline.View()
+	if !strings.Contains(view, "Pick one") || !strings.Contains(view, "No") {
+		t.Errorf("expected the answered question on the timeline, got:\n%s", view)
 	}
 }
 
