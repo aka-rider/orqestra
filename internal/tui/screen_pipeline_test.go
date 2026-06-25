@@ -124,9 +124,7 @@ func setupEditConfirmScreen() PipelineScreen {
 	s.awaitingPlanDecision = true
 	s.hasPlan = true
 	s.finalPlan = "# Original Plan"
-	s.pendingEditContent = "# Modified Plan"
-	s.editConfirmCursor = 0
-	s.hasEditComment = false
+	s.editConfirm = newEditConfirm("# Modified Plan")
 	return s
 }
 
@@ -135,12 +133,12 @@ func TestEditConfirm_YesWithComment(t *testing.T) {
 
 	// Press Tab to open comment textarea
 	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	if !s.hasEditComment {
+	if !s.editConfirm.hasComment {
 		t.Fatal("expected hasEditComment to be true after Tab")
 	}
 
 	// Type comment
-	s.editConfirmComment.SetValue("Fixed imports")
+	s.editConfirm.comment.SetValue("Fixed imports")
 
 	// Press Enter to confirm
 	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -185,8 +183,8 @@ func TestEditConfirm_YesNoComment(t *testing.T) {
 	if s.content != ContentStreaming {
 		t.Errorf("expected ContentStreaming, got %d", s.content)
 	}
-	if s.pendingEditContent != "" {
-		t.Errorf("expected pendingEditContent cleared, got %q", s.pendingEditContent)
+	if s.editConfirm.pending != "" {
+		t.Errorf("expected pendingEditContent cleared, got %q", s.editConfirm.pending)
 	}
 }
 
@@ -204,8 +202,8 @@ func TestEditConfirm_No(t *testing.T) {
 	if s.content != ContentHumanGate {
 		t.Errorf("expected ContentHumanGate, got %d", s.content)
 	}
-	if s.pendingEditContent != "" {
-		t.Errorf("expected pendingEditContent cleared, got %q", s.pendingEditContent)
+	if s.editConfirm.pending != "" {
+		t.Errorf("expected pendingEditContent cleared, got %q", s.editConfirm.pending)
 	}
 	if s.finalPlan != "# Original Plan" {
 		t.Errorf("expected finalPlan unchanged, got %q", s.finalPlan)
@@ -224,8 +222,8 @@ func TestEditConfirm_EscapeReturns(t *testing.T) {
 	if s.content != ContentHumanGate {
 		t.Errorf("expected ContentHumanGate, got %d", s.content)
 	}
-	if s.pendingEditContent != "" {
-		t.Errorf("expected pendingEditContent cleared, got %q", s.pendingEditContent)
+	if s.editConfirm.pending != "" {
+		t.Errorf("expected pendingEditContent cleared, got %q", s.editConfirm.pending)
 	}
 	if s.finalPlan != "# Original Plan" {
 		t.Errorf("expected finalPlan unchanged, got %q", s.finalPlan)

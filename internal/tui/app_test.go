@@ -704,8 +704,8 @@ func TestTUI_EditorReturn(t *testing.T) {
 	if model.pipelineScreen.content != ContentEditConfirm {
 		t.Errorf("expected ContentEditConfirm after editor return with changes, got %d", model.pipelineScreen.content)
 	}
-	if model.pipelineScreen.pendingEditContent != modifiedPlan {
-		t.Errorf("expected pendingEditContent = modified plan, got %q", model.pipelineScreen.pendingEditContent)
+	if model.pipelineScreen.editConfirm.pending != modifiedPlan {
+		t.Errorf("expected pendingEditContent = modified plan, got %q", model.pipelineScreen.editConfirm.pending)
 	}
 	// channel removed — no decision should be sent yet (confirmation is pending), checked by state only
 }

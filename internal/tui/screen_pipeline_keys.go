@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -60,97 +59,27 @@ func (s PipelineScreen) handleCompletionKey(msg tea.KeyPressMsg) (PipelineScreen
 }
 
 func (s PipelineScreen) handleEditConfirmKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
-	if s.hasEditComment {
-		switch {
-		case key.Matches(msg, s.keys.FocusNext): // Tab: stop adding a comment
-			s.hasEditComment = false
-			return s, nil
-		case key.Matches(msg, s.keys.Back): // Esc: discard the comment
-			s.editConfirmComment.Reset()
-			s.hasEditComment = false
-			return s, nil
-		case key.Matches(msg, s.keys.Submit): // bare Enter: save the comment
-			comment := strings.TrimSpace(s.editConfirmComment.Value())
-			s.PendingIntent = ConfirmEditIntent{
-				EditedContent: s.pendingEditContent,
-				Comment:       comment,
-				AutoApprove:   comment == "",
-			}
-			s.pendingEditContent = ""
-			s.hasEditComment = false
-			s.awaitingPlanDecision = false
-			s.enterStreaming()
-			return s, nil
+	var res editConfirmResult
+	var cmd tea.Cmd
+	s.editConfirm, res, cmd = s.editConfirm.Update(msg, s.keys)
+	switch res {
+	case editConfirmApply:
+		comment := s.editConfirm.commentText()
+		s.PendingIntent = ConfirmEditIntent{
+			EditedContent: s.editConfirm.pending,
+			Comment:       comment,
+			AutoApprove:   comment == "",
 		}
-		// Shift/Alt+Enter inserts a newline; any other printable key edits the
-		// comment. Newline insertion is the textarea's own concern, not a binding.
-		if msg.Code == tea.KeyEnter {
-			s.editConfirmComment.InsertString("\n")
-			return s, nil
-		}
-		if !msg.Mod.Contains(tea.ModCtrl) && !msg.Mod.Contains(tea.ModAlt) && !msg.Mod.Contains(tea.ModMeta) {
-			var cmd tea.Cmd
-			s.editConfirmComment, cmd = s.editConfirmComment.Update(msg)
-			return s, cmd
-		}
-		return s, nil
-	}
-
-	switch {
-	case key.Matches(msg, s.keys.Up):
-		if s.editConfirmCursor > 0 {
-			s.editConfirmCursor--
-		}
-		return s, nil
-	case key.Matches(msg, s.keys.Down):
-		if s.editConfirmCursor < 1 {
-			s.editConfirmCursor++
-		}
-		return s, nil
-	case key.Matches(msg, s.keys.FocusNext): // Tab: add a context comment
-		if s.editConfirmCursor == 0 {
-			ta := textarea.New()
-			ta.Placeholder = "Describe your changes..."
-			ta.SetWidth(max(1, 80-6))
-			ta.SetHeight(2)
-			ta.CharLimit = 1024
-			ta.Focus()
-			s.editConfirmComment = ta
-			s.hasEditComment = true
-			return s, nil
-		}
-		return s, nil
-	case key.Matches(msg, s.keys.Submit):
-		if s.editConfirmCursor == 0 {
-			comment := ""
-			if s.hasEditComment {
-				comment = strings.TrimSpace(s.editConfirmComment.Value())
-			}
-			s.PendingIntent = ConfirmEditIntent{
-				EditedContent: s.pendingEditContent,
-				Comment:       comment,
-				AutoApprove:   comment == "",
-			}
-			s.pendingEditContent = ""
-			s.hasEditComment = false
-			s.awaitingPlanDecision = false
-			s.enterStreaming()
-			return s, nil
-		}
-		// "No" — discard edit, return to gate
-		s.pendingEditContent = ""
-		s.hasEditComment = false
+		s.editConfirm = editConfirmModel{}
+		s.awaitingPlanDecision = false
+		s.enterStreaming()
+	case editConfirmDiscard:
+		// Keep the original plan; return to the gate.
+		s.editConfirm = editConfirmModel{}
 		s.content = ContentHumanGate
 		s.awaitingPlanDecision = true
-		return s, nil
-	case key.Matches(msg, s.keys.Back): // Esc — same as "No"
-		s.pendingEditContent = ""
-		s.hasEditComment = false
-		s.content = ContentHumanGate
-		s.awaitingPlanDecision = true
-		return s, nil
 	}
-	return s, nil
+	return s, cmd
 }
 
 func (s PipelineScreen) viewFooter(ctrlCPending bool) string {
@@ -168,7 +97,7 @@ func (s PipelineScreen) viewFooter(ctrlCPending bool) string {
 		}
 		return ctrlCHint
 	case ContentEditConfirm:
-		if s.hasEditComment {
+		if s.editConfirm.hasComment {
 			return keyStyle.Render(" [Tab/Enter] save context | [Esc] discard  ") + ctrlCHint
 		}
 		return keyStyle.Render(" [↑↓] navigate | [Tab] add context | [Enter] confirm | [Esc] discard  ") + ctrlCHint

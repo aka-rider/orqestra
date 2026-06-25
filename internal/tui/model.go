@@ -211,10 +211,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if edited != m.pipelineScreen.finalPlan {
-			// Show confirmation prompt instead of immediate DecisionEdit
-			m.pipelineScreen.pendingEditContent = edited
-			m.pipelineScreen.editConfirmCursor = 0
-			m.pipelineScreen.hasEditComment = false
+			// Show the confirmation dialog instead of an immediate DecisionEdit.
+			m.pipelineScreen.editConfirm = newEditConfirm(edited)
 			m.pipelineScreen.content = ContentEditConfirm
 			m.recalculateLayout()
 			return m, nil

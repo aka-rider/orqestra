@@ -62,7 +62,7 @@ func (s PipelineScreen) View(width, height int, ctrlCPending bool) string {
 	case ContentUserQuestion:
 		overlay = s.question.View(w)
 	case ContentEditConfirm:
-		overlay = s.viewEditConfirm(w)
+		overlay = s.editConfirm.View(w)
 	}
 
 	if bodyH > 0 && overlay != "" {
@@ -79,7 +79,7 @@ func (s PipelineScreen) viewInputZone() string {
 	case ContentUserQuestion:
 		return keyStyle.Render(s.question.InputZone())
 	case ContentEditConfirm:
-		if s.hasEditComment {
+		if s.editConfirm.hasComment {
 			return keyStyle.Render(" [Tab/Enter] save context | [Esc] discard")
 		}
 		return keyStyle.Render(" [Enter] confirm | [Tab] add context | [Esc] discard")
@@ -162,37 +162,6 @@ func (s PipelineScreen) viewCompletion(width int) string {
 		b.WriteString("\n")
 	}
 	return b.String()
-}
-
-func (s PipelineScreen) viewEditConfirm(width int) string {
-	var b strings.Builder
-
-	b.WriteString(goalStyle.Render("  Plan was modified"))
-	b.WriteString("\n\n")
-	b.WriteString("  Apply these changes?\n\n")
-
-	options := []string{"Yes, apply changes", "No, discard changes"}
-	for i, opt := range options {
-		cursor := "  "
-		style := dimStyle
-		if i == s.editConfirmCursor {
-			cursor = "> "
-			style = phaseStyle.Bold(true)
-		}
-		b.WriteString(style.Render(cursor + opt))
-		if i == 0 && s.editConfirmCursor == 0 {
-			b.WriteString(dimStyle.Render("  [Tab: add context]"))
-		}
-		b.WriteString("\n")
-	}
-
-	if s.hasEditComment {
-		b.WriteString("\n")
-		b.WriteString(s.editConfirmComment.View())
-		b.WriteString("\n")
-	}
-
-	return lipgloss.NewStyle().Width(width).Render(b.String())
 }
 
 // formatActivityLine returns a single styled line for a tool invocation.

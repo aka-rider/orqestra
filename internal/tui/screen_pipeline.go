@@ -57,11 +57,8 @@ type PipelineScreen struct {
 	hasQuestion bool
 
 	// Edit-confirmation sub-model (valid when content == ContentEditConfirm)
-	pendingEditContent string
-	editConfirmCursor  int
-	editConfirmComment textarea.Model
-	hasEditComment     bool
-	editorFilePath     string // temp file the external editor edits in place
+	editConfirm    editConfirmModel
+	editorFilePath string // temp file the external editor edits in place
 
 	// Post-message input (always visible during ContentStreaming)
 	postInput textarea.Model
@@ -153,9 +150,7 @@ func (s *PipelineScreen) Reset() {
 	s.phase = ""
 	s.question = userQuestionModel{activeEditor: -1}
 	s.hasQuestion = false
-	s.pendingEditContent = ""
-	s.editConfirmCursor = 0
-	s.hasEditComment = false
+	s.editConfirm = editConfirmModel{}
 	s.animFrame = 0
 	s.toolFrameExpanded = false
 	s.timeline.Clear()
@@ -321,9 +316,9 @@ func (s PipelineScreen) UpdateSubModel(msg tea.Msg) (PipelineScreen, tea.Cmd) {
 		s.question, cmd = s.question.Update(msg)
 		return s, cmd
 	}
-	if s.content == ContentEditConfirm && s.hasEditComment {
+	if s.content == ContentEditConfirm {
 		var cmd tea.Cmd
-		s.editConfirmComment, cmd = s.editConfirmComment.Update(msg)
+		s.editConfirm, _, cmd = s.editConfirm.Update(msg, s.keys)
 		return s, cmd
 	}
 	return s, nil
