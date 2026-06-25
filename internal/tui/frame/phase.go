@@ -11,17 +11,17 @@ import (
 // no gutter, marking an agent/phase transition in the transcript.
 type Phase struct {
 	label string
-	style lipgloss.Style
 	rows  []Row
 }
 
-// NewPhase creates a phase-separator rule with the given label and rule style.
-func NewPhase(label string, style lipgloss.Style) StaticFrame {
-	return Phase{label: label, style: style}
+// NewPhase creates a phase-separator rule with the given label. It owns its rule
+// style via the frame palette.
+func NewPhase(label string) StaticFrame {
+	return Phase{label: label}
 }
 
 func (p Phase) SetWidth(w int) StaticFrame {
-	p.rows = []Row{ruleRow(p.label, w, p.style)}
+	p.rows = []Row{ruleRow(p.label, w, theme.Phase)}
 	return p
 }
 

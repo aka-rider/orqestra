@@ -3,8 +3,6 @@ package frame
 import (
 	"strings"
 	"testing"
-
-	"charm.land/lipgloss/v2"
 )
 
 func rowsText(f StaticFrame) []string {
@@ -44,7 +42,7 @@ func TestProse_RendersText(t *testing.T) {
 }
 
 func TestTool_StatusIcons(t *testing.T) {
-	tool := NewTool("read main.go", ToolStyles{})
+	tool := NewTool("read main.go")
 	pending := tool.SetWidth(40).(Tool)
 	if !strings.HasPrefix(pending.Rows()[0].Text(), "◌") {
 		t.Errorf("pending should start with ◌, got %q", pending.Rows()[0].Text())
@@ -60,7 +58,7 @@ func TestTool_StatusIcons(t *testing.T) {
 }
 
 func TestTool_NeverWrapsAndTruncates(t *testing.T) {
-	tool := NewTool(strings.Repeat("x", 200), ToolStyles{}).SetWidth(20)
+	tool := NewTool(strings.Repeat("x", 200)).SetWidth(20)
 	if got := len(tool.Rows()); got != 1 {
 		t.Errorf("tool must be a single row, got %d", got)
 	}
@@ -70,7 +68,7 @@ func TestTool_NeverWrapsAndTruncates(t *testing.T) {
 }
 
 func TestPhase_RendersLabelledRule(t *testing.T) {
-	f := NewPhase("architect", lipgloss.NewStyle()).SetWidth(40)
+	f := NewPhase("architect").SetWidth(40)
 	rows := f.Rows()
 	if len(rows) != 1 {
 		t.Fatalf("phase should be one row, got %d", len(rows))
@@ -85,11 +83,11 @@ func TestPhase_RendersLabelledRule(t *testing.T) {
 }
 
 func TestSteerAndSummary(t *testing.T) {
-	steer := rowsText(NewSteer("go ahead", lipgloss.NewStyle()).SetWidth(80))
+	steer := rowsText(NewSteer("go ahead").SetWidth(80))
 	if len(steer) != 1 || steer[0] != "you: go ahead" {
 		t.Errorf("steer = %q", steer)
 	}
-	sum := rowsText(NewSummary("Done: ✓ architect", lipgloss.NewStyle()).SetWidth(80))
+	sum := rowsText(NewSummary("Done: ✓ architect").SetWidth(80))
 	if len(sum) != 1 || sum[0] != "Done: ✓ architect" {
 		t.Errorf("summary = %q", sum)
 	}

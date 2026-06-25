@@ -3,7 +3,6 @@ package frame
 import (
 	"strings"
 
-	"charm.land/lipgloss/v2"
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -23,15 +22,14 @@ type DeltaMsg struct{ Text string }
 // streaming look; the resolved prose frame wraps.
 type LiveProse struct {
 	text    string
-	style   lipgloss.Style
 	width   int
 	blinkOn bool
 	rows    []Row
 }
 
-// NewLiveProse starts an empty live-prose tail rendered in the given style.
-func NewLiveProse(style lipgloss.Style) LiveProse {
-	p := LiveProse{style: style}
+// NewLiveProse starts an empty live-prose tail. It owns its style via the palette.
+func NewLiveProse() LiveProse {
+	var p LiveProse
 	p.rows = p.layout(p.width)
 	return p
 }
@@ -68,9 +66,9 @@ func (p LiveProse) layout(w int) []Row {
 	var rows []Row
 	for _, line := range lines {
 		s := " " + truncate(line, max(0, w-2))
-		rows = append(rows, Row{Cells: cellsFromSpans([]Span{{Text: s, Style: p.style}})})
+		rows = append(rows, Row{Cells: cellsFromSpans([]Span{{Text: s, Style: theme.Live}})})
 	}
-	cursor := p.style
+	cursor := theme.Live
 	if p.blinkOn {
 		cursor = cursor.Faint(true)
 	}

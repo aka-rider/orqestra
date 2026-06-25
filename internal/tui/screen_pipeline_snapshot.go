@@ -48,7 +48,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 			} else if a.Meta.ModelRef != "" {
 				ruleLabel += ": " + a.Meta.ModelRef
 			}
-			s.timeline.Append(frame.NewPhase(ruleLabel, dividerStyle))
+			s.timeline.Append(frame.NewPhase(ruleLabel))
 			s.lastAgentID = a.AgentID
 			if s.streamBuf != nil {
 				s.streamBuf.SetAgent(a.AgentID)
@@ -72,7 +72,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 					}
 				}
 				s.reconcilePendingTools()
-				s.timeline.Append(frame.NewSummary(agentSummaryLine("Done:", "✓", a, elapsed), phaseStyle))
+				s.timeline.Append(frame.NewSummary(agentSummaryLine("Done:", "✓", a, elapsed)))
 			case "failed":
 				for i := range s.agents {
 					if s.agents[i].ID == a.AgentID {
@@ -82,7 +82,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 				if a.Error != "" {
 					s.lastErr = errors.New(a.Error)
 				}
-				s.timeline.Append(frame.NewSummary(agentSummaryLine("Failed:", "✗", a, a.EndTime.Sub(a.StartTime)), phaseStyle))
+				s.timeline.Append(frame.NewSummary(agentSummaryLine("Failed:", "✗", a, a.EndTime.Sub(a.StartTime))))
 			}
 			s.knownAgents[a.AgentID] = curr
 		}

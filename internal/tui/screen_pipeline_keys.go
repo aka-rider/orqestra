@@ -42,7 +42,7 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 		return s, nil
 	case key.Matches(msg, s.keys.Submit):
 		if text, ok := s.chat.Submit(); ok {
-			s.timeline.Append(frame.NewSteer(text, dimStyle))
+			s.timeline.Append(frame.NewSteer(text))
 			agentID := s.lastAgentID
 			return s, func() tea.Msg {
 				return PostMessageIntent{AgentID: agentID, Text: text}
@@ -62,7 +62,7 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 func (s PipelineScreen) handleGateKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	switch {
 	case key.Matches(msg, s.keys.ApprovePlan):
-		s.timeline.Append(frame.NewSteer("approved plan", dimStyle))
+		s.timeline.Append(frame.NewSteer("approved plan"))
 		s.closeGate()
 		s.PendingIntent = ApprovePlanIntent{}
 		return s, nil
@@ -85,7 +85,7 @@ func (s PipelineScreen) handleGateKey(msg tea.KeyPressMsg) (PipelineScreen, tea.
 		return s, cmd
 	case key.Matches(msg, s.keys.Submit):
 		if text, ok := s.chat.Submit(); ok {
-			s.timeline.Append(frame.NewSteer(text, dimStyle))
+			s.timeline.Append(frame.NewSteer(text))
 			s.closeGate()
 			s.PendingIntent = CommentPlanIntent{Comment: text}
 		}

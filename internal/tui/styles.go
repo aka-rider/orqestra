@@ -1,6 +1,32 @@
 package tui
 
-import "charm.land/lipgloss/v2"
+import (
+	"charm.land/lipgloss/v2"
+
+	"github.com/xiii/orqestra/internal/tui/frame"
+)
+
+// init installs the frame palette once at package load — the single place each
+// frame's appearance is defined. Frames read it, so no constructor takes a style
+// and changing a look is a one-line edit here. (streamSpeech/streamTool* live in
+// timeline_view.go; all package-level style vars are initialised before init.)
+func init() {
+	frame.SetStyles(frame.Styles{
+		Prose:    lipgloss.NewStyle(),
+		Steer:    dimStyle,
+		Summary:  phaseStyle,
+		Phase:    dividerStyle,
+		Question: phaseStyle,
+		Answer:   dimStyle,
+		Live:     streamSpeechStyle,
+		Tool: frame.ToolStyles{
+			Pending: streamToolPendingStyle,
+			OK:      streamToolOKStyle,
+			Err:     streamToolErrStyle,
+			Unknown: dimStyle,
+		},
+	})
+}
 
 var (
 	// Header styles

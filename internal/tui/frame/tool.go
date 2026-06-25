@@ -14,8 +14,7 @@ const (
 	ToolUnknown
 )
 
-// ToolStyles carries the four status styles so the frame package stays free of
-// any global style state; the Timeline supplies them at construction.
+// ToolStyles carries the four status styles (one field of the frame palette).
 type ToolStyles struct {
 	Pending lipgloss.Style
 	OK      lipgloss.Style
@@ -29,13 +28,12 @@ type ToolStyles struct {
 type Tool struct {
 	text   string
 	status ToolStatus
-	sty    ToolStyles
 	rows   []Row
 }
 
-// NewTool creates a pending tool frame.
-func NewTool(text string, sty ToolStyles) Tool {
-	return Tool{text: text, status: ToolPending, sty: sty}
+// NewTool creates a pending tool frame. It owns its status styles via the palette.
+func NewTool(text string) Tool {
+	return Tool{text: text, status: ToolPending}
 }
 
 // Status reports the current lifecycle state.
@@ -75,12 +73,12 @@ func (t Tool) layout(w int) []Row {
 func (t Tool) iconStyle() (string, lipgloss.Style) {
 	switch t.status {
 	case ToolOK:
-		return "✓ ", t.sty.OK
+		return "✓ ", theme.Tool.OK
 	case ToolErr:
-		return "✗ ", t.sty.Err
+		return "✗ ", theme.Tool.Err
 	case ToolUnknown:
-		return "· ", t.sty.Unknown
+		return "· ", theme.Tool.Unknown
 	default:
-		return "◌ ", t.sty.Pending
+		return "◌ ", theme.Tool.Pending
 	}
 }

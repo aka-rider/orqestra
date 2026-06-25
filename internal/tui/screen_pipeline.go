@@ -106,7 +106,7 @@ func (s *PipelineScreen) Start(goal string) tea.Cmd {
 	// Post the opening prompt to the timeline through the same path every later
 	// message uses, so the user's first input is visible (bug: first prompt was
 	// never shown). Full Chat unification (deleting PromptScreen) follows.
-	s.timeline.Append(frame.NewSteer(goal, dimStyle))
+	s.timeline.Append(frame.NewSteer(goal))
 	return cmd
 }
 
@@ -178,18 +178,7 @@ func (s *PipelineScreen) SetStreamBuf(buf *orchestrator.StreamRing) {
 // cursor is visible while the agent is active, before any prose streams. The
 // producer owns building the tail; the Timeline only holds it.
 func (s *PipelineScreen) showLiveCursor() {
-	s.timeline.SetTail(frame.NewLiveProse(streamSpeechStyle))
-}
-
-// toolFrameStyles bundles the package tool styles the producer uses to build
-// frame.Tool. It lives with the producer (the screen), not the Timeline.
-func toolFrameStyles() frame.ToolStyles {
-	return frame.ToolStyles{
-		Pending: streamToolPendingStyle,
-		OK:      streamToolOKStyle,
-		Err:     streamToolErrStyle,
-		Unknown: dimStyle,
-	}
+	s.timeline.SetTail(frame.NewLiveProse())
 }
 
 // pendingTool is a tool frame awaiting its result, tracked by the producer.
@@ -211,14 +200,14 @@ func (s *PipelineScreen) resolvePendingTool(isErr bool) {
 	if isErr {
 		status = frame.ToolErr
 	}
-	s.timeline.SetFrame(pt.idx, frame.NewTool(pt.text, toolFrameStyles()).WithStatus(status))
+	s.timeline.SetFrame(pt.idx, frame.NewTool(pt.text).WithStatus(status))
 }
 
 // reconcilePendingTools resolves any tools still pending when an agent finishes,
 // marking them Unknown (result never arrived).
 func (s *PipelineScreen) reconcilePendingTools() {
 	for _, pt := range s.pendingTools {
-		s.timeline.SetFrame(pt.idx, frame.NewTool(pt.text, toolFrameStyles()).WithStatus(frame.ToolUnknown))
+		s.timeline.SetFrame(pt.idx, frame.NewTool(pt.text).WithStatus(frame.ToolUnknown))
 	}
 	s.pendingTools = nil
 }
@@ -269,7 +258,7 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 					}
 					// The tool is a static frame above the heartbeat tail (⏺ stays below).
 					text := stripAnsi(formatActivityLine(u.Tool, u.Detail, s.cwd))
-					idx := s.timeline.Append(frame.NewTool(text, toolFrameStyles()))
+					idx := s.timeline.Append(frame.NewTool(text))
 					s.pendingTools = append(s.pendingTools, pendingTool{idx: idx, text: text})
 				}
 			case orchestrator.EntryToolResult:
@@ -341,7 +330,7 @@ func (s PipelineScreen) HandleCtrlCCancel() PipelineScreen {
 // ^C-skip paths so both stay in lockstep.
 func (s PipelineScreen) resolveQuestion(q userQuestionModel) PipelineScreen {
 	s.chat.question = q
-	s.timeline.Append(frame.NewAnswer(q.QuestionText(), q.AnswerSummary(), phaseStyle, dimStyle))
+	s.timeline.Append(frame.NewAnswer(q.QuestionText(), q.AnswerSummary()))
 	s.PendingIntent = SubmitQuestionAnswerIntent{Answer: q.Answer()}
 	s.chat.CloseQuestion()
 	s.enterStreaming()

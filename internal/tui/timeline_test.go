@@ -49,7 +49,7 @@ func TestTimeline_AppendProse_StripTrailingNewline(t *testing.T) {
 
 func TestTimeline_AppendPhase_AddsRuleFrame(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.Append(frame.NewPhase("researcher: claude-opus", dividerStyle))
+	tl.Append(frame.NewPhase("researcher: claude-opus"))
 	if len(tl.frames) != 1 {
 		t.Fatalf("expected 1 frame, got %d", len(tl.frames))
 	}
@@ -64,14 +64,14 @@ func TestTimeline_AppendPhase_AddsRuleFrame(t *testing.T) {
 
 func TestTimeline_AppendReturnsIndex_SetFrameResolves(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	idx := tl.Append(frame.NewTool("Read /foo/bar.go", frame.ToolStyles{}))
+	idx := tl.Append(frame.NewTool("Read /foo/bar.go"))
 	if tl.CollapsibleCount() != 1 {
 		t.Fatalf("expected 1 collapsible frame, got %d", tl.CollapsibleCount())
 	}
 	if !strings.Contains(tl.View(), "◌") {
 		t.Error("pending tool should render ◌")
 	}
-	tl.SetFrame(idx, frame.NewTool("Read /foo/bar.go", frame.ToolStyles{}).WithStatus(frame.ToolOK))
+	tl.SetFrame(idx, frame.NewTool("Read /foo/bar.go").WithStatus(frame.ToolOK))
 	if !strings.Contains(tl.View(), "✓") {
 		t.Error("resolved tool should render ✓")
 	}
@@ -79,8 +79,8 @@ func TestTimeline_AppendReturnsIndex_SetFrameResolves(t *testing.T) {
 
 func TestTimeline_SetFrame_Error(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	idx := tl.Append(frame.NewTool("cat /etc/shadow", frame.ToolStyles{}))
-	tl.SetFrame(idx, frame.NewTool("cat /etc/shadow", frame.ToolStyles{}).WithStatus(frame.ToolErr))
+	idx := tl.Append(frame.NewTool("cat /etc/shadow"))
+	tl.SetFrame(idx, frame.NewTool("cat /etc/shadow").WithStatus(frame.ToolErr))
 	if !strings.Contains(tl.View(), "✗") {
 		t.Error("errored tool should render ✗")
 	}
@@ -90,7 +90,7 @@ func TestTimeline_SetFrame_Error(t *testing.T) {
 
 func TestTimeline_AppendSteer(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.Append(frame.NewSteer("approved plan", dimStyle))
+	tl.Append(frame.NewSteer("approved plan"))
 	if len(tl.frames) != 1 {
 		t.Fatalf("expected 1 frame, got %d", len(tl.frames))
 	}
@@ -103,7 +103,7 @@ func TestTimeline_AppendSteer(t *testing.T) {
 
 func TestTimeline_LiveTail_AppendAndClear(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.SetTail(frame.NewLiveProse(streamSpeechStyle))
+	tl.SetTail(frame.NewLiveProse())
 	tl.AppendDelta("partial ")
 	tl.AppendDelta("text")
 	if !tl.HasContent() {
@@ -121,7 +121,7 @@ func TestTimeline_LiveTail_AppendAndClear(t *testing.T) {
 // A live-prose tail set via SetTail shows the ⏺ heartbeat before any text streams.
 func TestTimeline_SetTail_ShowsHeartbeat(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.SetTail(frame.NewLiveProse(streamSpeechStyle))
+	tl.SetTail(frame.NewLiveProse())
 	if !strings.Contains(tl.View(), "⏺") {
 		t.Error("a live-prose tail should show the ⏺ cursor even with no text")
 	}
@@ -132,7 +132,7 @@ func TestTimeline_SetTail_ShowsHeartbeat(t *testing.T) {
 func TestTimeline_Clear(t *testing.T) {
 	tl := newTestTimeline(80, 20)
 	tl.Append(frame.NewProse("some content"))
-	tl.SetTail(frame.NewLiveProse(streamSpeechStyle))
+	tl.SetTail(frame.NewLiveProse())
 	tl.AppendDelta("live")
 	tl.Clear()
 	if tl.HasContent() {
@@ -188,7 +188,7 @@ func TestTimeline_ScrollToBottom(t *testing.T) {
 
 func TestTimeline_View_LiveDeltaText(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.SetTail(frame.NewLiveProse(streamSpeechStyle))
+	tl.SetTail(frame.NewLiveProse())
 	tl.AppendDelta("partial output here")
 	if !strings.Contains(tl.View(), "partial output here") {
 		t.Error("View should show live delta text")
@@ -202,8 +202,8 @@ func TestTimeline_View_DimCollapse(t *testing.T) {
 	tl := newTestTimeline(80, 40)
 	for i := range constToolFrameMax + 3 {
 		text := strings.Repeat("x", i+1)
-		idx := tl.Append(frame.NewTool(text, frame.ToolStyles{}))
-		tl.SetFrame(idx, frame.NewTool(text, frame.ToolStyles{}).WithStatus(frame.ToolOK))
+		idx := tl.Append(frame.NewTool(text))
+		tl.SetFrame(idx, frame.NewTool(text).WithStatus(frame.ToolOK))
 	}
 	if !strings.Contains(tl.View(), "more tools") {
 		t.Error("expected the dim-collapse summary for excess collapsible frames")
@@ -237,7 +237,7 @@ func TestTimeline_BlinkMsg_ReschedulesWhileActive(t *testing.T) {
 	tl := newTestTimeline(80, 20)
 	tl.active = true
 	tl.blinkTag = 1
-	tl.SetTail(frame.NewLiveProse(streamSpeechStyle)) // a tail to forward the blink to
+	tl.SetTail(frame.NewLiveProse()) // a tail to forward the blink to
 	_, cmd := tl.Update(timelineBlinkMsg{tag: 1})
 	if cmd == nil {
 		t.Error("a valid blink tick should reschedule the blink loop")
@@ -322,11 +322,11 @@ func TestTimeline_Resize_PreservesContent(t *testing.T) {
 
 func TestTimeline_MixedFrames(t *testing.T) {
 	tl := newTestTimeline(80, 40)
-	tl.Append(frame.NewPhase("researcher", dividerStyle))
+	tl.Append(frame.NewPhase("researcher"))
 	tl.Append(frame.NewProse("Here is my research."))
-	idx := tl.Append(frame.NewTool("read /tmp/data.json", frame.ToolStyles{}))
-	tl.SetFrame(idx, frame.NewTool("read /tmp/data.json", frame.ToolStyles{}).WithStatus(frame.ToolOK))
-	tl.Append(frame.NewSteer("approved plan", dimStyle))
+	idx := tl.Append(frame.NewTool("read /tmp/data.json"))
+	tl.SetFrame(idx, frame.NewTool("read /tmp/data.json").WithStatus(frame.ToolOK))
+	tl.Append(frame.NewSteer("approved plan"))
 
 	if len(tl.frames) != 4 {
 		t.Fatalf("expected 4 frames, got %d", len(tl.frames))
