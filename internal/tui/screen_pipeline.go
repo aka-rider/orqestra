@@ -84,7 +84,6 @@ type PipelineScreen struct {
 	// Completion state
 	lastErr          error
 	workerValidation string
-	hasValidation    bool
 
 	// Live stream (written by orchestrator, polled by TUI on tick)
 	streamBuf *orchestrator.StreamRing
@@ -142,7 +141,6 @@ func (s *PipelineScreen) Reset() {
 	s.finalPlan = ""
 	s.hasPlan = false
 	s.workerValidation = ""
-	s.hasValidation = false
 	s.streamBuf = nil
 	s.awaitingPlanDecision = false
 	s.seenGateMarkdown = ""

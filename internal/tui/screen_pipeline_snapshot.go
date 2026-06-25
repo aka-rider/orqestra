@@ -130,7 +130,6 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 		}
 		if snap.Terminal.Result.WorkerValidation != "" {
 			s.workerValidation = snap.Terminal.Result.WorkerValidation
-			s.hasValidation = true
 		}
 	}
 }

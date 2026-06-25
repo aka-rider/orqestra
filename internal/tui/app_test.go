@@ -370,8 +370,8 @@ func TestTUI_CompletionValidation(t *testing.T) {
 	if m.pipelineScreen.content != ContentCompletion {
 		t.Errorf("expected ContentCompletion, got %d", m.pipelineScreen.content)
 	}
-	if !m.pipelineScreen.hasValidation {
-		t.Error("expected hasValidation=true")
+	if m.pipelineScreen.workerValidation == "" {
+		t.Error("expected workerValidation to be set")
 	}
 }
 
@@ -567,7 +567,6 @@ func TestTUI_NewRunClearsStaleState(t *testing.T) {
 	m.pipelineScreen.finalPlan = "# Old Plan"
 	m.pipelineScreen.hasPlan = true
 	m.pipelineScreen.workerValidation = "old validation"
-	m.pipelineScreen.hasValidation = true
 
 	// Press Ctrl+N to start new run
 	result, _ := sendCtrl(m, 'n')
@@ -587,8 +586,8 @@ func TestTUI_NewRunClearsStaleState(t *testing.T) {
 	if model.pipelineScreen.hasPlan {
 		t.Error("expected hasPlan cleared")
 	}
-	if model.pipelineScreen.hasValidation {
-		t.Error("expected hasValidation cleared")
+	if model.pipelineScreen.workerValidation != "" {
+		t.Error("expected workerValidation cleared")
 	}
 	if model.pipelineScreen.finalPlan != "" {
 		t.Error("expected finalPlan cleared")

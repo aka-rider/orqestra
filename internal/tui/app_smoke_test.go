@@ -40,7 +40,6 @@ func hydratedModels(t *testing.T) map[string]Model {
 		m.pipelineScreen.content = ContentCompletion
 		m.pipelineScreen.hasPlan = true
 		m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nDone."
-		m.pipelineScreen.hasValidation = true
 		m.pipelineScreen.workerValidation = "pass"
 		m.pipelineScreen.agents = []AgentRow{
 			{ID: "researcher", State: AgentStateDone, Elapsed: 30 * time.Second, StartedAt: time.Now().Add(-30 * time.Second), InputTokens: 2000, OutputTokens: 1000},

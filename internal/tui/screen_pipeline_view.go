@@ -107,7 +107,7 @@ func (s PipelineScreen) viewCompletion(width int) string {
 	if s.lastErr != nil {
 		b.WriteString(renderPrefixedText(errorStyle, " Error: ", s.lastErr.Error(), width))
 	}
-	if s.hasValidation {
+	if s.workerValidation != "" {
 		b.WriteString(" Validation:\n")
 		// The worker's final output is markdown — render it as markdown, not as
 		// plain wrapped text (bug: final model output showed as simple text).
