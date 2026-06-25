@@ -40,8 +40,8 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 		prev, seen := s.knownAgents[a.AgentID]
 		curr := a.Status
 		if !seen {
-			// Flush live partial and emit phase separator rule on agent transition.
-			s.timeline.FlushLive()
+			// Reset the live cursor and emit the phase separator on agent transition.
+			s.timeline.StartLive()
 			ruleLabel := agentDisplayName(string(a.AgentID))
 			if a.Meta.ModelDisplay != "" {
 				ruleLabel += ": " + a.Meta.ModelDisplay
@@ -71,7 +71,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 						s.agents[i].OutputTokens = a.Output
 					}
 				}
-				s.timeline.ReconcilePendingTools()
+				s.reconcilePendingTools()
 				s.timeline.Append(frame.NewSummary(agentSummaryLine("Done:", "✓", a, elapsed), phaseStyle))
 			case "failed":
 				for i := range s.agents {

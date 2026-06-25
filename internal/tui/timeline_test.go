@@ -59,57 +59,30 @@ func TestTimeline_AppendPhase_AddsRuleFrame(t *testing.T) {
 	}
 }
 
-// --- AppendToolPending / ResolveLastTool ---
+// --- Generic frames: Append returns an index, SetFrame resolves in place ---
+// (tool-specific resolution lives in the producer, not the Timeline)
 
-func TestTimeline_ToolPendingAndResolve(t *testing.T) {
+func TestTimeline_AppendReturnsIndex_SetFrameResolves(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.AppendToolPending("Read /foo/bar.go")
-	if len(tl.frames) != 1 || tl.ToolCount() != 1 {
-		t.Fatalf("expected 1 tool frame, got frames=%d tools=%d", len(tl.frames), tl.ToolCount())
+	idx := tl.Append(frame.NewTool("Read /foo/bar.go", frame.ToolStyles{}))
+	if tl.CollapsibleCount() != 1 {
+		t.Fatalf("expected 1 collapsible frame, got %d", tl.CollapsibleCount())
 	}
 	if !strings.Contains(tl.View(), "◌") {
 		t.Error("pending tool should render ◌")
 	}
-	tl.ResolveLastTool(false)
+	tl.SetFrame(idx, frame.NewTool("Read /foo/bar.go", frame.ToolStyles{}).WithStatus(frame.ToolOK))
 	if !strings.Contains(tl.View(), "✓") {
 		t.Error("resolved tool should render ✓")
 	}
 }
 
-func TestTimeline_ResolveLastTool_Error(t *testing.T) {
+func TestTimeline_SetFrame_Error(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.AppendToolPending("cat /etc/shadow")
-	tl.ResolveLastTool(true)
+	idx := tl.Append(frame.NewTool("cat /etc/shadow", frame.ToolStyles{}))
+	tl.SetFrame(idx, frame.NewTool("cat /etc/shadow", frame.ToolStyles{}).WithStatus(frame.ToolErr))
 	if !strings.Contains(tl.View(), "✗") {
 		t.Error("errored tool should render ✗")
-	}
-}
-
-func TestTimeline_ResolveLastTool_MultipleTools(t *testing.T) {
-	tl := newTestTimeline(80, 20)
-	tl.AppendToolPending("tool 1")
-	tl.ResolveLastTool(false)
-	tl.AppendToolPending("tool 2")
-	tl.ResolveLastTool(true)
-	view := tl.View()
-	if !strings.Contains(view, "✓") || !strings.Contains(view, "✗") {
-		t.Errorf("expected both ✓ (tool 1) and ✗ (tool 2) in view:\n%s", view)
-	}
-}
-
-// --- ReconcilePendingTools ---
-
-func TestTimeline_ReconcilePendingTools(t *testing.T) {
-	tl := newTestTimeline(80, 20)
-	tl.AppendToolPending("tool 1")
-	tl.AppendToolPending("tool 2")
-	tl.ReconcilePendingTools()
-	view := tl.View()
-	if strings.Contains(view, "◌") {
-		t.Error("no tool should remain pending after reconcile")
-	}
-	if !strings.Contains(view, "·") {
-		t.Error("reconciled tools should render the unknown icon ·")
 	}
 }
 
@@ -126,44 +99,30 @@ func TestTimeline_AppendSteer(t *testing.T) {
 	}
 }
 
-// --- Live partial (AppendDelta / FlushLive / ClearLive) ---
+// --- Live tail (AppendDelta / StartLive / ClearLive) ---
 
-func TestTimeline_AppendDelta_FlushLive(t *testing.T) {
+func TestTimeline_LiveTail_AppendAndClear(t *testing.T) {
 	tl := newTestTimeline(80, 20)
 	tl.AppendDelta("partial ")
 	tl.AppendDelta("text")
-	if tl.liveText != "partial text" {
-		t.Errorf("liveText = %q, want %q", tl.liveText, "partial text")
-	}
-	tl.FlushLive()
-	if tl.liveText != "" {
-		t.Error("FlushLive should clear liveText")
-	}
-	if len(tl.frames) != 1 {
-		t.Fatalf("expected 1 frame after flush, got %d", len(tl.frames))
+	if !tl.HasContent() {
+		t.Fatal("a live tail should count as content")
 	}
 	if !strings.Contains(tl.View(), "partial text") {
-		t.Error("flushed prose should appear in the view")
+		t.Error("the live tail should render the streamed text")
 	}
-}
-
-func TestTimeline_ClearLive(t *testing.T) {
-	tl := newTestTimeline(80, 20)
-	tl.AppendDelta("delta1")
 	tl.ClearLive()
-	if tl.liveText != "" {
-		t.Errorf("ClearLive should discard liveText, got %q", tl.liveText)
-	}
-	if tl.HasContent() {
-		t.Error("ClearLive should not produce a frame")
+	if tl.tail != nil {
+		t.Error("ClearLive should drop the tail")
 	}
 }
 
-func TestTimeline_FlushLive_Empty(t *testing.T) {
+// StartLive shows the ⏺ heartbeat (an empty prose tail) before any text streams.
+func TestTimeline_StartLive_ShowsHeartbeat(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.FlushLive()
-	if tl.HasContent() {
-		t.Error("FlushLive on empty liveText should not produce a frame")
+	tl.StartLive()
+	if !strings.Contains(tl.View(), "⏺") {
+		t.Error("StartLive should show the ⏺ cursor even with no text")
 	}
 }
 
@@ -177,8 +136,8 @@ func TestTimeline_Clear(t *testing.T) {
 	if tl.HasContent() {
 		t.Error("after Clear, HasContent should be false")
 	}
-	if tl.liveText != "" {
-		t.Error("Clear should reset liveText")
+	if tl.tail != nil {
+		t.Error("Clear should reset the tail")
 	}
 	if len(tl.rows) != 0 {
 		t.Error("Clear should reset rows")
@@ -227,30 +186,29 @@ func TestTimeline_ScrollToBottom(t *testing.T) {
 
 func TestTimeline_View_ShowsLiveCursor(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.active = true
-	tl.blinkOn = false
+	tl.AppendDelta("x") // a live prose tail carries the ⏺ cursor
 	if !strings.Contains(tl.View(), "⏺") {
-		t.Error("View should show live cursor when active")
+		t.Error("a live tail should render the ⏺ cursor")
 	}
 }
 
 func TestTimeline_View_LiveDeltaText(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.active = true
 	tl.AppendDelta("partial output here")
 	if !strings.Contains(tl.View(), "partial output here") {
 		t.Error("View should show live delta text")
 	}
 }
 
-func TestTimeline_View_DimToolCollapse(t *testing.T) {
+func TestTimeline_View_DimCollapse(t *testing.T) {
 	tl := newTestTimeline(80, 40)
 	for i := range constToolFrameMax + 3 {
-		tl.AppendToolPending(strings.Repeat("x", i+1))
-		tl.ResolveLastTool(false)
+		text := strings.Repeat("x", i+1)
+		idx := tl.Append(frame.NewTool(text, frame.ToolStyles{}))
+		tl.SetFrame(idx, frame.NewTool(text, frame.ToolStyles{}).WithStatus(frame.ToolOK))
 	}
 	if !strings.Contains(tl.View(), "more tools") {
-		t.Error("expected dim collapse summary for excess tool frames")
+		t.Error("expected the dim-collapse summary for excess collapsible frames")
 	}
 }
 
@@ -277,17 +235,14 @@ func TestTimeline_ScrollKeys(t *testing.T) {
 
 // --- Blink lifecycle ---
 
-func TestTimeline_BlinkMsg_TogglesBlinkOn(t *testing.T) {
+func TestTimeline_BlinkMsg_ReschedulesWhileActive(t *testing.T) {
 	tl := newTestTimeline(80, 20)
 	tl.active = true
 	tl.blinkTag = 1
-	tl, _ = tl.Update(timelineBlinkMsg{tag: 1})
-	if !tl.blinkOn {
-		t.Error("blink message should toggle blinkOn to true")
-	}
-	tl, _ = tl.Update(timelineBlinkMsg{tag: 1})
-	if tl.blinkOn {
-		t.Error("second blink message should toggle blinkOn back to false")
+	tl.AppendDelta("x") // a tail to forward the blink to
+	_, cmd := tl.Update(timelineBlinkMsg{tag: 1})
+	if cmd == nil {
+		t.Error("a valid blink tick should reschedule the blink loop")
 	}
 }
 
@@ -295,9 +250,9 @@ func TestTimeline_BlinkMsg_StaleTagIgnored(t *testing.T) {
 	tl := newTestTimeline(80, 20)
 	tl.active = true
 	tl.blinkTag = 5
-	tl, _ = tl.Update(timelineBlinkMsg{tag: 3}) // stale
-	if tl.blinkOn {
-		t.Error("stale blink message should not toggle blinkOn")
+	_, cmd := tl.Update(timelineBlinkMsg{tag: 3}) // stale
+	if cmd != nil {
+		t.Error("a stale blink tick should not reschedule")
 	}
 }
 
@@ -314,10 +269,7 @@ func TestTimeline_Stop_HaltsBlink(t *testing.T) {
 	if tl.blinkTag == tagBefore {
 		t.Error("Stop should bump the blink tag so in-flight ticks are stale")
 	}
-	out, cmd := tl.Update(timelineBlinkMsg{tag: tagBefore})
-	if out.blinkOn {
-		t.Error("a stale tick after Stop must not toggle the cursor")
-	}
+	_, cmd := tl.Update(timelineBlinkMsg{tag: tagBefore})
 	if cmd != nil {
 		t.Error("a stale tick after Stop must not reschedule the blink")
 	}
@@ -374,8 +326,8 @@ func TestTimeline_MixedFrames(t *testing.T) {
 	tl := newTestTimeline(80, 40)
 	tl.Append(frame.NewPhase("researcher", dividerStyle))
 	tl.Append(frame.NewProse("Here is my research."))
-	tl.AppendToolPending("read /tmp/data.json")
-	tl.ResolveLastTool(false)
+	idx := tl.Append(frame.NewTool("read /tmp/data.json", frame.ToolStyles{}))
+	tl.SetFrame(idx, frame.NewTool("read /tmp/data.json", frame.ToolStyles{}).WithStatus(frame.ToolOK))
 	tl.Append(frame.NewSteer("approved plan", dimStyle))
 
 	if len(tl.frames) != 4 {

@@ -41,6 +41,9 @@ func NewTool(text string, sty ToolStyles) Tool {
 // Status reports the current lifecycle state.
 func (t Tool) Status() ToolStatus { return t.status }
 
+// CollapseGroup marks resolved tool frames as foldable activity (frame.Collapsible).
+func (t Tool) CollapseGroup() string { return "tool" }
+
 // WithStatus returns a copy in the given status, re-laid-out at the prior width.
 func (t Tool) WithStatus(s ToolStatus) Tool {
 	t.status = s

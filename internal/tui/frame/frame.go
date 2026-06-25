@@ -24,5 +24,13 @@ type InteractiveFrame interface {
 	Resolve() StaticFrame
 }
 
+// Collapsible is an optional capability a StaticFrame may implement so the
+// Timeline's viewport can fold older members of the same group once many
+// accumulate (e.g. tool activity). The Timeline reasons about the group string,
+// never about a concrete frame type.
+type Collapsible interface {
+	CollapseGroup() string
+}
+
 // Height reports a frame's row count at its current width.
 func Height(f StaticFrame) int { return len(f.Rows()) }

@@ -37,13 +37,19 @@ type selPos struct{ row, col int }
 //
 // Value sub-model: callers hold copies; methods return updated copies.
 type Timeline struct {
-	frames  []frame.StaticFrame
-	toolIdx []int // indices into frames that hold a frame.Tool
+	frames []frame.StaticFrame
 
-	// Live tail (in-progress prose). Only this blinks. Stop() clears it on run
-	// end so the blink tick stops rescheduling — the fix for the eternal cursor.
-	liveText string
-	blinkOn  bool
+	// tail is the single in-progress unit (the live prose with its blinking
+	// cursor) — a frame.InteractiveFrame that Resolve()s into a static frame.
+	// The Timeline forwards blink ticks to it and renders its Rows() below the
+	// static list; it does not know the concrete type.
+	tail frame.InteractiveFrame
+
+	// collapsed holds the frame indices that opted into frame.Collapsible, so
+	// the viewport can fold older members (e.g. tool activity) past a cap. The
+	// Timeline reasons about the capability, never a concrete frame type.
+	collapsed []int
+
 	blinkTag int
 	active   bool
 
@@ -77,78 +83,47 @@ func NewTimeline(keys keymap.Bindings, styles timelineStyles) Timeline {
 
 // --- Content API (called from Update paths) ---
 
-// Start marks the timeline active and begins the blink loop.
+// Start marks the timeline active, begins the blink loop, and shows the live
+// cursor (an empty prose tail) so the ⏺ heartbeat is visible while the agent is
+// thinking, before any prose streams.
 func (t Timeline) Start() (Timeline, tea.Cmd) {
 	t.active = true
 	t.blinkTag++
+	t.StartLive()
 	return t, blinkCmd(t.blinkTag)
 }
 
-// Stop ends the live tail: clears active and bumps the blink tag so any
-// in-flight blink tick is ignored and the loop stops rescheduling.
+// Stop ends the live tail: bumps the blink tag so any in-flight tick is ignored
+// and the loop stops rescheduling, then drops the tail so the ⏺ cursor is gone
+// (the fix for the eternal blink). Completed prose is already static by then.
 func (t *Timeline) Stop() {
 	t.active = false
-	t.blinkOn = false
 	t.blinkTag++
+	t.tail = nil
 }
 
-// AppendDelta accumulates a streaming text delta into the live partial.
-func (t *Timeline) AppendDelta(text string) { t.liveText += text }
-
-// ClearLive discards the live partial without promoting it.
-func (t *Timeline) ClearLive() { t.liveText = "" }
-
-// FlushLive promotes the live partial to a Prose frame and clears it.
-func (t *Timeline) FlushLive() {
-	if t.liveText == "" {
-		return
-	}
-	t.Append(frame.NewProse(t.liveText))
-	t.liveText = ""
+// StartLive (re)shows the live cursor: a fresh empty prose tail. The producer
+// calls it after promoting a finished turn so the heartbeat continues.
+func (t *Timeline) StartLive() {
+	t.tail = frame.NewLiveProse(streamSpeechStyle).SetWidth(t.contentWidth())
 }
 
-// AppendToolPending appends a new pending Tool frame and tracks it so a later
-// result can resolve it. The pending → ok/err transition is live tool state the
-// Timeline owns; callers FlushLive first. Plain content frames go through Append.
-func (t *Timeline) AppendToolPending(text string) {
-	t.toolIdx = append(t.toolIdx, len(t.frames))
-	t.Append(frame.NewTool(text, toolFrameStyles()))
+// AppendDelta accumulates a streaming delta into the live-prose tail (the tail
+// is display-only; the producer appends the authoritative prose on completion).
+func (t *Timeline) AppendDelta(text string) {
+	lp, ok := t.tail.(frame.LiveProse)
+	if !ok {
+		lp = frame.NewLiveProse(streamSpeechStyle)
+	}
+	t.tail = lp.Append(text).SetWidth(t.contentWidth())
 }
 
-// ResolveLastTool resolves the most recent pending Tool frame to ok or error.
-func (t *Timeline) ResolveLastTool(isErr bool) {
-	status := frame.ToolOK
-	if isErr {
-		status = frame.ToolErr
-	}
-	for i := len(t.toolIdx) - 1; i >= 0; i-- {
-		fi := t.toolIdx[i]
-		tool, ok := t.frames[fi].(frame.Tool)
-		if ok && tool.Status() == frame.ToolPending {
-			t.frames[fi] = tool.WithStatus(status)
-			t.rebuildRows()
-			return
-		}
-	}
-}
+// ClearLive drops the live tail (e.g. before promoting a finished turn).
+func (t *Timeline) ClearLive() { t.tail = nil }
 
-// ReconcilePendingTools resolves any still-pending Tool frames to unknown.
-func (t *Timeline) ReconcilePendingTools() {
-	changed := false
-	for _, fi := range t.toolIdx {
-		tool, ok := t.frames[fi].(frame.Tool)
-		if ok && tool.Status() == frame.ToolPending {
-			t.frames[fi] = tool.WithStatus(frame.ToolUnknown)
-			changed = true
-		}
-	}
-	if changed {
-		t.rebuildRows()
-	}
-}
-
-// ToolCount reports the number of tool frames (for footer overflow hints).
-func (t Timeline) ToolCount() int { return len(t.toolIdx) }
+// CollapsibleCount reports how many frames opted into frame.Collapsible (tool
+// activity), for the footer's expand/collapse hint.
+func (t Timeline) CollapsibleCount() int { return len(t.collapsed) }
 
 // --- Layout & scroll ---
 
@@ -162,6 +137,9 @@ func (t *Timeline) SetRect(r image.Rectangle) {
 	switch {
 	case newW != oldW && newW > 0:
 		t.rebuildRows()
+		if t.tail != nil {
+			t.tail = t.tail.SetWidth(newW)
+		}
 		fallthrough
 	case r != oldRect:
 		if pinned {
@@ -172,8 +150,8 @@ func (t *Timeline) SetRect(r image.Rectangle) {
 	}
 }
 
-// HasContent reports whether the timeline has any frames or live text.
-func (t Timeline) HasContent() bool { return len(t.frames) > 0 || t.liveText != "" }
+// HasContent reports whether the timeline has any frames or a live tail.
+func (t Timeline) HasContent() bool { return len(t.frames) > 0 || t.tail != nil }
 
 // AtBottom reports whether the viewport is at or past the final row.
 func (t Timeline) AtBottom() bool {
@@ -199,10 +177,9 @@ func (t *Timeline) ScrollToTop() {
 // Clear removes all content and resets to zero state.
 func (t *Timeline) Clear() {
 	t.frames = nil
-	t.toolIdx = nil
+	t.collapsed = nil
 	t.rows = nil
-	t.liveText = ""
-	t.blinkOn = false
+	t.tail = nil
 	t.active = false
 	t.top = 0
 	t.follow = true
@@ -222,7 +199,9 @@ func (t Timeline) Update(msg tea.Msg) (Timeline, tea.Cmd) {
 		if !t.active || msg.tag != t.blinkTag {
 			return t, nil
 		}
-		t.blinkOn = !t.blinkOn
+		if t.tail != nil {
+			t.tail, _ = t.tail.Update(frame.BlinkMsg{})
+		}
 		return t, blinkCmd(t.blinkTag)
 	case tea.KeyPressMsg:
 		return t.handleKey(msg)
@@ -259,18 +238,34 @@ func (t Timeline) contentWidth() int { return t.rect.Dx() }
 
 // appendStatic lays out a frame at the current width, stores it, and appends its
 // rows to the flat cache.
-// Append adds any StaticFrame to the timeline. This is the single content entry
-// point: the Timeline does not know or care which concrete frame it is — the
-// caller builds it (NewProse, NewPhase, NewSteer, NewAnswer, NewPlan, …). New
-// frame kinds need no new Timeline method.
-func (t *Timeline) Append(f frame.StaticFrame) {
+// Append adds any StaticFrame to the timeline and returns its index. This is the
+// single content entry point: the Timeline does not know or care which concrete
+// frame it is — the caller builds it (NewProse, NewPhase, NewSteer, NewAnswer,
+// NewPlan, NewTool, …). A frame that opts into frame.Collapsible is tracked so
+// the viewport can fold old ones. New frame kinds need no new Timeline method.
+func (t *Timeline) Append(f frame.StaticFrame) int {
 	f = f.SetWidth(t.contentWidth())
 	idx := len(t.frames)
 	t.frames = append(t.frames, f)
+	if _, ok := f.(frame.Collapsible); ok {
+		t.collapsed = append(t.collapsed, idx)
+	}
 	t.appendRows(idx, f)
 	if t.follow {
 		t.scrollToBottom()
 	}
+	return idx
+}
+
+// SetFrame replaces the frame at idx and rebuilds the row cache — used by the
+// producer to resolve a pending frame in place (e.g. a tool to ok/err) without
+// the Timeline knowing what kind it is.
+func (t *Timeline) SetFrame(idx int, f frame.StaticFrame) {
+	if idx < 0 || idx >= len(t.frames) {
+		return
+	}
+	t.frames[idx] = f.SetWidth(t.contentWidth())
+	t.rebuildRows()
 }
 
 func (t *Timeline) appendRows(idx int, f frame.StaticFrame) {

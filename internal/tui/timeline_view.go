@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/xiii/orqestra/internal/tui/frame"
 )
 
 // View renders the timeline for the current viewport. Pure: no side effects.
@@ -15,7 +17,7 @@ func (t Timeline) View() string {
 	}
 
 	selMin, selMax := normaliseSel(t.anchor, t.cursor)
-	dim := t.dimToolFrames()
+	dim := t.dimCollapsed()
 	dimCount := len(dim)
 	dimEmitted := false
 
@@ -43,9 +45,10 @@ func (t Timeline) View() string {
 		rowsRendered++
 	}
 
-	// Live tail: the in-progress prose with a blinking cursor, below static rows.
-	if avail := h - rowsRendered; t.active && avail > 0 {
-		rowsRendered += t.renderLive(&b, w, avail)
+	// Live tail: the in-progress unit (live prose + cursor) renders itself below
+	// the static rows. The Timeline only asks it for Rows() — no type knowledge.
+	if avail := h - rowsRendered; t.tail != nil && avail > 0 {
+		rowsRendered += t.renderTail(&b, avail)
 	}
 
 	for rowsRendered < h {
@@ -55,50 +58,49 @@ func (t Timeline) View() string {
 	return b.String()
 }
 
-// renderLive writes up to avail rows of live text plus the cursor line, and
-// reports how many rows it wrote.
-func (t Timeline) renderLive(b *strings.Builder, w, avail int) int {
-	lines := strings.Split(t.liveText, "\n")
-	for len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
+// renderTail writes the bottom-anchored last `avail` rows of the live tail.
+func (t Timeline) renderTail(b *strings.Builder, avail int) int {
+	rows := t.tail.Rows()
+	start := 0
+	if len(rows) > avail {
+		start = len(rows) - avail
 	}
 	written := 0
-	if len(lines) > 0 {
-		start := 0
-		if len(lines) > avail-1 {
-			start = len(lines) - (avail - 1)
-		}
-		for _, l := range lines[start:] {
-			if written >= avail-1 {
-				break
-			}
-			b.WriteString(streamSpeechStyle.Render(" " + truncateRunes(l, w-2)))
-			b.WriteByte('\n')
-			written++
-		}
+	for _, r := range rows[start:] {
+		b.WriteString(renderCells(r.Cells, nil, ""))
+		b.WriteByte('\n')
+		written++
 	}
-	b.WriteString(streamSpeechStyle.Faint(t.blinkOn).Render("⏺"))
-	b.WriteByte('\n')
-	return written + 1
+	return written
 }
 
-// dimToolFrames returns the set of tool-frame indices to collapse (oldest tools
-// beyond constToolFrameMax), or nil when expanded or under the cap.
-func (t Timeline) dimToolFrames() map[int]bool {
-	if t.expanded || len(t.toolIdx) <= constToolFrameMax {
+// dimCollapsed returns the set of frame indices to fold (oldest collapsible
+// members beyond constToolFrameMax), or nil when expanded or under the cap.
+func (t Timeline) dimCollapsed() map[int]bool {
+	if t.expanded || len(t.collapsed) <= constToolFrameMax {
 		return nil
 	}
 	dim := make(map[int]bool)
-	for _, fi := range t.toolIdx[:len(t.toolIdx)-constToolFrameMax] {
+	for _, fi := range t.collapsed[:len(t.collapsed)-constToolFrameMax] {
 		dim[fi] = true
 	}
 	return dim
 }
 
-// renderRow renders one display row, overlaying the selection background on
-// cells inside [selMin, selMax). Adjacent cells of equal style are coalesced.
+// renderRow renders one static display row, overlaying the selection background
+// on cells inside [selMin, selMax).
 func renderRow(rr rowRef, rowIdx int, hasSel bool, selMin, selMax selPos, selBg string) string {
-	cells := rr.cells
+	var selected func(col int) bool
+	if hasSel {
+		selected = func(col int) bool { return inSel(rowIdx, col, selMin, selMax) }
+	}
+	return renderCells(rr.cells, selected, selBg)
+}
+
+// renderCells renders a flat cell slice, coalescing adjacent cells of equal
+// style. When selected(col) is non-nil and true, the selection background is
+// overlaid on that cell. Shared by the static rows and the live tail.
+func renderCells(cells []frame.Cell, selected func(col int) bool, selBg string) string {
 	if len(cells) == 0 {
 		return ""
 	}
@@ -113,7 +115,7 @@ func renderRow(rr rowRef, rowIdx int, hasSel bool, selMin, selMax selPos, selBg 
 	}
 	for i, c := range cells {
 		eff := c.Style
-		if hasSel && inSel(rowIdx, i, selMin, selMax) {
+		if selected != nil && selected(i) {
 			eff = c.Style.Background(lipgloss.Color(selBg))
 		}
 		if first {
@@ -132,18 +134,6 @@ func renderRow(rr rowRef, rowIdx int, hasSel bool, selMin, selMax selPos, selBg 
 
 // stylesEqual reports whether two styles render identically.
 func stylesEqual(a, b lipgloss.Style) bool { return a.Render("x") == b.Render("x") }
-
-// truncateRunes clips s to maxLen runes.
-func truncateRunes(s string, maxLen int) string {
-	if maxLen <= 0 {
-		return ""
-	}
-	runes := []rune(s)
-	if len(runes) <= maxLen {
-		return s
-	}
-	return string(runes[:maxLen])
-}
 
 var (
 	streamSpeechStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("15"))

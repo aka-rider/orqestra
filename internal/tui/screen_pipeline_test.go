@@ -103,6 +103,29 @@ func TestDrainStreamUpdates_TextLineGoesToTimeline(t *testing.T) {
 	}
 }
 
+// The producer (not the Timeline) resolves tools: a tool-use appends a pending
+// frame and tracks it; the matching result resolves it in place via SetFrame.
+func TestPipeline_ToolResolvedByProducer(t *testing.T) {
+	s := PipelineScreen{
+		timeline:    NewTimeline(keymap.Default(), timelineStyles{selectionBg: selectionBg}),
+		knownAgents: make(map[string]string),
+	}
+	s.timeline.SetRect(image.Rect(0, 0, 80, 20))
+
+	ch := make(chan orchestrator.StreamEntry, 4)
+	ch <- orchestrator.StreamEntry{Kind: orchestrator.EntryToolUse, Tool: "Read", Detail: "foo.go"}
+	ch <- orchestrator.StreamEntry{Kind: orchestrator.EntryToolResult, ToolErr: false}
+	close(ch)
+	s.DrainStreamUpdates(ch)
+
+	if len(s.pendingTools) != 0 {
+		t.Errorf("expected the pending tool resolved, %d left", len(s.pendingTools))
+	}
+	if v := s.timeline.View(); !strings.Contains(v, "✓") {
+		t.Errorf("expected the resolved tool ✓ in the view:\n%s", v)
+	}
+}
+
 func TestViewCompletion_ShowsAgentSummary(t *testing.T) {
 	s := setupTestPipelineScreen()
 	s.streamBuf.SetAgent("architect") // Snapshot researcher

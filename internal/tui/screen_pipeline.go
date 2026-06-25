@@ -51,6 +51,10 @@ type PipelineScreen struct {
 	agents      []AgentRow
 	knownAgents map[string]string
 
+	// pendingTools tracks unresolved tool frames by index so the producer (not
+	// the Timeline) can resolve them to ok/err/unknown via Timeline.SetFrame.
+	pendingTools []pendingTool
+
 	// Completion state
 	lastErr          error
 	workerValidation string
@@ -116,6 +120,7 @@ func (s *PipelineScreen) Reset() {
 	s.awaitingPlanDecision = false
 	s.seenGateMarkdown = ""
 	s.knownAgents = make(map[string]string)
+	s.pendingTools = nil
 	s.active = false
 	s.phase = ""
 	s.editConfirm = editConfirmModel{}
@@ -168,6 +173,37 @@ func (s *PipelineScreen) SetStreamBuf(buf *orchestrator.StreamRing) {
 	s.streamBuf = buf
 }
 
+// pendingTool is a tool frame awaiting its result, tracked by the producer.
+type pendingTool struct {
+	idx  int
+	text string
+}
+
+// resolvePendingTool resolves the most recently started tool to ok/err. Results
+// arrive newest-first (LIFO), matching how parallel tool calls unwind.
+func (s *PipelineScreen) resolvePendingTool(isErr bool) {
+	n := len(s.pendingTools)
+	if n == 0 {
+		return
+	}
+	pt := s.pendingTools[n-1]
+	s.pendingTools = s.pendingTools[:n-1]
+	status := frame.ToolOK
+	if isErr {
+		status = frame.ToolErr
+	}
+	s.timeline.SetFrame(pt.idx, frame.NewTool(pt.text, toolFrameStyles()).WithStatus(status))
+}
+
+// reconcilePendingTools resolves any tools still pending when an agent finishes,
+// marking them Unknown (result never arrived).
+func (s *PipelineScreen) reconcilePendingTools() {
+	for _, pt := range s.pendingTools {
+		s.timeline.SetFrame(pt.idx, frame.NewTool(pt.text, toolFrameStyles()).WithStatus(frame.ToolUnknown))
+	}
+	s.pendingTools = nil
+}
+
 // DrainStreamUpdates consumes currently buffered stream updates without blocking.
 // Completed text lines go to the transcript sub-model; tool events and streaming
 // deltas go to the streaming console.
@@ -200,20 +236,25 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 				} else {
 					line = strings.TrimRight(u.Text, "\n\r")
 				}
+				// The live tail is display-only: drop the streamed copy, append the
+				// authoritative prose, and restart the ⏺ heartbeat for the next turn.
+				s.timeline.ClearLive()
 				if line != "" {
-					s.timeline.ClearLive()
 					s.timeline.Append(frame.NewProse(line))
 				}
+				s.timeline.StartLive()
 			case orchestrator.EntryToolUse:
 				if u.Detail != "" {
 					if s.streamBuf != nil {
 						s.streamBuf.AppendActivity(u.Tool, u.Detail)
 					}
-					s.timeline.FlushLive()
-					s.timeline.AppendToolPending(stripAnsi(formatActivityLine(u.Tool, u.Detail, s.cwd)))
+					// The tool is a static frame above the heartbeat tail (⏺ stays below).
+					text := stripAnsi(formatActivityLine(u.Tool, u.Detail, s.cwd))
+					idx := s.timeline.Append(frame.NewTool(text, toolFrameStyles()))
+					s.pendingTools = append(s.pendingTools, pendingTool{idx: idx, text: text})
 				}
 			case orchestrator.EntryToolResult:
-				s.timeline.ResolveLastTool(u.ToolErr)
+				s.resolvePendingTool(u.ToolErr)
 			}
 		default:
 			return
