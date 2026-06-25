@@ -59,8 +59,6 @@ func (s PipelineScreen) View(width, height int, ctrlCPending bool) string {
 		if s.activeChat != nil {
 			overlay = s.activeChat.View(w)
 		}
-	case ContentUserQuestion:
-		overlay = s.question.View(w)
 	case ContentEditConfirm:
 		overlay = s.editConfirm.View(w)
 	}
@@ -76,8 +74,6 @@ func (s PipelineScreen) viewInputZone() string {
 	switch s.content {
 	case ContentStreaming:
 		return s.chat.View()
-	case ContentUserQuestion:
-		return keyStyle.Render(s.question.InputZone())
 	case ContentEditConfirm:
 		if s.editConfirm.hasComment {
 			return keyStyle.Render(" [Tab/Enter] save context | [Esc] discard")

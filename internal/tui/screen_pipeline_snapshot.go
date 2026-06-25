@@ -113,11 +113,10 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 		}
 	}
 
-	// UserQuestion: show once per question arrival.
-	if snap.HasQuestion && !s.hasQuestion {
-		s.content = ContentUserQuestion
-		s.question = newUserQuestion(snap.UserQuestion, width)
-		s.hasQuestion = true
+	// UserQuestion: open it on the chat once per arrival. No mode change — the
+	// chat surfaces the question while the run stays in its streaming state.
+	if snap.HasQuestion && !s.chat.QuestionOpen() {
+		s.chat.OpenQuestion(snap.UserQuestion, width)
 	}
 
 	// Terminal: pipeline finished.

@@ -240,9 +240,7 @@ func setupUserQuestionScreen(multi bool) PipelineScreen {
 		},
 	}
 	s := NewPipelineScreen("test", runeUI{}, keymap.Default())
-	s.content = ContentUserQuestion
-	s.question = newUserQuestion(q, 80)
-	s.hasQuestion = true
+	s.chat.OpenQuestion(q, 80) // content stays ContentStreaming; the chat hosts the question
 	return s
 }
 
@@ -282,7 +280,7 @@ func TestUserQuestion_AnswerPostsFrameToTimeline(t *testing.T) {
 func TestUserQuestion_HandleCtrlCCancel_ClosesInlineEditor(t *testing.T) {
 	s := setupUserQuestionScreen(false)
 	// Open the inline editor by sending Tab through the component.
-	s.question, _ = s.question.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	s.chat.question, _ = s.chat.question.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 
 	s = s.HandleCtrlCCancel()
 
@@ -297,7 +295,7 @@ func TestUserQuestion_HandleCtrlCCancel_ClosesInlineEditor(t *testing.T) {
 
 func TestUserQuestion_TabHintRendered(t *testing.T) {
 	s := setupUserQuestionScreen(false)
-	out := s.question.View(80)
+	out := s.chat.question.View(80)
 	if !strings.Contains(out, "Tab") || !strings.Contains(out, "add context") {
 		t.Errorf("expected Tab hint in render, got:\n%s", out)
 	}
@@ -320,7 +318,7 @@ func TestUserQuestion_MultiSelectToggleVisible(t *testing.T) {
 	s := setupUserQuestionScreen(true)
 	s, _ = s.Update(tea.KeyPressMsg{Text: " "})
 
-	out := s.question.View(80)
+	out := s.chat.question.View(80)
 	if !strings.Contains(out, "[x]") {
 		t.Errorf("expected toggled option to render [x], got:\n%s", out)
 	}

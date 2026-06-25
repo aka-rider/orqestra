@@ -52,9 +52,8 @@ type PipelineScreen struct {
 	// Plan-gate sub-model (valid when content == ContentHumanGate)
 	activeChat HumanChatMode
 
-	// User-question sub-model (valid when content == ContentUserQuestion)
-	question    userQuestionModel
-	hasQuestion bool
+	// AskUserQuestion is hosted by the chat (s.chat.question) — the chat models
+	// its own openness, so there is no separate question field or content mode.
 
 	// Edit-confirmation sub-model (valid when content == ContentEditConfirm)
 	editConfirm    editConfirmModel
@@ -149,8 +148,6 @@ func (s *PipelineScreen) Reset() {
 	s.reviewTokensOut = 0
 	s.active = false
 	s.phase = ""
-	s.question = userQuestionModel{activeEditor: -1}
-	s.hasQuestion = false
 	s.editConfirm = editConfirmModel{}
 	s.animFrame = 0
 	s.toolFrameExpanded = false
@@ -168,6 +165,17 @@ func (s *PipelineScreen) Reset() {
 func (s *PipelineScreen) enterStreaming() {
 	s.content = ContentStreaming
 	s.chat.Focus()
+}
+
+// inputZoneHeight is the number of rows the bottom input zone needs: one line
+// normally, grown to fit an open question's options. The layout recalculates
+// when this value changes, so question open/close drives the input grow/shrink
+// without a separate content mode.
+func (s PipelineScreen) inputZoneHeight() int {
+	if s.chat.QuestionOpen() {
+		return max(constPipelineInputHeight, len(s.chat.question.q.Options)+2)
+	}
+	return constPipelineInputHeight
 }
 
 // SetToolFrameExpanded sets the tool frame expanded/collapsed state and
@@ -238,17 +246,6 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 // Update handles key events for the pipeline screen.
 func (s PipelineScreen) Update(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	switch s.content {
-	case ContentUserQuestion:
-		var cmd tea.Cmd
-		s.question, cmd = s.question.Update(msg)
-		if s.question.Done() {
-			answer := s.question.Answer()
-			s.timeline.Append(frame.NewAnswer(s.question.QuestionText(), s.question.AnswerSummary(), phaseStyle, dimStyle))
-			s.hasQuestion = false
-			s.enterStreaming()
-			s.PendingIntent = SubmitQuestionAnswerIntent{Answer: answer}
-		}
-		return s, cmd
 	case ContentHumanGate:
 		if s.activeChat == nil {
 			return s, nil
@@ -309,13 +306,9 @@ func (s PipelineScreen) UpdateSubModel(msg tea.Msg) (PipelineScreen, tea.Cmd) {
 		return s, cmd
 	}
 	if s.content == ContentStreaming {
+		// The chat routes to the open question (its blink/cursor) or the text input.
 		var cmd tea.Cmd
 		s.chat, cmd = s.chat.Update(msg)
-		return s, cmd
-	}
-	if s.content == ContentUserQuestion && s.hasQuestion {
-		var cmd tea.Cmd
-		s.question, cmd = s.question.Update(msg)
 		return s, cmd
 	}
 	if s.content == ContentEditConfirm {
@@ -351,16 +344,26 @@ func (s PipelineScreen) HandleCtrlCCancel() PipelineScreen {
 			s.PendingIntent = CancelPlanIntent{}
 		}
 	case ContentStreaming:
-		s.PendingIntent = CancelPipelineIntent{}
-	case ContentUserQuestion:
-		s.question = s.question.Cancel()
-		answer := s.question.Answer()
-		s.timeline.Append(frame.NewAnswer(s.question.QuestionText(), s.question.AnswerSummary(), phaseStyle, dimStyle))
-		s.hasQuestion = false
-		s.enterStreaming()
-		s.PendingIntent = SubmitQuestionAnswerIntent{Answer: answer}
+		// With a question open, the first ^C skips it; otherwise it cancels the run.
+		if s.chat.QuestionOpen() {
+			s = s.resolveQuestion(s.chat.question.Cancel())
+		} else {
+			s.PendingIntent = CancelPipelineIntent{}
+		}
 	default:
 		s.PendingIntent = CancelPipelineIntent{}
 	}
+	return s
+}
+
+// resolveQuestion closes the chat's open question, echoes the answer to the
+// timeline, and queues the answer for the model. Shared by the Enter and the
+// ^C-skip paths so both stay in lockstep.
+func (s PipelineScreen) resolveQuestion(q userQuestionModel) PipelineScreen {
+	s.chat.question = q
+	s.timeline.Append(frame.NewAnswer(q.QuestionText(), q.AnswerSummary(), phaseStyle, dimStyle))
+	s.PendingIntent = SubmitQuestionAnswerIntent{Answer: q.Answer()}
+	s.chat.CloseQuestion()
+	s.enterStreaming()
 	return s
 }

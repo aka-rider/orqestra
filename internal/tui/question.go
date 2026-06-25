@@ -18,9 +18,9 @@ const (
 	questionMulti
 )
 
-// userQuestionModel is a self-contained component for the AskUserQuestion
-// content mode. Parent screens forward every message to Update and re-render
-// after each call; rendering goes through View/Footer/InputZone.
+// userQuestionModel is a self-contained component for an AskUserQuestion,
+// hosted by the chat. The chat forwards every message to Update and re-renders
+// after each call; rendering goes through View/Footer.
 type userQuestionModel struct {
 	q            mcp.ToolCall
 	mode         questionMode
@@ -346,21 +346,6 @@ func (m userQuestionModel) Footer() string {
 	switch m.mode {
 	case questionFreeform:
 		return " [Enter] submit | [Shift+Enter] newline | [Esc] skip"
-	case questionMulti:
-		return " [↑↓] navigate | [Space] toggle | [Tab] add context | [Enter] confirm | [Esc] skip"
-	default:
-		return " [↑↓] navigate | [Tab] add context | [Enter] confirm | [Esc] skip"
-	}
-}
-
-// InputZone returns the short hint string for the input-zone line.
-func (m userQuestionModel) InputZone() string {
-	if m.activeEditor >= 0 {
-		return " [Tab/Enter] save context | [Esc] discard"
-	}
-	switch m.mode {
-	case questionFreeform:
-		return " Type your answer, then [Enter] to submit | [Esc] skip"
 	case questionMulti:
 		return " [↑↓] navigate | [Space] toggle | [Tab] add context | [Enter] confirm | [Esc] skip"
 	default:

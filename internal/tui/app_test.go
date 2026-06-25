@@ -207,12 +207,10 @@ func TestTUI_UserQuestion_CtrlCSkipsWithDefault(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.active = true
-	m.pipelineScreen.content = ContentUserQuestion
-	m.pipelineScreen.question = newUserQuestion(mcp.ToolCall{
+	m.pipelineScreen.chat.OpenQuestion(mcp.ToolCall{
 		Question: "Pick one",
 		Options:  []mcp.ToolOption{{Label: "Yes"}, {Label: "No"}},
 	}, 80)
-	m.pipelineScreen.hasQuestion = true
 
 	updated, _ := sendCtrl(m, 'c')
 	mm := updated.(Model)

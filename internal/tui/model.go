@@ -31,11 +31,10 @@ const (
 type ContentMode int
 
 const (
-	ContentStreaming    ContentMode = iota // auto-follows active agent stream
-	ContentCompletion                     // QA report, summary
-	ContentUserQuestion                   // MCP AskUserQuestion picker
-	ContentEditConfirm                    // Ctrl+E edit confirmation prompt
-	ContentHumanGate                      // human-in-the-loop plan gate
+	ContentStreaming  ContentMode = iota // streaming + the always-present chat (hosts questions)
+	ContentCompletion                    // QA report, summary
+	ContentEditConfirm                   // Ctrl+E edit confirmation prompt
+	ContentHumanGate                     // human-in-the-loop plan gate
 )
 
 // AgentState classifies an agent's execution state.
@@ -276,14 +275,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		snap := m.obs.Snapshot()
-		prevContent := m.pipelineScreen.content
+		prevInputH := m.pipelineScreen.inputZoneHeight()
 		m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
 		m.pipelineScreen.ApplySnapshot(snap, m.width)
 		m.lastRev = snap.Rev
-		content := m.pipelineScreen.content
 
 		if m.state == StatePipeline {
-			if inputHeightChanged(prevContent, content) {
+			if m.pipelineScreen.inputZoneHeight() != prevInputH {
 				m.recalculateLayout()
 			}
 		}
@@ -367,9 +365,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return ctrlCTimeoutMsg{}
 		})
 		// Dispatch cancel to the active pipeline screen
-		prevContent := m.pipelineScreen.content
+		prevInputH := m.pipelineScreen.inputZoneHeight()
 		m.pipelineScreen = m.pipelineScreen.HandleCtrlCCancel()
-		if inputHeightChanged(prevContent, m.pipelineScreen.content) {
+		if m.pipelineScreen.inputZoneHeight() != prevInputH {
 			m.recalculateLayout()
 		}
 		// Process any intent emitted by the cancel handler
@@ -507,12 +505,6 @@ func (m Model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// inputHeightChanged reports whether a content mode transition requires a
-// layout recalculation. Question mode uses dynamic height.
-func inputHeightChanged(prevContent, nextContent ContentMode) bool {
-	return (prevContent == ContentUserQuestion) != (nextContent == ContentUserQuestion)
-}
-
 // handlePipelineKey delegates to PipelineScreen and handles intents.
 func (m Model) handlePipelineKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Explicit copy key bindings: Cmd+Shift+C copies selection; Cmd+C copies hovered frame.
@@ -527,10 +519,10 @@ func (m Model) handlePipelineKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	prevContent := m.pipelineScreen.content
+	prevInputH := m.pipelineScreen.inputZoneHeight()
 	var cmd tea.Cmd
 	m.pipelineScreen, cmd = m.pipelineScreen.Update(msg)
-	if inputHeightChanged(prevContent, m.pipelineScreen.content) {
+	if m.pipelineScreen.inputZoneHeight() != prevInputH {
 		m.recalculateLayout()
 	}
 	if intent := m.pipelineScreen.PendingIntent; intent != nil {
@@ -740,19 +732,13 @@ func (m *Model) recalculateLayout() {
 		inputHeight = m.promptScreen.DesiredInputHeight(m.height)
 		m.promptScreen.SetTextareaHeight(inputHeight - 1) // Subtract divider chrome
 	case StatePipeline:
-		if m.pipelineScreen.content == ContentUserQuestion && m.pipelineScreen.hasQuestion {
-			// Auto-grow input zone for question options
-			optCount := len(m.pipelineScreen.question.q.Options)
-			inputHeight = max(constPipelineInputHeight, optCount+2)
-		} else {
-			inputHeight = constPipelineInputHeight
-		}
+		inputHeight = m.pipelineScreen.inputZoneHeight()
 	case StateRunsList, StateRunDetail:
 		inputHeight = 0
 	}
 
-	if m.pipelineScreen.content == ContentUserQuestion && m.pipelineScreen.hasQuestion {
-		m.pipelineScreen.question = m.pipelineScreen.question.SetWidth(m.width)
+	if m.pipelineScreen.chat.QuestionOpen() {
+		m.pipelineScreen.chat.SetWidth(m.width)
 	}
 
 	// Pipeline alt-screen layout: timeline + input + footer (no status bar).

@@ -9,6 +9,16 @@ import (
 )
 
 func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
+	// A question open in the chat takes the keys until it resolves; the prompt's
+	// own shortcuts (scroll, new run, submit) are suspended while answering.
+	if s.chat.QuestionOpen() {
+		var cmd tea.Cmd
+		s.chat, cmd = s.chat.Update(msg)
+		if s.chat.question.Done() {
+			s = s.resolveQuestion(s.chat.question)
+		}
+		return s, cmd
+	}
 	switch {
 	case key.Matches(msg, s.keys.PageUp, s.keys.PageDown, s.keys.ScrollTop, s.keys.ScrollBottom):
 		var cmd tea.Cmd
@@ -86,9 +96,12 @@ func (s PipelineScreen) viewFooter(ctrlCPending bool) string {
 		ctrlCHint = warnStyle.Render("[^C] EXIT")
 	}
 
+	// A question open in the chat owns the footer hints, regardless of run state.
+	if s.chat.QuestionOpen() {
+		return keyStyle.Render(s.chat.question.Footer()+"  ") + ctrlCHint
+	}
+
 	switch s.content {
-	case ContentUserQuestion:
-		return keyStyle.Render(s.question.Footer()+"  ") + ctrlCHint
 	case ContentHumanGate:
 		if s.activeChat != nil {
 			return keyStyle.Render(s.activeChat.Footer()+"  ") + ctrlCHint
