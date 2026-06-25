@@ -109,7 +109,9 @@ func (s PipelineScreen) viewCompletion(width int) string {
 	}
 	if s.hasValidation {
 		b.WriteString(" Validation:\n")
-		b.WriteString(renderPrefixedText(lipgloss.NewStyle(), "   ", s.workerValidation, width))
+		// The worker's final output is markdown — render it as markdown, not as
+		// plain wrapped text (bug: final model output showed as simple text).
+		b.WriteString(renderMarkdown(s.workerValidation, width))
 	}
 	elapsed := time.Since(s.startTime).Truncate(time.Second)
 	b.WriteString(fmt.Sprintf("\n Elapsed: %s\n", elapsed))
