@@ -9,8 +9,12 @@ import (
 
 // BlinkMsg toggles a live frame's cursor. The Timeline owns the blink tick
 // lifecycle and forwards this to its tail; live frames that have no cursor
-// (e.g. a running tool) ignore it.
+// ignore it.
 type BlinkMsg struct{}
+
+// DeltaMsg carries a streamed text chunk to the live tail. The Timeline forwards
+// it generically; only text-accumulating frames (LiveProse) react.
+type DeltaMsg struct{ Text string }
 
 // LiveProse is the in-progress assistant prose: the streaming text plus a
 // blinking cursor. It is the InteractiveFrame tail while the model is talking;
@@ -32,21 +36,19 @@ func NewLiveProse(style lipgloss.Style) LiveProse {
 	return p
 }
 
-// Append accumulates a streaming delta.
-func (p LiveProse) Append(delta string) LiveProse {
-	p.text += delta
-	p.rows = p.layout(p.width)
-	return p
-}
-
 func (p LiveProse) SetWidth(w int) InteractiveFrame {
 	p.width = w
 	p.rows = p.layout(w)
 	return p
 }
 
+// Update accumulates streamed deltas and toggles the cursor on blink ticks.
 func (p LiveProse) Update(msg tea.Msg) (InteractiveFrame, tea.Cmd) {
-	if _, ok := msg.(BlinkMsg); ok {
+	switch m := msg.(type) {
+	case DeltaMsg:
+		p.text += m.Text
+		p.rows = p.layout(p.width)
+	case BlinkMsg:
 		p.blinkOn = !p.blinkOn
 		p.rows = p.layout(p.width)
 	}

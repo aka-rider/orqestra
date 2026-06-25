@@ -4,8 +4,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-
-	"github.com/xiii/orqestra/internal/tui/frame"
 )
 
 // timelineAutoscrollMsg drives continuous scroll while a drag holds beyond the
@@ -23,16 +21,6 @@ func blinkCmd(tag int) tea.Cmd {
 	return tea.Tick(timelineBlinkInterval, func(time.Time) tea.Msg {
 		return timelineBlinkMsg{tag: tag}
 	})
-}
-
-// toolFrameStyles bundles the package tool styles for frame.Tool construction.
-func toolFrameStyles() frame.ToolStyles {
-	return frame.ToolStyles{
-		Pending: streamToolPendingStyle,
-		OK:      streamToolOKStyle,
-		Err:     streamToolErrStyle,
-		Unknown: dimStyle,
-	}
 }
 
 // clamp constrains v to [lo, hi].

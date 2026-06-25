@@ -41,7 +41,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 		curr := a.Status
 		if !seen {
 			// Reset the live cursor and emit the phase separator on agent transition.
-			s.timeline.StartLive()
+			s.showLiveCursor()
 			ruleLabel := agentDisplayName(string(a.AgentID))
 			if a.Meta.ModelDisplay != "" {
 				ruleLabel += ": " + a.Meta.ModelDisplay

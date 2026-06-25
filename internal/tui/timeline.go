@@ -83,13 +83,11 @@ func NewTimeline(keys keymap.Bindings, styles timelineStyles) Timeline {
 
 // --- Content API (called from Update paths) ---
 
-// Start marks the timeline active, begins the blink loop, and shows the live
-// cursor (an empty prose tail) so the ⏺ heartbeat is visible while the agent is
-// thinking, before any prose streams.
+// Start marks the timeline active and begins the blink loop. The producer sets
+// the live tail (SetTail) so the Timeline never constructs a frame.
 func (t Timeline) Start() (Timeline, tea.Cmd) {
 	t.active = true
 	t.blinkTag++
-	t.StartLive()
 	return t, blinkCmd(t.blinkTag)
 }
 
@@ -102,20 +100,19 @@ func (t *Timeline) Stop() {
 	t.tail = nil
 }
 
-// StartLive (re)shows the live cursor: a fresh empty prose tail. The producer
-// calls it after promoting a finished turn so the heartbeat continues.
-func (t *Timeline) StartLive() {
-	t.tail = frame.NewLiveProse(streamSpeechStyle).SetWidth(t.contentWidth())
+// SetTail sets the single in-progress unit (an InteractiveFrame the producer
+// builds — typically the live prose with its ⏺ cursor) and lays it out. The
+// Timeline forwards ticks and deltas to it but never constructs or inspects it.
+func (t *Timeline) SetTail(f frame.InteractiveFrame) {
+	t.tail = f.SetWidth(t.contentWidth())
 }
 
-// AppendDelta accumulates a streaming delta into the live-prose tail (the tail
-// is display-only; the producer appends the authoritative prose on completion).
+// AppendDelta forwards a streamed chunk to the live tail. Generic: the tail
+// reacts (LiveProse accumulates); other interactive frames may ignore it.
 func (t *Timeline) AppendDelta(text string) {
-	lp, ok := t.tail.(frame.LiveProse)
-	if !ok {
-		lp = frame.NewLiveProse(streamSpeechStyle)
+	if t.tail != nil {
+		t.tail, _ = t.tail.Update(frame.DeltaMsg{Text: text})
 	}
-	t.tail = lp.Append(text).SetWidth(t.contentWidth())
 }
 
 // ClearLive drops the live tail (e.g. before promoting a finished turn).

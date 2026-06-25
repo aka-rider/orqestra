@@ -102,6 +102,7 @@ func (s *PipelineScreen) Start(goal string) tea.Cmd {
 	s.enterStreaming()
 	var cmd tea.Cmd
 	s.timeline, cmd = s.timeline.Start()
+	s.showLiveCursor()
 	// Post the opening prompt to the timeline through the same path every later
 	// message uses, so the user's first input is visible (bug: first prompt was
 	// never shown). Full Chat unification (deleting PromptScreen) follows.
@@ -173,6 +174,24 @@ func (s *PipelineScreen) SetStreamBuf(buf *orchestrator.StreamRing) {
 	s.streamBuf = buf
 }
 
+// showLiveCursor (re)shows the ⏺ heartbeat — an empty live-prose tail — so the
+// cursor is visible while the agent is active, before any prose streams. The
+// producer owns building the tail; the Timeline only holds it.
+func (s *PipelineScreen) showLiveCursor() {
+	s.timeline.SetTail(frame.NewLiveProse(streamSpeechStyle))
+}
+
+// toolFrameStyles bundles the package tool styles the producer uses to build
+// frame.Tool. It lives with the producer (the screen), not the Timeline.
+func toolFrameStyles() frame.ToolStyles {
+	return frame.ToolStyles{
+		Pending: streamToolPendingStyle,
+		OK:      streamToolOKStyle,
+		Err:     streamToolErrStyle,
+		Unknown: dimStyle,
+	}
+}
+
 // pendingTool is a tool frame awaiting its result, tracked by the producer.
 type pendingTool struct {
 	idx  int
@@ -242,7 +261,7 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 				if line != "" {
 					s.timeline.Append(frame.NewProse(line))
 				}
-				s.timeline.StartLive()
+				s.showLiveCursor()
 			case orchestrator.EntryToolUse:
 				if u.Detail != "" {
 					if s.streamBuf != nil {

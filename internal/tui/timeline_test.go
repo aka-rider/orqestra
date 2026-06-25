@@ -103,6 +103,7 @@ func TestTimeline_AppendSteer(t *testing.T) {
 
 func TestTimeline_LiveTail_AppendAndClear(t *testing.T) {
 	tl := newTestTimeline(80, 20)
+	tl.SetTail(frame.NewLiveProse(streamSpeechStyle))
 	tl.AppendDelta("partial ")
 	tl.AppendDelta("text")
 	if !tl.HasContent() {
@@ -117,12 +118,12 @@ func TestTimeline_LiveTail_AppendAndClear(t *testing.T) {
 	}
 }
 
-// StartLive shows the ⏺ heartbeat (an empty prose tail) before any text streams.
-func TestTimeline_StartLive_ShowsHeartbeat(t *testing.T) {
+// A live-prose tail set via SetTail shows the ⏺ heartbeat before any text streams.
+func TestTimeline_SetTail_ShowsHeartbeat(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	tl.StartLive()
+	tl.SetTail(frame.NewLiveProse(streamSpeechStyle))
 	if !strings.Contains(tl.View(), "⏺") {
-		t.Error("StartLive should show the ⏺ cursor even with no text")
+		t.Error("a live-prose tail should show the ⏺ cursor even with no text")
 	}
 }
 
@@ -131,6 +132,7 @@ func TestTimeline_StartLive_ShowsHeartbeat(t *testing.T) {
 func TestTimeline_Clear(t *testing.T) {
 	tl := newTestTimeline(80, 20)
 	tl.Append(frame.NewProse("some content"))
+	tl.SetTail(frame.NewLiveProse(streamSpeechStyle))
 	tl.AppendDelta("live")
 	tl.Clear()
 	if tl.HasContent() {
@@ -184,19 +186,15 @@ func TestTimeline_ScrollToBottom(t *testing.T) {
 
 // --- View output ---
 
-func TestTimeline_View_ShowsLiveCursor(t *testing.T) {
-	tl := newTestTimeline(80, 20)
-	tl.AppendDelta("x") // a live prose tail carries the ⏺ cursor
-	if !strings.Contains(tl.View(), "⏺") {
-		t.Error("a live tail should render the ⏺ cursor")
-	}
-}
-
 func TestTimeline_View_LiveDeltaText(t *testing.T) {
 	tl := newTestTimeline(80, 20)
+	tl.SetTail(frame.NewLiveProse(streamSpeechStyle))
 	tl.AppendDelta("partial output here")
 	if !strings.Contains(tl.View(), "partial output here") {
 		t.Error("View should show live delta text")
+	}
+	if !strings.Contains(tl.View(), "⏺") {
+		t.Error("a live tail should render the ⏺ cursor")
 	}
 }
 
@@ -239,7 +237,7 @@ func TestTimeline_BlinkMsg_ReschedulesWhileActive(t *testing.T) {
 	tl := newTestTimeline(80, 20)
 	tl.active = true
 	tl.blinkTag = 1
-	tl.AppendDelta("x") // a tail to forward the blink to
+	tl.SetTail(frame.NewLiveProse(streamSpeechStyle)) // a tail to forward the blink to
 	_, cmd := tl.Update(timelineBlinkMsg{tag: 1})
 	if cmd == nil {
 		t.Error("a valid blink tick should reschedule the blink loop")
