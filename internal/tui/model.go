@@ -760,7 +760,7 @@ func (m *Model) recalculateLayout() {
 		chromeH := inputHeight + constFooterHeight
 		timelineH := max(0, m.height-chromeH)
 
-		m.pipelineScreen.postInput.SetWidth(m.width)
+		m.pipelineScreen.chat.SetWidth(m.width)
 
 		y := 0
 		m.regions.timeline = image.Rect(1, y, m.width-1, y+timelineH) // 1-col margins

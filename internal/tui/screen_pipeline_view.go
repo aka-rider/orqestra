@@ -75,7 +75,7 @@ func (s PipelineScreen) View(width, height int, ctrlCPending bool) string {
 func (s PipelineScreen) viewInputZone() string {
 	switch s.content {
 	case ContentStreaming:
-		return s.postInput.View()
+		return s.chat.View()
 	case ContentUserQuestion:
 		return keyStyle.Render(s.question.InputZone())
 	case ContentEditConfirm:

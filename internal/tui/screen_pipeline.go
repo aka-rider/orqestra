@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/orchestrator"
 	"github.com/xiii/orqestra/internal/tui/frame"
@@ -61,8 +60,8 @@ type PipelineScreen struct {
 	editConfirm    editConfirmModel
 	editorFilePath string // temp file the external editor edits in place
 
-	// Post-message input (always visible during ContentStreaming)
-	postInput textarea.Model
+	// Chat is the bottom steering input (always visible during ContentStreaming).
+	chat chat
 
 	// Plan tracking
 	finalPlan            string
@@ -103,17 +102,13 @@ type PipelineScreen struct {
 
 // NewPipelineScreen creates a new pipeline screen.
 func NewPipelineScreen(configName string, ui runeUI, keys keymap.Bindings) PipelineScreen {
-	ta := textarea.New()
-	ta.Placeholder = "post to steer the model"
-	ta.SetHeight(1)
-	ta.CharLimit = 4096
 	return PipelineScreen{
 		keys:        keys,
 		configName:  configName,
 		knownAgents: make(map[string]string),
 		md:          ui.mdDeps(),
 		timeline:    NewTimeline(keys, timelineStyles{selectionBg: selectionBg}),
-		postInput:   ta,
+		chat:        newChat(keys),
 	}
 }
 
@@ -162,8 +157,8 @@ func (s *PipelineScreen) Reset() {
 	s.timeline.Clear()
 	s.timeline.styles = timelineStyles{selectionBg: selectionBg}
 	s.lastAgentID = ""
-	s.postInput.Reset()
-	s.postInput.Blur()
+	s.chat.Reset()
+	s.chat.Blur()
 }
 
 // enterStreaming returns the screen to the live streaming mode with the Chat
@@ -172,7 +167,7 @@ func (s *PipelineScreen) Reset() {
 // unrepresentable transition (was bug: the ^E edit-confirm path forgot to focus).
 func (s *PipelineScreen) enterStreaming() {
 	s.content = ContentStreaming
-	s.postInput.Focus()
+	s.chat.Focus()
 }
 
 // SetToolFrameExpanded sets the tool frame expanded/collapsed state and
@@ -315,7 +310,7 @@ func (s PipelineScreen) UpdateSubModel(msg tea.Msg) (PipelineScreen, tea.Cmd) {
 	}
 	if s.content == ContentStreaming {
 		var cmd tea.Cmd
-		s.postInput, cmd = s.postInput.Update(msg)
+		s.chat, cmd = s.chat.Update(msg)
 		return s, cmd
 	}
 	if s.content == ContentUserQuestion && s.hasQuestion {

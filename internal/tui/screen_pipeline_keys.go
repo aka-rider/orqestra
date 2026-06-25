@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"strings"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -29,9 +28,7 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 		s.SetToolFrameExpanded(!s.toolFrameExpanded)
 		return s, nil
 	case key.Matches(msg, s.keys.Submit):
-		text := strings.TrimSpace(s.postInput.Value())
-		if text != "" {
-			s.postInput.Reset()
+		if text, ok := s.chat.Submit(); ok {
 			s.timeline.Append(frame.NewSteer(text, dimStyle))
 			agentID := s.lastAgentID
 			return s, func() tea.Msg {
@@ -41,7 +38,7 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 		return s, nil
 	}
 	var cmd tea.Cmd
-	s.postInput, cmd = s.postInput.Update(msg)
+	s.chat, cmd = s.chat.Update(msg)
 	return s, cmd
 }
 
