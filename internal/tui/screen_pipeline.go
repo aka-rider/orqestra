@@ -97,9 +97,6 @@ type PipelineScreen struct {
 	timeline    Timeline
 	lastAgentID string
 
-	// rune UI bundle — passed to newHumanChatMode for markdownedit construction.
-	ui runeUI
-
 	PendingIntent tea.Msg
 }
 
@@ -112,7 +109,6 @@ func NewPipelineScreen(configName string, ui runeUI, keys keymap.Bindings) Pipel
 	return PipelineScreen{
 		keys:        keys,
 		configName:  configName,
-		ui:          ui,
 		knownAgents: make(map[string]string),
 		timeline:    NewTimeline(keys, timelineStyles{selectionBg: selectionBg, rule: dividerStyle}, ui.mdDeps()),
 		postInput:   ta,

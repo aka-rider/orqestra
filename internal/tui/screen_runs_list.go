@@ -4,13 +4,16 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/orchestrator"
+	"github.com/xiii/orqestra/internal/tui/keymap"
 )
 
 // RunsListScreen manages the historical runs list view.
 type RunsListScreen struct {
+	keys          keymap.Bindings
 	runs          []orchestrator.RunSummary
 	cursor        int
 	viewport      viewport.Model
@@ -18,10 +21,10 @@ type RunsListScreen struct {
 }
 
 // NewRunsListScreen creates a new runs list screen.
-func NewRunsListScreen() RunsListScreen {
+func NewRunsListScreen(keys keymap.Bindings) RunsListScreen {
 	vp := viewport.New()
 	vp.MouseWheelEnabled = true
-	return RunsListScreen{viewport: vp}
+	return RunsListScreen{keys: keys, viewport: vp}
 }
 
 // SetRuns assigns the runs list and resets the cursor.
@@ -78,32 +81,32 @@ func (s RunsListScreen) Update(msg tea.Msg) (RunsListScreen, tea.Cmd) {
 		return s, nil
 	}
 
-	switch keyMsg.Code {
-	case tea.KeyEscape:
+	switch {
+	case key.Matches(keyMsg, s.keys.Back):
 		s.PendingIntent = NavigateBackIntent{}
 		return s, nil
-	case tea.KeyEnter:
+	case key.Matches(keyMsg, s.keys.Submit):
 		if len(s.runs) == 0 {
 			return s, nil
 		}
 		s.PendingIntent = NavigateToRunDetailIntent{RunIndex: s.cursor}
 		return s, nil
-	case tea.KeyUp:
+	case key.Matches(keyMsg, s.keys.Up):
 		if s.cursor > 0 {
 			s.cursor--
 			s.SyncViewport(s.viewport.Width())
 		}
 		return s, nil
-	case tea.KeyDown:
+	case key.Matches(keyMsg, s.keys.Down):
 		if s.cursor < len(s.runs)-1 {
 			s.cursor++
 			s.SyncViewport(s.viewport.Width())
 		}
 		return s, nil
-	case tea.KeyPgUp:
+	case key.Matches(keyMsg, s.keys.PageUp):
 		s.viewport.HalfPageUp()
 		return s, nil
-	case tea.KeyPgDown:
+	case key.Matches(keyMsg, s.keys.PageDown):
 		s.viewport.HalfPageDown()
 		return s, nil
 	}

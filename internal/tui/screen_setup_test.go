@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"github.com/xiii/orqestra/internal/tui/keymap"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -16,7 +17,7 @@ func pressSpace() tea.KeyPressMsg {
 }
 
 func TestSetupModel_Navigation(t *testing.T) {
-	m := newSetupModel()
+	m := newSetupModel(keymap.Default())
 	m.Open(orchestrator.DefaultPipelineSetup())
 
 	// Down wraps through all items
@@ -40,7 +41,7 @@ func TestSetupModel_Navigation(t *testing.T) {
 }
 
 func TestSetupModel_ToggleBool(t *testing.T) {
-	m := newSetupModel()
+	m := newSetupModel(keymap.Default())
 	m.Open(orchestrator.DefaultPipelineSetup())
 
 	// Navigate to Execution (cursor 1; cursor 0 is the Deliberation int).
@@ -68,7 +69,7 @@ func TestSetupModel_ToggleBool(t *testing.T) {
 }
 
 func TestSetupModel_GateToggle(t *testing.T) {
-	m := newSetupModel()
+	m := newSetupModel(keymap.Default())
 	m.Open(orchestrator.DefaultPipelineSetup())
 	// Move to first gate item (cursor=setupItemGateFirst, GateAfterDeliberation)
 	for i := 0; i < setupItemGateFirst; i++ {
@@ -90,7 +91,7 @@ func TestSetupModel_GateToggle(t *testing.T) {
 }
 
 func TestSetupModel_EnterEmitsConfirmAndCloses(t *testing.T) {
-	m := newSetupModel()
+	m := newSetupModel(keymap.Default())
 	setup := orchestrator.DefaultPipelineSetup()
 	setup.Execution = false
 	m.Open(setup)
@@ -110,7 +111,7 @@ func TestSetupModel_EnterEmitsConfirmAndCloses(t *testing.T) {
 }
 
 func TestSetupModel_EscClosesWithoutEmitting(t *testing.T) {
-	m := newSetupModel()
+	m := newSetupModel(keymap.Default())
 	m.Open(orchestrator.DefaultPipelineSetup())
 
 	m, _ = m.Update(pressKey(tea.KeyEscape))
@@ -124,7 +125,7 @@ func TestSetupModel_EscClosesWithoutEmitting(t *testing.T) {
 }
 
 func TestSetupModel_ViewPurity(t *testing.T) {
-	m := newSetupModel()
+	m := newSetupModel(keymap.Default())
 	m.Open(orchestrator.DefaultPipelineSetup())
 
 	v1 := m.View()
@@ -135,7 +136,7 @@ func TestSetupModel_ViewPurity(t *testing.T) {
 }
 
 func TestSetupModel_DeliberationIncrement(t *testing.T) {
-	m := newSetupModel()
+	m := newSetupModel(keymap.Default())
 	m.Open(orchestrator.DefaultPipelineSetup())
 
 	// Deliberation is the first item (cursor 0).
@@ -184,7 +185,7 @@ func TestSetupModel_DeliberationIncrement(t *testing.T) {
 }
 
 func TestSetupModel_DeliberationInConfirm(t *testing.T) {
-	m := newSetupModel()
+	m := newSetupModel(keymap.Default())
 	m.Open(orchestrator.DefaultPipelineSetup())
 
 	// Deliberation is the first item (cursor 0). Change to 3.

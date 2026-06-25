@@ -56,9 +56,8 @@ type Bindings struct {
 	OpenPlanInEditor key.Binding // ctrl+e — open the plan in $EDITOR
 	OpenStepLog      key.Binding // ctrl+l — open a run-detail step log
 
-	// Panels / help.
+	// Panels.
 	SetupPanel key.Binding // ctrl+p
-	Help       key.Binding // ctrl+h
 
 	// Clipboard.
 	Copy          key.Binding // super+c — copy selection (or hovered frame)
@@ -96,7 +95,6 @@ func Default() Bindings {
 		OpenStepLog:      key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("^l", "step log")),
 
 		SetupPanel: key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("^p", "setup")),
-		Help:       key.NewBinding(key.WithKeys("ctrl+h"), key.WithHelp("^h", "help")),
 
 		Copy:          key.NewBinding(key.WithKeys("super+c"), key.WithHelp("⌘c", "copy")),
 		CopySelection: key.NewBinding(key.WithKeys("super+shift+c"), key.WithHelp("⌘⇧c", "copy selection")),

@@ -4,14 +4,17 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/xiii/orqestra/internal/orchestrator"
+	"github.com/xiii/orqestra/internal/tui/keymap"
 )
 
 // setupModel owns the pipeline-setup overlay state.
 // It is a value sub-model: Update returns a new copy; View is pure.
 type setupModel struct {
+	keys          keymap.Bindings
 	open          bool
 	cursor        int // 0..numSetupItems-1
 	setup         orchestrator.PipelineSetup
@@ -32,8 +35,8 @@ var gateOrder = [1]orchestrator.HumanGatePosition{
 	orchestrator.GateAfterDeliberation,
 }
 
-func newSetupModel() setupModel {
-	return setupModel{setup: orchestrator.DefaultPipelineSetup()}
+func newSetupModel(keys keymap.Bindings) setupModel {
+	return setupModel{keys: keys, setup: orchestrator.DefaultPipelineSetup()}
 }
 
 // Open opens the panel with a fresh working draft initialised from setup.
@@ -54,36 +57,31 @@ func (s *setupModel) IsOpen() bool { return s.open }
 // When the user confirms or cancels, PendingIntent is set.
 func (s setupModel) Update(msg tea.KeyPressMsg) (setupModel, tea.Cmd) {
 	s.PendingIntent = nil
-	switch msg.Code {
-	case tea.KeyUp:
+	switch {
+	case key.Matches(msg, s.keys.Up):
 		s.cursor = (s.cursor - 1 + numSetupItems) % numSetupItems
-	case tea.KeyDown:
+	case key.Matches(msg, s.keys.Down):
 		s.cursor = (s.cursor + 1) % numSetupItems
-	case tea.KeyLeft:
+	case key.Matches(msg, s.keys.Left):
 		s = s.changeValue("left")
-	case tea.KeyRight:
+	case key.Matches(msg, s.keys.Right):
 		s = s.changeValue("right")
-	case tea.KeyEnter:
+	case key.Matches(msg, s.keys.Submit):
 		s.open = false
 		s.PendingIntent = ConfirmSetupIntent{Setup: s.setup}
-	case tea.KeyEscape:
+	case key.Matches(msg, s.keys.Back), key.Matches(msg, s.keys.SetupPanel):
 		s.open = false
-	case ' ':
+	case msg.Code == ' ':
 		// Space (rune 32): toggle — direction irrelevant for bools/gates.
 		s = s.changeValue("left")
-	default:
-		// ctrl+p closes by string (ctrl combos not in Code constants).
-		if msg.String() == "ctrl+p" {
-			s.open = false
-		}
 	}
 	return s, nil
 }
 
-func (s setupModel) changeValue(key string) setupModel {
+func (s setupModel) changeValue(dir string) setupModel {
 	switch s.cursor {
 	case setupItemDeliberation:
-		switch key {
+		switch dir {
 		case "left":
 			s.setup.DeliberationRounds = max(1, s.setup.DeliberationRounds-1)
 		case "right":

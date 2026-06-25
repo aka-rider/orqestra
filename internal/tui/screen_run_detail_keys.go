@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/xiii/orqestra/internal/orchestrator"
@@ -14,14 +15,14 @@ func (s RunDetailScreen) Update(msg tea.Msg) (RunDetailScreen, tea.Cmd) {
 	}
 
 	// Global keys — not focus-dependent.
-	switch keyMsg.String() {
-	case "ctrl+e":
+	switch {
+	case key.Matches(keyMsg, s.keys.OpenStepLog):
 		return s.openStepLog()
-	case "ctrl+shift+r":
+	case key.Matches(keyMsg, s.keys.RestartRun):
 		if !s.completeness.Complete && s.detail.Path != "" {
 			s.PendingIntent = RestartRunIntent{
-				RunPath:           s.detail.Path,
-				Phase: orchestrator.RestartPhase(s.completeness.RestartPhase),
+				RunPath: s.detail.Path,
+				Phase:   orchestrator.RestartPhase(s.completeness.RestartPhase),
 			}
 		}
 		return s, nil
@@ -40,100 +41,73 @@ func (s RunDetailScreen) Update(msg tea.Msg) (RunDetailScreen, tea.Cmd) {
 }
 
 func (s RunDetailScreen) updateMenu(msg tea.KeyPressMsg) (RunDetailScreen, tea.Cmd) {
-	switch msg.Code {
-	case tea.KeyEscape:
+	switch {
+	case key.Matches(msg, s.keys.Back):
 		s.PendingIntent = NavigateBackIntent{}
-		return s, nil
-	case tea.KeyUp:
+	case key.Matches(msg, s.keys.Up):
 		if s.stepCursor > 0 {
 			s.stepCursor--
 			s.LoadStepLog()
 			s.SyncViewports()
 		}
-		return s, nil
-	case tea.KeyDown:
+	case key.Matches(msg, s.keys.Down):
 		if s.stepCursor < len(s.detail.Steps)-1 {
 			s.stepCursor++
 			s.LoadStepLog()
 			s.SyncViewports()
 		}
-		return s, nil
-	case tea.KeyPgUp:
+	case key.Matches(msg, s.keys.PageUp):
 		s.stepCursor = max(0, s.stepCursor-5)
 		s.LoadStepLog()
 		s.SyncViewports()
-		return s, nil
-	case tea.KeyPgDown:
+	case key.Matches(msg, s.keys.PageDown):
 		s.stepCursor = min(max(0, len(s.detail.Steps)-1), s.stepCursor+5)
 		s.LoadStepLog()
 		s.SyncViewports()
-		return s, nil
-	case tea.KeyEnter:
+	case key.Matches(msg, s.keys.Submit), key.Matches(msg, s.keys.FocusNext):
 		s.focus = RunDetailFocusContent
-		return s, nil
-	case tea.KeyTab:
-		if msg.Mod.Contains(tea.ModShift) {
-			s.focus = RunDetailFocusLog
-		} else {
-			s.focus = RunDetailFocusContent
-		}
-		return s, nil
+	case key.Matches(msg, s.keys.FocusPrev):
+		s.focus = RunDetailFocusLog
 	}
 	return s, nil
 }
 
 func (s RunDetailScreen) updateContent(msg tea.KeyPressMsg) (RunDetailScreen, tea.Cmd) {
-	switch msg.Code {
-	case tea.KeyEscape:
+	switch {
+	case key.Matches(msg, s.keys.Back):
 		s.focus = RunDetailFocusMenu
-		return s, nil
-	case tea.KeyUp:
+	case key.Matches(msg, s.keys.Up):
 		s.detailVP.ScrollUp(1)
-		return s, nil
-	case tea.KeyDown:
+	case key.Matches(msg, s.keys.Down):
 		s.detailVP.ScrollDown(1)
-		return s, nil
-	case tea.KeyPgUp:
+	case key.Matches(msg, s.keys.PageUp):
 		s.detailVP.HalfPageUp()
-		return s, nil
-	case tea.KeyPgDown:
+	case key.Matches(msg, s.keys.PageDown):
 		s.detailVP.HalfPageDown()
-		return s, nil
-	case tea.KeyTab:
-		if msg.Mod.Contains(tea.ModShift) {
-			s.focus = RunDetailFocusMenu
-		} else {
-			s.focus = RunDetailFocusLog
-		}
-		return s, nil
+	case key.Matches(msg, s.keys.FocusPrev):
+		s.focus = RunDetailFocusMenu
+	case key.Matches(msg, s.keys.FocusNext):
+		s.focus = RunDetailFocusLog
 	}
 	return s, nil
 }
 
 func (s RunDetailScreen) updateLog(msg tea.KeyPressMsg) (RunDetailScreen, tea.Cmd) {
-	switch msg.Code {
-	case tea.KeyEscape:
+	switch {
+	case key.Matches(msg, s.keys.Back):
 		s.focus = RunDetailFocusMenu
-		return s, nil
-	case tea.KeyUp:
+	case key.Matches(msg, s.keys.Up):
 		s.logVP.ScrollUp(1)
-		return s, nil
-	case tea.KeyDown:
+	case key.Matches(msg, s.keys.Down):
 		s.logVP.ScrollDown(1)
-		return s, nil
-	case tea.KeyPgUp:
+	case key.Matches(msg, s.keys.PageUp):
 		s.logVP.HalfPageUp()
-		return s, nil
-	case tea.KeyPgDown:
+	case key.Matches(msg, s.keys.PageDown):
 		s.logVP.HalfPageDown()
-		return s, nil
-	case tea.KeyTab:
-		if msg.Mod.Contains(tea.ModShift) {
-			s.focus = RunDetailFocusContent
-		} else {
-			s.focus = RunDetailFocusMenu
-		}
-		return s, nil
+	case key.Matches(msg, s.keys.FocusPrev):
+		s.focus = RunDetailFocusContent
+	case key.Matches(msg, s.keys.FocusNext):
+		s.focus = RunDetailFocusMenu
 	}
 	return s, nil
 }

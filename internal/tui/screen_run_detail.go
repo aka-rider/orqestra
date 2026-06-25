@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/xiii/orqestra/internal/orchestrator"
+	"github.com/xiii/orqestra/internal/tui/keymap"
 )
 
 // RunDetailFocus identifies which pane has keyboard focus in the run detail screen.
@@ -22,6 +23,7 @@ const (
 
 // RunDetailScreen manages the run detail inspection view.
 type RunDetailScreen struct {
+	keys          keymap.Bindings
 	detail        orchestrator.RunDetail
 	completeness  orchestrator.RunCompleteness
 	stepCursor    int
@@ -34,7 +36,7 @@ type RunDetailScreen struct {
 }
 
 // NewRunDetailScreen creates a new run detail screen.
-func NewRunDetailScreen() RunDetailScreen {
+func NewRunDetailScreen(keys keymap.Bindings) RunDetailScreen {
 	dvp := viewport.New()
 	dvp.MouseWheelEnabled = true
 	svp := viewport.New()
@@ -42,6 +44,7 @@ func NewRunDetailScreen() RunDetailScreen {
 	lvp := viewport.New()
 	lvp.MouseWheelEnabled = true
 	return RunDetailScreen{
+		keys:     keys,
 		focus:    RunDetailFocusMenu,
 		detailVP: dvp,
 		stepsVP:  svp,

@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/orchestrator"
+	"github.com/xiii/orqestra/internal/tui/keymap"
 )
 
 // HumanChatMode is the interface for human-in-the-loop chat modes during gates.
@@ -29,40 +31,36 @@ type HumanChatMode interface {
 type PlanChatMode struct {
 	chatHistory []ChatEntry
 	pending     tea.Msg
+	keys        keymap.Bindings
 }
 
 // SimpleChatMode handles non-plan gates that present a plain chat prompt.
 type SimpleChatMode struct {
 	chatHistory []ChatEntry
 	pending     tea.Msg
+	keys        keymap.Bindings
 }
 
 // newHumanChatMode creates a HumanChatMode for the given gate request.
-func newHumanChatMode(req orchestrator.GateRequest, _ runeUI) HumanChatMode {
+func newHumanChatMode(req orchestrator.GateRequest, keys keymap.Bindings) HumanChatMode {
 	if req.Position.IsPlanGate() {
-		return &PlanChatMode{
-			chatHistory: []ChatEntry{},
-		}
+		return &PlanChatMode{keys: keys}
 	}
-	return &SimpleChatMode{
-		chatHistory: []ChatEntry{},
-	}
+	return &SimpleChatMode{keys: keys}
 }
 
 // SetSize is a no-op for PlanChatMode (plan is rendered by Timeline).
 func (m *PlanChatMode) SetSize(_, _ int) {}
 
 // Update handles messages for PlanChatMode.
-// Ctrl+A and Ctrl+C are intercepted for approve/cancel.
+// Approve and Cancel are intercepted for the hard gate.
 func (m *PlanChatMode) Update(msg tea.Msg) (HumanChatMode, tea.Cmd) {
 	if km, ok := msg.(tea.KeyPressMsg); ok {
-		switch km.String() {
-		case "ctrl+a":
+		switch {
+		case key.Matches(km, m.keys.ApprovePlan):
 			m.pending = &orchestrator.Decision{Type: orchestrator.DecisionApprove}
-			return m, nil
-		case "ctrl+c":
+		case key.Matches(km, m.keys.Cancel):
 			m.pending = &orchestrator.Decision{Type: orchestrator.DecisionCancel}
-			return m, nil
 		}
 	}
 	return m, nil
@@ -94,19 +92,16 @@ func (m *SimpleChatMode) SetSize(_, _ int) {}
 // Update handles messages for SimpleChatMode.
 func (m *SimpleChatMode) Update(msg tea.Msg) (HumanChatMode, tea.Cmd) {
 	if km, ok := msg.(tea.KeyPressMsg); ok {
-		switch km.String() {
-		case "enter", "ctrl+j":
+		switch {
+		case key.Matches(km, m.keys.Submit):
 			m.pending = &orchestrator.Decision{
 				Type:    orchestrator.DecisionComment,
 				Comment: "user comment",
 			}
-			return m, nil
-		case "ctrl+a":
+		case key.Matches(km, m.keys.ApprovePlan):
 			m.pending = &orchestrator.Decision{Type: orchestrator.DecisionApprove}
-			return m, nil
-		case "ctrl+c":
+		case key.Matches(km, m.keys.Cancel):
 			m.pending = &orchestrator.Decision{Type: orchestrator.DecisionCancel}
-			return m, nil
 		}
 	}
 	return m, nil

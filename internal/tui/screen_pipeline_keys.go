@@ -4,30 +4,31 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 )
 
 func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
-	switch msg.String() {
-	case "pgup", "ctrl+b", "pgdown", "ctrl+f", "home", "end":
+	switch {
+	case key.Matches(msg, s.keys.PageUp, s.keys.PageDown, s.keys.ScrollTop, s.keys.ScrollBottom):
 		var cmd tea.Cmd
 		s.timeline, cmd = s.timeline.Update(msg)
 		return s, cmd
-	case "ctrl+n":
+	case key.Matches(msg, s.keys.NewRun):
 		if s.active {
 			s.PendingIntent = ConfirmNewRunIntent{}
 			return s, nil
 		}
 		s.PendingIntent = NavigateToPromptIntent{PreFillGoal: s.goal}
 		return s, nil
-	case "ctrl+r":
+	case key.Matches(msg, s.keys.RunsList):
 		s.PendingIntent = NavigateToRunsListIntent{}
 		return s, nil
-	case "ctrl+o":
+	case key.Matches(msg, s.keys.ExpandTools):
 		s.SetToolFrameExpanded(!s.toolFrameExpanded)
 		return s, nil
-	case "enter":
+	case key.Matches(msg, s.keys.Submit):
 		text := strings.TrimSpace(s.postInput.Value())
 		if text != "" {
 			s.postInput.Reset()
@@ -45,14 +46,14 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 }
 
 func (s PipelineScreen) handleCompletionKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+r":
+	switch {
+	case key.Matches(msg, s.keys.RunsList):
 		s.PendingIntent = NavigateToRunsListIntent{}
 		return s, nil
-	case "ctrl+n":
+	case key.Matches(msg, s.keys.NewRun):
 		s.PendingIntent = NavigateToPromptIntent{PreFillGoal: s.goal}
 		return s, nil
-	case "ctrl+q":
+	case key.Matches(msg, s.keys.Quit):
 		return s, tea.Quit
 	}
 	return s, nil
@@ -60,19 +61,15 @@ func (s PipelineScreen) handleCompletionKey(msg tea.KeyPressMsg) (PipelineScreen
 
 func (s PipelineScreen) handleEditConfirmKey(msg tea.KeyPressMsg) (PipelineScreen, tea.Cmd) {
 	if s.hasEditComment {
-		switch msg.Code {
-		case tea.KeyTab:
+		switch {
+		case key.Matches(msg, s.keys.FocusNext): // Tab: stop adding a comment
 			s.hasEditComment = false
 			return s, nil
-		case tea.KeyEscape:
+		case key.Matches(msg, s.keys.Back): // Esc: discard the comment
 			s.editConfirmComment.Reset()
 			s.hasEditComment = false
 			return s, nil
-		case tea.KeyEnter:
-			if msg.Mod.Contains(tea.ModShift) || msg.Mod.Contains(tea.ModAlt) {
-				s.editConfirmComment.InsertString("\n")
-				return s, nil
-			}
+		case key.Matches(msg, s.keys.Submit): // bare Enter: save the comment
 			comment := strings.TrimSpace(s.editConfirmComment.Value())
 			s.PendingIntent = ConfirmEditIntent{
 				EditedContent: s.pendingEditContent,
@@ -85,6 +82,12 @@ func (s PipelineScreen) handleEditConfirmKey(msg tea.KeyPressMsg) (PipelineScree
 			s.enterStreaming()
 			return s, nil
 		}
+		// Shift/Alt+Enter inserts a newline; any other printable key edits the
+		// comment. Newline insertion is the textarea's own concern, not a binding.
+		if msg.Code == tea.KeyEnter {
+			s.editConfirmComment.InsertString("\n")
+			return s, nil
+		}
 		if !msg.Mod.Contains(tea.ModCtrl) && !msg.Mod.Contains(tea.ModAlt) && !msg.Mod.Contains(tea.ModMeta) {
 			var cmd tea.Cmd
 			s.editConfirmComment, cmd = s.editConfirmComment.Update(msg)
@@ -93,18 +96,18 @@ func (s PipelineScreen) handleEditConfirmKey(msg tea.KeyPressMsg) (PipelineScree
 		return s, nil
 	}
 
-	switch msg.Code {
-	case tea.KeyUp:
+	switch {
+	case key.Matches(msg, s.keys.Up):
 		if s.editConfirmCursor > 0 {
 			s.editConfirmCursor--
 		}
 		return s, nil
-	case tea.KeyDown:
+	case key.Matches(msg, s.keys.Down):
 		if s.editConfirmCursor < 1 {
 			s.editConfirmCursor++
 		}
 		return s, nil
-	case tea.KeyTab:
+	case key.Matches(msg, s.keys.FocusNext): // Tab: add a context comment
 		if s.editConfirmCursor == 0 {
 			ta := textarea.New()
 			ta.Placeholder = "Describe your changes..."
@@ -117,7 +120,7 @@ func (s PipelineScreen) handleEditConfirmKey(msg tea.KeyPressMsg) (PipelineScree
 			return s, nil
 		}
 		return s, nil
-	case tea.KeyEnter:
+	case key.Matches(msg, s.keys.Submit):
 		if s.editConfirmCursor == 0 {
 			comment := ""
 			if s.hasEditComment {
@@ -140,8 +143,7 @@ func (s PipelineScreen) handleEditConfirmKey(msg tea.KeyPressMsg) (PipelineScree
 		s.content = ContentHumanGate
 		s.awaitingPlanDecision = true
 		return s, nil
-	case tea.KeyEscape:
-		// Same as "No"
+	case key.Matches(msg, s.keys.Back): // Esc — same as "No"
 		s.pendingEditContent = ""
 		s.hasEditComment = false
 		s.content = ContentHumanGate
@@ -159,17 +161,17 @@ func (s PipelineScreen) viewFooter(ctrlCPending bool) string {
 
 	switch s.content {
 	case ContentUserQuestion:
-		return keyStyle.Render(s.question.Footer()+"  [^H] help  ") + ctrlCHint
+		return keyStyle.Render(s.question.Footer()+"  ") + ctrlCHint
 	case ContentHumanGate:
 		if s.activeChat != nil {
-			return keyStyle.Render(s.activeChat.Footer()+"  [^H] help  ") + ctrlCHint
+			return keyStyle.Render(s.activeChat.Footer()+"  ") + ctrlCHint
 		}
-		return keyStyle.Render(" [^H] help  ") + ctrlCHint
+		return ctrlCHint
 	case ContentEditConfirm:
 		if s.hasEditComment {
-			return keyStyle.Render(" [Tab/Enter] save context | [Esc] discard                    [^H] help  ") + ctrlCHint
+			return keyStyle.Render(" [Tab/Enter] save context | [Esc] discard  ") + ctrlCHint
 		}
-		return keyStyle.Render(" [↑↓] navigate | [Tab] add context | [Enter] confirm | [Esc] discard  [^H] help  ") + ctrlCHint
+		return keyStyle.Render(" [↑↓] navigate | [Tab] add context | [Enter] confirm | [Esc] discard  ") + ctrlCHint
 	case ContentCompletion:
 		hint := " [^N] new run  [^R] runs  [^Q] quit"
 		if s.reviewTokensIn+s.reviewTokensOut > 0 {

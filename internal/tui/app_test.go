@@ -159,7 +159,7 @@ func TestTUI_PlanEditOpensExternalEditor(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentHumanGate
-	m.pipelineScreen.activeChat = newHumanChatMode(orchestrator.GateRequest{Position: orchestrator.GateAfterDeliberation}, m.runeUI)
+	m.pipelineScreen.activeChat = newHumanChatMode(orchestrator.GateRequest{Position: orchestrator.GateAfterDeliberation}, m.keys)
 	m.pipelineScreen.hasPlan = true
 	m.pipelineScreen.finalPlan = plan
 

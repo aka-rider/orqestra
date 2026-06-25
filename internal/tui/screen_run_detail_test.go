@@ -9,10 +9,11 @@ import (
 	"time"
 
 	"github.com/xiii/orqestra/internal/orchestrator"
+	"github.com/xiii/orqestra/internal/tui/keymap"
 )
 
 func TestRunDetailScrollFollow(t *testing.T) {
-	s := NewRunDetailScreen()
+	s := NewRunDetailScreen(keymap.Default())
 	steps := make([]orchestrator.StepMeta, 10)
 	for i := range steps {
 		steps[i] = orchestrator.StepMeta{
@@ -47,7 +48,7 @@ func TestRunDetailScrollFollow(t *testing.T) {
 }
 
 func TestRunDetailViewPurity(t *testing.T) {
-	s := NewRunDetailScreen()
+	s := NewRunDetailScreen(keymap.Default())
 	s.stepsVP.SetWidth(40)
 	s.stepsVP.SetHeight(20)
 	s.detailVP.SetWidth(80)
@@ -79,7 +80,7 @@ func TestRunDetailPerStepContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := NewRunDetailScreen()
+	s := NewRunDetailScreen(keymap.Default())
 	s.detailVP.SetWidth(80)
 	s.detailVP.SetHeight(20)
 	s.stepsVP.SetWidth(40)

@@ -4,14 +4,17 @@ import (
 	"os"
 	"strings"
 
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/xiii/orqestra/internal/tui/keymap"
 	"rune/pkg/ui/components/textedit"
 )
 
 // PromptScreen manages the task prompt input and file picker.
 type PromptScreen struct {
+	keys          keymap.Bindings
 	input         PromptInput
 	fp            filePicker
 	fpActive      bool
@@ -23,8 +26,9 @@ type PromptScreen struct {
 }
 
 // NewPromptScreen creates a new prompt screen with a focused PromptInput.
-func NewPromptScreen(ui runeUI) PromptScreen {
+func NewPromptScreen(ui runeUI, keys keymap.Bindings) PromptScreen {
 	return PromptScreen{
+		keys: keys,
 		input: newPromptInput(ui).SetPlaceholder(
 			"Enter a task description. Be specific about the end state.",
 		),
@@ -81,29 +85,28 @@ func (s PromptScreen) Update(msg tea.Msg) (PromptScreen, tea.Cmd) {
 		return s.handleFilePickerKey(keyMsg)
 	}
 
-	// Reserved chords: intercept before delegating to textedit.
-	switch keyMsg.String() {
-	case "ctrl+r":
+	// Reserved chords and submit: intercept before delegating to textedit.
+	switch {
+	case key.Matches(keyMsg, s.keys.RunsList):
 		s.PendingIntent = NavigateToRunsListIntent{}
 		return s, nil
-	case "ctrl+p":
+	case key.Matches(keyMsg, s.keys.SetupPanel):
 		s.PendingIntent = ToggleSetupIntent{}
 		return s, nil
-	}
-
-	// Enter: submit or insert newline — NEVER delegated to textedit.
-	if keyMsg.Code == tea.KeyEnter {
-		if keyMsg.Mod.Contains(tea.ModShift) || keyMsg.Mod.Contains(tea.ModAlt) {
-			// Shift+Enter / Alt+Enter → insert newline at cursor.
-			off := s.input.CursorOffset()
-			s.input.Model = s.input.Model.ReplaceRange(off, off, "\n")
-			return s, nil
-		}
+	case key.Matches(keyMsg, s.keys.Submit):
 		prompt := strings.TrimSpace(s.input.Value())
 		if prompt == "" {
 			return s, nil
 		}
 		s.PendingIntent = StartPipelineIntent{Prompt: prompt}
+		return s, nil
+	}
+
+	// Shift+Enter / Alt+Enter → insert a newline at the cursor (the input's own
+	// micro-key, never the Submit binding). Other enters already returned above.
+	if keyMsg.Code == tea.KeyEnter {
+		off := s.input.CursorOffset()
+		s.input.Model = s.input.Model.ReplaceRange(off, off, "\n")
 		return s, nil
 	}
 

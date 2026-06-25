@@ -121,13 +121,13 @@ func NewModel(engine *orchestrator.Engine, configName string) (Model, error) {
 	return Model{
 		state:             StatePrompt,
 		keys:              keys,
-		promptScreen:      NewPromptScreen(ui),
+		promptScreen:      NewPromptScreen(ui, keys),
 		pipelineScreen:    NewPipelineScreen(configName, ui, keys),
 		engine:            engine,
 		runeUI:            ui,
-		runsListScreen:    NewRunsListScreen(),
-		runDetailScreen:   NewRunDetailScreen(),
-		setupScreen:       newSetupModel(),
+		runsListScreen:    NewRunsListScreen(keys),
+		runDetailScreen:   NewRunDetailScreen(keys),
+		setupScreen:       newSetupModel(keys),
 		confirmedSetup:    orchestrator.DefaultPipelineSetup(),
 	}, nil
 }
