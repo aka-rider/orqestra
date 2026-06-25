@@ -16,7 +16,13 @@ var errReportArrived = errors.New("supervisor: report arrived")
 // Defined here so the orchestrator package does not need to import mcp beyond
 // what engine_types.go already has.
 type ReportSignaler interface {
-	ReportSignal(agentID string) <-chan struct{}
+	// RegisterSession re-arms the correlation slot for agentID with the given
+	// sessionID. Call on EventSessionStart, before calling ReportSignal.
+	RegisterSession(agentID, sessionID string)
+	// ReportSignal returns a channel closed when a report arrives for key
+	// (which is reportKey(agentID, sessionID)). Returns a pre-closed channel if
+	// the report has already arrived. Callers must not close the channel.
+	ReportSignal(key string) <-chan struct{}
 }
 
 // AgentSupervisor is the single owner of the agent lifecycle.
@@ -72,21 +78,23 @@ func (s *AgentSupervisor) Run(
 
 	policies := buildPolicies(spec)
 
-	// Report-arrival signal — only for roles that submit via SubmitReport.
+	// reportSig starts nil; it is lazily bound in the supervise loop when
+	// EventSessionStart delivers a session ID via sessionC. A nil channel never
+	// fires in select, so the case is a no-op until bound.
 	var reportSig <-chan struct{}
-	if spec.ExpectsReport && s.reports != nil && spec.AgentID != "" {
-		reportSig = s.reports.ReportSignal(spec.AgentID)
-	}
 
 	// Decide whether to open an input plane.
-	// Pure passthrough: no policies, no caller-supplied in, no report signal —
+	// Pure passthrough: no policies, no caller-supplied in, and no report machinery —
 	// preserves the single-shot -p behaviour of the original merge path.
-	// If reportSig is set we must enter the supervise loop to act on it.
-	needsInputPlane := len(policies) > 0 || in != nil || reportSig != nil
+	// The report condition mirrors the sessionC creation guard below; a bridge-less
+	// ExpectsReport spec should not enter the input plane (spec.Prompt would be
+	// seeded into msgs and cleared, changing the subprocess invocation mode).
+	needsInputPlane := len(policies) > 0 || in != nil || (spec.ExpectsReport && s.reports != nil && spec.AgentID != "")
 
 	var msgs chan harness.Message
 	var baseIn <-chan harness.Message
 	var events chan harness.Event
+	var sessionC chan string
 	var runSink harness.Sink
 
 	if needsInputPlane {
@@ -120,7 +128,11 @@ func (s *AgentSupervisor) Run(
 		baseIn = msgs
 
 		events = make(chan harness.Event, 64)
-		runSink = &fanoutSink{inner: sink, events: events}
+		if spec.ExpectsReport && s.reports != nil && spec.AgentID != "" {
+			// 1-slot buffer: EventSessionStart fires once; duplicates dropped.
+			sessionC = make(chan string, 1)
+		}
+		runSink = &fanoutSink{inner: sink, events: events, sessionC: sessionC}
 	} else {
 		baseIn = in
 		runSink = sink
@@ -171,6 +183,13 @@ func (s *AgentSupervisor) Run(
 			oc := <-runDone
 			s.recordUsage(spec.AgentID, oc.res)
 			return s.resolveErr(ctx, oc.res, oc.err)
+
+		case sid := <-sessionC:
+			// Session ID arrived non-lossily. Re-arm the bridge slot and bind
+			// reportSig. After this, the case below becomes live.
+			key := reportKey(spec.AgentID, sid)
+			s.reports.RegisterSession(spec.AgentID, sid)
+			reportSig = s.reports.ReportSignal(key)
 
 		case <-reportSig:
 			// Report arrived: cancel with the report sentinel so resolveErr
@@ -274,14 +293,25 @@ func buildPolicies(spec harness.ProcessSpec) []supervisorPolicy {
 // fanoutSink forwards every event to both the real sink and the events channel.
 // Observe is called from the harness sink goroutine — the events channel send
 // is non-blocking to avoid stalling the sink.
+//
+// sessionC is a dedicated 1-slot channel for EventSessionStart delivery.
+// It is non-lossy within a single session (only the first session_id is sent;
+// duplicates are silently dropped by the default: branch).
 type fanoutSink struct {
-	inner  harness.Sink
-	events chan<- harness.Event
+	inner    harness.Sink
+	events   chan<- harness.Event
+	sessionC chan<- string
 }
 
 func (f *fanoutSink) Observe(ev harness.Event) {
 	if f.inner != nil {
 		f.inner.Observe(ev)
+	}
+	if ev.Kind == harness.EventSessionStart && ev.SessionID != "" && f.sessionC != nil {
+		select {
+		case f.sessionC <- ev.SessionID:
+		default: // first session_id already delivered; duplicates dropped
+		}
 	}
 	select {
 	case f.events <- ev:

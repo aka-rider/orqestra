@@ -13,10 +13,10 @@ type fakeReportStore struct {
 	reports map[string]string
 }
 
-func (f *fakeReportStore) TakeReport(agentID string) (string, bool) {
-	r, ok := f.reports[agentID]
+func (f *fakeReportStore) TakeReport(key string) (string, bool) {
+	r, ok := f.reports[key]
 	if ok {
-		delete(f.reports, agentID)
+		delete(f.reports, key)
 	}
 	return r, ok
 }
@@ -63,7 +63,8 @@ func TestExtractReport_SubmitReportTierOneShot(t *testing.T) {
 	const agentID = "architect"
 	const validPlan = "# Plan\n\n## Goal\nAdd a flag.\n\n## Work Packages\n### 1. Edit main.go\n"
 
-	store := &fakeReportStore{reports: map[string]string{agentID: validPlan}}
+	// Key is reportKey(agentID, res.SessionID) = res.SessionID when non-empty.
+	store := &fakeReportStore{reports: map[string]string{"fake-session-abc": validPlan}}
 
 	sc := StepContext{
 		Log:     slog.Default(),

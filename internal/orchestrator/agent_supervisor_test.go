@@ -82,13 +82,29 @@ func (c *blockingCapturingPlayer) hasMessage(text string) bool {
 
 // --- other helpers -----------------------------------------------------------
 
-// preFiredSignaler returns a pre-closed channel for all agentIDs.
+// preFiredSignaler returns a pre-closed channel for any key.
 type preFiredSignaler struct{}
+
+func (preFiredSignaler) RegisterSession(_, _ string) {}
 
 func (preFiredSignaler) ReportSignal(_ string) <-chan struct{} {
 	ch := make(chan struct{})
 	close(ch)
 	return ch
+}
+
+// sessionEmittingBlocker emits EventSessionStart with sessionID via the sink,
+// then blocks until ctx is cancelled. Used to exercise the lazy-bind path.
+type sessionEmittingBlocker struct {
+	sessionID string
+}
+
+func (p *sessionEmittingBlocker) Run(ctx context.Context, _ harness.ProcessSpec, _ <-chan harness.Message, sink harness.Sink) (harness.RunResult, error) {
+	if sink != nil {
+		sink.Observe(harness.Event{Kind: harness.EventSessionStart, SessionID: p.sessionID})
+	}
+	<-ctx.Done()
+	return harness.RunResult{SessionID: p.sessionID}, ctx.Err()
 }
 
 func newTestSupervisor(base harness.Executor) *AgentSupervisor {
@@ -209,9 +225,10 @@ func TestSupervisor_LoopEscalation(t *testing.T) {
 }
 
 func TestSupervisor_ReportArrivalStopsRun(t *testing.T) {
-	// preFiredSignaler returns a pre-closed channel — report "already arrived".
-	// Supervisor detects it and stops cleanly (errReportArrived → nil).
-	player := &blockingPlayer{player: &fixturePlayer{path: "testdata/normal_exit.jsonl"}}
+	// sessionEmittingBlocker fires EventSessionStart → fanoutSink delivers sessionID
+	// to sessionC → supervisor lazy-binds reportSig via RegisterSession+ReportSignal
+	// → preFiredSignaler returns pre-closed channel → supervisor stops cleanly (nil).
+	player := &sessionEmittingBlocker{sessionID: "test-sid"}
 	guard := NewBudgetGuard(NewRunUsage(0))
 	sup := NewAgentSupervisor(player, preFiredSignaler{}, guard)
 

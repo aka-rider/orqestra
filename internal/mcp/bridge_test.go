@@ -230,30 +230,36 @@ func TestQuestionBridge_ReportRoundTrip(t *testing.T) {
 	}
 }
 
-func TestQuestionBridge_RunClearsStaleReport(t *testing.T) {
+func TestQuestionBridge_RegisterSessionClearsStaleReport(t *testing.T) {
+	// Run() no longer clears stale state. RegisterSession does.
 	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-stale-%d.sock", os.Getpid()))
 	defer os.Remove(sockPath)
 	bridge := NewQuestionBridge(sockPath)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	runBridge(t, ctx, bridge, sockPath)
 
-	// First run: send a report, then stop.
-	ctx1, cancel1 := context.WithCancel(ctx)
-	runDone1 := runBridge(t, ctx1, bridge, sockPath)
+	// Deliver report for "critic" and let it sit (simulate cancelled-before-TakeReport run).
 	if err := sendReport(sockPath, "critic", "stale report", ""); err != nil {
-		cancel1()
 		t.Fatalf("sendReport: %v", err)
 	}
-	cancel1()
-	<-runDone1 // wait for full exit including deferred socket removal
+	// Verify it's there.
+	if _, ok := bridge.TakeReport("critic"); !ok {
+		t.Fatal("expected report to be stored initially")
+	}
 
-	// Second run: Run() clears stale state at startup.
-	runBridge(t, ctx, bridge, sockPath)
+	// Simulate the next run: deliver again without taking, then RegisterSession.
+	if err := sendReport(sockPath, "critic", "stale report 2", ""); err != nil {
+		t.Fatalf("sendReport 2: %v", err)
+	}
+
+	// RegisterSession (no sessionID → agentID key) must clear the stale report.
+	bridge.RegisterSession("critic", "")
 
 	_, ok := bridge.TakeReport("critic")
 	if ok {
-		t.Error("expected stale report to be cleared on second Run")
+		t.Error("expected stale report to be cleared by RegisterSession")
 	}
 }
 
@@ -345,19 +351,18 @@ func TestReportSignal_ReArmedAfterTakeReport(t *testing.T) {
 	}
 }
 
-func TestReportSignal_ReArmedAfterRestart(t *testing.T) {
+func TestReportSignal_ReArmedAfterRegisterSession(t *testing.T) {
+	// RegisterSession (not Run) is the re-arm trigger.
 	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-sig-restart-%d.sock", os.Getpid()))
 	defer os.Remove(sockPath)
 	bridge := NewQuestionBridge(sockPath)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	runBridge(t, ctx, bridge, sockPath)
 
-	// First run.
-	ctx1, cancel1 := context.WithCancel(ctx)
-	runDone1 := runBridge(t, ctx1, bridge, sockPath)
-
-	// Subscribe before stopping the first run.
+	// Subscribe before the first run completes — simulates a run that was cancelled
+	// before the agent ever submitted a report.
 	sigBefore := bridge.ReportSignal("architect")
 	select {
 	case <-sigBefore:
@@ -365,28 +370,39 @@ func TestReportSignal_ReArmedAfterRestart(t *testing.T) {
 	default:
 	}
 
-	cancel1()
-	<-runDone1 // wait for full exit including deferred socket removal
+	// RegisterSession re-arms the slot: sigBefore is orphaned (never closed; the old
+	// supervisor goroutine already exited when the run was cancelled).
+	bridge.RegisterSession("architect", "")
 
-	// Second run: reportWaiters cleared by Run().
-	runBridge(t, ctx, bridge, sockPath)
-
-	// New subscription after restart must return a fresh open channel.
+	// New subscription must return a fresh open channel.
 	sigAfter := bridge.ReportSignal("architect")
 	select {
 	case <-sigAfter:
-		t.Fatal("re-armed signal after restart should be open, not pre-closed")
+		t.Fatal("re-armed signal after RegisterSession should be open, not pre-closed")
 	default:
 	}
 
-	// Delivery on the new run closes the new signal (not the stale one).
+	// sigBefore is still open — it was orphaned, not closed.
+	select {
+	case <-sigBefore:
+		t.Fatal("orphaned signal should remain open after RegisterSession")
+	default:
+	}
+
+	// Delivery on the new run closes sigAfter.
 	if err := sendReport(sockPath, "architect", "# Plan\n## Goal\nAfter restart.", ""); err != nil {
 		t.Fatalf("sendReport: %v", err)
 	}
 	select {
 	case <-sigAfter:
 	case <-time.After(time.Second):
-		t.Fatal("re-armed signal did not close after delivery on new run")
+		t.Fatal("re-armed signal did not close after delivery")
+	}
+	// sigBefore must remain open.
+	select {
+	case <-sigBefore:
+		t.Fatal("orphaned signal must not fire on second run's delivery")
+	default:
 	}
 }
 

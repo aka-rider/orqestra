@@ -21,8 +21,10 @@ type Step[In, Out any] interface {
 // ReportStore retrieves agent report submissions delivered via SubmitReport.
 // TakeReport returns the report text and true if a submission exists, then
 // removes it so it is consumed exactly once.
+// key is the value from reportKey(agentID, sessionID): a session ID when
+// non-empty, or agentID as fallback for models that emit no session_id.
 type ReportStore interface {
-	TakeReport(agentID string) (string, bool)
+	TakeReport(key string) (string, bool)
 }
 
 // StepContext carries cross-cutting capabilities by value.
@@ -91,7 +93,7 @@ func extractReport(
 
 	// Tier 1: SubmitReport submission.
 	if sc.Reports != nil {
-		if sub, ok := sc.Reports.TakeReport(agentID); ok && sub != "" {
+		if sub, ok := sc.Reports.TakeReport(reportKey(agentID, res.SessionID)); ok && sub != "" {
 			if looksLikeReport(sub) {
 				return sub, nil
 			}
