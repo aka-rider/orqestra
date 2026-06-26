@@ -11,14 +11,15 @@ import "charm.land/lipgloss/v2"
 // configuration set before any frame is built, matching how the rest of the TUI
 // holds styles as package-level values. It is never mutated afterwards.
 type Styles struct {
-	Prose    lipgloss.Style
-	Steer    lipgloss.Style
-	Summary  lipgloss.Style
-	Phase    lipgloss.Style
-	Question lipgloss.Style
-	Answer   lipgloss.Style
-	Live     lipgloss.Style
-	Tool     ToolStyles
+	Prose     lipgloss.Style
+	Steer     lipgloss.Style
+	Summary   lipgloss.Style
+	Phase     lipgloss.Style
+	Question  lipgloss.Style
+	Answer    lipgloss.Style
+	Live      lipgloss.Style
+	Collapsed lipgloss.Style // dim "… and +N more tools" summary in a collapsed TurnGroup
+	Tool      ToolStyles
 }
 
 var theme Styles

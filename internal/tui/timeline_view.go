@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -17,9 +16,6 @@ func (t Timeline) View() string {
 	}
 
 	selMin, selMax := normaliseSel(t.anchor, t.cursor)
-	dim := t.dimCollapsed()
-	dimCount := len(dim)
-	dimEmitted := false
 
 	var b strings.Builder
 	b.Grow(w * h * 2)
@@ -31,26 +27,12 @@ func (t Timeline) View() string {
 			break
 		}
 		rr := t.rows[ri]
-		if dim[rr.frameIdx] {
-			if !dimEmitted {
-				dimEmitted = true
-				blink := ""
-				if t.active && t.blinkOn {
-					blink = "⏺ "
-				}
-				b.WriteString(dimStyle.Render(blink + fmt.Sprintf("… and +%d more tools", dimCount)))
-				b.WriteByte('\n')
-				rowsRendered++
-			}
-			continue
-		}
 		b.WriteString(renderRow(rr, ri, t.hasSel, selMin, selMax, t.styles.selectionBg))
 		b.WriteByte('\n')
 		rowsRendered++
 	}
 
-	// Live tail: the in-progress unit (live prose + cursor) renders itself below
-	// the static rows. The Timeline only asks it for Rows() — no type knowledge.
+	// Live tail renders below static rows — the Timeline asks only for Rows().
 	if avail := h - rowsRendered; t.tail != nil && avail > 0 {
 		rowsRendered += t.renderTail(&b, avail)
 	}
@@ -76,19 +58,6 @@ func (t Timeline) renderTail(b *strings.Builder, avail int) int {
 		written++
 	}
 	return written
-}
-
-// dimCollapsed returns the set of frame indices to fold (oldest collapsible
-// members beyond constToolFrameMax), or nil when expanded or under the cap.
-func (t Timeline) dimCollapsed() map[int]bool {
-	if t.expanded || len(t.collapsed) <= constToolFrameMax {
-		return nil
-	}
-	dim := make(map[int]bool)
-	for _, fi := range t.collapsed[:len(t.collapsed)-constToolFrameMax] {
-		dim[fi] = true
-	}
-	return dim
 }
 
 // renderRow renders one static display row, overlaying the selection background

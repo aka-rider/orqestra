@@ -44,16 +44,16 @@ func TestProse_RendersText(t *testing.T) {
 func TestTool_StatusIcons(t *testing.T) {
 	tool := NewTool("Read", "main.go")
 	pending := tool.SetWidth(40).(Tool)
-	if !strings.HasPrefix(pending.Rows()[0].Text(), "◌") {
-		t.Errorf("pending should start with ◌, got %q", pending.Rows()[0].Text())
+	if !strings.Contains(pending.Rows()[0].Text(), "◌") {
+		t.Errorf("pending should contain ◌, got %q", pending.Rows()[0].Text())
 	}
 	ok := pending.WithStatus(ToolOK)
-	if !strings.HasPrefix(ok.Rows()[0].Text(), "✓") {
-		t.Errorf("ok should start with ✓, got %q", ok.Rows()[0].Text())
+	if !strings.Contains(ok.Rows()[0].Text(), "✓") {
+		t.Errorf("ok should contain ✓, got %q", ok.Rows()[0].Text())
 	}
 	errd := pending.WithStatus(ToolErr)
-	if !strings.HasPrefix(errd.Rows()[0].Text(), "✗") {
-		t.Errorf("err should start with ✗, got %q", errd.Rows()[0].Text())
+	if !strings.Contains(errd.Rows()[0].Text(), "✗") {
+		t.Errorf("err should contain ✗, got %q", errd.Rows()[0].Text())
 	}
 }
 
@@ -77,7 +77,7 @@ func TestTool_TailPreserved_NoTruncation(t *testing.T) {
 }
 
 func TestTool_TailTruncate_Narrow(t *testing.T) {
-	// At width 20, only 9 cols remain for the detail (prefixW=9, 2 for parens).
+	// At width 20, prefixW=11 (space+◌space+gap+📖+gap+Read), detailW=7.
 	// truncateToTail keeps the tail, so the directory prefix is dropped but the
 	// basename survives.
 	tool := NewTool("Read", "/very/deeply/nested/path/file.go").SetWidth(20)
@@ -109,15 +109,158 @@ func TestTool_NoDetailWhenNoRoom(t *testing.T) {
 func TestTool_NewFormat(t *testing.T) {
 	tool := NewTool("Read", "/foo/bar.go").SetWidth(80)
 	text := tool.Rows()[0].Text()
-	// Format: ◌  ✑ Read(/foo/bar.go)
-	if !strings.Contains(text, "✑") {
-		t.Errorf("tool should contain Read icon ✑, got %q", text)
+	// Format: " ◌  📖 Read(/foo/bar.go)"
+	if !strings.Contains(text, "📖") {
+		t.Errorf("tool should contain Read icon 📖, got %q", text)
 	}
 	if !strings.Contains(text, "Read(") {
 		t.Errorf("tool should contain 'Read(', got %q", text)
 	}
 	if !strings.Contains(text, "bar.go") {
 		t.Errorf("tool should contain basename 'bar.go', got %q", text)
+	}
+}
+
+// --- TurnGroup ---
+
+func TestTurnGroup_BriefUpdates(t *testing.T) {
+	tg := NewTurnGroup()
+	tg.SetWidth(80)
+	tg.FinalizeProse("Now let me run the tests.")
+	rows := tg.Rows()
+	if len(rows) == 0 {
+		t.Fatal("expected at least one row after FinalizeProse")
+	}
+	if !strings.Contains(rows[0].Text(), "Now let me run the tests.") {
+		t.Errorf("brief header should contain prose, got %q", rows[0].Text())
+	}
+}
+
+func TestTurnGroup_AddResolve(t *testing.T) {
+	tg := NewTurnGroup()
+	tg.SetWidth(80)
+	idx := tg.AddTool("Read", "foo.go")
+	if tg.ToolCount() != 1 {
+		t.Fatalf("expected 1 tool, got %d", tg.ToolCount())
+	}
+	// Pending: ◌
+	found := false
+	for _, r := range tg.Rows() {
+		if strings.Contains(r.Text(), "◌") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("pending tool should show ◌")
+	}
+	tg.ResolveTool(idx, ToolOK)
+	found = false
+	for _, r := range tg.Rows() {
+		if strings.Contains(r.Text(), "✓") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("resolved tool should show ✓")
+	}
+}
+
+func TestTurnGroup_Collapse(t *testing.T) {
+	tg := NewTurnGroup()
+	tg.SetWidth(80)
+	for i := range ConstToolGroupMax + 3 {
+		tg.AddTool("Bash", strings.Repeat("x", i+1))
+	}
+	found := false
+	for _, r := range tg.Rows() {
+		if strings.Contains(r.Text(), "more tools") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected collapsed summary for >ConstToolGroupMax tools")
+	}
+}
+
+func TestTurnGroup_ExpandCollapse(t *testing.T) {
+	tg := NewTurnGroup()
+	tg.SetWidth(80)
+	for range ConstToolGroupMax + 2 {
+		tg.AddTool("Bash", "echo hi")
+	}
+	tg.SetExpanded(true)
+	for _, r := range tg.Rows() {
+		if strings.Contains(r.Text(), "more tools") {
+			t.Error("expanded mode should not show 'more tools' summary")
+		}
+	}
+	tg.SetExpanded(false)
+	found := false
+	for _, r := range tg.Rows() {
+		if strings.Contains(r.Text(), "more tools") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("collapsed mode should show 'more tools' summary")
+	}
+}
+
+func TestTurnGroup_SealAutoExpands(t *testing.T) {
+	tg := NewTurnGroup()
+	tg.SetWidth(80)
+	for range ConstToolGroupMax + 2 {
+		tg.AddTool("Bash", "cmd")
+	}
+	tg.Seal()
+	// After sealing, expanded=true → no "more tools"
+	for _, r := range tg.Rows() {
+		if strings.Contains(r.Text(), "more tools") {
+			t.Error("sealed TurnGroup should not show 'more tools'")
+		}
+	}
+	// Active header gone after seal
+	for _, r := range tg.Rows() {
+		if strings.Contains(r.Text(), "⏺") {
+			t.Error("sealed TurnGroup should not show ⏺")
+		}
+	}
+}
+
+func TestTurnGroup_Resolve_Empty(t *testing.T) {
+	tg := NewTurnGroup()
+	tg.SetWidth(80)
+	tg.Seal()
+	snap := tg.Resolve()
+	if snap != nil && len(snap.Rows()) > 0 {
+		t.Error("resolving an empty TurnGroup should yield nil or empty rows")
+	}
+}
+
+func TestTurnGroup_Resolve_Static(t *testing.T) {
+	tg := NewTurnGroup()
+	tg.SetWidth(80)
+	tg.FinalizeProse("Hello world.")
+	tg.AddTool("Read", "bar.go")
+	tg.ResolveTool(0, ToolOK)
+	tg.Seal()
+	snap := tg.Resolve()
+	if snap == nil {
+		t.Fatal("expected non-nil TurnSnapshot")
+	}
+	rows := rowsText(snap)
+	found := map[string]bool{"Hello world.": false, "✓": false, "bar.go": false}
+	for _, row := range rows {
+		for k := range found {
+			if strings.Contains(row, k) {
+				found[k] = true
+			}
+		}
+	}
+	for k, ok := range found {
+		if !ok {
+			t.Errorf("TurnSnapshot missing %q in rows: %v", k, rows)
+		}
 	}
 }
 

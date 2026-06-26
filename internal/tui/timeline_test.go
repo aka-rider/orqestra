@@ -65,9 +65,6 @@ func TestTimeline_AppendPhase_AddsRuleFrame(t *testing.T) {
 func TestTimeline_AppendReturnsIndex_SetFrameResolves(t *testing.T) {
 	tl := newTestTimeline(80, 20)
 	idx := tl.Append(frame.NewTool("Read", "/foo/bar.go"))
-	if tl.CollapsibleCount() != 1 {
-		t.Fatalf("expected 1 collapsible frame, got %d", tl.CollapsibleCount())
-	}
 	if !strings.Contains(tl.View(), "◌") {
 		t.Error("pending tool should render ◌")
 	}
@@ -198,15 +195,28 @@ func TestTimeline_View_LiveDeltaText(t *testing.T) {
 	}
 }
 
-func TestTimeline_View_DimCollapse(t *testing.T) {
+func TestTimeline_PromoteTail(t *testing.T) {
 	tl := newTestTimeline(80, 40)
-	for i := range constToolFrameMax + 3 {
-		text := strings.Repeat("x", i+1)
-		idx := tl.Append(frame.NewTool("Bash", text))
-		tl.SetFrame(idx, frame.NewTool("Bash", text).WithStatus(frame.ToolOK))
+	tg := frame.NewTurnGroup()
+	tl.SetTail(tg)
+	tg.SetWidth(80)
+	tg.FinalizeProse("hello from turn")
+	tg.AddTool("Bash", "echo hi")
+	tg.ResolveTool(0, frame.ToolOK)
+	tg.Seal()
+	tl.PromoteTail()
+	if tl.tail != nil {
+		t.Error("PromoteTail should clear the tail")
 	}
-	if !strings.Contains(tl.View(), "more tools") {
-		t.Error("expected the dim-collapse summary for excess collapsible frames")
+	if len(tl.frames) != 1 {
+		t.Fatalf("PromoteTail should append 1 static frame, got %d", len(tl.frames))
+	}
+	view := tl.View()
+	if !strings.Contains(view, "hello from turn") {
+		t.Errorf("promoted TurnSnapshot should render prose: %q", view)
+	}
+	if !strings.Contains(view, "✓") {
+		t.Errorf("promoted TurnSnapshot should render resolved tool ✓: %q", view)
 	}
 }
 

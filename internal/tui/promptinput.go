@@ -329,7 +329,7 @@ func (p PromptInput) View() string {
 		}
 		// matchStyle/activeMatchStyle are no-ops here: the prompt input has no
 		// search-match highlighting (mirrors rune's own no-search callers).
-		renderedLines = append(renderedLines, textedit.CellsToString(lineCells, selStyle, cursorStyle, lipgloss.NewStyle(), lipgloss.NewStyle()))
+		renderedLines = append(renderedLines, textedit.CellsToString(lineCells, selStyle, cursorStyle, lipgloss.NewStyle(), lipgloss.NewStyle(), false))
 	}
 
 	for len(renderedLines) < contentH {

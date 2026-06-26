@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
+	"github.com/xiii/orqestra/internal/tui/frame"
 	"github.com/xiii/orqestra/internal/tui/keymap"
 )
 
@@ -83,13 +84,17 @@ func TestViewStreaming_FilePathsAreFullPaths(t *testing.T) {
 }
 
 // TestDrainStreamUpdates_TextLineGoesToTimeline verifies that a newline-terminated
-// EntryText is promoted to the timeline as a static prose frame.
+// EntryText is stored in the active TurnGroup's prose and appears in the view.
 func TestDrainStreamUpdates_TextLineGoesToTimeline(t *testing.T) {
 	s := PipelineScreen{
-		streamBuf: orchestrator.NewStreamRing(200),
-		timeline:  NewTimeline(keymap.Default(), timelineStyles{selectionBg: selectionBg}),
+		streamBuf:   orchestrator.NewStreamRing(200),
+		timeline:    NewTimeline(keymap.Default(), timelineStyles{selectionBg: selectionBg}),
 		knownAgents: make(map[string]string),
 	}
+	s.timeline.SetRect(image.Rect(0, 0, 80, 20))
+	tg := frame.NewTurnGroup()
+	s.currentTurn = tg
+	s.timeline.SetTail(tg)
 
 	updates := make(chan orchestrator.StreamEntry, 2)
 	updates <- orchestrator.StreamEntry{Kind: orchestrator.EntryText, Text: "hello world\n"}
@@ -97,20 +102,25 @@ func TestDrainStreamUpdates_TextLineGoesToTimeline(t *testing.T) {
 
 	s.DrainStreamUpdates(updates)
 
-	// The completed line must appear in the timeline.
 	if !s.timeline.HasContent() {
-		t.Fatal("expected timeline to have content after ingesting a completed line")
+		t.Fatal("expected timeline to have content (active tail)")
+	}
+	if !strings.Contains(s.timeline.View(), "hello world") {
+		t.Error("expected 'hello world' in the brief header after FinalizeProse")
 	}
 }
 
-// The producer (not the Timeline) resolves tools: a tool-use appends a pending
-// frame and tracks it; the matching result resolves it in place via SetFrame.
+// The producer resolves tools in the TurnGroup: a tool-use adds a pending entry
+// and the matching result resolves it in place via ResolveTool.
 func TestPipeline_ToolResolvedByProducer(t *testing.T) {
 	s := PipelineScreen{
 		timeline:    NewTimeline(keymap.Default(), timelineStyles{selectionBg: selectionBg}),
 		knownAgents: make(map[string]string),
 	}
 	s.timeline.SetRect(image.Rect(0, 0, 80, 20))
+	tg := frame.NewTurnGroup()
+	s.currentTurn = tg
+	s.timeline.SetTail(tg)
 
 	ch := make(chan orchestrator.StreamEntry, 4)
 	ch <- orchestrator.StreamEntry{Kind: orchestrator.EntryToolUse, Tool: "Read", Detail: "foo.go"}
@@ -121,6 +131,7 @@ func TestPipeline_ToolResolvedByProducer(t *testing.T) {
 	if len(s.pendingTools) != 0 {
 		t.Errorf("expected the pending tool resolved, %d left", len(s.pendingTools))
 	}
+	// The TurnGroup is the tail; its rows include the resolved tool row.
 	if v := s.timeline.View(); !strings.Contains(v, "✓") {
 		t.Errorf("expected the resolved tool ✓ in the view:\n%s", v)
 	}

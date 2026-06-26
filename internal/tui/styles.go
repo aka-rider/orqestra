@@ -12,13 +12,14 @@ import (
 // timeline_view.go; all package-level style vars are initialised before init.)
 func init() {
 	frame.SetStyles(frame.Styles{
-		Prose:    lipgloss.NewStyle(),
-		Steer:    dimStyle,
-		Summary:  phaseStyle,
-		Phase:    dividerStyle,
-		Question: phaseStyle,
-		Answer:   dimStyle,
-		Live:     streamSpeechStyle,
+		Prose:     lipgloss.NewStyle(),
+		Steer:     dimStyle,
+		Summary:   phaseStyle,
+		Phase:     dividerStyle,
+		Question:  phaseStyle,
+		Answer:    dimStyle,
+		Live:      streamSpeechStyle,
+		Collapsed: dimStyle,
 		Tool: frame.ToolStyles{
 			Pending: streamToolPendingStyle,
 			OK:      streamToolOKStyle,

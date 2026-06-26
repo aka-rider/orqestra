@@ -51,8 +51,13 @@ type PipelineScreen struct {
 	agents      []AgentRow
 	knownAgents map[string]string
 
-	// pendingTools tracks unresolved tool frames by index so the producer (not
-	// the Timeline) can resolve them to ok/err/unknown via Timeline.SetFrame.
+	// currentTurn is the active TurnGroup (live ⏺ header + tool rows). The same
+	// pointer is set as the Timeline's tail so both views share the state.
+	// Nil between turns (after Seal+Promote and before the next agent starts).
+	currentTurn *frame.TurnGroup
+
+	// pendingTools tracks unresolved tool entries by local TurnGroup index so
+	// resolvePendingTool can update the correct slot.
 	pendingTools []pendingTool
 
 	// Completion state
@@ -102,10 +107,10 @@ func (s *PipelineScreen) Start(goal string) tea.Cmd {
 	s.enterStreaming()
 	var cmd tea.Cmd
 	s.timeline, cmd = s.timeline.Start()
-	s.showLiveCursor()
-	// Post the opening prompt to the timeline through the same path every later
-	// message uses, so the user's first input is visible (bug: first prompt was
-	// never shown). Full Chat unification (deleting PromptScreen) follows.
+	// TurnGroup owns the ⏺ heartbeat and accumulates prose+tools for this turn.
+	tg := frame.NewTurnGroup()
+	s.currentTurn = tg
+	s.timeline.SetTail(tg)
 	s.timeline.Append(frame.NewSteer(goal))
 	return cmd
 }
@@ -122,6 +127,7 @@ func (s *PipelineScreen) Reset() {
 	s.seenGateMarkdown = ""
 	s.knownAgents = make(map[string]string)
 	s.pendingTools = nil
+	s.currentTurn = nil
 	s.active = false
 	s.phase = ""
 	s.editConfirm = editConfirmModel{}
@@ -162,14 +168,14 @@ func (s PipelineScreen) inputZoneHeight() int {
 	return constPipelineInputHeight
 }
 
-// SetToolFrameExpanded sets the tool frame expanded/collapsed state and
-// syncs it to the timeline's own expanded field.
+// SetToolFrameExpanded sets the tool frame expanded/collapsed state on the
+// active TurnGroup. No-op when no active turn.
 func (s *PipelineScreen) SetToolFrameExpanded(expanded bool) {
-	if !s.active {
-		return // turn ended: frame is static, ^o has no effect
+	if !s.active || s.currentTurn == nil {
+		return
 	}
 	s.toolFrameExpanded = expanded
-	s.timeline.expanded = expanded
+	s.currentTurn.SetExpanded(expanded)
 }
 
 // SetStreamBuf sets the shared stream buffer for live output.
@@ -177,25 +183,16 @@ func (s *PipelineScreen) SetStreamBuf(buf *orchestrator.StreamRing) {
 	s.streamBuf = buf
 }
 
-// showLiveCursor (re)shows the ⏺ heartbeat — an empty live-prose tail — so the
-// cursor is visible while the agent is active, before any prose streams. The
-// producer owns building the tail; the Timeline only holds it.
-func (s *PipelineScreen) showLiveCursor() {
-	s.timeline.SetTail(frame.NewLiveProse())
-}
-
-// pendingTool is a tool frame awaiting its result, tracked by the producer.
+// pendingTool tracks a tool entry awaiting its result by local TurnGroup index.
 type pendingTool struct {
-	idx      int
-	toolName string
-	text     string
+	localIdx int
 }
 
 // resolvePendingTool resolves the most recently started tool to ok/err. Results
 // arrive newest-first (LIFO), matching how parallel tool calls unwind.
 func (s *PipelineScreen) resolvePendingTool(isErr bool) {
 	n := len(s.pendingTools)
-	if n == 0 {
+	if n == 0 || s.currentTurn == nil {
 		return
 	}
 	pt := s.pendingTools[n-1]
@@ -204,14 +201,16 @@ func (s *PipelineScreen) resolvePendingTool(isErr bool) {
 	if isErr {
 		status = frame.ToolErr
 	}
-	s.timeline.SetFrame(pt.idx, frame.NewTool(pt.toolName, pt.text).WithStatus(status))
+	s.currentTurn.ResolveTool(pt.localIdx, status)
 }
 
-// reconcilePendingTools resolves any tools still pending when an agent finishes,
-// marking them Unknown (result never arrived).
+// reconcilePendingTools marks any still-pending tools Unknown when an agent
+// finishes without sending results.
 func (s *PipelineScreen) reconcilePendingTools() {
-	for _, pt := range s.pendingTools {
-		s.timeline.SetFrame(pt.idx, frame.NewTool(pt.toolName, pt.text).WithStatus(frame.ToolUnknown))
+	if s.currentTurn != nil {
+		for _, pt := range s.pendingTools {
+			s.currentTurn.ResolveTool(pt.localIdx, frame.ToolUnknown)
+		}
 	}
 	s.pendingTools = nil
 }
@@ -248,22 +247,20 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 				} else {
 					line = strings.TrimRight(u.Text, "\n\r")
 				}
-				// The live tail is display-only: drop the streamed copy, append the
-				// authoritative prose, and restart the ⏺ heartbeat for the next turn.
-				s.timeline.ClearLive()
-				if line != "" {
-					s.timeline.Append(frame.NewProse(line))
+				// Finalize the prose in the active TurnGroup (updates the brief header).
+				if s.currentTurn != nil {
+					s.currentTurn.FinalizeProse(line)
 				}
-				s.showLiveCursor()
 			case orchestrator.EntryToolUse:
 				if u.Detail != "" {
 					if s.streamBuf != nil {
 						s.streamBuf.AppendActivity(u.Tool, u.Detail)
 					}
-					// The tool is a static frame above the heartbeat tail (⏺ stays below).
 					text := stripAnsi(u.Detail)
-					idx := s.timeline.Append(frame.NewTool(u.Tool, text))
-					s.pendingTools = append(s.pendingTools, pendingTool{idx: idx, toolName: u.Tool, text: text})
+					if s.currentTurn != nil {
+						localIdx := s.currentTurn.AddTool(u.Tool, text)
+						s.pendingTools = append(s.pendingTools, pendingTool{localIdx: localIdx})
+					}
 				}
 			case orchestrator.EntryToolResult:
 				s.resolvePendingTool(u.ToolErr)

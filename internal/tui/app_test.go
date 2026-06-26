@@ -497,19 +497,19 @@ func TestTUI_StreamingOutput(t *testing.T) {
 
 	m.recalculateLayout()
 
-	// Completed line goes to transcript (visible in View).
+	// With TurnGroup: completed prose accumulates in prose[], partial in brief.
+	// Once a delta arrives it becomes the brief, so "Completed line" is stored
+	// but the view shows the streaming partial as the ⏺ header.
 	view := viewString(m)
-	if !strings.Contains(view, "Completed line") {
-		t.Error("completed line should appear in transcript View()")
-	}
-	// Streaming delta appears in the streaming console partial.
 	if !strings.Contains(view, "Partial in progress") {
-		t.Error("expected streaming delta to appear in streaming console partial")
+		t.Error("expected streaming delta to appear in view (TurnGroup brief and console)")
 	}
-
-	// Completed line must be in the timeline.
+	// The active TurnGroup is the timeline tail — timeline has content.
 	if !m.pipelineScreen.timeline.HasContent() {
-		t.Error("expected timeline to have content after ingesting a completed line")
+		t.Error("expected timeline to have content (active TurnGroup tail)")
+	}
+	if m.pipelineScreen.currentTurn == nil {
+		t.Error("expected active TurnGroup after streaming")
 	}
 }
 

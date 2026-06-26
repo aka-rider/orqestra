@@ -27,6 +27,17 @@ func agentSummaryLine(prefix, icon string, a orchestrator.AgentSnapshot, elapsed
 	return line
 }
 
+// sealAndPromoteTurn seals the active TurnGroup (auto-expands tools, marks
+// inactive) and promotes it to a static TurnSnapshot in the timeline. The
+// currentTurn pointer is cleared so the next agent starts fresh.
+func (s *PipelineScreen) sealAndPromoteTurn() {
+	if s.currentTurn != nil {
+		s.currentTurn.Seal()
+	}
+	s.timeline.PromoteTail()
+	s.currentTurn = nil
+}
+
 // ApplySnapshot updates the screen from an ObsStore snapshot, detecting state
 // transitions (new agent, agent done/failed, gate open, question, terminal).
 func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int) {
@@ -40,8 +51,9 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 		prev, seen := s.knownAgents[a.AgentID]
 		curr := a.Status
 		if !seen {
-			// Reset the live cursor and emit the phase separator on agent transition.
-			s.showLiveCursor()
+			// Seal the previous turn (if any), emit the phase separator, then start
+			// a fresh TurnGroup for the new agent.
+			s.sealAndPromoteTurn()
 			ruleLabel := agentDisplayName(string(a.AgentID))
 			if a.Meta.ModelDisplay != "" {
 				ruleLabel += ": " + a.Meta.ModelDisplay
@@ -49,6 +61,9 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 				ruleLabel += ": " + a.Meta.ModelRef
 			}
 			s.timeline.Append(frame.NewPhase(ruleLabel))
+			tg := frame.NewTurnGroup()
+			s.currentTurn = tg
+			s.timeline.SetTail(tg)
 			s.lastAgentID = a.AgentID
 			if s.streamBuf != nil {
 				s.streamBuf.SetAgent(a.AgentID)
@@ -72,6 +87,7 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 					}
 				}
 				s.reconcilePendingTools()
+				s.sealAndPromoteTurn()
 				s.timeline.Append(frame.NewSummary(agentSummaryLine("Done:", "✓", a, elapsed)))
 			case "failed":
 				for i := range s.agents {
@@ -82,6 +98,8 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 				if a.Error != "" {
 					s.lastErr = errors.New(a.Error)
 				}
+				s.reconcilePendingTools()
+				s.sealAndPromoteTurn()
 				s.timeline.Append(frame.NewSummary(agentSummaryLine("Failed:", "✗", a, a.EndTime.Sub(a.StartTime))))
 			}
 			s.knownAgents[a.AgentID] = curr
@@ -110,12 +128,12 @@ func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int)
 		s.chat.OpenQuestion(snap.UserQuestion, width)
 	}
 
-	// Terminal: pipeline finished.
+	// Terminal: pipeline finished. The active turn is already sealed by the
+	// agent-done path; Stop() just halts the blink loop.
 	if snap.Terminal.Done && s.active && !s.awaitingPlanDecision {
-		s.SetToolFrameExpanded(true) // auto-expand tool frame on turn end
 		s.content = ContentCompletion
 		s.active = false
-		s.timeline.Stop() // halt the live blink loop (bug: ⏺ blinked forever)
+		s.timeline.Stop()
 		if snap.Terminal.Err != nil {
 			s.lastErr = snap.Terminal.Err
 		}

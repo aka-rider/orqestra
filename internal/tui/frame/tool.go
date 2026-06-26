@@ -45,9 +45,6 @@ func NewTool(toolName, detail string) Tool {
 // Status reports the current lifecycle state.
 func (t Tool) Status() ToolStatus { return t.status }
 
-// CollapseGroup marks resolved tool frames as foldable activity (frame.Collapsible).
-func (t Tool) CollapseGroup() string { return "tool" }
-
 // WithStatus returns a copy in the given status, re-laid-out at the prior width.
 func (t Tool) WithStatus(s ToolStatus) Tool {
 	t.status = s
@@ -75,15 +72,15 @@ func (t Tool) layout(w int) []Row {
 	toolIcon := t.toolIcon()
 	st := t.statusStyle()
 	var spans []Span
+	spans = append(spans, Span{Text: " ", Style: st}) // leading indent
 	spans = append(spans, Span{Text: icon, Style: st})
-	spans = append(spans, Span{Text: " ", Style: st}) // gap between status and tool group
+	spans = append(spans, Span{Text: " ", Style: st})
 	spans = append(spans, Span{Text: toolIcon, Style: st})
-	spans = append(spans, Span{Text: " ", Style: st}) // gap between tool icon and name
+	spans = append(spans, Span{Text: " ", Style: st})
 	spans = append(spans, Span{Text: t.toolName, Style: st})
 	if t.detail != "" {
-		// Use runewidth.StringWidth for display-column-accurate prefix length.
-		// Status icon (e.g. "✓ ") = width 2, gap = 1, tool icon = 1–2, gap = 1, toolName = variable.
-		prefixW := runewidth.StringWidth(icon) + 1 +
+		// 1 for leading space; then status icon + gap + tool icon + gap + toolName.
+		prefixW := 1 + runewidth.StringWidth(icon) + 1 +
 			runewidth.StringWidth(toolIcon) + 1 + runewidth.StringWidth(t.toolName)
 		detailW := w - prefixW - 2 // 2 for "()"
 		if detailW > 0 {
@@ -99,16 +96,16 @@ func (t Tool) layout(w int) []Row {
 func (t Tool) toolIcon() string {
 	switch t.toolName {
 	case "Read", "TodoRead":
-		return "✑"
+		return "📖"
 	case "Write", "MultiEdit", "TodoWrite":
 		return "✎"
 	case "Bash":
 		return "❯"
-	case "Grep", "Glob":
-		return "⚲"
+	case "Grep", "Glob", "WebSearch":
+		return "🔍"
 	default:
 		if strings.HasPrefix(t.toolName, "mcp__") {
-			return "⚒"
+			return "⚙"
 		}
 		return "·"
 	}

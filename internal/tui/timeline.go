@@ -10,10 +10,6 @@ import (
 	"github.com/xiii/orqestra/internal/tui/keymap"
 )
 
-// constToolFrameMax is the number of recent tool frames shown bright; older
-// ones fold into a dim "+N more tools" summary unless expanded.
-const constToolFrameMax = 8
-
 // timelineStyles holds the Timeline's own colors. Per-frame styling lives on
 // the frames themselves — the Timeline only owns the selection background.
 type timelineStyles struct {
@@ -39,16 +35,10 @@ type selPos struct{ row, col int }
 type Timeline struct {
 	frames []frame.StaticFrame
 
-	// tail is the single in-progress unit (the live prose with its blinking
-	// cursor) — a frame.InteractiveFrame that Resolve()s into a static frame.
-	// The Timeline forwards blink ticks to it and renders its Rows() below the
-	// static list; it does not know the concrete type.
+	// tail is the single in-progress unit — a frame.InteractiveFrame that
+	// Resolve()s into a static frame when complete. The Timeline forwards blink
+	// ticks to it and renders its Rows() below the static list.
 	tail frame.InteractiveFrame
-
-	// collapsed holds the frame indices that opted into frame.Collapsible, so
-	// the viewport can fold older members (e.g. tool activity) past a cap. The
-	// Timeline reasons about the capability, never a concrete frame type.
-	collapsed []int
 
 	blinkTag int
 	active   bool
@@ -70,10 +60,8 @@ type Timeline struct {
 	autoscrollDir int
 	dragSeq       uint64
 
-	keys     keymap.Bindings
-	styles   timelineStyles
-	expanded bool
-	blinkOn  bool
+	keys   keymap.Bindings
+	styles timelineStyles
 }
 
 // NewTimeline creates a timeline with the given bindings and styles. Frames are
@@ -98,7 +86,6 @@ func (t Timeline) Start() (Timeline, tea.Cmd) {
 func (t *Timeline) Stop() {
 	t.active = false
 	t.blinkTag++
-	t.blinkOn = false
 	t.tail = nil
 }
 
@@ -120,9 +107,6 @@ func (t *Timeline) AppendDelta(text string) {
 // ClearLive drops the live tail (e.g. before promoting a finished turn).
 func (t *Timeline) ClearLive() { t.tail = nil }
 
-// CollapsibleCount reports how many frames opted into frame.Collapsible (tool
-// activity), for the footer's expand/collapse hint.
-func (t Timeline) CollapsibleCount() int { return len(t.collapsed) }
 
 // --- Layout & scroll ---
 
@@ -176,7 +160,6 @@ func (t *Timeline) ScrollToTop() {
 // Clear removes all content and resets to zero state.
 func (t *Timeline) Clear() {
 	t.frames = nil
-	t.collapsed = nil
 	t.rows = nil
 	t.tail = nil
 	t.active = false
@@ -198,7 +181,6 @@ func (t Timeline) Update(msg tea.Msg) (Timeline, tea.Cmd) {
 		if !t.active || msg.tag != t.blinkTag {
 			return t, nil
 		}
-		t.blinkOn = !t.blinkOn
 		if t.tail != nil {
 			t.tail, _ = t.tail.Update(frame.BlinkMsg{})
 		}
@@ -243,18 +225,33 @@ func (t Timeline) contentWidth() int { return t.rect.Dx() }
 // frame it is — the caller builds it (NewProse, NewPhase, NewSteer, NewAnswer,
 // NewPlan, NewTool, …). A frame that opts into frame.Collapsible is tracked so
 // the viewport can fold old ones. New frame kinds need no new Timeline method.
+// Append adds any StaticFrame to the timeline and returns its index. The
+// Timeline is frame-agnostic — callers build frames (NewProse, NewPhase, NewSteer,
+// NewAnswer, NewPlan, NewTool, TurnSnapshot, …) and hand them in here.
 func (t *Timeline) Append(f frame.StaticFrame) int {
 	f = f.SetWidth(t.contentWidth())
 	idx := len(t.frames)
 	t.frames = append(t.frames, f)
-	if _, ok := f.(frame.Collapsible); ok {
-		t.collapsed = append(t.collapsed, idx)
-	}
 	t.appendRows(idx, f)
 	if t.follow {
 		t.scrollToBottom()
 	}
 	return idx
+}
+
+// PromoteTail resolves the live tail into a static frame and appends it to the
+// timeline, then clears the tail. A no-op when the tail is nil or resolves to
+// an empty frame. Called when a turn ends to convert an in-progress TurnGroup
+// into a permanent TurnSnapshot.
+func (t *Timeline) PromoteTail() {
+	if t.tail == nil {
+		return
+	}
+	static := t.tail.Resolve()
+	t.tail = nil
+	if static != nil && len(static.Rows()) > 0 {
+		t.Append(static)
+	}
 }
 
 // SetFrame replaces the frame at idx and rebuilds the row cache — used by the
