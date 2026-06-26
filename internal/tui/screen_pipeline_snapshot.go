@@ -36,6 +36,7 @@ func (s *PipelineScreen) sealAndPromoteTurn() {
 	}
 	s.timeline.PromoteTail()
 	s.currentTurn = nil
+	s.toolFrameExpanded = false
 }
 
 // ApplySnapshot updates the screen from an ObsStore snapshot, detecting state

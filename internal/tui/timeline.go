@@ -218,16 +218,9 @@ func (t Timeline) handleKey(msg tea.KeyPressMsg) (Timeline, tea.Cmd) {
 // contentWidth is the width frames lay out to.
 func (t Timeline) contentWidth() int { return t.rect.Dx() }
 
-// appendStatic lays out a frame at the current width, stores it, and appends its
-// rows to the flat cache.
-// Append adds any StaticFrame to the timeline and returns its index. This is the
-// single content entry point: the Timeline does not know or care which concrete
-// frame it is — the caller builds it (NewProse, NewPhase, NewSteer, NewAnswer,
-// NewPlan, NewTool, …). A frame that opts into frame.Collapsible is tracked so
-// the viewport can fold old ones. New frame kinds need no new Timeline method.
 // Append adds any StaticFrame to the timeline and returns its index. The
 // Timeline is frame-agnostic — callers build frames (NewProse, NewPhase, NewSteer,
-// NewAnswer, NewPlan, NewTool, TurnSnapshot, …) and hand them in here.
+// NewAnswer, NewPlan, TurnSnapshot, …) and hand them in here.
 func (t *Timeline) Append(f frame.StaticFrame) int {
 	f = f.SetWidth(t.contentWidth())
 	idx := len(t.frames)
