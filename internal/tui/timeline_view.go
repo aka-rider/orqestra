@@ -34,7 +34,11 @@ func (t Timeline) View() string {
 		if dim[rr.frameIdx] {
 			if !dimEmitted {
 				dimEmitted = true
-				b.WriteString(dimStyle.Render(fmt.Sprintf(" … and +%d more tools", dimCount)))
+				blink := ""
+				if t.active && t.blinkOn {
+					blink = "⏺ "
+				}
+				b.WriteString(dimStyle.Render(blink + fmt.Sprintf("… and +%d more tools", dimCount)))
 				b.WriteByte('\n')
 				rowsRendered++
 			}

@@ -42,7 +42,7 @@ func TestProse_RendersText(t *testing.T) {
 }
 
 func TestTool_StatusIcons(t *testing.T) {
-	tool := NewTool("read main.go")
+	tool := NewTool("Read", "main.go")
 	pending := tool.SetWidth(40).(Tool)
 	if !strings.HasPrefix(pending.Rows()[0].Text(), "◌") {
 		t.Errorf("pending should start with ◌, got %q", pending.Rows()[0].Text())
@@ -58,12 +58,66 @@ func TestTool_StatusIcons(t *testing.T) {
 }
 
 func TestTool_NeverWrapsAndTruncates(t *testing.T) {
-	tool := NewTool(strings.Repeat("x", 200)).SetWidth(20)
+	tool := NewTool("Bash", strings.Repeat("x", 200)).SetWidth(20)
 	if got := len(tool.Rows()); got != 1 {
 		t.Errorf("tool must be a single row, got %d", got)
 	}
 	if w := tool.Rows()[0].Width(); w > 20 {
 		t.Errorf("tool row width %d exceeds 20", w)
+	}
+}
+
+func TestTool_TailPreserved_NoTruncation(t *testing.T) {
+	// At width 80 the full path fits; baseline check that the path appears intact.
+	tool := NewTool("Read", "/very/deeply/nested/path/file.go").SetWidth(80)
+	text := tool.Rows()[0].Text()
+	if !strings.Contains(text, "/very/deeply/nested/path/file.go") {
+		t.Errorf("short path should appear in full at width 80, got %q", text)
+	}
+}
+
+func TestTool_TailTruncate_Narrow(t *testing.T) {
+	// At width 20, only 9 cols remain for the detail (prefixW=9, 2 for parens).
+	// truncateToTail keeps the tail, so the directory prefix is dropped but the
+	// basename survives.
+	tool := NewTool("Read", "/very/deeply/nested/path/file.go").SetWidth(20)
+	text := tool.Rows()[0].Text()
+	if w := tool.Rows()[0].Width(); w > 20 {
+		t.Errorf("row width %d exceeds 20", w)
+	}
+	if strings.Contains(text, "/very/") {
+		t.Errorf("path prefix should be truncated at width 20, got %q", text)
+	}
+	if !strings.Contains(text, "file.go") {
+		t.Errorf("basename should survive tail-truncation, got %q", text)
+	}
+}
+
+func TestTool_NoDetailWhenNoRoom(t *testing.T) {
+	// At width 10, there is no room for "(detail)" after the prefix (prefixW=9).
+	// The frame must not overflow — detail is silently omitted rather than
+	// appending the full string.
+	tool := NewTool("Bash", "very-long-script.sh").SetWidth(10)
+	if got := len(tool.Rows()); got != 1 {
+		t.Errorf("tool must be a single row even when detail doesn't fit, got %d", got)
+	}
+	if w := tool.Rows()[0].Width(); w > 10 {
+		t.Errorf("tool row width %d exceeds 10 (overflow)", w)
+	}
+}
+
+func TestTool_NewFormat(t *testing.T) {
+	tool := NewTool("Read", "/foo/bar.go").SetWidth(80)
+	text := tool.Rows()[0].Text()
+	// Format: ◌  ✑ Read(/foo/bar.go)
+	if !strings.Contains(text, "✑") {
+		t.Errorf("tool should contain Read icon ✑, got %q", text)
+	}
+	if !strings.Contains(text, "Read(") {
+		t.Errorf("tool should contain 'Read(', got %q", text)
+	}
+	if !strings.Contains(text, "bar.go") {
+		t.Errorf("tool should contain basename 'bar.go', got %q", text)
 	}
 }
 

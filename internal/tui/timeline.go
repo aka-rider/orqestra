@@ -73,6 +73,7 @@ type Timeline struct {
 	keys     keymap.Bindings
 	styles   timelineStyles
 	expanded bool
+	blinkOn  bool
 }
 
 // NewTimeline creates a timeline with the given bindings and styles. Frames are
@@ -97,6 +98,7 @@ func (t Timeline) Start() (Timeline, tea.Cmd) {
 func (t *Timeline) Stop() {
 	t.active = false
 	t.blinkTag++
+	t.blinkOn = false
 	t.tail = nil
 }
 
@@ -196,6 +198,7 @@ func (t Timeline) Update(msg tea.Msg) (Timeline, tea.Cmd) {
 		if !t.active || msg.tag != t.blinkTag {
 			return t, nil
 		}
+		t.blinkOn = !t.blinkOn
 		if t.tail != nil {
 			t.tail, _ = t.tail.Update(frame.BlinkMsg{})
 		}

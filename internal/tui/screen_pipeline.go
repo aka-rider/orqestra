@@ -165,6 +165,9 @@ func (s PipelineScreen) inputZoneHeight() int {
 // SetToolFrameExpanded sets the tool frame expanded/collapsed state and
 // syncs it to the timeline's own expanded field.
 func (s *PipelineScreen) SetToolFrameExpanded(expanded bool) {
+	if !s.active {
+		return // turn ended: frame is static, ^o has no effect
+	}
 	s.toolFrameExpanded = expanded
 	s.timeline.expanded = expanded
 }
@@ -183,8 +186,9 @@ func (s *PipelineScreen) showLiveCursor() {
 
 // pendingTool is a tool frame awaiting its result, tracked by the producer.
 type pendingTool struct {
-	idx  int
-	text string
+	idx      int
+	toolName string
+	text     string
 }
 
 // resolvePendingTool resolves the most recently started tool to ok/err. Results
@@ -200,14 +204,14 @@ func (s *PipelineScreen) resolvePendingTool(isErr bool) {
 	if isErr {
 		status = frame.ToolErr
 	}
-	s.timeline.SetFrame(pt.idx, frame.NewTool(pt.text).WithStatus(status))
+	s.timeline.SetFrame(pt.idx, frame.NewTool(pt.toolName, pt.text).WithStatus(status))
 }
 
 // reconcilePendingTools resolves any tools still pending when an agent finishes,
 // marking them Unknown (result never arrived).
 func (s *PipelineScreen) reconcilePendingTools() {
 	for _, pt := range s.pendingTools {
-		s.timeline.SetFrame(pt.idx, frame.NewTool(pt.text).WithStatus(frame.ToolUnknown))
+		s.timeline.SetFrame(pt.idx, frame.NewTool(pt.toolName, pt.text).WithStatus(frame.ToolUnknown))
 	}
 	s.pendingTools = nil
 }
@@ -257,9 +261,9 @@ func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEn
 						s.streamBuf.AppendActivity(u.Tool, u.Detail)
 					}
 					// The tool is a static frame above the heartbeat tail (⏺ stays below).
-					text := stripAnsi(formatActivityLine(u.Tool, u.Detail, s.cwd))
-					idx := s.timeline.Append(frame.NewTool(text))
-					s.pendingTools = append(s.pendingTools, pendingTool{idx: idx, text: text})
+					text := stripAnsi(u.Detail)
+					idx := s.timeline.Append(frame.NewTool(u.Tool, text))
+					s.pendingTools = append(s.pendingTools, pendingTool{idx: idx, toolName: u.Tool, text: text})
 				}
 			case orchestrator.EntryToolResult:
 				s.resolvePendingTool(u.ToolErr)

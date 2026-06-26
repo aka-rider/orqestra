@@ -1,6 +1,11 @@
 package frame
 
-import "charm.land/lipgloss/v2"
+import (
+	"strings"
+
+	"charm.land/lipgloss/v2"
+	"github.com/mattn/go-runewidth"
+)
 
 // ToolStatus is the lifecycle state of a tool invocation. A Tool frame starts
 // Pending and is resolved to OK/Err when its result arrives, or to Unknown if
@@ -26,14 +31,15 @@ type ToolStyles struct {
 // description. It never wraps. Its status is mutable in place (Pending →
 // OK/Err/Unknown) — a legal state of one frame type, not a kind tag.
 type Tool struct {
-	text   string
-	status ToolStatus
-	rows   []Row
+	toolName string
+	detail   string
+	status   ToolStatus
+	rows     []Row
 }
 
 // NewTool creates a pending tool frame. It owns its status styles via the palette.
-func NewTool(text string) Tool {
-	return Tool{text: text, status: ToolPending}
+func NewTool(toolName, detail string) Tool {
+	return Tool{toolName: toolName, detail: detail, status: ToolPending}
 }
 
 // Status reports the current lifecycle state.
@@ -65,20 +71,71 @@ func (t Tool) rowWidth() int {
 }
 
 func (t Tool) layout(w int) []Row {
-	icon, style := t.iconStyle()
-	s := icon + truncate(t.text, max(0, w-2))
-	return []Row{{Cells: cellsFromSpans([]Span{{Text: s, Style: style}})}}
+	icon := t.statusIcon()
+	toolIcon := t.toolIcon()
+	st := t.statusStyle()
+	var spans []Span
+	spans = append(spans, Span{Text: icon, Style: st})
+	spans = append(spans, Span{Text: " ", Style: st}) // gap between status and tool group
+	spans = append(spans, Span{Text: toolIcon, Style: st})
+	spans = append(spans, Span{Text: " ", Style: st}) // gap between tool icon and name
+	spans = append(spans, Span{Text: t.toolName, Style: st})
+	if t.detail != "" {
+		// Use runewidth.StringWidth for display-column-accurate prefix length.
+		// Status icon (e.g. "✓ ") = width 2, gap = 1, tool icon = 1–2, gap = 1, toolName = variable.
+		prefixW := runewidth.StringWidth(icon) + 1 +
+			runewidth.StringWidth(toolIcon) + 1 + runewidth.StringWidth(t.toolName)
+		detailW := w - prefixW - 2 // 2 for "()"
+		if detailW > 0 {
+			truncated := truncateToTail(t.detail, detailW)
+			spans = append(spans, Span{Text: "(", Style: st})
+			spans = append(spans, Span{Text: truncated, Style: st})
+			spans = append(spans, Span{Text: ")", Style: st})
+		}
+	}
+	return []Row{{Cells: cellsFromSpans(spans)}}
 }
 
-func (t Tool) iconStyle() (string, lipgloss.Style) {
+func (t Tool) toolIcon() string {
+	switch t.toolName {
+	case "Read", "TodoRead":
+		return "✑"
+	case "Write", "MultiEdit", "TodoWrite":
+		return "✎"
+	case "Bash":
+		return "❯"
+	case "Grep", "Glob":
+		return "⚲"
+	default:
+		if strings.HasPrefix(t.toolName, "mcp__") {
+			return "⚒"
+		}
+		return "·"
+	}
+}
+
+func (t Tool) statusIcon() string {
 	switch t.status {
 	case ToolOK:
-		return "✓ ", theme.Tool.OK
+		return "✓ "
 	case ToolErr:
-		return "✗ ", theme.Tool.Err
+		return "✗ "
 	case ToolUnknown:
-		return "· ", theme.Tool.Unknown
+		return "· "
 	default:
-		return "◌ ", theme.Tool.Pending
+		return "◌ "
+	}
+}
+
+func (t Tool) statusStyle() lipgloss.Style {
+	switch t.status {
+	case ToolOK:
+		return theme.Tool.OK
+	case ToolErr:
+		return theme.Tool.Err
+	case ToolUnknown:
+		return theme.Tool.Unknown
+	default:
+		return theme.Tool.Pending
 	}
 }

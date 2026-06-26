@@ -64,6 +64,19 @@ func truncate(s string, n int) string {
 	return string(runes[:n])
 }
 
+// truncateToTail keeps the last n runes of s (i.e., right-truncates from the
+// left). Used for tool details where the basename is more useful than the path prefix.
+func truncateToTail(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[len(runes)-n:])
+}
+
 // cellsFromSpans flattens styled spans into a single cell slice, dropping any
 // newline/carriage-return runes (wrapping is by width, not by embedded newline).
 func cellsFromSpans(spans []Span) []Cell {

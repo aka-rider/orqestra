@@ -158,10 +158,9 @@ func (s PipelineScreen) viewFooter(ctrlCPending bool) string {
 		return keyStyle.Render(" [^N] new run  [^R] runs  [^Q] quit") + ctrlCHint
 	default:
 		// Count tool frames for footer hint.
-		hasOverflow := s.timeline.CollapsibleCount() > constToolFrameMax
-
+		nTools := s.timeline.CollapsibleCount()
 		baseHint := " [⏎] post  [^N] new run  [^R] runs"
-		if s.active && hasOverflow {
+		if s.active && nTools > constToolFrameMax {
 			if s.toolFrameExpanded {
 				baseHint += "  [^O] collapse"
 			} else {

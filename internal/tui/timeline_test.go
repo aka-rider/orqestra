@@ -64,14 +64,14 @@ func TestTimeline_AppendPhase_AddsRuleFrame(t *testing.T) {
 
 func TestTimeline_AppendReturnsIndex_SetFrameResolves(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	idx := tl.Append(frame.NewTool("Read /foo/bar.go"))
+	idx := tl.Append(frame.NewTool("Read", "/foo/bar.go"))
 	if tl.CollapsibleCount() != 1 {
 		t.Fatalf("expected 1 collapsible frame, got %d", tl.CollapsibleCount())
 	}
 	if !strings.Contains(tl.View(), "◌") {
 		t.Error("pending tool should render ◌")
 	}
-	tl.SetFrame(idx, frame.NewTool("Read /foo/bar.go").WithStatus(frame.ToolOK))
+	tl.SetFrame(idx, frame.NewTool("Read", "/foo/bar.go").WithStatus(frame.ToolOK))
 	if !strings.Contains(tl.View(), "✓") {
 		t.Error("resolved tool should render ✓")
 	}
@@ -79,8 +79,8 @@ func TestTimeline_AppendReturnsIndex_SetFrameResolves(t *testing.T) {
 
 func TestTimeline_SetFrame_Error(t *testing.T) {
 	tl := newTestTimeline(80, 20)
-	idx := tl.Append(frame.NewTool("cat /etc/shadow"))
-	tl.SetFrame(idx, frame.NewTool("cat /etc/shadow").WithStatus(frame.ToolErr))
+	idx := tl.Append(frame.NewTool("Bash", "cat /etc/shadow"))
+	tl.SetFrame(idx, frame.NewTool("Bash", "cat /etc/shadow").WithStatus(frame.ToolErr))
 	if !strings.Contains(tl.View(), "✗") {
 		t.Error("errored tool should render ✗")
 	}
@@ -202,8 +202,8 @@ func TestTimeline_View_DimCollapse(t *testing.T) {
 	tl := newTestTimeline(80, 40)
 	for i := range constToolFrameMax + 3 {
 		text := strings.Repeat("x", i+1)
-		idx := tl.Append(frame.NewTool(text))
-		tl.SetFrame(idx, frame.NewTool(text).WithStatus(frame.ToolOK))
+		idx := tl.Append(frame.NewTool("Bash", text))
+		tl.SetFrame(idx, frame.NewTool("Bash", text).WithStatus(frame.ToolOK))
 	}
 	if !strings.Contains(tl.View(), "more tools") {
 		t.Error("expected the dim-collapse summary for excess collapsible frames")
@@ -324,8 +324,8 @@ func TestTimeline_MixedFrames(t *testing.T) {
 	tl := newTestTimeline(80, 40)
 	tl.Append(frame.NewPhase("researcher"))
 	tl.Append(frame.NewProse("Here is my research."))
-	idx := tl.Append(frame.NewTool("read /tmp/data.json"))
-	tl.SetFrame(idx, frame.NewTool("read /tmp/data.json").WithStatus(frame.ToolOK))
+	idx := tl.Append(frame.NewTool("Read", "/tmp/data.json"))
+	tl.SetFrame(idx, frame.NewTool("Read", "/tmp/data.json").WithStatus(frame.ToolOK))
 	tl.Append(frame.NewSteer("approved plan"))
 
 	if len(tl.frames) != 4 {
