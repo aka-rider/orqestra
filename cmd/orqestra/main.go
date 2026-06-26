@@ -297,13 +297,17 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		os.Exit(exitInvalidInput)
 	}
 	workerSpec.AgentID = "worker"
+	workerSpec.ExpectsReport = true
 	workerSpec.Timeout = cfg.Worker.Timeout.Duration
 	workerSpec.LoopGuard = harness.LoopGuardSpec{
 		RepeatThreshold: cfg.Worker.LoopGuard.RepeatThreshold,
 		MaxNudges:       cfg.Worker.LoopGuard.MaxNudges,
 		CooldownTurns:   cfg.Worker.LoopGuard.CooldownTurns,
 	}
-	// SilenceGuard: zero value = disabled (worker runs long Bash commands; silence is expected)
+	workerSpec.SilenceGuard = harness.SilenceGuardSpec{
+		SilenceSecs: cfg.Worker.SilenceGuard.SilenceSecs,
+		NudgeText:   cfg.Worker.SilenceGuard.NudgeText,
+	}
 	workerSpec.PreTimeoutNudge = preTimeoutNudgeFor("worker")
 
 	wtSpecFn := func(wtPath string) harness.ProcessSpec {
@@ -386,10 +390,10 @@ func preTimeoutNudgeFor(role string) string {
 	case "researcher", "architect", "critic":
 		return genericReportNudge
 	case "worker":
-		return "[Orchestrator] Session deadline in ~60 s. " +
-			"Describe what you are doing and what the next step is. " +
-			"If stuck, explain why. Your file changes are already saved — " +
-			"do NOT run cleanup, exit, or discard commands."
+		return "[Orchestrator] Session deadline approaching. " +
+			"If your Validation Report is complete, call mcp__orqestra__SubmitReport " +
+			"with the full report markdown now. " +
+			"Otherwise continue executing — your file changes are already saved."
 	default:
 		return ""
 	}

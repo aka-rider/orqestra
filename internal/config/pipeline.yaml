@@ -241,6 +241,9 @@ worker:
     repeat_threshold: 3
     max_nudges: 3
     cooldown_turns: 2
+  silence_guard:
+    silence_secs: 120
+    nudge_text: "[Orchestrator] No activity for a while. If your validation report is ready, call mcp__orqestra__SubmitReport with the full report markdown; otherwise continue executing."
   system_prompt: |
     Execute autonomously. Do not ask questions — make reasonable judgments
     and document any assumptions in your validation output.
@@ -271,6 +274,9 @@ worker:
 
     ### Failures
     If verdict is FAIL: list each failed criterion with the actual output vs expected.
+
+    5. Call mcp__orqestra__SubmitReport with the full Validation Report markdown as the
+       `report` argument to signal completion to the orchestrator.
 
     RULES:
     - Never skip a work package. If a step is impossible, document why and continue.

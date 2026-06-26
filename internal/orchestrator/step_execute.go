@@ -78,12 +78,23 @@ func (s *ExecuteStep) Run(ctx context.Context, in ExecuteInput, sc StepContext) 
 		return ExecuteOutput{}, fmt.Errorf("worker: %w", err)
 	}
 
-	sc.Artifacts.WriteBestEffort("worker_output.txt", []byte(res.Output))
+	// Prefer the SubmitReport value (tier 1) over the raw output stream (tier 2).
+	// The worker runs in input-plane mode (LoopGuard forces it), so the subprocess
+	// stays alive after producing its text output; ExpectsReport=true lets the
+	// supervisor stop cleanly on SubmitReport and propagates the report via TakeReport.
+	workOutput := res.Output
+	if sc.Reports != nil {
+		if rep, ok := sc.Reports.TakeReport(string(s.ID())); ok && rep != "" {
+			workOutput = rep
+		}
+	}
+
+	sc.Artifacts.WriteBestEffort("worker_output.txt", []byte(workOutput))
 	s.writeMeta(sc, res.SessionID, start, "done", nil, res.Usage)
 	sc.Obs.AgentDone(s.ID(), res.Usage)
 
 	return ExecuteOutput{
-		WorkOutput:   res.Output,
+		WorkOutput:   workOutput,
 		SessionID:    res.SessionID,
 		Worktree:     wt,
 		TargetBranch: targetBranch,
