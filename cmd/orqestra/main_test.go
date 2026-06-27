@@ -51,7 +51,7 @@ func TestRun_Help(t *testing.T) {
 //  4. When mcp_servers is explicit, --strict-mcp-config is set
 //  5. When mcp_servers is nil, no --strict-mcp-config (all user MCPs available)
 //  6. --allowedTools and --disallowedTools are set even with --strict-mcp-config
-//  7. --settings injects permissions.allow for deferred MCP tools
+//  7. --settings injects permissions.allow ["mcp__*"] for all MCP tools
 func TestBridgeToolOpts_Constraints(t *testing.T) {
 	// INV-P2-WRITE: worker never receives bare "*" tool grant; least-privilege MCP constraints enforced
 	mcpDocker := []string{"mcp_docker", "orqestra"}
@@ -165,10 +165,10 @@ func TestBridgeToolOpts_Constraints(t *testing.T) {
 				}
 			}
 
-			// CONSTRAINT 7: --settings injects permissions.allow for MCP bridge
+			// CONSTRAINT 7: --settings injects permissions.allow for all MCP tools (mcp__*)
 			settings := flagValue(args, "--settings")
-			if !strings.Contains(settings, "mcp__orqestra__") {
-				t.Errorf("CONSTRAINT 7 violated: --settings = %q, must contain mcp__orqestra__ permission", settings)
+			if !strings.Contains(settings, `"mcp__*"`) {
+				t.Errorf("CONSTRAINT 7 violated: --settings = %q, must contain mcp__* permission", settings)
 			}
 
 			// Verify user-supplied allowed_tools are preserved

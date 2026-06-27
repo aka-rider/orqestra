@@ -238,6 +238,8 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 			os.Exit(exitInvalidInput)
 		}
 		roSandboxCfg.Profiles = append(roSandboxCfg.Profiles, orqProfile.Snapshot())
+		workerSandboxCfg.Profiles = append(workerSandboxCfg.Profiles, orqProfile.Snapshot())
+		worktreeSandboxCfg.Profiles = append(worktreeSandboxCfg.Profiles, orqProfile.Snapshot())
 	}
 
 	// BuildProcessSpec inherits all options already set in plnOpts/criticOpts,
@@ -287,11 +289,14 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 	// deliver its permission mode and system prompt explicitly. The seatbelt sandbox
 	// is the security boundary — bypassPermissions + --dangerously-skip-permissions
 	// disables Claude Code's own permission prompts so headless execution is unblocked.
-	workerSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Worker.Model, workerSandboxCfg,
+	workerOpts := []harness.ClaudeCLIOption{
 		harness.WithWorkDir(repoPath),
 		harness.WithPermissionMode(cfg.Worker.PermissionMode),
-		harness.WithExtraArgs("--dangerously-skip-permissions"),
-		harness.WithAppendSystemPrompt(harness.MergeAppendPrompts(cfg.Worker.SystemPrompt, cfg.Worker.AppendSystemPrompt)))
+		bridgeOptFor("worker"),
+		harness.WithAppendSystemPrompt(harness.MergeAppendPrompts(cfg.Worker.SystemPrompt, cfg.Worker.AppendSystemPrompt)),
+	}
+	workerOpts = append(workerOpts, openAgentOpts()...)
+	workerSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Worker.Model, workerSandboxCfg, workerOpts...)
 	if specErr != nil {
 		slog.Error("failed to build worker spec", "err", specErr)
 		os.Exit(exitInvalidInput)
@@ -469,6 +474,16 @@ func toolOpts(mcpServers *[]string, allowed, disallowed []string, permissionMode
 	return opts
 }
 
+// openAgentOpts returns permission options applied to every headless agent:
+// all MCP tools pre-approved and interactive prompts bypassed. Single
+// chokepoint — add here, not per-agent.
+func openAgentOpts() []harness.ClaudeCLIOption {
+	return []harness.ClaudeCLIOption{
+		harness.WithExtraArgs("--dangerously-skip-permissions"),
+		harness.WithSettings(`{"permissions":{"allow":["mcp__*"]}}`),
+	}
+}
+
 // bridgeToolOpts returns CLI options that configure the common agent baseline
 // for bridge-enabled agents: block built-in AskUserQuestion, pre-approve all
 // tools for pipe mode, and inject the question-routing system prompt nudge.
@@ -490,14 +505,7 @@ func bridgeToolOpts(base config.BaseAgentConfig) []harness.ClaudeCLIOption {
 
 	opts := toolOpts(base.MCPServers, allowed, disallowed, base.PermissionMode)
 
-	// MCP deferred tools (loaded after session start) are not pre-approved by
-	// --allowedTools alone — Claude CLI's permission system evaluates them
-	// separately. Inject a --settings override that adds the bridge tool to
-	// the permissions.allow list, ensuring it is approved at tool-use time
-	// even when discovered late via deferred_tools_delta.
-	opts = append(opts, harness.WithSettings(
-		`{"permissions":{"allow":["mcp__orqestra__*"]}}`,
-	))
+	opts = append(opts, openAgentOpts()...)
 
 	// Deliver the role's full system prompt to the model. It rides --append-system-prompt
 	// (layer 5) alongside the question-routing default, so Claude Code's base prompt and

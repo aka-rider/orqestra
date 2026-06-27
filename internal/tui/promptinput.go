@@ -208,6 +208,17 @@ func (p PromptInput) handlePaste(content string) (PromptInput, tea.Cmd) {
 // NaturalHeight returns the natural content height at the given width.
 // Used by DesiredInputHeight in screen_prompt.go.
 func (p PromptInput) NaturalHeight(width int) int {
+	// Fast path: the textedit model keeps an up-to-date snapshot at its own
+	// configured width. NaturalContentHeight rebuilds the full layout from
+	// scratch every call (O(n)); reusing TotalRows makes this O(1) and avoids
+	// O(n²) behaviour when the caller queries height repeatedly during typing.
+	// Snapshot().TotalRows also reflects the actual cursor-reveal state, which
+	// is more accurate than NaturalContentHeight's cursor-at-0 approximation.
+	if width == p.Model.Width() {
+		if rows := p.Model.Snapshot().TotalRows; rows > 0 {
+			return rows
+		}
+	}
 	return p.Model.NaturalContentHeight(width)
 }
 

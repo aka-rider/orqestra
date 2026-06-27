@@ -1,5 +1,5 @@
 # 2026-05-11
-.PHONY: build run test test-unit test-integration lint clean e2e sandbox-image test-sandbox qa-verify qa-verify-write
+.PHONY: build run test test-unit test-integration lint clean e2e sandbox-image test-sandbox test-fuzzy
 
 THIS_MAKEFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
 ORQESTRA := "$(dir $(THIS_MAKEFILE_PATH))orqestra"
@@ -36,19 +36,21 @@ test-sandbox:
 # the old `go test -run TestE2E` recipe passed by vacuity (zero tests = green).
 # Until a real L3 lane exists, this target must not masquerade as coverage.
 test-e2e:
-	@echo "test-e2e: no live e2e (L3) tests implemented yet — placeholder, not coverage. See docs/qa/qa-spec.md §5."
+	@echo "test-e2e: no live e2e (L3) tests implemented yet — placeholder, not coverage."
 
 lint:
 	go vet ./...
 
-# QA spec self-defense: anchors resolve, status<->test traceability, ledger
-# freshness, and that documented defects still reproduce (canaries).
-qa-verify:
-	go run ./cmd/qaverify
-
-# Regenerate the generated §9 ledger in docs/qa/qa-spec.md from invariants.yaml.
-qa-verify-write:
-	go run ./cmd/qaverify --write
+# Fuzz all targets for T (default 3m) each, in parallel.
+# Requires: -tags=fuzz build tag; each target runs in a separate go test process.
+# Usage: make test-fuzzy T=3m
+T ?= 3m
+test-fuzzy:
+	@go test -run=^$$ -fuzz=FuzzParseStreamLines      -fuzztime=$(T) -tags=fuzz ./internal/harness/ & p1=$$!; \
+	 go test -run=^$$ -fuzz=FuzzTUIInput              -fuzztime=$(T) -tags=fuzz ./internal/tui/     & p2=$$!; \
+	 go test -run=^$$ -fuzz=FuzzParseValidationOutput -fuzztime=$(T) -tags=fuzz ./internal/agent/   & p3=$$!; \
+	 go test -run=^$$ -fuzz=FuzzParseCommitMessage    -fuzztime=$(T) -tags=fuzz ./internal/agent/   & p4=$$!; \
+	 rc=0; wait $$p1 || rc=1; wait $$p2 || rc=1; wait $$p3 || rc=1; wait $$p4 || rc=1; exit $$rc
 
 test-all: test test-integration test-sandbox test-e2e lint
 

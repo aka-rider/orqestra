@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}\n")
