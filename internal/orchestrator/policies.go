@@ -68,13 +68,18 @@ type silencePolicy struct {
 	basePolicy
 	silenceDur time.Duration
 	nudgeText  string
+	lastNudge  time.Time // zero = never nudged
 }
 
 func (p *silencePolicy) tick(now, lastEvent, _ time.Time) policyResult {
-	if now.Sub(lastEvent) >= p.silenceDur {
-		return policyResult{text: p.nudgeText}
+	if now.Sub(lastEvent) < p.silenceDur {
+		return policyResult{}
 	}
-	return policyResult{}
+	if !p.lastNudge.IsZero() && now.Sub(p.lastNudge) < p.silenceDur {
+		return policyResult{}
+	}
+	p.lastNudge = now
+	return policyResult{text: p.nudgeText}
 }
 
 // -- preTimeoutPolicy ---------------------------------------------------------

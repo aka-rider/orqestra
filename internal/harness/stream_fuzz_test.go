@@ -16,7 +16,7 @@ func FuzzParseStreamLines(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, input []byte) {
 		// Drain events in background so the channel never blocks.
-		ch := make(chan Event, 256)
+		ch := make(chan Event, 4096)
 		done := make(chan struct{})
 		go func() {
 			defer close(done)

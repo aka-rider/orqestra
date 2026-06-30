@@ -87,6 +87,29 @@ func TestSilencePolicy_AtOrAboveThreshold(t *testing.T) {
 	}
 }
 
+func TestSilencePolicy_DoesNotReNudgeWithinCooldown(t *testing.T) {
+	p := &silencePolicy{silenceDur: 5 * time.Second, nudgeText: "wake up"}
+	now := time.Now()
+	last := now.Add(-6 * time.Second)
+	p.tick(now, last, time.Time{}) // first nudge — arms lastNudge
+	r := p.tick(now, last, time.Time{}) // same instant — still within cooldown
+	if r.text != "" {
+		t.Errorf("within cooldown: expected no nudge, got %q", r.text)
+	}
+}
+
+func TestSilencePolicy_ReNudgesAfterAnotherSilenceDur(t *testing.T) {
+	p := &silencePolicy{silenceDur: 5 * time.Second, nudgeText: "wake up"}
+	now := time.Now()
+	last := now.Add(-6 * time.Second)
+	p.tick(now, last, time.Time{}) // first nudge
+	later := now.Add(5 * time.Second)
+	r := p.tick(later, last, time.Time{}) // 5s after first nudge = next window
+	if r.text != "wake up" {
+		t.Errorf("after cooldown: expected nudge, got %q", r.text)
+	}
+}
+
 // -- preTimeoutPolicy ---------------------------------------------------------
 
 func TestPreTimeoutPolicy_NoDeadline(t *testing.T) {
