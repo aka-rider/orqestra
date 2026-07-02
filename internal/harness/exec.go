@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -120,6 +122,32 @@ func Run(ctx context.Context, spec ProcessSpec, in <-chan Message, sink Sink) (R
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
+	// Group-kill on cancel (J32/J15): exec.CommandContext's default Cancel only
+	// kills cmd.Process (the direct child / process-group leader, often
+	// sandbox-exec). If claude spawns node/bash/MCP grandchildren, they inherit
+	// the group set up by Setpgid above; killing only the leader leaves them
+	// holding stdout open forever — parseStream never sees EOF and Run wedges
+	// (the very hang this contract promises not to cause, see :98-100). SIGKILL
+	// the whole process group instead. Cancel only fires after a successful
+	// Start, so cmd.Process is guaranteed non-nil here; the nil check is
+	// belt-and-braces.
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrProcessDone) {
+				return nil // already gone — nothing left to kill
+			}
+			return fmt.Errorf("exec: kill process group %d: %w", cmd.Process.Pid, err)
+		}
+		return nil
+	}
+	// Bound cmd.Wait(): even after the group kill above, cmd.Wait can block on
+	// I/O held by an orphan that hasn't finished dying yet. WaitDelay forces
+	// the pipes closed after this grace period so Wait always returns.
+	cmd.WaitDelay = 5 * time.Second
+
 	env, err := buildEnvFromSpec(spec)
 	if err != nil {
 		return RunResult{}, fmt.Errorf("exec: build env: %w", err)
@@ -187,9 +215,14 @@ func Run(ctx context.Context, spec ProcessSpec, in <-chan Message, sink Sink) (R
 	runDone := make(chan struct{})
 
 	// stdin writer goroutine: drains in and writes NDJSON to stdin.
-	// Exits when in is closed, ctx is done, or runDone fires.
+	// Exits when in is closed, ctx is done, or runDone fires. writerDone is
+	// joined below (J42) so Run never returns while this goroutine is still
+	// live, per the "owns every goroutine ... and joins them" contract at :109.
+	var writerDone chan struct{}
 	if hasInputPlane {
+		writerDone = make(chan struct{})
 		go func() {
+			defer close(writerDone)
 			defer stdinPipe.Close()
 			for {
 				select {
@@ -197,9 +230,9 @@ func Run(ctx context.Context, spec ProcessSpec, in <-chan Message, sink Sink) (R
 					if !ok {
 						return
 					}
-					data, err := json.Marshal(map[string]interface{}{
+					data, err := json.Marshal(map[string]any{
 						"type":               "user",
-						"message":            map[string]interface{}{"role": "user", "content": msg.Text},
+						"message":            map[string]any{"role": "user", "content": msg.Text},
 						"parent_tool_use_id": nil,
 					})
 					if err != nil {
@@ -255,8 +288,12 @@ func Run(ctx context.Context, spec ProcessSpec, in <-chan Message, sink Sink) (R
 	// Parse stdout (blocking: returns when stdout hits EOF).
 	rawResult, isError, usage, sessionID, planFilePath, parseErr := parseStream(stdout, parseEvents)
 
-	// Signal stdin writer that the process is done.
+	// Signal stdin writer that the process is done, then join it (J42): it
+	// already exits on runDone/ctx.Done/in-closed, so this cannot block.
 	close(runDone)
+	if writerDone != nil {
+		<-writerDone
+	}
 
 	// Close the parse→sink bridge; wait for the bridge to drain before closing sinkCh.
 	// Closing parseEvents signals the bridge goroutine to stop; <-bridgeDone waits for it
