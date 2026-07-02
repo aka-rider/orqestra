@@ -53,6 +53,15 @@ func NewControl(obs *ObsStore) Control {
 }
 
 func (c *controlImpl) Gate(ctx context.Context, req GateRequest) (Decision, error) {
+	// Drain any stale buffered decision before opening the gate (J2): a Submit
+	// that raced a prior gate's close (or a double keypress) must not be
+	// silently handed to THIS gate before the user has even seen it — only a
+	// FRESH Submit, made while this gate is open, may satisfy it.
+	select {
+	case <-c.decisions:
+	default:
+	}
+
 	c.obs.GateOpened(req)
 	defer c.obs.GateClosed()
 

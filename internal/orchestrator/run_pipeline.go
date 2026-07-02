@@ -124,7 +124,17 @@ func RunPipeline(ctx context.Context, setup PipelineSetup, in PipelineRunInput,
 			if dec.Type == DecisionApprove {
 				break
 			}
-			// Comment or Edit: revise the plan and re-open the gate.
+			if dec.Type == DecisionEdit && dec.AutoApprove && dec.Comment == "" {
+				// Confirmed edit (J26): the user already reviewed and confirmed
+				// this exact markdown (^E → save → Yes) — treat it as final
+				// approval. No architect re-engagement, no second gate cycle.
+				// An empty EditedContent means "confirm as-is": keep the current plan.
+				if dec.EditedContent != "" {
+					plan.Markdown = dec.EditedContent
+				}
+				break
+			}
+			// Comment or a non-auto-approved Edit: revise the plan and re-open the gate.
 			revised, revErr := steps.Revise.Run(ctx, ReviseInput{Plan: plan, Decision: dec}, sc)
 			if revErr != nil {
 				return Result{Status: StatusFailed}, fmt.Errorf("revise: %w", revErr)

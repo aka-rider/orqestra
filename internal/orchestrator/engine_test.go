@@ -343,12 +343,26 @@ func TestEngine_DecisionEdit(t *testing.T) {
 	defer cancel()
 
 	// First gate: send Edit; second gate: send Approve.
+	//
+	// Edge-triggered via Rev, not via re-observing HasGate: NotifyCh is a
+	// coalescing wake signal and Snapshot is a point-in-time poll, so a stale
+	// wakeup can observe the SAME still-open gate twice before Gate() has
+	// consumed the decision and closed it. Without dedup that double-counts
+	// gate 1 as gate 2, submits the Approve decision while gate 1's Edit
+	// decision is still the one buffered (Approve is silently dropped, cap-1
+	// channel full), and this goroutine returns having never satisfied the
+	// real second gate — which then blocks until ctx times out. GateOpened
+	// always bumps Rev, so a distinct opening always carries an unhandled Rev.
 	gateCount := 0
 	var gateMu sync.Mutex
 	go func() {
+		var lastHandledRev uint64
+		handled := false
 		for {
 			snap := obs.Snapshot()
-			if snap.HasGate && snap.Gate.Position == GateAfterDeliberation {
+			if snap.HasGate && snap.Gate.Position == GateAfterDeliberation && (!handled || snap.Rev != lastHandledRev) {
+				handled = true
+				lastHandledRev = snap.Rev
 				gateMu.Lock()
 				gateCount++
 				n := gateCount
