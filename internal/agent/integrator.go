@@ -2,11 +2,16 @@ package agent
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
 
-const integratorGiveUpPrefix = "INTEGRATOR-GIVE-UP:"
+// integratorGiveUpPattern matches the give-up sentinel with tolerance for
+// drift a 30B-class model may introduce: case, a leading markdown bullet
+// (`- `), bold markers (`**...**`) around the token and/or colon, and a
+// missing colon before the reason.
+var integratorGiveUpPattern = regexp.MustCompile(`(?i)^[-*\s]*INTEGRATOR-GIVE-UP\*{0,2}\s*:?\s*\*{0,2}\s*(.*)$`)
 
 // IntegratorCommitMessagePrompt builds the prompt for the Integrator to produce
 // a semantic commit message from the worker's diff against the base branch.
@@ -55,11 +60,17 @@ Rules:
 
 // ParseIntegratorGiveUp checks whether raw agent output contains the give-up
 // sentinel. Returns (reason, true) if the agent gave up, ("", false) otherwise.
+// Matching is tolerant of the drift a 30B-class model may introduce: case,
+// a leading list marker, markdown bold around the sentinel or colon, and a
+// missing colon before the reason.
 func ParseIntegratorGiveUp(raw string) (reason string, gaveUp bool) {
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, integratorGiveUpPrefix) {
-			return strings.TrimSpace(line[len(integratorGiveUpPrefix):]), true
+		if line == "" {
+			continue
+		}
+		if m := integratorGiveUpPattern.FindStringSubmatch(line); m != nil {
+			return strings.TrimSpace(m[1]), true
 		}
 	}
 	return "", false

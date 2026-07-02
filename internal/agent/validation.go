@@ -37,6 +37,18 @@ type ValidationOutput struct {
 	Raw     string // original text preserved for display and artifact storage
 }
 
+// Textual fallback prefixes recognised when the LLM emits words instead of
+// the ✓/✕/⚠ markers. Matching is case-insensitive on the prefix only; the
+// marker forms above remain the primary, preferred contract.
+const (
+	textPrefixPass   = "pass:"
+	textPrefixOK     = "ok:"
+	textPrefixFail   = "fail:"
+	textPrefixFailed = "failed:"
+	textPrefixSkip   = "skip:"
+	textPrefixWarn   = "warn:"
+)
+
 // ParseValidationOutput is a best-effort parser for raw LLM validation text.
 // It scans for marker-prefixed check lines and derives a typed verdict.
 // The result is advisory — LLM output is non-deterministic and may not follow
@@ -59,6 +71,7 @@ func ParseValidationOutput(raw string) ValidationOutput {
 
 		var outcome CheckOutcome
 		var rest string
+		lower := strings.ToLower(trimmed)
 		switch {
 		case strings.HasPrefix(trimmed, MarkerPass):
 			outcome = CheckPassed
@@ -69,6 +82,15 @@ func ParseValidationOutput(raw string) ValidationOutput {
 		case strings.HasPrefix(trimmed, MarkerWarn):
 			outcome = CheckSkipped
 			rest = strings.TrimPrefix(trimmed, MarkerWarn)
+		case strings.HasPrefix(lower, textPrefixPass) || strings.HasPrefix(lower, textPrefixOK):
+			outcome = CheckPassed
+			rest = trimmed[strings.Index(trimmed, ":")+1:]
+		case strings.HasPrefix(lower, textPrefixFail) || strings.HasPrefix(lower, textPrefixFailed):
+			outcome = CheckFailed
+			rest = trimmed[strings.Index(trimmed, ":")+1:]
+		case strings.HasPrefix(lower, textPrefixSkip) || strings.HasPrefix(lower, textPrefixWarn):
+			outcome = CheckSkipped
+			rest = trimmed[strings.Index(trimmed, ":")+1:]
 		default:
 			continue
 		}
