@@ -80,4 +80,13 @@ type Engine struct {
 type RunHandle struct {
 	Obs  *ObsStore
 	Ctrl Control
+
+	// forwarderDone is closed once this run's question-forwarder goroutine has
+	// been joined (WP4b/J5,J41) — always before Obs.Finished is called, so an
+	// observer reacting to Obs's terminal state (e.g. starting the next run)
+	// never races this run's forwarder teardown, guaranteeing at most one
+	// consumer of the shared QuestionBridge.Questions() channel at a time.
+	// Unexported: white-box test instrumentation only, invisible outside this
+	// package (the TUI never depends on it).
+	forwarderDone chan struct{}
 }

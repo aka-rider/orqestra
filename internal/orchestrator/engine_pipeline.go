@@ -17,18 +17,63 @@ import (
 // It creates ObsStore + Control and uses ObsStore directly as the Observer —
 // no bridging channels, no backpressure. The TUI polls Obs.Snapshot() on each
 // notify wakeup or tick.
+//
+// QuestionBridge lifecycle (WP4b/J5,J41): e.QuestionBridge.Run is started
+// exactly ONCE, for the whole engine/TUI-session lifetime, by whoever hands
+// the Engine to the TUI (see tui.Run) — never here. Each run only owns a
+// question-FORWARDER goroutine that relays e.QuestionBridge.Questions() into
+// THIS run's ObsStore. That forwarder runs on its own run-scoped context
+// (derived from ctx, not ctx itself) so it is torn down deterministically
+// when this run's pipeline work concludes, independent of whether ctx is
+// ever cancelled — a natural completion never cancels ctx (J41), so without
+// this the forwarder would leak and stay a live consumer of the shared
+// Questions() channel forever. The forwarder is joined BEFORE obs.Finished
+// signals completion (not merely deferred to goroutine exit), so any
+// observer reacting to Terminal.Done — the TUI, or a test starting the next
+// run — can never race this run's forwarder teardown: at most one consumer
+// of Questions() exists at any time, even across back-to-back runs.
 func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 	obs := NewObsStore()
 	ctrl := NewControl(obs)
 
+	runCtx, runCancel := context.WithCancel(ctx)
+	forwarderDone := make(chan struct{})
+	if e.QuestionBridge != nil {
+		go func() {
+			defer close(forwarderDone)
+			for {
+				select {
+				case q, ok := <-e.QuestionBridge.Questions():
+					if !ok {
+						return
+					}
+					obs.UserQuestion(q)
+				case <-runCtx.Done():
+					return
+				}
+			}
+		}()
+	} else {
+		close(forwarderDone)
+	}
+
 	go func() {
+		// finish joins the question-forwarder BEFORE signaling terminal state —
+		// see the lifecycle comment above. Every return path in this goroutine
+		// MUST go through finish, not obs.Finished directly.
+		finish := func(res Result, err error) {
+			runCancel()
+			<-forwarderDone
+			obs.Finished(res, err)
+		}
+
 		// Setup session directory.
 		var session agent.SessionDir
 		if e.RunDirFactory != nil {
 			var err error
 			session, err = e.RunDirFactory("run")
 			if err != nil {
-				obs.Finished(Result{Status: StatusFailed}, fmt.Errorf("create run directory: %w", err))
+				finish(Result{Status: StatusFailed}, fmt.Errorf("create run directory: %w", err))
 				return
 			}
 		}
@@ -55,28 +100,6 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 		if session.Path != "" {
 			artifacts := NewArtifactSink(session)
 			artifacts.WriteBestEffort("prompt.md", []byte(input.Prompt))
-		}
-
-		// Question bridge.
-		if e.QuestionBridge != nil {
-			go func() {
-				if err := e.QuestionBridge.Run(ctx); err != nil {
-					logger.Warn("question bridge", "err", err)
-				}
-			}()
-			go func() {
-				for {
-					select {
-					case q, ok := <-e.QuestionBridge.Questions():
-						if !ok {
-							return
-						}
-						obs.UserQuestion(q)
-					case <-ctx.Done():
-						return
-					}
-				}
-			}()
 		}
 
 		// Build supervisor for process-group and worktree cleanup.
@@ -110,7 +133,7 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 		setup := resolveSetup(input)
 
 		if err := setup.Validate(); err != nil {
-			obs.Finished(Result{Status: StatusFailed}, fmt.Errorf("invalid pipeline setup: %w", err))
+			finish(Result{Status: StatusFailed}, fmt.Errorf("invalid pipeline setup: %w", err))
 			return
 		}
 
@@ -118,7 +141,7 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 		// return inside DeliberateStep.Run, so Rounds is irrelevant in that case.
 		deliberate, ok := steps.Deliberate.(*DeliberateStep)
 		if !ok {
-			obs.Finished(Result{Status: StatusFailed}, fmt.Errorf("internal: Deliberate step is not *DeliberateStep"))
+			finish(Result{Status: StatusFailed}, fmt.Errorf("internal: Deliberate step is not *DeliberateStep"))
 			return
 		}
 		deliberate.Rounds = setup.DeliberationRounds
@@ -132,15 +155,15 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 			result.Status = StatusCancelled
 		}
 		result.RunDir = session.Path
-		obs.Finished(result, err)
 		errText := ""
 		if err != nil {
 			errText = err.Error()
 		}
+		finish(result, err)
 		logger.Info("run_complete", "status", string(result.Status), "err", errText)
 	}()
 
-	return RunHandle{Obs: obs, Ctrl: ctrl}
+	return RunHandle{Obs: obs, Ctrl: ctrl, forwarderDone: forwarderDone}
 }
 
 // buildPipelineSteps constructs PipelineSteps from e.Specs and e.Config.
