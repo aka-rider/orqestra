@@ -174,7 +174,11 @@ func (s *AgentSupervisor) Run(
 
 	applyResult := func(r policyResult) {
 		if r.stop {
-			cancelCause(ErrLoopEscalated)
+			cause := r.err
+			if cause == nil {
+				cause = ErrLoopEscalated // safety net; every escalating policy sets err
+			}
+			cancelCause(cause)
 			return
 		}
 		if r.text != "" {
@@ -288,9 +292,14 @@ func buildPolicies(spec harness.ProcessSpec) []supervisorPolicy {
 		if nudgeText == "" {
 			nudgeText = spec.PreTimeoutNudge
 		}
+		maxNudges := spec.SilenceGuard.MaxNudges
+		if maxNudges <= 0 {
+			maxNudges = 3
+		}
 		ps = append(ps, &silencePolicy{
 			silenceDur: time.Duration(spec.SilenceGuard.SilenceSecs) * time.Second,
 			nudgeText:  nudgeText,
+			maxNudges:  maxNudges,
 		})
 	}
 

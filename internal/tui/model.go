@@ -69,10 +69,10 @@ type Model struct {
 	regions   regionBounds // pipeline alt-screen layout regions
 
 	// Pipeline observation + control (ObsStore polling path)
-	obs     *orchestrator.ObsStore
-	ctrl    orchestrator.Control
-	lastRev uint64
-	cancel  context.CancelFunc
+	obs         *orchestrator.ObsStore
+	ctrl        orchestrator.Control
+	lastRev     uint64
+	cancelCause context.CancelCauseFunc
 
 	// Engine
 	engine *orchestrator.Engine

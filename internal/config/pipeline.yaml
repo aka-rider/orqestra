@@ -166,7 +166,7 @@ critic:
   model: medium
   permission_mode: default
   max_turns: 15
-  timeout: 15m
+  timeout: 45m
   silence_guard:
     silence_secs: 60
     nudge_text: "[Orchestrator] No activity for a while. If your critic report is ready, submit it now via mcp__orqestra__SubmitReport; otherwise continue reviewing."

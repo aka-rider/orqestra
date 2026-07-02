@@ -263,6 +263,7 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 	archSpec.SilenceGuard = harness.SilenceGuardSpec{
 		SilenceSecs: cfg.Architect.SilenceGuard.SilenceSecs,
 		NudgeText:   cfg.Architect.SilenceGuard.NudgeText,
+		MaxNudges:   cfg.Architect.SilenceGuard.MaxNudges,
 	}
 	archSpec.PreTimeoutNudge = preTimeoutNudgeFor("architect")
 
@@ -282,6 +283,7 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 	criticSpec.SilenceGuard = harness.SilenceGuardSpec{
 		SilenceSecs: cfg.Critic.SilenceGuard.SilenceSecs,
 		NudgeText:   cfg.Critic.SilenceGuard.NudgeText,
+		MaxNudges:   cfg.Critic.SilenceGuard.MaxNudges,
 	}
 	criticSpec.PreTimeoutNudge = preTimeoutNudgeFor("critic")
 
@@ -312,6 +314,7 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 	workerSpec.SilenceGuard = harness.SilenceGuardSpec{
 		SilenceSecs: cfg.Worker.SilenceGuard.SilenceSecs,
 		NudgeText:   cfg.Worker.SilenceGuard.NudgeText,
+		MaxNudges:   cfg.Worker.SilenceGuard.MaxNudges,
 	}
 	workerSpec.PreTimeoutNudge = preTimeoutNudgeFor("worker")
 
@@ -379,7 +382,6 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		QuestionBridge: bridge,
 	}
 }
-
 
 // genericReportNudge is sent to report roles (researcher, architect, critic) both
 // 60 s before the hard deadline and when the driftPolicy detects implementation intent.

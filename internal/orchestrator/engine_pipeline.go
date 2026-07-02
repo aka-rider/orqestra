@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -127,9 +128,16 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 			RunID:  filepath.Base(session.Path),
 		}, sc, steps)
 
+		if err != nil && errors.Is(context.Cause(ctx), ErrUserCancelled) {
+			result.Status = StatusCancelled
+		}
 		result.RunDir = session.Path
 		obs.Finished(result, err)
-		logger.Info("run_complete", "status", string(result.Status))
+		errText := ""
+		if err != nil {
+			errText = err.Error()
+		}
+		logger.Info("run_complete", "status", string(result.Status), "err", errText)
 	}()
 
 	return RunHandle{Obs: obs, Ctrl: ctrl}

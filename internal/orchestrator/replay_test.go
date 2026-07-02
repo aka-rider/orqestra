@@ -80,6 +80,7 @@ func emitAssistantEvents(msgRaw json.RawMessage, sink harness.Sink) {
 		Content []struct {
 			Type  string          `json:"type"`
 			Name  string          `json:"name"`
+			Text  string          `json:"text"`
 			Input json.RawMessage `json:"input"`
 		} `json:"content"`
 	}
@@ -87,11 +88,17 @@ func emitAssistantEvents(msgRaw json.RawMessage, sink harness.Sink) {
 		return
 	}
 	for _, block := range msg.Content {
-		if block.Type == "tool_use" {
+		switch block.Type {
+		case "tool_use":
 			var argsBuf bytes.Buffer
 			if err := json.Compact(&argsBuf, block.Input); err == nil {
 				sink.Observe(harness.Event{Kind: harness.EventToolUse, Tool: block.Name, Args: argsBuf.String()})
 			}
+		case "text":
+			// A whole (non-delta) assistant message — the turn-boundary signal
+			// silencePolicy watches for. Fixtures replay one complete message
+			// per line, so every text block here is IsDelta:false.
+			sink.Observe(harness.Event{Kind: harness.EventChunk, Text: block.Text, IsDelta: false})
 		}
 	}
 }

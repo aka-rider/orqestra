@@ -45,8 +45,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, m.keys.Cancel) {
 		// Second Ctrl+C within the time gate → cancel and quit immediately.
 		if m.ctrlCPending && time.Now().Before(m.ctrlCDeadline) {
-			if m.cancel != nil {
-				m.cancel()
+			if m.cancelCause != nil {
+				m.cancelCause(orchestrator.ErrUserCancelled)
 			}
 			return m, tea.Quit
 		}

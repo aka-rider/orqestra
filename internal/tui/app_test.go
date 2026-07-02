@@ -92,15 +92,15 @@ func TestTUI_PromptSubmit(t *testing.T) {
 	if model.ctrl == nil {
 		t.Error("model.ctrl is nil after prompt submit — gate responses will never be sent")
 	}
-	if model.cancel == nil {
-		t.Error("model.cancel is nil after prompt submit — pipeline cannot be stopped")
+	if model.cancelCause == nil {
+		t.Error("model.cancelCause is nil after prompt submit — pipeline cannot be stopped")
 	}
 	// Cmd should be non-nil (waitForEvent + tick)
 	if cmd == nil {
 		t.Error("expected non-nil cmd from startPipeline")
 	}
 	// Clean up: cancel the pipeline
-	model.cancel()
+	model.cancelCause(nil)
 }
 
 func TestTUI_PromptEmptyIgnored(t *testing.T) {
@@ -213,7 +213,7 @@ func TestTUI_CancelAgent(t *testing.T) {
 	m.pipelineScreen.content = ContentStreaming
 	m.pipelineScreen.active = true
 	cancelled := false
-	m.cancel = func() { cancelled = true }
+	m.cancelCause = func(error) { cancelled = true }
 
 	// First Ctrl+C cancels the pipeline
 	result, _ := sendCtrl(m, 'c')
@@ -275,7 +275,7 @@ func TestTUI_NewRunConfirm(t *testing.T) {
 	m.pipelineScreen.goal = "active task"
 	m.pipelineScreen.active = true
 	cancelled := false
-	m.cancel = func() { cancelled = true }
+	m.cancelCause = func(error) { cancelled = true }
 
 	// Press Ctrl+N during active pipeline — directly confirms new run
 	result, _ := sendCtrl(m, 'n')
@@ -325,7 +325,7 @@ func TestTUI_DoubleCtrlC(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
 	m.pipelineScreen.active = true
-	m.cancel = func() {}
+	m.cancelCause = func(error) {}
 
 	// First Ctrl+C — cancels pipeline, sets pending
 	result, cmd := sendCtrl(m, 'c')
@@ -359,7 +359,7 @@ func TestTUI_CtrlCTimeoutResets(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
 	m.pipelineScreen.active = true
-	m.cancel = func() {}
+	m.cancelCause = func(error) {}
 
 	// First Ctrl+C
 	result, _ := sendCtrl(m, 'c')
@@ -646,7 +646,7 @@ func TestTUI_RestartClearsErrorAndAgents(t *testing.T) {
 	if model2.pipelineScreen.lastErr != nil {
 		t.Errorf("expected lastErr cleared on new pipeline start, got %v", model2.pipelineScreen.lastErr)
 	}
-	model2.cancel()
+	model2.cancelCause(nil)
 }
 
 func TestTUI_PlanGateBlocksOverwrite(t *testing.T) {
@@ -826,7 +826,6 @@ func TestTUI_DrainLoopChannelCloseAfterGate(t *testing.T) {
 	t.Skip("skipped: channel-close race not possible with ObsStore/Control gate blocking")
 }
 
-
 func TestTUI_ShiftEnterNewline(t *testing.T) {
 	m := testModel()
 	m.promptScreen.SetValue("line one")
@@ -854,7 +853,7 @@ func TestTUI_ShiftEnterNewline(t *testing.T) {
 	if model3.state != StatePipeline {
 		t.Errorf("expected StatePipeline after plain Enter, got %d", model3.state)
 	}
-	model3.cancel()
+	model3.cancelCause(nil)
 }
 
 // TestApplySnapshot_TerminalErrShowsInCompletion verifies that a pipeline failure

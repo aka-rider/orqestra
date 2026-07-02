@@ -126,7 +126,10 @@ func (s *DeliberateStep) runRound(
 	revSpec := s.ArchSpec
 	revSpec.Prompt = agent.CriticContinuePrompt(planMarkdown, criticMarkdown)
 	revSpec.Resume = harness.ResumeSession(sessionID)
-	revSpec.SilenceGuard = harness.SilenceGuardSpec{} // revision is text-only; silence nudge loops on it
+	// Revision completes by finishing its response, not by calling SubmitReport —
+	// the default architect silence nudge references that tool, so give this
+	// round its own text. SilenceSecs/MaxNudges stay inherited from ArchSpec.
+	revSpec.SilenceGuard.NudgeText = agent.ArchitectRevisionSilenceNudge
 
 	revStart := time.Now()
 	revRes, revised, revErr := runReportAgent(ctx, sc, revSpec, s.ArchMeta, 1)
@@ -135,9 +138,12 @@ func (s *DeliberateStep) runRound(
 		// Distinguish fatal context/budget/loop errors from "chat-only, no plan produced".
 		// Fatal: propagate. Chat-only: fall back to the existing plan.
 		if ctx.Err() != nil {
-			sc.Obs.AgentFailed("architect", ctx.Err())
-			writeMeta(sc, fmt.Sprintf("architect_critic_revision_meta_round%d.json", roundNum+1), string(s.ID()), s.ArchMeta, sessionID, revStart, "failed", ctx.Err(), revRes.Usage)
-			return "", "", fmt.Errorf("architect critic revision: %w", ctx.Err())
+			// Prefer the attributed cause (e.g. ErrUserCancelled) over the bare
+			// ctx.Err() so the meta artifact and logs are self-explanatory.
+			cause := context.Cause(ctx)
+			sc.Obs.AgentFailed("architect", cause)
+			writeMeta(sc, fmt.Sprintf("architect_critic_revision_meta_round%d.json", roundNum+1), string(s.ID()), s.ArchMeta, sessionID, revStart, "failed", cause, revRes.Usage)
+			return "", "", fmt.Errorf("architect critic revision: %w", cause)
 		}
 		// No report extracted — treat as chat-only continuation (no plan rewrite).
 		sc.Log.Debug("architect critic revision: plan unchanged (chat continuation)", "err", revErr)

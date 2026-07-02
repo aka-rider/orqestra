@@ -13,9 +13,9 @@ import (
 type loopDetector struct {
 	spec        harness.LoopGuardSpec
 	fingerprint string
-	count       int  // consecutive repeats of current fingerprint
-	nudgeCount  int  // nudges sent so far
-	cooldown    int  // turns remaining in cooldown
+	count       int // consecutive repeats of current fingerprint
+	nudgeCount  int // nudges sent so far
+	cooldown    int // turns remaining in cooldown
 	escalated   bool
 }
 
@@ -86,6 +86,11 @@ func (d *loopDetector) observe(tool, args string, errResult bool) loopAction {
 // ErrLoopEscalated is returned when the supervisor forcibly stops a run
 // because the loop guard exhausted all nudges.
 var ErrLoopEscalated = fmt.Errorf("loop guard: escalated after repeated identical tool calls")
+
+// ErrSilenceEscalated is returned when the supervisor forcibly stops a run
+// because the silence guard exhausted all nudges after a confirmed empty
+// turn (a completed assistant message with no tool calls).
+var ErrSilenceEscalated = fmt.Errorf("silence guard: escalated")
 
 // preTimeoutWarning is how far before the hard deadline the pre-timeout nudge fires.
 const preTimeoutWarning = 60 * time.Second

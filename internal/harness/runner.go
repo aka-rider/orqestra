@@ -45,6 +45,7 @@ type LoopGuardSpec struct {
 type SilenceGuardSpec struct {
 	SilenceSecs int    // seconds of event-stream silence before nudging; 0 = disabled
 	NudgeText   string // "" falls back to spec.PreTimeoutNudge
+	MaxNudges   int    // nudges tolerated after a confirmed empty turn before escalating; <=0 = default (3)
 }
 
 // EventKind identifies the type of a Runner event.

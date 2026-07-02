@@ -93,6 +93,14 @@ judge all findings to be non-issues, re-output the plan with inline
 notes explaining why.`, criticReport, currentPlan)
 }
 
+// ArchitectRevisionSilenceNudge is the silence-guard nudge text for architect
+// revision rounds (step_deliberate.go's runRound). Revision rounds complete by
+// finishing their response, not by calling SubmitReport, so — unlike the
+// architect's default silence nudge — this text must not reference that tool.
+const ArchitectRevisionSilenceNudge = "[Orchestrator] You have gone idle without making the fix or " +
+	"explaining why none is needed. If you have changes to make to the plan, make them now; if the " +
+	"plan is already correct as-is, say so explicitly in one line."
+
 // CriticReviewPrompt builds the prompt for the critic to review a plan.
 func CriticReviewPrompt(userPrompt, planMarkdown string) string {
 	return fmt.Sprintf("<user_request>\n%s\n</user_request>\n\n<implementation_plan>\n%s\n</implementation_plan>\n\nReview the implementation plan above against the actual codebase. Produce a Critic Report.",

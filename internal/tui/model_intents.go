@@ -59,8 +59,8 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 		m.ctrl.Submit(orchestrator.Decision{Type: orchestrator.DecisionCancel})
 		return m, batch(nil)
 	case CancelPipelineIntent:
-		if m.cancel != nil {
-			m.cancel()
+		if m.cancelCause != nil {
+			m.cancelCause(orchestrator.ErrUserCancelled)
 		}
 		return m, batch(nil)
 	case NavigateToPromptIntent:
@@ -75,8 +75,8 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 		m.navigateToRunsList()
 		return m, batch(nil)
 	case ConfirmNewRunIntent:
-		if m.cancel != nil {
-			m.cancel()
+		if m.cancelCause != nil {
+			m.cancelCause(orchestrator.ErrUserCancelled)
 		}
 		goal := m.pipelineScreen.goal
 		m.pipelineScreen.Reset()
@@ -116,8 +116,8 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 
 // startPipeline launches the orchestrator and returns a command to start listening.
 func (m *Model) startPipeline(prompt string) tea.Cmd {
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancel = cancel
+	ctx, cancel := context.WithCancelCause(context.Background())
+	m.cancelCause = cancel
 
 	handle := m.engine.Start(ctx, orchestrator.Input{
 		Prompt: prompt,
@@ -134,8 +134,8 @@ func (m *Model) startPipeline(prompt string) tea.Cmd {
 // startPipelineRestart launches the orchestrator for a restart run and returns
 // a command to start listening. The restart context is passed through the Input.
 func (m *Model) startPipelineRestart(prompt, runPath string, phase orchestrator.RestartPhase) tea.Cmd {
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancel = cancel
+	ctx, cancel := context.WithCancelCause(context.Background())
+	m.cancelCause = cancel
 
 	handle := m.engine.Start(ctx, orchestrator.Input{
 		Prompt: prompt,

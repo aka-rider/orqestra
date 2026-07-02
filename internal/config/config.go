@@ -127,17 +127,17 @@ func (c *Config) modelNames() []string {
 }
 
 type Config struct {
-	Providers      map[string]ProviderConfig `yaml:"providers"`
-	Models         map[string]ModelConfig    `yaml:"models"`
-	Defaults       DefaultsConfig            `yaml:"defaults"`
-	Pipeline       PipelineConfig            `yaml:"pipeline"`
-	Researcher     ResearcherConfig          `yaml:"researcher"`
-	Architect      ArchitectConfig           `yaml:"architect"`
-	Critic         CriticConfig              `yaml:"critic"`
-	Worker         WorkerConfig              `yaml:"worker"`
-	Integrator     IntegratorConfig          `yaml:"integrator"`
-	Retry          RetryConfig               `yaml:"retry"`
-	Sandbox        SandboxConfig             `yaml:"sandbox"`
+	Providers  map[string]ProviderConfig `yaml:"providers"`
+	Models     map[string]ModelConfig    `yaml:"models"`
+	Defaults   DefaultsConfig            `yaml:"defaults"`
+	Pipeline   PipelineConfig            `yaml:"pipeline"`
+	Researcher ResearcherConfig          `yaml:"researcher"`
+	Architect  ArchitectConfig           `yaml:"architect"`
+	Critic     CriticConfig              `yaml:"critic"`
+	Worker     WorkerConfig              `yaml:"worker"`
+	Integrator IntegratorConfig          `yaml:"integrator"`
+	Retry      RetryConfig               `yaml:"retry"`
+	Sandbox    SandboxConfig             `yaml:"sandbox"`
 }
 
 // DefaultsConfig provides baseline values merged into every agent config.
@@ -150,14 +150,15 @@ type DefaultsConfig struct {
 // LoopGuard configures the LoopBreaker middleware's loop-detection thresholds.
 type LoopGuard struct {
 	RepeatThreshold int `yaml:"repeat_threshold"` // identical tool calls before nudging (default 3)
-	MaxNudges       int `yaml:"max_nudges"`        // nudges before escalating to cancel (default 3)
-	CooldownTurns   int `yaml:"cooldown_turns"`    // turns to wait after a nudge before re-checking (default 2)
+	MaxNudges       int `yaml:"max_nudges"`       // nudges before escalating to cancel (default 3)
+	CooldownTurns   int `yaml:"cooldown_turns"`   // turns to wait after a nudge before re-checking (default 2)
 }
 
 // SilenceGuard configures the SilenceDetector middleware.
 type SilenceGuard struct {
 	SilenceSecs int    `yaml:"silence_secs"` // seconds of event-stream silence before nudging; 0 = disabled
 	NudgeText   string `yaml:"nudge_text"`   // optional; "" falls back to the agent's PreTimeoutNudge text
+	MaxNudges   int    `yaml:"max_nudges"`   // nudges tolerated after a confirmed empty turn before escalating (default 3)
 }
 
 // BaseAgentConfig holds fields shared by all agent roles.
@@ -310,6 +311,9 @@ func (c *Config) applyDefaults() {
 		}
 		if a.LoopGuard.CooldownTurns == 0 {
 			a.LoopGuard.CooldownTurns = 2
+		}
+		if a.SilenceGuard.MaxNudges == 0 {
+			a.SilenceGuard.MaxNudges = 3
 		}
 	}
 }

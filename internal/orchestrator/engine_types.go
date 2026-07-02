@@ -1,11 +1,18 @@
 package orchestrator
 
 import (
+	"errors"
+
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/mcp"
 )
+
+// ErrUserCancelled is the cancellation cause the TUI attributes to the root run
+// context when the user cancels a running pipeline (e.g. Ctrl+C). Distinguishes
+// an intentional stop from an internal failure in run.log and Result.Status.
+var ErrUserCancelled = errors.New("run cancelled by user")
 
 // RestartInput carries context for restarting a failed or incomplete run.
 type RestartInput struct {
@@ -42,9 +49,9 @@ type RunDirFactory func(slug string) (agent.SessionDir, error)
 
 // ProcessSpecs holds per-role ProcessSpec values for the RunPipeline path.
 type ProcessSpecs struct {
-	Architect  harness.ProcessSpec
-	Critic     harness.ProcessSpec
-	Worker     harness.ProcessSpec
+	Architect harness.ProcessSpec
+	Critic    harness.ProcessSpec
+	Worker    harness.ProcessSpec
 	// WorktreeSpecFn returns a spec for the worker scoped to the given worktree path.
 	// If nil, Worker spec is used with direct repo access.
 	WorktreeSpecFn func(wtPath string) harness.ProcessSpec

@@ -118,8 +118,8 @@ func checkFuzzInvariants(t *testing.T, m Model) {
 		t.Fatalf("unknown app state %d", m.state)
 	}
 
-	if (m.obs != nil) != (m.cancel != nil) {
-		t.Fatalf("obs/cancel set asymmetrically: obs=%v cancel=%v", m.obs != nil, m.cancel != nil)
+	if (m.obs != nil) != (m.cancelCause != nil) {
+		t.Fatalf("obs/cancel set asymmetrically: obs=%v cancel=%v", m.obs != nil, m.cancelCause != nil)
 	}
 
 	// Timeline region bounds are only maintained while in StatePipeline.

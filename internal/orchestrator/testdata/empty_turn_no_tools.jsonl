@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"empty-turn-session","cwd":"/repo","model":"claude-sonnet-4-6","tools":["Read","Edit"]}
+{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"No response requested."}]}}

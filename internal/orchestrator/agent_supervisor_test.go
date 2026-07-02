@@ -241,6 +241,58 @@ func TestSupervisor_LoopEscalation(t *testing.T) {
 	}
 }
 
+func TestSupervisor_SilenceEscalation(t *testing.T) {
+	// empty_turn_no_tools.jsonl replays one assistant turn with a text block
+	// and no tool_use — a confirmed empty turn. blockingPlayer then blocks so
+	// the silence guard's tick has a chance to fire and escalate, mirroring
+	// TestSupervisor_LoopEscalation's shape for the silence-guard path.
+	player := &blockingPlayer{player: &fixturePlayer{path: "testdata/empty_turn_no_tools.jsonl"}}
+	sup := newTestSupervisor(player)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	spec := harness.ProcessSpec{
+		Prompt: "revise",
+		SilenceGuard: harness.SilenceGuardSpec{
+			SilenceSecs: 1,
+			NudgeText:   "wake up",
+			MaxNudges:   1,
+		},
+	}
+
+	_, err := sup.Run(ctx, spec, nil, nil)
+	if !errors.Is(err, ErrSilenceEscalated) {
+		t.Errorf("expected ErrSilenceEscalated, got %v", err)
+	}
+}
+
+// TestSupervisor_SilenceGuardDoesNotAffectCleanExit is a regression guard for
+// the emitAssistantEvents change above (text blocks now emit EventChunk): a
+// normal run that completes via a "result" line must still exit cleanly with
+// the silence guard enabled, even though its one turn is text-only.
+func TestSupervisor_SilenceGuardDoesNotAffectCleanExit(t *testing.T) {
+	player := &fixturePlayer{path: "testdata/normal_exit.jsonl"}
+	sup := newTestSupervisor(player)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	spec := harness.ProcessSpec{
+		Prompt: "work",
+		SilenceGuard: harness.SilenceGuardSpec{
+			SilenceSecs: 1,
+			NudgeText:   "wake up",
+			MaxNudges:   1,
+		},
+	}
+
+	_, err := sup.Run(ctx, spec, nil, nil)
+	if err != nil {
+		t.Errorf("expected no error (turn completed cleanly, no stall observed), got %v", err)
+	}
+}
+
 func TestSupervisor_ReportArrivalStopsRun(t *testing.T) {
 	// sessionEmittingBlocker fires EventSessionStart → fanoutSink delivers sessionID
 	// to sessionC → supervisor lazy-binds reportSig via RegisterSession+ReportSignal
