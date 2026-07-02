@@ -12,6 +12,5 @@ type Observer interface {
 	AgentFailed(AgentID, error)
 	Stream(AgentID, harness.Event)
 	GateOpened(GateRequest)
-	Complete(RunStatus)
 	Finished(Result, error)
 }

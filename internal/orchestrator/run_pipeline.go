@@ -139,7 +139,6 @@ func RunPipeline(ctx context.Context, setup PipelineSetup, in PipelineRunInput,
 	}
 
 	if !setup.Execution {
-		sc.Obs.Complete(StatusSuccess)
 		return Result{Status: StatusSuccess, FinalPlan: plan.Markdown}, nil
 	}
 
@@ -179,7 +178,6 @@ func RunPipeline(ctx context.Context, setup PipelineSetup, in PipelineRunInput,
 		integrateStatus = intResult.Status
 	}
 
-	sc.Obs.Complete(integrateStatus)
 	return Result{
 		Status:           integrateStatus,
 		FinalPlan:        plan.Markdown,

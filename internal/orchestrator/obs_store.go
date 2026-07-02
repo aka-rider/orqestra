@@ -218,15 +218,6 @@ func (s *ObsStore) GateClosed() {
 	s.poke()
 }
 
-func (s *ObsStore) Complete(status RunStatus) {
-	s.mu.Lock()
-	s.terminal.Done = true
-	s.terminal.Result.Status = status
-	s.rev++
-	s.mu.Unlock()
-	s.poke()
-}
-
 func (s *ObsStore) Finished(res Result, err error) {
 	s.mu.Lock()
 	s.terminal.Done = true
