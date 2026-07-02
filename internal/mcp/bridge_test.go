@@ -96,19 +96,21 @@ func TestQuestionBridge_RoundTrip(t *testing.T) {
 		done <- nil
 	}()
 
+	var question ToolCall
 	select {
-	case q := <-bridge.Questions():
-		if q.Question != "What color do you prefer?" {
-			t.Errorf("question = %q, want 'What color do you prefer?'", q.Question)
+	case question = <-bridge.Questions():
+		if question.Question != "What color do you prefer?" {
+			t.Errorf("question = %q, want 'What color do you prefer?'", question.Question)
 		}
-		if len(q.Options) != 2 {
-			t.Errorf("options count = %d, want 2", len(q.Options))
+		if len(question.Options) != 2 {
+			t.Errorf("options count = %d, want 2", len(question.Options))
 		}
 	case <-ctx.Done():
 		t.Fatal("timeout waiting for question")
 	}
 
 	bridge.SendAnswer(Answer{
+		ID:              question.ID,
 		SelectedIndices: []int{1},
 	})
 
@@ -148,19 +150,20 @@ func TestQuestionBridge_FreeformRoundTrip(t *testing.T) {
 		done <- nil
 	}()
 
+	var question ToolCall
 	select {
-	case q := <-bridge.Questions():
-		if q.Question != "What is your name?" {
-			t.Errorf("question = %q", q.Question)
+	case question = <-bridge.Questions():
+		if question.Question != "What is your name?" {
+			t.Errorf("question = %q", question.Question)
 		}
-		if len(q.Options) != 0 {
-			t.Errorf("expected no options, got %d", len(q.Options))
+		if len(question.Options) != 0 {
+			t.Errorf("expected no options, got %d", len(question.Options))
 		}
 	case <-ctx.Done():
 		t.Fatal("timeout")
 	}
 
-	bridge.SendAnswer(Answer{FreeformText: "Alice"})
+	bridge.SendAnswer(Answer{ID: question.ID, FreeformText: "Alice"})
 
 	select {
 	case err := <-done:

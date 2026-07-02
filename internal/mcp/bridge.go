@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 )
 
 // bridgeEnvelope is the framed wire format for bridge messages.
@@ -42,13 +43,16 @@ type ReportSubmission struct {
 //
 //	TUI answer → orchestrator → SendAnswer() → channel → QuestionBridge → socket → MCP server
 //
-// Lifetime: call Run(ctx) once per pipeline run; it blocks until ctx is cancelled
-// and then cleans up. Report/waiter maps survive across runs — RegisterSession
-// re-arms the per-slot state at the start of each new agent invocation.
+// Lifetime: call Run(ctx) exactly ONCE, for the whole engine/TUI-session
+// lifetime (WP4b/J5,J41) — not per pipeline run. It blocks until ctx is
+// cancelled and then cleans up. Report/waiter maps survive across runs —
+// RegisterSession re-arms the per-slot state at the start of each new agent
+// invocation.
 type QuestionBridge struct {
 	socketPath    string
 	questions     chan ToolCall
 	pendingAnswer chan Answer
+	questionSeq   atomic.Uint64 // generates unique ToolCall.ID values (WP5/J17,J25)
 	reportsMu     sync.Mutex
 	sessions      map[string]string          // agentID → current sessionID
 	reports       map[string]ReportSubmission // key (sessionID or agentID) → report
@@ -143,6 +147,9 @@ func (b *QuestionBridge) handleQuestion(ctx context.Context, conn net.Conn, env 
 		slog.Debug("question bridge question unmarshal error", "err", err)
 		return
 	}
+	// Generate a unique ID BEFORE forwarding (WP5/J17,J25): this is the only
+	// question this call will ever accept an answer for.
+	question.ID = fmt.Sprintf("q-%d", b.questionSeq.Add(1))
 
 	select {
 	case b.questions <- question:
@@ -150,11 +157,24 @@ func (b *QuestionBridge) handleQuestion(ctx context.Context, conn net.Conn, env 
 		return
 	}
 
+	// Wait for an answer whose ID matches THIS question. SendAnswer is a
+	// non-blocking send into a cap-1 buffer that nothing drains when no
+	// question is pending, so a stale/double-submitted answer (J17) can sit
+	// there from before this question was even asked — accepting it on ID
+	// mismatch would silently misanswer this question. Drop it and keep
+	// waiting for the real one.
 	var answer Answer
-	select {
-	case answer = <-b.pendingAnswer:
-	case <-ctx.Done():
-		answer = Answer{Skipped: true}
+	for {
+		select {
+		case answer = <-b.pendingAnswer:
+		case <-ctx.Done():
+			answer = Answer{Skipped: true}
+		}
+		if ctx.Err() != nil || answer.ID == question.ID {
+			break
+		}
+		slog.Debug("question bridge dropped stale/mismatched answer",
+			"want_id", question.ID, "got_id", answer.ID)
 	}
 
 	answerData, err := json.Marshal(answer)

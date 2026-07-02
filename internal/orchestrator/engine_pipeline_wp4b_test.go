@@ -246,9 +246,11 @@ func TestEngineStart_QuestionBridgeLifecycle(t *testing.T) {
 		answerCh <- ans
 	}()
 
+	var questionID string
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if handle2.Obs.Snapshot().HasQuestion {
+		if snap2 := handle2.Obs.Snapshot(); snap2.HasQuestion {
+			questionID = snap2.UserQuestion.ID
 			break
 		}
 		if handle1.Obs.Snapshot().HasQuestion {
@@ -260,8 +262,10 @@ func TestEngineStart_QuestionBridgeLifecycle(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Complete the round trip so the dialing goroutine above unblocks.
-	bridge.SendAnswer(mcp.Answer{FreeformText: "ack"})
+	// Complete the round trip so the dialing goroutine above unblocks. The
+	// bridge only accepts an answer whose ID matches its pending question
+	// (WP5/J17) — echo the ID this test just observed in run-2's ObsStore.
+	bridge.SendAnswer(mcp.Answer{ID: questionID, FreeformText: "ack"})
 	select {
 	case askErr := <-askErrCh:
 		t.Fatalf("sendTestQuestion failed: %v", askErr)

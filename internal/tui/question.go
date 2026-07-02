@@ -84,8 +84,15 @@ func (m userQuestionModel) SetWidth(w int) userQuestionModel {
 // Done reports whether the component has produced a final answer.
 func (m userQuestionModel) Done() bool { return m.done }
 
-// Answer returns the final answer (only meaningful after Done()).
-func (m userQuestionModel) Answer() mcp.Answer { return m.answer }
+// Answer returns the final answer (only meaningful after Done()), stamped
+// with the ID of the question it answers (WP5/J17,J25) — the bridge accepts
+// only an answer whose ID matches its pending question, so this is what lets
+// a stale/mismatched buffered answer be told apart from the real one.
+func (m userQuestionModel) Answer() mcp.Answer {
+	ans := m.answer
+	ans.ID = m.q.ID
+	return ans
+}
 
 // QuestionText returns the prompt, for echoing the answered question to the timeline.
 func (m userQuestionModel) QuestionText() string { return m.q.Question }

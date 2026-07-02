@@ -92,7 +92,13 @@ type ReportCall struct {
 }
 
 // ToolCall is the parsed input from a tools/call invocation.
+//
+// ID correlates a question with its answer (J17/J25, WP5): the bridge
+// generates a unique ID per incoming question before forwarding it (see
+// QuestionBridge.handleQuestion) — a client never sets it. The TUI carries
+// the ID through to the Answer it eventually submits.
 type ToolCall struct {
+	ID          string       `json:"id,omitempty"`
 	Question    string       `json:"question"`
 	Options     []ToolOption `json:"options,omitempty"`
 	AllowCustom *bool        `json:"allow_custom,omitempty"`
@@ -106,7 +112,13 @@ type ToolOption struct {
 }
 
 // Answer is the answer received back from the question bridge.
+//
+// ID must echo the ToolCall.ID of the question being answered (J17/J25,
+// WP5): QuestionBridge.handleQuestion accepts only an Answer whose ID
+// matches its pending question, so a stale or mismatched buffered Answer
+// (e.g. a double-submit) can never satisfy a later, unrelated question.
 type Answer struct {
+	ID              string         `json:"id,omitempty"`
 	SelectedIndices []int          `json:"selected_indices,omitempty"`
 	CustomTexts     map[int]string `json:"custom_texts,omitempty"`
 	Skipped         bool           `json:"skipped,omitempty"`

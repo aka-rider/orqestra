@@ -24,6 +24,12 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 	case SubmitQuestionAnswerIntent:
 		if m.engine != nil {
 			ans := i.Answer
+			// Clear the pending question from the snapshot NOW (J25): otherwise
+			// the next stream event's snapshot still reports it pending and
+			// ApplySnapshot re-opens the identical, already-answered question.
+			if m.obs != nil {
+				m.obs.ClearQuestion()
+			}
 			return m, batch(func() tea.Msg {
 				m.engine.SendAnswer(ans)
 				return nil
