@@ -10,10 +10,23 @@ import (
 	"strings"
 )
 
+// cwdToDashReplacer folds the characters Claude CLI's own project-directory
+// naming scheme folds into "-", beyond the leading/separator "/". Confirmed
+// empirically (J38) against this machine's real ~/.claude/projects/ entries:
+// a session recorded with "cwd":"/Users/xiii/.claude" is stored under
+// -Users-xiii--claude (the "." folded, not preserved), and a session recorded
+// with "cwd":".../bq1h62_d2ls9hqp7j501tr2c0000gn/T/TestClaudeCLI_InSandbox.../001"
+// is stored under a directory with "bq1h62-d2ls9hqp7j501tr2c0000gn" and
+// "TestClaudeCLI-InSandbox..." (the "_" folded too). No project directory
+// name on this machine retains a literal "." or "_", across ~80 distinct
+// entries — see docs/bug-journal-2026-07-02.md J38 for the full evidence.
+var cwdToDashReplacer = strings.NewReplacer("/", "-", ".", "-", "_", "-")
+
 // CwdToDash converts an absolute path to Claude CLI's project directory naming format.
 // /Users/xiii/Developer/orqestra → -Users-xiii-Developer-orqestra
+// /Users/xiii/.claude → -Users-xiii--claude (the "." is folded too, not kept)
 func CwdToDash(absPath string) string {
-	return "-" + strings.ReplaceAll(strings.TrimPrefix(absPath, "/"), "/", "-")
+	return "-" + cwdToDashReplacer.Replace(strings.TrimPrefix(absPath, "/"))
 }
 
 // ResolveSessionLogPath returns the absolute path to a Claude CLI session JSONL file.
@@ -129,7 +142,7 @@ func ExtractPlanFilePath(sessionLogPath string) (string, error) {
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, initialScanBufferBytes), maxJSONLLineBytes)
 
 	var lineCount int
 	var typesSeen []string

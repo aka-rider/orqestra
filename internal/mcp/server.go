@@ -119,7 +119,10 @@ type Answer struct {
 // The server exits cleanly when stdin is closed (MCP lifecycle).
 func RunServer(socketPath, agentID string) error {
 	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	// Bounded to maxFrameBytes (frame.go) so a large tools/call request (e.g. a
+	// SubmitReport whose "report" argument approaches the bridge frame cap) is
+	// not truncated by bufio.ErrTooLong before it ever reaches the bridge.
+	scanner.Buffer(make([]byte, 64<<10), maxFrameBytes)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()

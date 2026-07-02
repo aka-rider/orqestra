@@ -120,6 +120,47 @@ func TestReadPlan_SecurityGate(t *testing.T) {
 	}
 }
 
+// TestReadPlan_SymlinkEscapeRejected verifies that a plan file path which is
+// lexically inside ~/.claude/plans/ but is actually a symlink pointing
+// OUTSIDE that directory is rejected. Before the fix, readSecurePlanFile used
+// filepath.Abs + strings.HasPrefix — a purely lexical check that a symlink
+// defeats trivially: the string still starts with the allowed prefix even
+// though the resolved target is elsewhere.
+func TestReadPlan_SymlinkEscapeRejected(t *testing.T) {
+	// INV-P1-PLANSRC: a symlink inside the plans dir pointing outside it must be rejected.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	sessionID := "test-symlink-escape"
+
+	// Secret file OUTSIDE ~/.claude/plans/.
+	secretDir := filepath.Join(tmp, "secret")
+	if err := os.MkdirAll(secretDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secretFile := filepath.Join(secretDir, "stolen.md")
+	if err := os.WriteFile(secretFile, []byte("# Plan\n\n## Work Packages\nsecret content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Symlink INSIDE ~/.claude/plans/ pointing at the secret file.
+	plansDir := filepath.Join(tmp, ".claude", "plans")
+	if err := os.MkdirAll(plansDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(plansDir, sessionID+"-plan.md")
+	if err := os.Symlink(secretFile, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// Provide the symlink path directly via the stream-captured planFilePath —
+	// lexically it is under ~/.claude/plans/, but its resolved target is not.
+	_, _, err := ReadPlan(sessionID, linkPath, "", false)
+	if err == nil {
+		t.Fatal("expected error for a plan file symlink escaping ~/.claude/plans/")
+	}
+}
+
 func TestReadPlan_EmptyPlanFile(t *testing.T) {
 	// INV-P1-PLANSRC: empty plan file is an integrity error, not a valid empty plan
 	sessionID := "test-empty"

@@ -215,9 +215,11 @@ func parseStream(r io.Reader, events chan<- Event) (result string, isError bool,
 		// Capture session_id from the first event that carries one (the system/init
 		// event leads the stream). Keeping this outside the result-type guard means
 		// RunResult.SessionID survives an early stop — e.g. the report-arrival SIGKILL
-		// where the terminal result event never arrives. The result event, when it
-		// does arrive, simply confirms the same id last.
-		if event.SessionID != "" {
+		// where the terminal result event never arrives. First-wins (not last-wins):
+		// if a subagent spawned mid-stream emits its own session_id, RunResult.SessionID
+		// must stay pinned to the run's own session, matching the supervisor's
+		// fanoutSink (agent_supervisor.go), which delivers only the first session_id.
+		if event.SessionID != "" && sessionID == "" {
 			sessionID = event.SessionID
 		}
 		if event.Type == "result" {

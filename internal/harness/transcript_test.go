@@ -157,3 +157,26 @@ func TestParseStream_SessionID_SurvivesMissingResult(t *testing.T) {
 		t.Error("truncated (no-result) stream must not be reported as an error result")
 	}
 }
+
+// TestParseStream_SessionID_FirstWins verifies that when a stream carries more
+// than one distinct session_id (e.g. a subagent spawned mid-run emits its own
+// system/init event), RunResult.SessionID stays pinned to the FIRST session_id
+// seen — matching the supervisor's fanoutSink, which delivers only the first
+// session_id and drops duplicates (agent_supervisor.go). Before the fix,
+// session_id was overwritten on every event that carried one, so the LAST
+// session_id won instead.
+func TestParseStream_SessionID_FirstWins(t *testing.T) {
+	// INV-H2-SESSIONID: session_id is first-wins, not last-wins.
+	const twoSessions = `{"type":"system","subtype":"init","session_id":"sess-outer-first","model":"qwen3.6","tools":["Read"]}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"spawning subagent"}]},"session_id":"sess-outer-first"}
+{"type":"system","subtype":"init","session_id":"sess-subagent-second","model":"qwen3.6","tools":["Read"]}
+{"type":"result","subtype":"success","session_id":"sess-subagent-second","result":"done","usage":{"input_tokens":1,"output_tokens":1}}`
+
+	_, _, _, sessionID, _, parseErr := parseStream(strings.NewReader(twoSessions), nil)
+	if parseErr != nil {
+		t.Fatalf("parseStream: %v", parseErr)
+	}
+	if sessionID != "sess-outer-first" {
+		t.Errorf("session_id = %q, want %q (the FIRST session_id seen in the stream)", sessionID, "sess-outer-first")
+	}
+}
