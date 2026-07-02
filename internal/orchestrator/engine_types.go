@@ -42,6 +42,9 @@ type Result struct {
 	FinalPlan        string
 	WorkerValidation string
 	RunDir           string
+	// ConflictFiles is populated when Integrate gives up on a merge conflict
+	// (see IntegrateOutput.ConflictFiles); empty otherwise.
+	ConflictFiles []string
 }
 
 // RunDirFactory creates a session directory for artifact persistence.

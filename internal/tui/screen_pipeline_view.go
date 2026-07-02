@@ -93,6 +93,12 @@ func (s PipelineScreen) viewCompletion(width int) string {
 	if s.lastErr != nil {
 		b.WriteString(renderPrefixedText(errorStyle, " Error: ", s.lastErr.Error(), width))
 	}
+	if len(s.conflictFiles) > 0 {
+		b.WriteString(warnStyle.Render(" Merge conflict — worktree branch preserved, not merged:") + "\n")
+		for _, f := range s.conflictFiles {
+			b.WriteString("   - " + f + "\n")
+		}
+	}
 	if s.workerValidation != "" {
 		b.WriteString(" Validation:\n")
 		// The worker's final output is markdown — render it as markdown, not as

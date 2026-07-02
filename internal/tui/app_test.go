@@ -885,6 +885,35 @@ func TestApplySnapshot_TerminalErrShowsInCompletion(t *testing.T) {
 	}
 }
 
+// TestApplySnapshot_ConflictFilesShowInCompletion is the WP3/J10 TUI gate: when
+// Result.ConflictFiles is non-empty (integrator gave up on a merge conflict),
+// the done screen must render the conflict file list — never hide it behind a
+// bare completion event.
+func TestApplySnapshot_ConflictFilesShowInCompletion(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.active = true
+
+	obs := orchestrator.NewObsStore()
+	m.obs = obs
+	m.ctrl = orchestrator.NewControl(obs)
+
+	conflictFiles := []string{"internal/foo.go", "internal/bar.go"}
+	obs.Finished(orchestrator.Result{Status: orchestrator.StatusFailed, ConflictFiles: conflictFiles}, nil)
+	result, _ := m.Update(obsNotifyMsg{})
+	model := result.(Model)
+
+	out := model.pipelineScreen.viewCompletion(80)
+	for _, f := range conflictFiles {
+		if !strings.Contains(out, f) {
+			t.Errorf("viewCompletion missing conflict file %q:\n%s", f, out)
+		}
+	}
+	if !strings.Contains(strings.ToLower(out), "conflict") {
+		t.Errorf("viewCompletion does not mention the merge conflict:\n%s", out)
+	}
+}
+
 // TestApplySnapshot_AgentFailedErrShowsInCompletion verifies that an agent
 // failure error stored in AgentSnapshot.Error reaches s.lastErr via ApplySnapshot.
 func TestApplySnapshot_AgentFailedErrShowsInCompletion(t *testing.T) {

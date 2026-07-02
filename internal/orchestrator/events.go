@@ -33,14 +33,6 @@ const (
 	DecisionMergeAbort // abort the post-run merge, keep the worktree branch
 )
 
-// MergeConflictInfo carries merge conflict details for the TUI.
-type MergeConflictInfo struct {
-	WorktreeBranch string
-	WorktreePath   string
-	TargetBranch   string
-	ConflictFiles  []string
-}
-
 // Decision is sent from TUI to pipeline at gates.
 type Decision struct {
 	Type          DecisionType

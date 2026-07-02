@@ -27,18 +27,23 @@ func (s *ExecuteStep) ID() AgentID { return "worker" }
 
 func (s *ExecuteStep) Run(ctx context.Context, in ExecuteInput, sc StepContext) (ExecuteOutput, error) {
 	sc.Obs.AgentStarted(s.ID(), s.Meta)
+	start := time.Now()
 
-	// Determine target branch for post-run merge.
+	// Determine target branch for post-run merge. This is a pre-flight, pre-token
+	// boundary (no agent has run yet), so a failure here fails fast rather than
+	// silently running the worker against the live, unisolated repo (J8): NEVER
+	// treat "branch unknown" as "isolation optional".
 	targetBranch, branchErr := worktree.CurrentBranch(ctx, s.RepoPath)
 	if branchErr != nil {
-		sc.Log.Warn("cannot determine current branch — worktree isolation disabled", "err", branchErr)
+		err := fmt.Errorf("determine current branch: %w", branchErr)
+		sc.Obs.AgentFailed(s.ID(), err)
+		s.writeMeta(sc, "", start, "failed", err, harness.TokenUsage{})
+		return ExecuteOutput{}, fmt.Errorf("worker: %w", err)
 	}
 
 	// Create isolated worktree when possible.
 	var wt worktree.Worktree
 	spec := s.Spec
-
-	start := time.Now()
 
 	if s.WorktreeSpecFn != nil && sc.Sessions.Path != "" && targetBranch != "" && in.RunID != "" {
 		var wtErr error

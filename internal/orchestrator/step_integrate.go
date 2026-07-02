@@ -41,12 +41,21 @@ type integratorMeta struct {
 func (s *IntegrateStep) Run(ctx context.Context, in IntegrateInput, sc StepContext) (IntegrateOutput, error) {
 	wt := in.Worktree
 	if wt.Path == "" {
+		// No worktree was ever created — worktree isolation was legitimately
+		// absent (e.g. WorktreeSpecFn nil). Nothing was isolated, so there is
+		// nothing to merge; reporting success here is honest, not a claim of a
+		// merge that never happened.
 		return IntegrateOutput{Status: StatusSuccess}, nil
 	}
 
 	if in.TargetBranch == "" {
-		sc.Log.Warn("integrate: target branch unknown — skipping")
-		return IntegrateOutput{Status: StatusSuccess}, nil
+		// A worktree WAS created (isolated work exists) but the branch to merge
+		// it into is unknown. Reporting success here would be a false claim: the
+		// worker's commits stay stranded on the worktree branch with nothing
+		// merged into the user's repo (J9). Fail closed instead of no-opping.
+		err := fmt.Errorf("integrate: worktree %s present but target branch unknown — refusing to no-op", wt.Path)
+		sc.Log.Warn("integrate: target branch unknown", "worktree", wt.Path)
+		return IntegrateOutput{Status: StatusFailed}, err
 	}
 
 	// Record base pre-SHA for recoverability.

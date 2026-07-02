@@ -150,7 +150,7 @@ Keep execution metadata — token usage, session IDs, log paths, timings, plan-f
 |---|---|
 | `agent/` | plan extraction `ReadPlan` (plan_extract.go), `CheckPlanHealth` (plancheck.go), validation parsing — `ParseValidationOutput`/`ValidationReport`/`Issue`/`DeriveVerdict` (validation.go), integrator prompts + `ParseIntegratorGiveUp` (integrator.go), worker/validation/commit prompts (spec.go), session-artifact helpers (session.go) |
 | `harness/` | `ClaudeCLI` subprocess, stream-JSON parse (stream_event.go), `Run(ctx)` (exec.go:111), MCP bridge wiring, model-env construction, `RunResult` |
-| `orchestrator/` | phase order + gates (run_pipeline.go), `Engine.Run` (engine.go:17), agent supervision + cancel cause (agent_supervisor.go), budgets (budget.go), events incl. `MergeConflictInfo` (events.go) |
+| `orchestrator/` | phase order + gates (run_pipeline.go), `Engine.Run` (engine.go:17), agent supervision + cancel cause (agent_supervisor.go), budgets (budget.go), events + `Result.ConflictFiles` (events.go, engine_types.go) |
 | `sandbox/` | seatbelt config validation, SBPL profile build, env scrub, sandbox-exec wrap, process-group cleanup |
 | `mcp/` | `QuestionBridge` — AskUserQuestion over a unix socket (bridge.go) |
 | `worktree/` | per-run git worktree: `Create`, `CommitAll`, `MergeInto`, conflict listing, `abortMerge` |
@@ -239,9 +239,9 @@ plan := lastAssistantMessage
   diffing is unavailable.
 - Worker self-validation failure is NEVER shown as success: if execution continues, artifacts and
   events show the validator status and the raw text.
-- Merge conflicts surface through `orchestrator.MergeConflictInfo` (events.go:37) — never hidden
-  behind a completion event. The integrator gives up by default (`ParseIntegratorGiveUp`); safety
-  is recoverability of the user's base, not a merge forced through (§0).
+- Merge conflicts surface through `orchestrator.Result.ConflictFiles` (engine_types.go:40) — never
+  hidden behind a completion event. The integrator gives up by default (`ParseIntegratorGiveUp`);
+  safety is recoverability of the user's base, not a merge forced through (§0).
 
 ## 6. Debugging headless runs via Claude CLI logs
 
@@ -321,7 +321,7 @@ Run the narrowest package after a change; cover the invariant class, not one hap
 - [ ] Validation parser success is never reported as proof of passing work.
 - [ ] Sandboxed execution path used; `sandbox.New` failure returns, with no silent fallback.
 - [ ] Stream scanner has a bounded buffer and a `scanner.Err()` check.
-- [ ] Merge conflicts surface via `MergeConflictInfo`; the integrator gives up by default.
+- [ ] Merge conflicts surface via `Result.ConflictFiles`; the integrator gives up by default.
 - [ ] Cancellation kills the process group (`Setpgid` + negative-PID kill), covered by tests.
 - [ ] `-race` run for any concurrency / streaming / sandbox / harness / orchestrator change.
 - [ ] `make test` reported green only with a fresh `QA-ATTEST … SUITE-COMPLETE` quoted.

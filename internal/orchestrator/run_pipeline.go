@@ -165,6 +165,7 @@ func RunPipeline(ctx context.Context, setup PipelineSetup, in PipelineRunInput,
 
 	// --- Integrate (commit + merge) ---
 	integrateStatus := StatusSuccess
+	var conflictFiles []string
 	if steps.Integrate != nil {
 		intResult, intErr := steps.Integrate.Run(ctx, IntegrateInput{
 			Worktree:     exec.Worktree,
@@ -176,11 +177,13 @@ func RunPipeline(ctx context.Context, setup PipelineSetup, in PipelineRunInput,
 			return Result{Status: StatusFailed}, fmt.Errorf("integrate: %w", intErr)
 		}
 		integrateStatus = intResult.Status
+		conflictFiles = intResult.ConflictFiles
 	}
 
 	return Result{
 		Status:           integrateStatus,
 		FinalPlan:        plan.Markdown,
 		WorkerValidation: valOutput,
+		ConflictFiles:    conflictFiles,
 	}, nil
 }
