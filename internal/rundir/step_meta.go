@@ -44,6 +44,7 @@ type StepMeta struct {
 	ReportSource   string   `json:"report_source,omitempty"`   // "submit_report" | "plan_file" | "final_message" | "raw_output"
 	ReportDetail   string   `json:"report_detail,omitempty"`   // path/session/agent detail, or "freshness-unverified" (J35)
 	ReportRejected []string `json:"report_rejected,omitempty"` // tier Source names that produced text but failed the sanity check
+	ReportErrored  []string `json:"report_errored,omitempty"`  // "<tier>: <err>" entries for tiers whose retrieval itself errored (A5)
 }
 
 // SaveStepMeta persists m as "<role>_meta.json" under the run directory.

@@ -64,6 +64,12 @@ type ReportProvenance struct {
 	Source   string
 	Detail   string   // path/session/agent identifying detail, or freshnessUnverified (J35)
 	Rejected []string // Source names of tiers that produced text but failed looksLikeReport
+	// Errored records tiers whose retrieval itself ERRORED (e.g. the plan
+	// file couldn't be read, the session JSONL couldn't be resolved) as
+	// opposed to merely failing the sanity check (Rejected) — A5: a tier
+	// that errors leaves no trace today unless recorded here. Each entry is
+	// "<tier source>: <err>".
+	Errored []string
 }
 
 // planFileSnapshot is a cheap point-in-time fingerprint of a plan file —
@@ -189,6 +195,7 @@ func (h *ReportHarvester) harvestExecutor(spec harness.ProcessSpec, res harness.
 func (h *ReportHarvester) harvestReporter(spec harness.ProcessSpec, res harness.RunResult, runErr error) (string, ReportProvenance, error) {
 	agentID := spec.AgentID
 	var rejected []string
+	var errored []string
 
 	// Tier 1: SubmitReport submission. Keyed by agentID — the bridge
 	// resolves the session internally, so this works even when
@@ -215,10 +222,13 @@ func (h *ReportHarvester) harvestReporter(spec harness.ProcessSpec, res harness.
 					if unverified {
 						detail = freshnessUnverified
 					}
-					return plan, ReportProvenance{Tier: 2, Source: SourcePlanFile, Detail: detail, Rejected: rejected}, nil
+					return plan, ReportProvenance{Tier: 2, Source: SourcePlanFile, Detail: detail, Rejected: rejected, Errored: errored}, nil
 				}
 				rejected = append(rejected, SourcePlanFile)
 				h.sc.Log.Warn("plan file failed sanity check, trying next tier", "agent", agentID)
+			} else {
+				errored = append(errored, fmt.Sprintf("%s: %v", SourcePlanFile, err))
+				h.sc.Log.Warn("plan file tier errored, trying next tier", "agent", agentID, "tier", SourcePlanFile, "err", err)
 			}
 		} else {
 			h.sc.Log.Debug("report harvest: plan file unchanged this invocation, tier 2 skipped (J35)", "agent", agentID)
@@ -228,17 +238,23 @@ func (h *ReportHarvester) harvestReporter(spec harness.ProcessSpec, res harness.
 	// Tier 3: Conversation probe.
 	if msg, err := finalMessage(h.sc, res); err == nil {
 		if looksLikeReport(msg) {
-			return msg, ReportProvenance{Tier: 3, Source: SourceFinalMessage, Detail: res.SessionID, Rejected: rejected}, nil
+			return msg, ReportProvenance{Tier: 3, Source: SourceFinalMessage, Detail: res.SessionID, Rejected: rejected, Errored: errored}, nil
 		}
 		rejected = append(rejected, SourceFinalMessage)
 		h.sc.Log.Warn("conversation probe failed sanity check", "agent", agentID)
+	} else {
+		errored = append(errored, fmt.Sprintf("%s: %v", SourceFinalMessage, err))
+		h.sc.Log.Warn("conversation probe tier errored", "agent", agentID, "tier", SourceFinalMessage, "err", err)
 	}
 
-	// Tier 4: Fail closed.
+	// Tier 4: Fail closed. The terminal error names both tiers that produced
+	// text but failed the sanity check (rejected) and tiers whose retrieval
+	// itself errored (errored) — A5: neither class of failure disappears
+	// silently.
 	if runErr != nil {
-		return "", ReportProvenance{Rejected: rejected}, fmt.Errorf("%s failed: %w", agentID, runErr)
+		return "", ReportProvenance{Rejected: rejected, Errored: errored}, fmt.Errorf("%s failed: %w (rejected tiers: %v, errored tiers: %v)", agentID, runErr, rejected, errored)
 	}
-	return "", ReportProvenance{Rejected: rejected}, fmt.Errorf("%s: no valid report produced", agentID)
+	return "", ReportProvenance{Rejected: rejected, Errored: errored}, fmt.Errorf("%s: no valid report produced (rejected tiers: %v, errored tiers: %v)", agentID, rejected, errored)
 }
 
 // preferReport returns the plan written by the architect to its plan file.

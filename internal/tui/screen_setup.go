@@ -71,6 +71,16 @@ func (s setupModel) Update(msg tea.KeyPressMsg) (setupModel, tea.Cmd) {
 		s.PendingIntent = ConfirmSetupIntent{Setup: s.setup}
 	case key.Matches(msg, s.keys.Back), key.Matches(msg, s.keys.SetupPanel):
 		s.open = false
+	case key.Matches(msg, s.keys.Quit):
+		// J31b: the overlay routes EVERY key to itself while open (see
+		// handlePromptKey's "route all keys to it" — model_keys.go), which
+		// silently swallowed ^Q (and ^R/^N) with no way out except Esc. Quit
+		// is too important to eat silently — handle it here exactly like Esc
+		// does for closing (s.open = false), but actually quit instead of
+		// just closing the panel, matching the pipeline screen's own
+		// screen-level ^Q handling (screen_pipeline_keys.go).
+		s.open = false
+		return s, tea.Quit
 	case msg.Code == ' ':
 		// Space (rune 32): toggle — direction irrelevant for bools/gates.
 		s = s.changeValue("left")
@@ -175,7 +185,11 @@ func (s setupModel) View() string {
 		b.WriteString(fmt.Sprintf("%s  %s %s\n", cur, check, gateLabels[i]))
 	}
 
-	b.WriteString("\n" + setupHintStyle.Render("[↑↓] navigate  [←→/Space] change  [Enter] confirm  [Esc] cancel"))
+	b.WriteString("\n" + setupHintStyle.Render("[↑↓] navigate  [←→/Space] change  [Enter] confirm  [Esc] cancel") + "\n")
+	// J31b: while this panel is open every key routes to it (handlePromptKey),
+	// so ^R (runs list) / ^N (new run) are unavailable until it closes — say
+	// so instead of silently eating them; ^Q still quits (handled above).
+	b.WriteString(setupHintStyle.Render("^R/^N unavailable while Setup is open — ^Q quits"))
 
 	return setupBorderStyle.Render(b.String())
 }

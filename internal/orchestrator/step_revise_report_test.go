@@ -153,3 +153,98 @@ func (e *rewritingExecutor) Run(_ context.Context, _ harness.ProcessSpec, _ <-ch
 	}
 	return e.result, nil
 }
+
+// TestReviseStep_SuccessfulRevision_AdvancesSessionID is WP18's J13 QA gate:
+// a revision that harvests a FRESH report (the plan actually changed) must
+// advance PlanOutput.SessionID to res.SessionID — mirroring
+// step_deliberate.go's runRound advance-on-change rule — so the next
+// gate-loop turn resumes THIS invocation's session (the architect's live
+// memory of its own revision), not a stale one.
+//
+// RED-first: against the pre-J13 code (`SessionID: in.Plan.SessionID`,
+// unconditional), this test failed with "SessionID = \"old-session-id\", want
+// the resumed invocation's fresh session id \"new-session-id\"".
+func TestReviseStep_SuccessfulRevision_AdvancesSessionID(t *testing.T) {
+	freshFinalMessage := "# Plan\n\n## Goal\nRevised plan incorporating feedback.\n\n" +
+		"## Work Packages\n### 1. Do X\n### 2. Do Y (new, from critic feedback)"
+
+	exec := &sequencedExecutor{
+		results: []harness.RunResult{{
+			SessionID: "new-session-id",
+			Output:    freshFinalMessage,
+		}},
+		errs: []error{nil},
+	}
+
+	step := &ReviseStep{ArchSpec: harness.ProcessSpec{AgentID: "architect"}}
+	sc := StepContext{
+		Exec:      exec,
+		Obs:       newRecordingObserver(),
+		Artifacts: NoopArtifactSink(),
+		Log:       slog.Default(),
+		RepoPath:  t.TempDir(),
+	}
+
+	in := ReviseInput{
+		Plan: PlanOutput{
+			Markdown:  "# Plan\n\n## Goal\nOriginal pre-revision plan.\n\n## Work Packages\n### 1. Do X\n",
+			SessionID: "old-session-id",
+		},
+		Decision: Decision{Type: DecisionComment, Comment: "please add step 2"},
+	}
+
+	out, err := step.Run(context.Background(), in, sc)
+	if err != nil {
+		t.Fatalf("ReviseStep.Run: unexpected error: %v", err)
+	}
+	if out.Markdown != freshFinalMessage {
+		t.Fatalf("expected the fresh revision to win, got %q", out.Markdown)
+	}
+	if out.SessionID != "new-session-id" {
+		t.Errorf("J13: SessionID = %q, want the resumed invocation's fresh session id %q", out.SessionID, "new-session-id")
+	}
+}
+
+// TestReviseStep_ChatOnlyFallback_KeepsPriorSessionID is J13's companion gate:
+// when the revision turn produces NO harvestable report (chat-only
+// continuation, fallback to the prior plan), the session ID must stay
+// PINNED to the prior (resumed) session — never advance to a session whose
+// content never actually became the plan.
+func TestReviseStep_ChatOnlyFallback_KeepsPriorSessionID(t *testing.T) {
+	exec := &sequencedExecutor{
+		results: []harness.RunResult{{
+			SessionID: "new-session-id", // populated, but nothing harvestable comes from it
+			Output:    "",
+		}},
+		errs: []error{nil},
+	}
+
+	step := &ReviseStep{ArchSpec: harness.ProcessSpec{AgentID: "architect"}}
+	sc := StepContext{
+		Exec:      exec,
+		Obs:       newRecordingObserver(),
+		Artifacts: NoopArtifactSink(),
+		Log:       slog.Default(),
+		RepoPath:  t.TempDir(),
+	}
+
+	origPlan := "# Plan\n\n## Goal\nOriginal pre-revision plan.\n\n## Work Packages\n### 1. Do X\n"
+	in := ReviseInput{
+		Plan: PlanOutput{
+			Markdown:  origPlan,
+			SessionID: "old-session-id",
+		},
+		Decision: Decision{Type: DecisionComment, Comment: "please add step 2"},
+	}
+
+	out, err := step.Run(context.Background(), in, sc)
+	if err != nil {
+		t.Fatalf("ReviseStep.Run: unexpected error: %v", err)
+	}
+	if out.Markdown != origPlan {
+		t.Fatalf("expected the chat-only fallback to keep the prior plan markdown, got %q", out.Markdown)
+	}
+	if out.SessionID != "old-session-id" {
+		t.Errorf("J13 companion: chat-only fallback must keep the PRIOR session id, got %q, want %q", out.SessionID, "old-session-id")
+	}
+}

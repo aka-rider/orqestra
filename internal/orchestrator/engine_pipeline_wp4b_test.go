@@ -85,24 +85,6 @@ func sendTestQuestion(ctx context.Context, socketPath, agentID string, tc mcp.To
 	return answer, nil
 }
 
-// waitSocketDialable polls (bounded) until socketPath accepts a raw dial.
-// QuestionBridge.Run has no readiness signal yet (deferred to WP12) — this is
-// the standard bounded-retry idiom for an external OS listener coming up, not
-// an unbounded sleep-based synchronization.
-func waitSocketDialable(t *testing.T, socketPath string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("unix", socketPath, 50*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("socket %s never became dialable within %s", socketPath, timeout)
-}
-
 // writeSleepyStub writes a small self-terminating script that sleeps briefly
 // before exiting cleanly — long enough that a run driven by it is reliably
 // still "in flight" (its forwarder still alive) when the test injects a
@@ -181,7 +163,11 @@ func TestEngineStart_QuestionBridgeLifecycle(t *testing.T) {
 	defer bridgeCancel()
 	bridgeErrCh := make(chan error, 1)
 	go func() { bridgeErrCh <- bridge.Run(bridgeCtx) }()
-	waitSocketDialable(t, socketPath, 5*time.Second)
+	select {
+	case <-bridge.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("bridge socket never became ready within 5s")
+	}
 
 	statBefore, err := os.Stat(socketPath)
 	if err != nil {

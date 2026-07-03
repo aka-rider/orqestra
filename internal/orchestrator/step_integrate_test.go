@@ -7,6 +7,7 @@ package orchestrator
 // honest no-op: nothing was isolated, so there is nothing to merge.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -235,5 +236,98 @@ func TestIntegrateStep_ConflictSpecBuildError_PreservesGiveUp(t *testing.T) {
 	}
 	if !strings.Contains(string(data), specErr.Error()) {
 		t.Errorf("give-up reason does not carry the spec-build error %q: %s", specErr.Error(), data)
+	}
+}
+
+// fixedOutputExec is a harness.Executor that always returns a fixed
+// RunResult, ignoring the spec/input/sink — used to force
+// generateCommitMsg's agent.ParseCommitMessage call down a specific path.
+type fixedOutputExec struct{ res harness.RunResult }
+
+func (f fixedOutputExec) Run(_ context.Context, _ harness.ProcessSpec, _ <-chan harness.Message, _ harness.Sink) (harness.RunResult, error) {
+	return f.res, nil
+}
+
+// setupPlainWorktree creates a real git repo + worktree (no conflict) so
+// Worktree.Diff has a real branch to diff against.
+func setupPlainWorktree(t *testing.T) (wt worktree.Worktree, target string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not in PATH")
+	}
+	repo := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "test@test.com")
+	run("config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(repo, "shared.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "seed")
+
+	ctx := context.Background()
+	var err error
+	target, err = worktree.CurrentBranch(ctx, repo)
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+
+	sessionDir := filepath.Join(t.TempDir(), "session")
+	wt, err = worktree.Create(ctx, repo, sessionDir, "commit-msg-parse-err")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt.Path, "shared.txt"), []byte("worker change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.StageAll(ctx); err != nil {
+		t.Fatalf("StageAll: %v", err)
+	}
+	if err := wt.CommitStaged(ctx, "worker change"); err != nil {
+		t.Fatalf("CommitStaged: %v", err)
+	}
+	return wt, target
+}
+
+// TestIntegrateStep_GenerateCommitMsg_ParseErrorLogged is WP18's A5 QA gate
+// for step_integrate.go:128 (per the review): when the commit-message agent
+// returns output that fails agent.ParseCommitMessage, generateCommitMsg must
+// still fall back to the default message (advisory failure, never blocks the
+// pipeline) AND must log the parse error — not silently swallow it.
+//
+// RED-first: against the pre-fix code (`if parsed, parseErr :=
+// agent.ParseCommitMessage(res.Output); parseErr == nil { ... }` with no
+// else), this test failed with "expected a Warn log naming the parse error,
+// got no matching log line" — the parse failure left zero trace.
+func TestIntegrateStep_GenerateCommitMsg_ParseErrorLogged(t *testing.T) {
+	wt, target := setupPlainWorktree(t)
+	defer wt.Remove(context.Background(), true) //nolint:errcheck
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	step := &IntegrateStep{
+		CommitMsgSpec: harness.ProcessSpec{AgentID: "integrator-commit-msg"},
+	}
+	sc := StepContext{
+		Exec: fixedOutputExec{res: harness.RunResult{Output: "```\n```"}}, // non-empty, but empty after fence-strip -> ParseCommitMessage errors
+		Log:  logger,
+	}
+
+	msg := step.generateCommitMsg(context.Background(), wt, IntegrateInput{RunID: "commit-msg-parse-err", TargetBranch: target}, sc)
+
+	if !strings.Contains(msg, "feat: Orqestra automated run") {
+		t.Errorf("expected the fallback commit message, got %q", msg)
+	}
+	if !strings.Contains(logBuf.String(), "parse commit message") {
+		t.Errorf("expected a Warn log naming the parse error, got no matching log line; log = %q", logBuf.String())
 	}
 }

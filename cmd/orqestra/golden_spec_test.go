@@ -65,10 +65,15 @@ func normalizeArgs(t *testing.T, args []string) []string {
 }
 
 func captureGolden(t *testing.T, spec harness.ProcessSpec) goldenSpec {
+	t.Helper()
 	env := append([]string(nil), spec.Sandbox.Env...)
 	sort.Strings(env)
+	args, err := harness.SpecArgs(spec)
+	if err != nil {
+		t.Fatalf("SpecArgs: %v", err)
+	}
 	return goldenSpec{
-		Args:            normalizeArgs(t, harness.SpecArgs(spec)),
+		Args:            normalizeArgs(t, args),
 		Model:           spec.Model,
 		SandboxRepoPath: spec.Sandbox.RepoPath,
 		SandboxWorktree: spec.Sandbox.WorktreePath,

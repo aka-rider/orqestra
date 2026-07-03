@@ -125,13 +125,16 @@ func (s *IntegrateStep) generateCommitMsg(ctx context.Context, wt worktree.Workt
 		return fallback
 	}
 	if res.Output != "" {
-		if parsed, parseErr := agent.ParseCommitMessage(res.Output); parseErr == nil {
-			msg := parsed
-			if in.RunID != "" {
-				msg += "\n\nrun: " + in.RunID + " by Orqestra"
-			}
-			return msg
+		parsed, parseErr := agent.ParseCommitMessage(res.Output)
+		if parseErr != nil {
+			sc.Log.Warn("integrate: parse commit message failed — using fallback", "err", parseErr)
+			return fallback
 		}
+		msg := parsed
+		if in.RunID != "" {
+			msg += "\n\nrun: " + in.RunID + " by Orqestra"
+		}
+		return msg
 	}
 	return fallback
 }

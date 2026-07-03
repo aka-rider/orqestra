@@ -3,8 +3,8 @@ package harness
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -74,7 +74,10 @@ func SpecForRole(cfg *config.Config, in config.RoleSpecInput, sandbox SandboxCon
 
 	switch role.Class {
 	case config.RoleClassReporter:
-		extraArgs = reporterArgs(role)
+		extraArgs, err = reporterArgs(role)
+		if err != nil {
+			return ProcessSpec{}, fmt.Errorf("spec for role %q: %w", in.Name, err)
+		}
 		if in.BridgeBinary != "" {
 			inline = append(inline, bridgeMCP(in, agentID))
 		}
@@ -146,7 +149,7 @@ func SpecForRole(cfg *config.Config, in config.RoleSpecInput, sandbox SandboxCon
 // AskUserQuestion bridge routing), then the shared skip-permissions+settings
 // pair every non-utility role gets so headless pipe-mode execution never
 // blocks on an interactive prompt.
-func reporterArgs(role config.RoleConfig) []string {
+func reporterArgs(role config.RoleConfig) ([]string, error) {
 	disallowed := append([]string(nil), role.DisallowedTools...)
 	if !containsString(disallowed, "AskUserQuestion") {
 		disallowed = append(disallowed, "AskUserQuestion")
@@ -166,7 +169,11 @@ func reporterArgs(role config.RoleConfig) []string {
 		if len(*role.MCPServers) == 0 {
 			args = append(args, noToolsArgs()...)
 		} else {
-			args = append(args, "--strict-mcp-config", "--mcp-config", filterMCPConfig(*role.MCPServers))
+			filtered, err := filterMCPConfig(*role.MCPServers)
+			if err != nil {
+				return nil, fmt.Errorf("reporter args: %w", err)
+			}
+			args = append(args, "--strict-mcp-config", "--mcp-config", filtered)
 		}
 	}
 	if len(allowed) > 0 {
@@ -176,18 +183,40 @@ func reporterArgs(role config.RoleConfig) []string {
 		args = append(args, "--disallowedTools", strings.Join(disallowed, ","))
 	}
 	args = append(args, openAgentArgs()...)
-	return args
+	return args, nil
 }
 
 // executorArgs builds the arguments for a RoleClassExecutor role
-// (worker-shaped): only permission-mode plus the shared skip-permissions+
-// settings pair — no tool filtering. Matches the pre-WP14 worker spec, which
-// never routed through the reporter tool-filtering path (it never asks
-// questions and needs the full default tool surface to execute a plan).
+// (worker-shaped): permission-mode plus the shared skip-permissions+settings
+// pair, matching the pre-WP14 worker spec exactly — UNLESS the role's config
+// explicitly sets AllowedTools, in which case §1.6 requires that explicit
+// intent take effect (a config gate reviewers pinned by name must actually
+// gate something).
+//
+// The gate is role.AllowedTools, not role.DisallowedTools: DefaultsConfig's
+// blanket "defaults.disallowed_tools" (pipeline.yaml) backfills EVERY role's
+// DisallowedTools — including the worker's — whenever the role itself leaves
+// it unset (config/roles.go's applyBaseAgentDefaults), so DisallowedTools is
+// essentially NEVER empty post-Load() even for a worker role that configured
+// nothing. AllowedTools has no such blanket-default field, so a non-empty
+// AllowedTools is an unambiguous signal that THIS role explicitly configured
+// its tool surface — at that point role.DisallowedTools (explicit or
+// defaulted) is included too, mirroring reporterArgs' pairing of the two.
+// A worker that sets ONLY disallowed_tools (no allowed_tools) is a known gap
+// left by this signal — flagged for a future pass; today's args (matching
+// pre-WP14 behavior) are preserved whenever AllowedTools is unset, keeping
+// every existing config (including cmd/orqestra/testdata/wp14_golden.yaml,
+// which sets neither) byte-identical.
 func executorArgs(role config.RoleConfig) []string {
 	var args []string
 	if role.PermissionMode != "" {
 		args = append(args, "--permission-mode", role.PermissionMode)
+	}
+	if len(role.AllowedTools) > 0 {
+		args = append(args, "--allowedTools", strings.Join(role.AllowedTools, ","))
+		if len(role.DisallowedTools) > 0 {
+			args = append(args, "--disallowedTools", strings.Join(role.DisallowedTools, ","))
+		}
 	}
 	args = append(args, openAgentArgs()...)
 	return args
@@ -293,42 +322,58 @@ func mergeAppendPrompts(parts ...string) string {
 // filterMCPConfig reads the user's ~/.claude.json MCP server definitions and
 // returns a JSON string containing only the named servers. This is passed to
 // --mcp-config so only selected servers start, keeping token overhead minimal.
-func filterMCPConfig(names []string) string {
+//
+// A6/§1.6: names arriving here are an explicit, user-NAMED config intent
+// (role.MCPServers in orqestra.yaml) — a name that is not found (whether
+// because ~/.claude.json itself is missing/unreadable/corrupt, or the file
+// exists but lacks that entry) is a config error, not something to warn about
+// and silently drop: the caller asked for a specific server and would
+// otherwise run with tools missing and no indication why. Fails closed
+// instead (was: warn + continue with an empty/partial server set).
+func filterMCPConfig(names []string) (string, error) {
 	type mcpConfig struct {
 		MCPServers map[string]json.RawMessage `json:"mcpServers"`
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		slog.Warn("cannot determine home dir for MCP config", "err", err)
-		return `{"mcpServers":{}}`
+		return "", fmt.Errorf("filter mcp config: determine home dir: %w", err)
 	}
 
-	data, err := os.ReadFile(home + "/.claude.json")
-	if err != nil {
-		slog.Debug("no ~/.claude.json found, using empty MCP config")
-		return `{"mcpServers":{}}`
-	}
-
+	claudeJSONPath := home + "/.claude.json"
 	var cfg mcpConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		slog.Warn("failed to parse ~/.claude.json", "err", err)
-		return `{"mcpServers":{}}`
+	data, err := os.ReadFile(claudeJSONPath)
+	switch {
+	case err == nil:
+		if unmarshalErr := json.Unmarshal(data, &cfg); unmarshalErr != nil {
+			return "", fmt.Errorf("filter mcp config: parse %s: %w", claudeJSONPath, unmarshalErr)
+		}
+	case os.IsNotExist(err):
+		// No file at all: cfg.MCPServers stays nil, so every named server
+		// below is reported missing — the same fail-closed outcome as an
+		// existing file lacking those entries, not a silent empty config.
+	default:
+		return "", fmt.Errorf("filter mcp config: read %s: %w", claudeJSONPath, err)
 	}
 
 	filtered := make(map[string]json.RawMessage, len(names))
+	var missing []string
 	for _, name := range names {
 		if server, ok := cfg.MCPServers[name]; ok {
 			filtered[name] = server
-		} else {
-			slog.Warn("MCP server not found in ~/.claude.json", "name", name)
+			continue
 		}
+		missing = append(missing, name)
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing) // §1.7: deterministic error message regardless of config iteration order
+		return "", fmt.Errorf("filter mcp config: named MCP server(s) not found in %s: %s", claudeJSONPath, strings.Join(missing, ", "))
 	}
 
 	result := mcpConfig{MCPServers: filtered}
 	out, err := json.Marshal(result)
 	if err != nil {
-		return `{"mcpServers":{}}`
+		return "", fmt.Errorf("filter mcp config: marshal filtered config: %w", err)
 	}
-	return string(out)
+	return string(out), nil
 }

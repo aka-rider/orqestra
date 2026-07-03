@@ -129,7 +129,15 @@ func Run(ctx context.Context, spec ProcessSpec, in <-chan Message, sink Sink) (R
 	}
 
 	hasInputPlane := in != nil
-	args := buildSpecArgs(spec, hasInputPlane)
+	args, err := buildSpecArgs(spec, hasInputPlane)
+	if err != nil {
+		// A6/§1.6: buildSpecArgs failing means the inline MCP merge could not
+		// be trusted — that set includes the question/report bridge, so
+		// silently falling back to a spec missing it would run the agent with
+		// no way to ask questions or submit a report. Fail closed instead of
+		// starting a subprocess that can never behave as configured.
+		return RunResult{}, fmt.Errorf("exec: build spec args: %w", err)
+	}
 
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

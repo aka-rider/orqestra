@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/xiii/orqestra/internal/harness"
@@ -267,5 +268,71 @@ func TestReportHarvester_PlanFileChanged_DifferentPathIsChanged(t *testing.T) {
 	}
 	if unverified {
 		t.Error("a definitively different path is not 'unverified' — it IS a change")
+	}
+}
+
+// TestReportHarvester_PlanFileTierErrorRecorded is WP18's A5 QA gate: a tier
+// that ERRORS while being retrieved (as opposed to merely failing the sanity
+// check) must leave a trace in ReportProvenance.Errored, not vanish silently.
+// Here tier 2 (plan file) errors because res.SessionID is empty — ReadPlanFile
+// fails closed with "no session ID" — while tier 3 (final message, from
+// res.Output) succeeds, so Harvest still returns a usable report.
+//
+// RED-first: against the pre-A5 harvestReporter (the `if plan, err := ...;
+// err == nil { ... }` tier-2 branch with no else), this test failed with
+// "provenance.Errored = [], want an entry naming \"plan_file\"" — the tier-2
+// read error left no trace at all.
+func TestReportHarvester_PlanFileTierErrorRecorded(t *testing.T) {
+	const validFinalMessage = "# Plan\n\n## Goal\nDo the thing.\n\n## Work Packages\n### 1. Step one"
+	sc := StepContext{Log: slog.Default(), RepoPath: t.TempDir()}
+
+	spec := harness.ProcessSpec{AgentID: "architect", PlanMode: true}
+	res := harness.RunResult{SessionID: "", Output: validFinalMessage} // no session ID -> preferReport errors
+
+	harvester := NewReportHarvester(sc, RoleReporter)
+	out, prov, err := harvester.Harvest(context.Background(), spec, res, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != validFinalMessage {
+		t.Errorf("out = %q, want the tier-3 fallback %q", out, validFinalMessage)
+	}
+	if prov.Tier != 3 {
+		t.Errorf("provenance.Tier = %d, want 3 (fallen through from the errored plan-file tier)", prov.Tier)
+	}
+	found := false
+	for _, e := range prov.Errored {
+		if strings.HasPrefix(e, SourcePlanFile+":") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("provenance.Errored = %v, want an entry naming %q (the plan-file tier's read error)", prov.Errored, SourcePlanFile)
+	}
+}
+
+// TestReportHarvester_TerminalErrorNamesErroredTiers proves the fail-closed
+// tier-4 error names every tier that errored on the way there — not just
+// which ones failed the sanity check — so a debugging session can tell "the
+// plan file couldn't be read" apart from "the plan file read fine but looked
+// like junk".
+func TestReportHarvester_TerminalErrorNamesErroredTiers(t *testing.T) {
+	sc := StepContext{Log: slog.Default(), RepoPath: t.TempDir()}
+	spec := harness.ProcessSpec{AgentID: "architect", PlanMode: true}
+	res := harness.RunResult{} // no session, no output: both plan-file and final-message tiers error
+
+	harvester := NewReportHarvester(sc, RoleReporter)
+	_, prov, err := harvester.Harvest(context.Background(), spec, res, nil)
+	if err == nil {
+		t.Fatal("expected a fail-closed error when every tier errors or is absent")
+	}
+	if !strings.Contains(err.Error(), SourcePlanFile) {
+		t.Errorf("terminal error %q does not name the errored %q tier", err.Error(), SourcePlanFile)
+	}
+	if !strings.Contains(err.Error(), SourceFinalMessage) {
+		t.Errorf("terminal error %q does not name the errored %q tier", err.Error(), SourceFinalMessage)
+	}
+	if len(prov.Errored) != 2 {
+		t.Errorf("prov.Errored = %v, want 2 entries (plan_file, final_message)", prov.Errored)
 	}
 }

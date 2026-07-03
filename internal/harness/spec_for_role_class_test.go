@@ -93,11 +93,18 @@ func TestSpecForRole_ReporterToolConstraints(t *testing.T) {
 			base.Model = "m"
 			cfg.Architect = config.ArchitectConfig{BaseAgentConfig: base}
 
+			if tt.base.MCPServers != nil && len(*tt.base.MCPServers) > 0 {
+				withClaudeJSONFixture(t, *tt.base.MCPServers...)
+			}
+
 			spec, err := SpecForRole(cfg, config.RoleSpecInput{Name: "architect"}, SandboxConfig{})
 			if err != nil {
 				t.Fatalf("SpecForRole: %v", err)
 			}
-			args := SpecArgs(spec)
+			args, err := SpecArgs(spec)
+			if err != nil {
+				t.Fatalf("SpecArgs: %v", err)
+			}
 
 			allowed := flagValue(args, "--allowedTools")
 			disallowed := flagValue(args, "--disallowedTools")
@@ -168,7 +175,10 @@ func TestSpecForRole_ReporterLeastPrivilege_NoWildcardStar(t *testing.T) {
 		if err != nil {
 			t.Fatalf("SpecForRole: %v", err)
 		}
-		args := SpecArgs(spec)
+		args, err := SpecArgs(spec)
+		if err != nil {
+			t.Fatalf("SpecArgs: %v", err)
+		}
 		allowedStr := flagValue(args, "--allowedTools")
 
 		for _, part := range strings.Split(allowedStr, ",") {
@@ -187,35 +197,37 @@ func TestSpecForRole_ReporterLeastPrivilege_NoWildcardStar(t *testing.T) {
 
 // --- Executor-class asymmetry (worker never gets reporter-style tool filtering) ---
 
-func TestSpecForRole_ExecutorSkipsToolFiltering(t *testing.T) {
-	// Matches the pre-WP14 worker spec exactly: only --permission-mode plus
-	// the shared skip-permissions+settings pair. AllowedTools/DisallowedTools/
-	// MCPServers configured on the worker role are NOT applied — the worker
-	// never routes through the reporter tool-filtering path.
-	mcpNames := []string{"some-server"}
+// TestSpecForRole_ExecutorUnsetToolsUnchanged is the "unset -> unchanged"
+// half of the WP18 executor-tool-filters follow-up: a worker role that never
+// configures AllowedTools/DisallowedTools/MCPServers gets EXACTLY the
+// pre-WP14 worker spec — only --permission-mode plus the shared
+// skip-permissions+settings pair — matching cmd/orqestra/testdata/
+// wp14_golden.yaml (which sets none of these for its worker role) byte for
+// byte.
+func TestSpecForRole_ExecutorUnsetToolsUnchanged(t *testing.T) {
 	cfg := fixtureConfig(t)
 	cfg.Worker = config.WorkerConfig{BaseAgentConfig: config.BaseAgentConfig{
-		Model:           "m",
-		PermissionMode:  "bypassPermissions",
-		AllowedTools:    []string{"Read"},
-		DisallowedTools: []string{"Bash"},
-		MCPServers:      &mcpNames,
+		Model:          "m",
+		PermissionMode: "bypassPermissions",
 	}}
 
 	spec, err := SpecForRole(cfg, config.RoleSpecInput{Name: "worker"}, SandboxConfig{})
 	if err != nil {
 		t.Fatalf("SpecForRole: %v", err)
 	}
-	args := SpecArgs(spec)
+	args, err := SpecArgs(spec)
+	if err != nil {
+		t.Fatalf("SpecArgs: %v", err)
+	}
 
 	if flagValue(args, "--permission-mode") != "bypassPermissions" {
 		t.Errorf("--permission-mode = %q, want bypassPermissions", flagValue(args, "--permission-mode"))
 	}
 	if flagValue(args, "--allowedTools") != "" {
-		t.Errorf("--allowedTools should be absent for an executor-class role, got %q", flagValue(args, "--allowedTools"))
+		t.Errorf("--allowedTools should be absent when the executor role never set AllowedTools, got %q", flagValue(args, "--allowedTools"))
 	}
 	if flagValue(args, "--disallowedTools") != "" {
-		t.Errorf("--disallowedTools should be absent for an executor-class role, got %q", flagValue(args, "--disallowedTools"))
+		t.Errorf("--disallowedTools should be absent when the executor role never set AllowedTools, got %q", flagValue(args, "--disallowedTools"))
 	}
 	found := false
 	for _, a := range args {
@@ -234,6 +246,39 @@ func TestSpecForRole_ExecutorSkipsToolFiltering(t *testing.T) {
 	}
 }
 
+// TestSpecForRole_ExecutorExplicitAllowedToolsApplied is the "set -> applied"
+// half: §1.6 requires an explicitly configured tool surface to actually take
+// effect. AllowedTools is the gate (see executorArgs' doc comment for why
+// DisallowedTools alone cannot be, given DefaultsConfig's blanket backfill);
+// once AllowedTools is set, DisallowedTools (explicit or defaulted) rides
+// along, matching reporterArgs' pairing. MCPServers stays unfiltered — the
+// executor class still never routes through filterMCPConfig/--strict-mcp-config.
+func TestSpecForRole_ExecutorExplicitAllowedToolsApplied(t *testing.T) {
+	cfg := fixtureConfig(t)
+	cfg.Worker = config.WorkerConfig{BaseAgentConfig: config.BaseAgentConfig{
+		Model:           "m",
+		PermissionMode:  "bypassPermissions",
+		AllowedTools:    []string{"Read", "Edit", "Write", "Bash"},
+		DisallowedTools: []string{"WebFetch"},
+	}}
+
+	spec, err := SpecForRole(cfg, config.RoleSpecInput{Name: "worker"}, SandboxConfig{})
+	if err != nil {
+		t.Fatalf("SpecForRole: %v", err)
+	}
+	args, err := SpecArgs(spec)
+	if err != nil {
+		t.Fatalf("SpecArgs: %v", err)
+	}
+
+	if flagValue(args, "--allowedTools") != "Read,Edit,Write,Bash" {
+		t.Errorf("--allowedTools = %q, want the configured Read,Edit,Write,Bash", flagValue(args, "--allowedTools"))
+	}
+	if flagValue(args, "--disallowedTools") != "WebFetch" {
+		t.Errorf("--disallowedTools = %q, want the configured WebFetch", flagValue(args, "--disallowedTools"))
+	}
+}
+
 // --- Utility-class shape (integrator's two invocation variants) ---
 
 func TestSpecForRole_UtilityNoToolsOverride(t *testing.T) {
@@ -245,7 +290,10 @@ func TestSpecForRole_UtilityNoToolsOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SpecForRole: %v", err)
 	}
-	args := SpecArgs(spec)
+	args, err := SpecArgs(spec)
+	if err != nil {
+		t.Fatalf("SpecArgs: %v", err)
+	}
 	if flagValue(args, "--tools") != "" {
 		t.Errorf("--tools = %q, want empty (no tools)", flagValue(args, "--tools"))
 	}
@@ -278,7 +326,10 @@ func TestSpecForRole_UtilityWithoutOverrideUsesRoleTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SpecForRole: %v", err)
 	}
-	args := SpecArgs(spec)
+	args, err := SpecArgs(spec)
+	if err != nil {
+		t.Fatalf("SpecArgs: %v", err)
+	}
 	if flagValue(args, "--allowedTools") != "Read,Edit" {
 		t.Errorf("--allowedTools = %q, want Read,Edit", flagValue(args, "--allowedTools"))
 	}

@@ -103,10 +103,21 @@ func (s *ReviseStep) Run(ctx context.Context, in ReviseInput, sc StepContext) (P
 		nextPlanFilePath = in.Plan.PlanFilePath
 	}
 
+	// J13: advance the session ID (like step_deliberate.go's runRound) only
+	// when the plan actually changed — a successful revision that produced a
+	// fresh report but happened to echo identical content, or the chat-only
+	// fallback path, both keep resuming the PRIOR session; only a genuine
+	// content change means the next gate-loop turn must resume THIS
+	// invocation's session (architect memory) instead of a stale one.
+	sessionID := in.Plan.SessionID
+	if revised != "" && revised != in.Plan.Markdown {
+		sessionID = res.SessionID
+	}
+
 	return PlanOutput{
 		Markdown:     revised,
 		Warnings:     agent.CheckPlanHealth(revised),
-		SessionID:    in.Plan.SessionID,
+		SessionID:    sessionID,
 		PlanFilePath: nextPlanFilePath,
 	}, nil
 }

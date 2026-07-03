@@ -1,12 +1,37 @@
 package harness
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/xiii/orqestra/internal/config"
 )
+
+// withClaudeJSONFixture points HOME at an isolated temp dir and writes a
+// ~/.claude.json containing an entry for each name in servers, so tests that
+// exercise filterMCPConfig's "found" path (A6: SpecForRole now fails closed
+// on a named-but-missing server) never depend on the developer/CI machine's
+// real ~/.claude.json.
+func withClaudeJSONFixture(t *testing.T, servers ...string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	entries := make(map[string]any, len(servers))
+	for _, name := range servers {
+		entries[name] = map[string]any{"command": "true"}
+	}
+	data, err := json.Marshal(map[string]any{"mcpServers": entries})
+	if err != nil {
+		t.Fatalf("marshal claude.json fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), data, 0o644); err != nil {
+		t.Fatalf("write claude.json fixture: %v", err)
+	}
+}
 
 // fixtureConfig returns a minimal, valid *config.Config: one provider, one
 // model ("m"), and architect/critic/worker/integrator all pointed at it.
@@ -109,6 +134,36 @@ func TestSpecForRole_UnknownSandboxTier_Errors(t *testing.T) {
 	}
 }
 
+// TestSpecForRole_NamedMCPServerMissing_Errors is WP18's A6 QA gate: a
+// user-NAMED mcp_servers entry that does not exist in ~/.claude.json is
+// explicit user intent that cannot be satisfied — SpecForRole must fail
+// closed (§1.6), never warn-and-silently-drop the missing server as pre-A6
+// filterMCPConfig did.
+//
+// RED-first: against the pre-A6 filterMCPConfig (slog.Warn + continue with
+// whatever servers WERE found), this test failed because SpecForRole
+// returned a valid spec with no error at all — the missing server vanished
+// with only a Warn log to notice it.
+func TestSpecForRole_NamedMCPServerMissing_Errors(t *testing.T) {
+	withClaudeJSONFixture(t, "present-server") // "missing-server" is deliberately absent
+
+	cfg := fixtureConfig(t)
+	named := []string{"present-server", "missing-server"}
+	cfg.Architect = config.ArchitectConfig{BaseAgentConfig: config.BaseAgentConfig{
+		Model:          "m",
+		PermissionMode: "plan",
+		MCPServers:     &named,
+	}}
+
+	_, err := SpecForRole(cfg, config.RoleSpecInput{Name: "architect"}, SandboxConfig{})
+	if err == nil {
+		t.Fatal("expected an error for a named-but-missing MCP server, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing-server") {
+		t.Errorf("error = %q, want it to name the missing server %q", err, "missing-server")
+	}
+}
+
 func TestSpecForRole_UnresolvableModelRef_Errors(t *testing.T) {
 	// INV-P5-FAILCLOSED: a model_ref that doesn't resolve to a configured
 	// model must error (typo/missing model), distinct from an empty ref.
@@ -198,7 +253,10 @@ func TestSpecForRole_NewRoleZeroGoChanges(t *testing.T) {
 		t.Errorf("expected the researcher subagent attached to a reporter role, got %+v", spec.Agents)
 	}
 
-	args := SpecArgs(spec)
+	args, err := SpecArgs(spec)
+	if err != nil {
+		t.Fatalf("SpecArgs: %v", err)
+	}
 	if flagValue(args, "--max-turns") != "10" {
 		t.Errorf("--max-turns = %q, want 10", flagValue(args, "--max-turns"))
 	}

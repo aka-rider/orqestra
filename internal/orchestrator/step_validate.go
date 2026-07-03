@@ -72,6 +72,9 @@ func (s *ValidateStep) writeMeta(sc StepContext, sid string, start time.Time, st
 		}
 		data, jsonErr := json.MarshalIndent(meta, "", "  ")
 		if jsonErr != nil {
+			// fire-and-forget: meta is a best-effort diagnostic artifact, not
+			// the run's outcome — but a vanished write leaves no trace without this.
+			sc.Log.Warn("writeMeta: marshal validator meta failed, artifact not written", "err", jsonErr)
 			return
 		}
 		sc.Artifacts.WriteBestEffort("validator_meta.json", data)
@@ -93,6 +96,9 @@ func (s *ValidateStep) writeMeta(sc StepContext, sid string, start time.Time, st
 	}
 	data, jsonErr := json.MarshalIndent(meta, "", "  ")
 	if jsonErr != nil {
+		// fire-and-forget: meta is a best-effort diagnostic artifact, not the
+		// run's outcome — but a vanished write leaves no trace without this.
+		sc.Log.Warn("writeMeta: marshal validator meta failed, artifact not written", "err", jsonErr)
 		return
 	}
 	sc.Artifacts.WriteBestEffort("validator_meta.json", data)

@@ -33,7 +33,10 @@ func TestWithInlineAgent_SerializedToAgentsFlag(t *testing.T) {
 		t.Fatalf("spec did not carry the inline agent: %+v", spec.Agents)
 	}
 
-	args := buildSpecArgs(spec, false)
+	args, err := buildSpecArgs(spec, false)
+	if err != nil {
+		t.Fatalf("buildSpecArgs: %v", err)
+	}
 	raw := findAgentsJSON(args)
 	if raw == "" {
 		t.Fatal("--agents flag not emitted")

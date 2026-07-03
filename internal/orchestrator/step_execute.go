@@ -122,12 +122,16 @@ func (s *ExecuteStep) writeMeta(sc StepContext, sid string, start time.Time, sta
 		ReportSource:         prov.Source,
 		ReportDetail:         prov.Detail,
 		ReportRejected:       prov.Rejected,
+		ReportErrored:        prov.Errored,
 	}
 	if err != nil {
 		meta.Error = err.Error()
 	}
 	data, jsonErr := json.MarshalIndent(meta, "", "  ")
 	if jsonErr != nil {
+		// fire-and-forget: meta is a best-effort diagnostic artifact, not the
+		// run's outcome — but a vanished write leaves no trace without this.
+		sc.Log.Warn("writeMeta: marshal worker meta failed, artifact not written", "err", jsonErr)
 		return
 	}
 	sc.Artifacts.WriteBestEffort("worker_meta.json", data)

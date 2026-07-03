@@ -138,3 +138,79 @@ func TestDeliberateStep_RunRound_UserCancelIsFatalWithAttributedCause(t *testing
 		t.Errorf("expected error to wrap the attributed cause ErrUserCancelled, got %v", err)
 	}
 }
+
+// TestApplyEmptyRevisionFallback is WP18's J12-residual QA gate: the
+// defensive branch that handles a harvester reporting SUCCESS (revErr ==
+// nil) with empty content anyway must be classified as a fallback (never a
+// clean "done") exactly like the revErr != nil chat-only path already is.
+//
+// looksLikeReport's own len<20 gate makes a nil-error harvest with empty
+// content structurally unreachable through the real ReportHarvester today
+// (every success path it returns is already non-empty) — this is a
+// defensive belt-and-braces fix, hence testing the extracted decision
+// function directly rather than driving it through the full harvester
+// chain (which cannot manufacture this input).
+//
+// RED-first: against the pre-fix inline code (`if revised == "" { revised =
+// planMarkdown }` with no fallback marking), the "empty + not already
+// fallback" case returned fallback=false — this test's second row failed
+// with "fallback = false, want true".
+func TestApplyEmptyRevisionFallback(t *testing.T) {
+	const planMarkdown = "# Plan\n\nOriginal plan content."
+
+	tests := []struct {
+		name            string
+		revised         string
+		alreadyFallback bool
+		wantRevised     string
+		wantFallback    bool
+		wantErrNil      bool
+	}{
+		{
+			name:            "non-empty revision is untouched",
+			revised:         "# Plan\n\nRevised content.",
+			alreadyFallback: false,
+			wantRevised:     "# Plan\n\nRevised content.",
+			wantFallback:    false,
+			wantErrNil:      true,
+		},
+		{
+			name:            "empty revision with a nil-error harvest is marked fallback",
+			revised:         "",
+			alreadyFallback: false,
+			wantRevised:     planMarkdown,
+			wantFallback:    true,
+			wantErrNil:      false, // must synthesize an explanatory error — no error existed yet
+		},
+		{
+			name:            "empty revision already marked fallback stays fallback (no double-wrap)",
+			revised:         "",
+			alreadyFallback: true,
+			wantRevised:     planMarkdown,
+			wantFallback:    true,
+			wantErrNil:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var inErr error
+			if tt.alreadyFallback {
+				inErr = errors.New("chat-only continuation")
+			}
+			gotRevised, gotFallback, gotErr := applyEmptyRevisionFallback(tt.revised, planMarkdown, tt.alreadyFallback, inErr)
+			if gotRevised != tt.wantRevised {
+				t.Errorf("revised = %q, want %q", gotRevised, tt.wantRevised)
+			}
+			if gotFallback != tt.wantFallback {
+				t.Errorf("fallback = %v, want %v", gotFallback, tt.wantFallback)
+			}
+			if tt.wantErrNil && gotErr != nil {
+				t.Errorf("expected nil error, got %v", gotErr)
+			}
+			if !tt.wantErrNil && gotErr == nil {
+				t.Error("expected a non-nil explanatory error, got nil")
+			}
+		})
+	}
+}

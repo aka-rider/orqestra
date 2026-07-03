@@ -1,5 +1,26 @@
 # Pipeline definition -- compile-time embedded.
 
+# J29: a minimal, always-bootable provider/model set so DefaultConfig() alone
+# (no user orqestra.yaml) passes validate() — the native Claude CLI provider
+# needs no base_url/api_key (it uses the caller's logged-in `claude`
+# credentials), so these three aliases are always resolvable standalone. A
+# user config file overlays/overrides providers/models/role model refs as
+# usual (config.Load re-applies validate() after the overlay); this section
+# only makes the EMBEDDED defaults themselves valid, matching every
+# researcher/architect/critic/worker/integrator model ref below (medium,
+# large) plus the "small" utility-model alias validate() always requires.
+providers:
+  native:
+    type: native
+
+models:
+  small:
+    provider: native
+  medium:
+    provider: native
+  large:
+    provider: native
+
 # Global pipeline behavior (not per-agent).
 pipeline:
   # When true, a FAIL verdict from worker self-validation skips Integrate and

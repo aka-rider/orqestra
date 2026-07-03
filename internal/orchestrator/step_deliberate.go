@@ -183,9 +183,7 @@ func (s *DeliberateStep) runRound(
 	} else {
 		sc.Obs.ReportHarvested("architect", revProv)
 	}
-	if revised == "" {
-		revised = planMarkdown
-	}
+	revised, chatOnlyFallback, revErr = applyEmptyRevisionFallback(revised, planMarkdown, chatOnlyFallback, revErr)
 
 	metaStatus := "done"
 	var metaErr error
@@ -207,6 +205,26 @@ func (s *DeliberateStep) runRound(
 		return revised, revRes.SessionID, nextPlanFilePath, nil
 	}
 	return planMarkdown, sessionID, planFilePath, nil
+}
+
+// applyEmptyRevisionFallback is the J12 residual: a harvester that reported
+// SUCCESS (revErr == nil, sc.Obs.ReportHarvested already called by the
+// caller) but returned empty content anyway is still a revision that
+// produced NOTHING — the same defect class J12 fixed for the revErr != nil
+// (chat-only) path, which must not be recorded as a clean "done". When
+// alreadyFallback is already true (the revErr != nil path already ran and
+// set revised = planMarkdown), this is a no-op: revised is already
+// planMarkdown (non-empty in practice) and the existing revErr already
+// explains why. Only when a nil-error harvest somehow yields "" does this
+// synthesize a fallback classification and an explanatory error.
+func applyEmptyRevisionFallback(revised, planMarkdown string, alreadyFallback bool, revErr error) (string, bool, error) {
+	if revised != "" {
+		return revised, alreadyFallback, revErr
+	}
+	if alreadyFallback {
+		return planMarkdown, true, revErr
+	}
+	return planMarkdown, true, fmt.Errorf("architect revision harvested empty content; falling back to the previous plan")
 }
 
 func (s *DeliberateStep) writeArchMeta(sc StepContext, sid string, start time.Time, status string, err error, usage harness.TokenUsage, prov ReportProvenance) {
@@ -231,12 +249,16 @@ func writeMeta(sc StepContext, filename, agentID string, meta AgentMeta, session
 		ReportSource:         prov.Source,
 		ReportDetail:         prov.Detail,
 		ReportRejected:       prov.Rejected,
+		ReportErrored:        prov.Errored,
 	}
 	if err != nil {
 		m.Error = err.Error()
 	}
 	data, jsonErr := json.MarshalIndent(m, "", "  ")
 	if jsonErr != nil {
+		// fire-and-forget: meta is a best-effort diagnostic artifact, not the
+		// run's outcome — but a vanished write leaves no trace without this.
+		sc.Log.Warn("writeMeta: marshal step meta failed, artifact not written", "file", filename, "agent", agentID, "err", jsonErr)
 		return
 	}
 	sc.Artifacts.WriteBestEffort(filename, data)

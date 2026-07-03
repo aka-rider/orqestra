@@ -146,6 +146,9 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 			logPath := filepath.Join(session.Path, "run.log")
 			logFile, logErr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 			if logErr != nil {
+				// fire-and-forget: run.log is a best-effort diagnostic file —
+				// the run proceeds using the process-default logger (still
+				// visible via StepContext.Log) rather than failing the run.
 				slog.Warn("could not create run log", "err", logErr)
 			} else {
 				logger = slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug}))
