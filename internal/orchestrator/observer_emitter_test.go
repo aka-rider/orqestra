@@ -19,7 +19,7 @@ import (
 // dropped. It passes now that non-delta text forwards when no IsDelta chunk
 // preceded it in the same block.
 func TestEventObserver_ZeroDeltaProseSurfaces(t *testing.T) {
-	em := newEmitter(8)
+	em := newEmitter(context.Background(), 8)
 	obs := newEventObserver(em)
 	sink := SinkFromObserver(AgentID("worker"), obs)
 
@@ -47,7 +47,7 @@ func TestEventObserver_ZeroDeltaProseSurfaces(t *testing.T) {
 // EXACTLY ONCE on the bus — the echo must be dropped, not forwarded as a
 // second EventDelta.
 func TestEventObserver_DeltaThenEchoRendersOnce(t *testing.T) {
-	em := newEmitter(8)
+	em := newEmitter(context.Background(), 8)
 	obs := newEventObserver(em)
 	const agentID = AgentID("worker")
 
