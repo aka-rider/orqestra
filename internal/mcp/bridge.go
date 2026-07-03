@@ -123,6 +123,26 @@ func (b *QuestionBridge) Ready() <-chan struct{} {
 	return b.ready
 }
 
+// StartBridgeAsync starts bridge.Run(ctx) in its own goroutine, scoped to
+// ctx's lifetime, and logs (never returns) a failure — a bridge that never
+// binds degrades question support rather than failing the caller (root
+// CLAUDE.md §5.3). A nil bridge is a no-op.
+//
+// This is the ONE place the "start once, for this caller's whole lifetime"
+// wiring is defined (WP16): both tui.Run (whole TUI-session lifetime) and the
+// cmd/orqestra headless entry point (single-run lifetime) call this instead
+// of duplicating the goroutine + nil-guard + log line.
+func StartBridgeAsync(ctx context.Context, bridge *QuestionBridge) {
+	if bridge == nil {
+		return
+	}
+	go func() {
+		if err := bridge.Run(ctx); err != nil {
+			slog.Warn("question bridge", "err", err)
+		}
+	}()
+}
+
 func (b *QuestionBridge) acceptLoop(ctx context.Context, ln net.Listener) {
 	for {
 		select {

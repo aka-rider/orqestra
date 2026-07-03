@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
@@ -46,11 +47,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	// Global flags
 	var configPath string
+	var promptFlag string
+	var autoApprove bool
+	var planOnly bool
+	var verboseStream bool
 
 	fs := flag.NewFlagSet("orqestra", flag.ContinueOnError)
 	fs.StringVar(&configPath, "config", "orqestra.yaml", "config file name or absolute path")
+	fs.StringVar(&promptFlag, "prompt", "", "run headless with this prompt instead of the TUI (WP16)")
+	fs.BoolVar(&autoApprove, "auto-approve", false, "headless: never gate on human review (no gate fires); requires --prompt")
+	fs.BoolVar(&planOnly, "plan-only", false, "headless: stop after the plan (skip execution and validation); requires --prompt")
+	fs.BoolVar(&verboseStream, "verbose-stream", false, "headless: print streamed agent text (deltas) to stdout; requires --prompt")
 	if err := fs.Parse(args[1:]); err != nil {
-		fmt.Fprintf(stderr, "Usage: orqestra [--config path|preset]\n")
+		fmt.Fprintf(stderr, "Usage: orqestra [--config path|preset] [--prompt text [--auto-approve] [--plan-only] [--verbose-stream]]\n")
+		return exitInvalidInput
+	}
+
+	promptFlag = strings.TrimSpace(promptFlag)
+	if promptFlag == "" && (autoApprove || planOnly || verboseStream) {
+		fmt.Fprintf(stderr, "Error: --auto-approve/--plan-only/--verbose-stream require --prompt\n")
 		return exitInvalidInput
 	}
 
@@ -101,6 +116,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if profileErr != nil {
 		fmt.Fprintf(stderr, "Error: sandbox profile detection failed: %v\n", profileErr)
 		return exitInvalidInput
+	}
+
+	// Headless path (WP16/J18): --prompt bypasses the TUI entirely.
+	if promptFlag != "" {
+		if len(cmdArgs) > 0 {
+			fmt.Fprintf(stderr, "Error: --prompt cannot be combined with a subcommand (%q)\n", cmdArgs[0])
+			return exitInvalidInput
+		}
+		return runHeadlessCommand(cfg, sandboxProfiles, repoPath, promptFlag, autoApprove, planOnly, verboseStream, stdout, stderr)
 	}
 
 	if len(cmdArgs) == 0 {

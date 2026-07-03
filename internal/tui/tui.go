@@ -3,10 +3,10 @@ package tui
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
@@ -20,24 +20,18 @@ import (
 // call site (the simplest correct owner). Engine.startNew only ever forwards
 // questions from the bridge onto each run's own event bus (RunEvent) — it
 // never starts or stops the bridge itself (see the lifecycle comment on
-// startNew). A future
-// headless entry point (WP16) would own its own bridge lifecycle the same
-// way, at its own place, since it won't call tui.Run.
+// startNew). The headless entry point (cmd/orqestra/headless.go, WP16) owns
+// its own bridge lifecycle the same way (via mcp.StartBridgeAsync below), at
+// its own place, since it never calls tui.Run.
 func Run(engine *orchestrator.Engine, configName string) error {
 	model, err := NewModel(engine, configName)
 	if err != nil {
 		return fmt.Errorf("init TUI: %w", err)
 	}
 
-	if engine.QuestionBridge != nil {
-		bridgeCtx, bridgeCancel := context.WithCancel(context.Background())
-		defer bridgeCancel()
-		go func() {
-			if bridgeErr := engine.QuestionBridge.Run(bridgeCtx); bridgeErr != nil {
-				slog.Warn("question bridge", "err", bridgeErr)
-			}
-		}()
-	}
+	bridgeCtx, bridgeCancel := context.WithCancel(context.Background())
+	defer bridgeCancel()
+	mcp.StartBridgeAsync(bridgeCtx, engine.QuestionBridge)
 
 	p := tea.NewProgram(model)
 
