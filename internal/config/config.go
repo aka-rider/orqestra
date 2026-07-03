@@ -138,6 +138,12 @@ type Config struct {
 	Integrator IntegratorConfig          `yaml:"integrator"`
 	Retry      RetryConfig               `yaml:"retry"`
 	Sandbox    SandboxConfig             `yaml:"sandbox"`
+
+	// ExtraRoles adds NEW pipeline roles beyond the built-ins (WP14/RC4,
+	// roles.go's Config.Roles()). Named ExtraRoles, not Roles, since Config
+	// already exports a Roles() method — the YAML key is still "roles". A
+	// key colliding with a built-in role name is a Roles()-time error.
+	ExtraRoles map[string]RoleConfig `yaml:"roles"`
 }
 
 // DefaultsConfig provides baseline values merged into every agent config.
@@ -290,7 +296,9 @@ func Load(path string) (*Config, error) {
 }
 
 // applyDefaults merges DefaultsConfig into each agent's BaseAgentConfig,
-// and applies zero-value defaults for LoopGuard thresholds.
+// and applies zero-value defaults for LoopGuard thresholds. The ExtraRoles
+// defaulting helper (applyRoleDefaults) lives in roles.go alongside
+// RoleConfig itself (WP14/RC4).
 func (c *Config) applyDefaults() {
 	agents := []*BaseAgentConfig{
 		&c.Researcher.BaseAgentConfig,
@@ -300,25 +308,9 @@ func (c *Config) applyDefaults() {
 		&c.Integrator.BaseAgentConfig,
 	}
 	for _, a := range agents {
-		if len(a.DisallowedTools) == 0 && len(c.Defaults.DisallowedTools) > 0 {
-			a.DisallowedTools = append([]string(nil), c.Defaults.DisallowedTools...)
-		}
-		if a.AppendSystemPrompt == "" && c.Defaults.AppendSystemPrompt != "" {
-			a.AppendSystemPrompt = c.Defaults.AppendSystemPrompt
-		}
-		if a.LoopGuard.RepeatThreshold == 0 {
-			a.LoopGuard.RepeatThreshold = 3
-		}
-		if a.LoopGuard.MaxNudges == 0 {
-			a.LoopGuard.MaxNudges = 3
-		}
-		if a.LoopGuard.CooldownTurns == 0 {
-			a.LoopGuard.CooldownTurns = 2
-		}
-		if a.SilenceGuard.MaxNudges == 0 {
-			a.SilenceGuard.MaxNudges = 3
-		}
+		applyBaseAgentDefaults(a, c.Defaults)
 	}
+	applyRoleDefaults(c.ExtraRoles, c.Defaults)
 }
 
 // validate checks that all model references point to existing providers.
@@ -387,6 +379,13 @@ func (c *Config) validate() error {
 
 	// Check for conflicting limits on the same underlying model
 	if _, err := c.ResolvedTokenLimits(); err != nil {
+		return err
+	}
+
+	// Roles() validates the unified role table (WP14/RC4) — unknown class,
+	// unknown sandbox_tier, or empty model_ref on any entry, including
+	// roles: additions the checks above never touch — fails Load closed.
+	if _, err := c.Roles(); err != nil {
 		return err
 	}
 

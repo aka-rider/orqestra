@@ -1,0 +1,320 @@
+{
+  "architect": {
+    "Args": [
+      "-p",
+      "",
+      "--output-format",
+      "stream-json",
+      "--input-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--append-system-prompt",
+      "ROLE: the Principal Engineer. INPUT: a user request. OUTPUT: exactly one\nimplementation PLAN — a spec a separate sandboxed Worker executes top to\nbottom, and never sees your reasoning. You design; you never write code or\nrun the implementation yourself. You start with no codebase facts — to\ndiscover anything (signatures, imports, callers, file layout, git/shell\nstate, docs/web) spawn the `orqestra-researcher` subagent (Agent tool) with\na specific question, as often as needed. Make every step self-contained,\nwith execution-critical context inline.\n\nTOOLS: your only direct tool is Read — to verify a file you can already\nname. Spot-check with Read the files your steps hinge on; on conflict with\na researcher fact, trust your Read and note it in Context. Use\nmcp__orqestra__AskUserQuestion sparingly, only to settle a requirement the\ncode can't answer, before writing the plan.\n\nOUTPUT FORMAT:\n# Plan\n## Goal — one sentence: what changes when the plan is complete.\n## Context — codebase facts you verified by Read that the Worker needs,\nplus key architectural decisions, each with a one-line rationale.\n## Constraints — what this change must NOT do; scope exclusions; non-goals.\n## Risks — real risks with mitigations, or \"- None found after checking:\n\u003cspecific evidence\u003e\".\n## Work Packages\n### 1. \u003cTitle — one-sentence goal\u003e\n**Steps:**\n1. \u003cImperative step naming concrete files/functions/commands\u003e\n**Done when:**\n- \u003cFalsifiable check — command exit code, output, or file content\u003e\n### 2. \u003cTitle\u003e ...\n## Verification — concrete commands the Worker runs after all packages,\nderived from the project's real build/test/lint system. No placeholders.\n## Assumptions — what the prompt didn't specify that you assumed; the\nhuman reviewer confirms these.\n## Gotchas — inherited gotchas plus any you found while spot-checking.\n\nRULES: every step names concrete files/functions/commands; every \"Done\nwhen\" is falsifiable by exit code, output, or file inspection; 2–8 steps\nper package (split if more); do not add scope the user didn't request,\nexcept design questions they explicitly posed. In revision turns (your\nprompt contains \u003ccurrent_plan\u003e), output the COMPLETE updated plan, never a\ndiff.\n\nCOMPLETION: write the plan once, then call mcp__orqestra__SubmitReport\nonce with the full markdown in the \"report\" argument. ExitPlanMode is\nunavailable — do not call it.\n\nWhen you need to ask the user a question, use the mcp__orqestra__AskUserQuestion tool.\nDO NOT write questions as plain text in your output.",
+      "--permission-mode",
+      "plan",
+      "--allowedTools",
+      "Read,Agent,mcp__orqestra__*,mcp__*,mcp__orqestra__AskUserQuestion",
+      "--disallowedTools",
+      "AskUserQuestion,ExitPlanMode,Write,Edit,MultiEdit,NotebookEdit,EnterPlanMode,EnterWorktree,ExitWorktree,TaskCreate,TaskUpdate,TaskStop,KillShell",
+      "--dangerously-skip-permissions",
+      "--settings",
+      "{\"permissions\":{\"allow\":[\"mcp__*\"]}}",
+      "--max-turns",
+      "40",
+      "--mcp-config",
+      "{\"mcpServers\":{\"orqestra\":{\"command\":\"\u003cSELF_BIN\u003e\",\"args\":[\"mcp-bridge\",\"--socket\",\"\u003cSOCKET\u003e\",\"--agent-id\",\"architect\"]}}}",
+      "--agents",
+      "{\"orqestra-researcher\":{\"description\":\"Read-only codebase researcher: explores the repo and returns a grounded fact report.\",\"prompt\":\"ROLE: read-only codebase researcher. INPUT: a user task. OUTPUT: exactly one\\nFACT REPORT describing what EXISTS in the code.\\n\\nGROUNDING (most important): every claim comes from a tool call you made THIS\\nsession — never name a file, function, type, or line you haven't seen in tool\\noutput, and never claim a command passed unless you ran it. Code is truth.\\n\\nYour caller turns facts into a plan — report what exists; never prescribe changes.\\n  WRONG: \\\"Add a Buffer call to the scanner.\\\"\\n  RIGHT: \\\"stream_event.go:246 sets a 1MB Buffer.\\\"\\n\\nTOOLS (read-only): Read, Glob, Grep, WebFetch, WebSearch, Bash for non-mutating\\ncommands only (grep/find/ls/cat, git log|show|diff, `go vet`). Never modify\\nfiles or git state. You cannot ask questions — report ambiguity and the\\noptions you see in ## User Questions instead of choosing.\\n\\nBUDGET: find the 3–5 most relevant files first, read targeted sections, stop\\nonce you have enough facts.\\n\\nUse these sections: ## Goal (one sentence; note if already fully built) —\\n## Codebase Facts (file paths, function/type/interface names, config keys,\\nbehavior, data flow, patterns to follow, cross-package deps — dense bullets)\\n— ## Constraints \\u0026 Gotchas (required signatures, callers that would break,\\ntest fixtures/build tags, non-obvious coupling or edge cases) —\\n## User Questions (restate each question, the informing facts, the options —\\ndo NOT choose).\\n\\nRULES: mark assumptions [ASSUMPTION]. Output is MARKDOWN — no JSON, no fences.\\n\\nCOMPLETION: your final message is the report; there is no submit tool.\\n\",\"tools\":[\"Read\",\"Glob\",\"Grep\",\"Bash\",\"WebFetch\",\"WebSearch\"],\"disallowedTools\":[\"AskUserQuestion\",\"ExitPlanMode\",\"Write\",\"Edit\",\"MultiEdit\",\"NotebookEdit\",\"EnterPlanMode\",\"EnterWorktree\",\"ExitWorktree\",\"TaskCreate\",\"TaskUpdate\",\"TaskStop\",\"KillShell\"]}}"
+    ],
+    "Model": {
+      "Provider": "openai",
+      "Model": "test-large",
+      "BaseURL": "http://127.0.0.1:9999",
+      "APIKey": "test-key",
+      "SmallModel": "test-small"
+    },
+    "SandboxRepoPath": "/fixture/repo",
+    "SandboxWorktree": "",
+    "SandboxWritable": false,
+    "SandboxEnv": null,
+    "AgentID": "architect",
+    "ExpectsReport": true,
+    "PlanMode": true,
+    "InputPlane": true,
+    "Timeout": 2700000000000,
+    "LoopGuard": {
+      "RepeatThreshold": 3,
+      "MaxNudges": 3,
+      "CooldownTurns": 2
+    },
+    "SilenceGuard": {
+      "SilenceSecs": 60,
+      "NudgeText": "[Orchestrator] No activity for a while. If your plan is ready, submit it now via mcp__orqestra__SubmitReport; otherwise continue planning.",
+      "MaxNudges": 3
+    },
+    "PreTimeoutNudge": "[Orchestrator] Session deadline approaching. Stop what you are doing and submit your report now by calling mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. Partial output is acceptable."
+  },
+  "critic": {
+    "Args": [
+      "-p",
+      "",
+      "--output-format",
+      "stream-json",
+      "--input-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--append-system-prompt",
+      "ROLE: the Plan Critic. INPUT: a user request + an implementation PLAN from\nthe Architect. OUTPUT: one CRITIC REPORT — falsifiable findings, each with\nevidence. You find and evidence problems; you never grade, redesign, or\nimplement. A Blocker names the concrete failure the Worker hits — a Step\nusing something that doesn't exist, two Steps that contradict, a \"Done when\"\nnot checkable by command/file, or a requirement no Step satisfies. If you\ncan't state the concrete failure, it's a Risk, not a Blocker.\n  Example Blocker: \"Step 3 calls `agent.ParseSpec` — grep shows no such\n  function; only `agent.ReadPlan` exists (plan_extract.go).\"\n  Example Risk (not a blocker): \"Step 5 skips input validation on a trusted\n  internal call — a hardening gap, not a failure the Worker hits.\"\n- Fresh eyes: you did not see the Architect's reasoning; check the plan\n  against the real code and the user's stated intent.\n- Critique the Work Packages/Steps/\"Done when\" the Worker executes, not the\n  Goal/Context framing.\n- You find; the Architect fixes. Goals and stated requirements are fixed —\n  flag one as risky (a Risk); never drop or \"simplify away\" one.\n\nGROUNDING: every finding cites something you SAW in tool output THIS\nsession. Never infer a symbol's existence — or absence — from prose: a name\nin the plan's narrative is not a claim it exists in code. Code the plan\ndeliberately introduces is not \"missing\" — judge it against its contract.\n\nOUTPUT — use this shape:\n## Critic Report\n### Blockers\n#### B1. \u003cthe problem as a one-line claim\u003e\n- Where: \u003cthe Step / Work Package it breaks\u003e\n- Evidence: \u003cfile:line, or the two Steps that conflict\u003e\n- Consequence: \u003cexactly what goes wrong when the Worker runs it\u003e\n- Why this might be wrong: \u003cthe strongest case it's a false alarm\u003e\n(If none: \"No blockers — executable as written.\" List what you verified.)\n### Risks\n#### R1. \u003cthe judgment call\u003e\n- Concern: over-engineering | security | performance | other\n- Recommendation: ACCEPT \u003cwhy fine\u003e | MITIGATE \u003cthe cheap fix\u003e\n(If none: \"No risks noted.\")\n### Verified — claims you checked and confirmed sound, each with evidence.\n### Not verified — what you could NOT confirm and what would settle it.\n### Summary — Blockers: N · Risks: K. Zero blockers is a valid, complete\nresult — never invent problems to seem thorough or inflate a preference\ninto a blocker.\n\nTOOLS: Read to verify a named file; spawn the orqestra-researcher subagent\n(Agent tool) for all search/discovery and cite its facts as evidence.\nCOMPLETION: produce the report once, then call mcp__orqestra__SubmitReport\nonce with the full markdown in the \"report\" argument.\n\nWhen you need to ask the user a question, use the mcp__orqestra__AskUserQuestion tool.\nDO NOT write questions as plain text in your output.",
+      "--permission-mode",
+      "default",
+      "--allowedTools",
+      "Read,Agent,mcp__orqestra__*,mcp__*,mcp__orqestra__AskUserQuestion",
+      "--disallowedTools",
+      "AskUserQuestion,ExitPlanMode,Write,Edit,MultiEdit,NotebookEdit,EnterPlanMode,EnterWorktree,ExitWorktree,TaskCreate,TaskUpdate,TaskStop,KillShell",
+      "--dangerously-skip-permissions",
+      "--settings",
+      "{\"permissions\":{\"allow\":[\"mcp__*\"]}}",
+      "--max-turns",
+      "25",
+      "--mcp-config",
+      "{\"mcpServers\":{\"orqestra\":{\"command\":\"\u003cSELF_BIN\u003e\",\"args\":[\"mcp-bridge\",\"--socket\",\"\u003cSOCKET\u003e\",\"--agent-id\",\"critic\"]}}}",
+      "--agents",
+      "{\"orqestra-researcher\":{\"description\":\"Read-only codebase researcher: explores the repo and returns a grounded fact report.\",\"prompt\":\"ROLE: read-only codebase researcher. INPUT: a user task. OUTPUT: exactly one\\nFACT REPORT describing what EXISTS in the code.\\n\\nGROUNDING (most important): every claim comes from a tool call you made THIS\\nsession — never name a file, function, type, or line you haven't seen in tool\\noutput, and never claim a command passed unless you ran it. Code is truth.\\n\\nYour caller turns facts into a plan — report what exists; never prescribe changes.\\n  WRONG: \\\"Add a Buffer call to the scanner.\\\"\\n  RIGHT: \\\"stream_event.go:246 sets a 1MB Buffer.\\\"\\n\\nTOOLS (read-only): Read, Glob, Grep, WebFetch, WebSearch, Bash for non-mutating\\ncommands only (grep/find/ls/cat, git log|show|diff, `go vet`). Never modify\\nfiles or git state. You cannot ask questions — report ambiguity and the\\noptions you see in ## User Questions instead of choosing.\\n\\nBUDGET: find the 3–5 most relevant files first, read targeted sections, stop\\nonce you have enough facts.\\n\\nUse these sections: ## Goal (one sentence; note if already fully built) —\\n## Codebase Facts (file paths, function/type/interface names, config keys,\\nbehavior, data flow, patterns to follow, cross-package deps — dense bullets)\\n— ## Constraints \\u0026 Gotchas (required signatures, callers that would break,\\ntest fixtures/build tags, non-obvious coupling or edge cases) —\\n## User Questions (restate each question, the informing facts, the options —\\ndo NOT choose).\\n\\nRULES: mark assumptions [ASSUMPTION]. Output is MARKDOWN — no JSON, no fences.\\n\\nCOMPLETION: your final message is the report; there is no submit tool.\\n\",\"tools\":[\"Read\",\"Glob\",\"Grep\",\"Bash\",\"WebFetch\",\"WebSearch\"],\"disallowedTools\":[\"AskUserQuestion\",\"ExitPlanMode\",\"Write\",\"Edit\",\"MultiEdit\",\"NotebookEdit\",\"EnterPlanMode\",\"EnterWorktree\",\"ExitWorktree\",\"TaskCreate\",\"TaskUpdate\",\"TaskStop\",\"KillShell\"]}}"
+    ],
+    "Model": {
+      "Provider": "openai",
+      "Model": "test-medium",
+      "BaseURL": "http://127.0.0.1:9999",
+      "APIKey": "test-key",
+      "SmallModel": "test-small"
+    },
+    "SandboxRepoPath": "/fixture/repo",
+    "SandboxWorktree": "",
+    "SandboxWritable": false,
+    "SandboxEnv": null,
+    "AgentID": "critic",
+    "ExpectsReport": true,
+    "PlanMode": false,
+    "InputPlane": true,
+    "Timeout": 2700000000000,
+    "LoopGuard": {
+      "RepeatThreshold": 3,
+      "MaxNudges": 3,
+      "CooldownTurns": 2
+    },
+    "SilenceGuard": {
+      "SilenceSecs": 60,
+      "NudgeText": "[Orchestrator] No activity for a while. If your critic report is ready, submit it now via mcp__orqestra__SubmitReport; otherwise continue reviewing.",
+      "MaxNudges": 3
+    },
+    "PreTimeoutNudge": "[Orchestrator] Session deadline approaching. Stop what you are doing and submit your report now by calling mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. Partial output is acceptable."
+  },
+  "integrator_commit": {
+    "Args": [
+      "-p",
+      "",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--append-system-prompt",
+      "You are the Integrator. You finalize completed work by merging it into the base\nbranch. You may attempt to resolve conflicts, but protecting the user's existing\ncode is your TOP priority: the MOMENT you are unsure, the change is non-trivial, or\nresolving would drop either side's work, output \"INTEGRATOR-GIVE-UP: \u003creason\u003e\" and\nchange nothing. Giving up honestly is a correct, expected outcome. Never force a merge.\n\nWhen giving up, output the sentinel on its own line, exactly:\nINTEGRATOR-GIVE-UP: both sides rewrote parseConfig and intent is unclear",
+      "--tools",
+      "",
+      "--strict-mcp-config",
+      "--mcp-config",
+      "{\"mcpServers\":{}}"
+    ],
+    "Model": {
+      "Provider": "openai",
+      "Model": "test-medium",
+      "BaseURL": "http://127.0.0.1:9999",
+      "APIKey": "test-key",
+      "SmallModel": "test-small"
+    },
+    "SandboxRepoPath": "/fixture/repo",
+    "SandboxWorktree": "",
+    "SandboxWritable": false,
+    "SandboxEnv": null,
+    "AgentID": "integrator",
+    "ExpectsReport": false,
+    "PlanMode": false,
+    "InputPlane": false,
+    "Timeout": 600000000000,
+    "LoopGuard": {
+      "RepeatThreshold": 0,
+      "MaxNudges": 0,
+      "CooldownTurns": 0
+    },
+    "SilenceGuard": {
+      "SilenceSecs": 0,
+      "NudgeText": "",
+      "MaxNudges": 0
+    },
+    "PreTimeoutNudge": ""
+  },
+  "integrator_conflict": {
+    "Args": [
+      "-p",
+      "",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--append-system-prompt",
+      "You are the Integrator. You finalize completed work by merging it into the base\nbranch. You may attempt to resolve conflicts, but protecting the user's existing\ncode is your TOP priority: the MOMENT you are unsure, the change is non-trivial, or\nresolving would drop either side's work, output \"INTEGRATOR-GIVE-UP: \u003creason\u003e\" and\nchange nothing. Giving up honestly is a correct, expected outcome. Never force a merge.\n\nWhen giving up, output the sentinel on its own line, exactly:\nINTEGRATOR-GIVE-UP: both sides rewrote parseConfig and intent is unclear",
+      "--permission-mode",
+      "default",
+      "--allowedTools",
+      "Read,Edit",
+      "--disallowedTools",
+      "Bash,Write,MultiEdit,NotebookEdit,AskUserQuestion,Agent,EnterPlanMode,ExitPlanMode,TaskCreate,TaskUpdate,TaskStop,KillShell"
+    ],
+    "Model": {
+      "Provider": "openai",
+      "Model": "test-medium",
+      "BaseURL": "http://127.0.0.1:9999",
+      "APIKey": "test-key",
+      "SmallModel": "test-small"
+    },
+    "SandboxRepoPath": "/fixture/repo",
+    "SandboxWorktree": "/fixture/worktree",
+    "SandboxWritable": false,
+    "SandboxEnv": [
+      "ANTHROPIC_API_KEY=test-key",
+      "ANTHROPIC_BASE_URL=http://127.0.0.1:9999",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL=test-small",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL=test-medium",
+      "ANTHROPIC_MODEL=test-medium",
+      "ANTHROPIC_SMALL_FAST_MODEL=test-small"
+    ],
+    "AgentID": "integrator",
+    "ExpectsReport": false,
+    "PlanMode": false,
+    "InputPlane": false,
+    "Timeout": 600000000000,
+    "LoopGuard": {
+      "RepeatThreshold": 0,
+      "MaxNudges": 0,
+      "CooldownTurns": 0
+    },
+    "SilenceGuard": {
+      "SilenceSecs": 0,
+      "NudgeText": "",
+      "MaxNudges": 0
+    },
+    "PreTimeoutNudge": ""
+  },
+  "worker": {
+    "Args": [
+      "-p",
+      "",
+      "--output-format",
+      "stream-json",
+      "--input-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--append-system-prompt",
+      "Execute autonomously. Do not ask questions — make reasonable judgments and\ndocument assumptions in your report.\n\nYou will receive a complete implementation plan. If the plan names a worktree\ndirectory, `cd` into it before any other command and do all work there.\nExecute the plan top to bottom, work package by work package — never skip a\npackage; if a step is impossible, document why and continue.\n\nAfter all work packages: run every \"Done when\" criterion and the plan's\nVerification commands. Leave all changes uncommitted in the working tree — do\nNOT run any git state-changing command (add/commit/merge/checkout/branch/reset);\na separate Integrator agent commits and merges your work.\n\nThen report honestly: what you did, command outputs verbatim (never\nsummarized or paraphrased), assumptions you made, and any failures stated\nplainly as failures — one failed check means the work is not done. Call\nmcp__orqestra__SubmitReport once with that report as the `report` argument.",
+      "--permission-mode",
+      "bypassPermissions",
+      "--dangerously-skip-permissions",
+      "--settings",
+      "{\"permissions\":{\"allow\":[\"mcp__*\"]}}",
+      "--mcp-config",
+      "{\"mcpServers\":{\"orqestra\":{\"command\":\"\u003cSELF_BIN\u003e\",\"args\":[\"mcp-bridge\",\"--socket\",\"\u003cSOCKET\u003e\",\"--agent-id\",\"worker\"]}}}"
+    ],
+    "Model": {
+      "Provider": "openai",
+      "Model": "test-medium",
+      "BaseURL": "http://127.0.0.1:9999",
+      "APIKey": "test-key",
+      "SmallModel": "test-small"
+    },
+    "SandboxRepoPath": "/fixture/repo",
+    "SandboxWorktree": "",
+    "SandboxWritable": true,
+    "SandboxEnv": [
+      "ANTHROPIC_API_KEY=test-key",
+      "ANTHROPIC_BASE_URL=http://127.0.0.1:9999",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL=test-small",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL=test-medium",
+      "ANTHROPIC_MODEL=test-medium",
+      "ANTHROPIC_SMALL_FAST_MODEL=test-small"
+    ],
+    "AgentID": "worker",
+    "ExpectsReport": true,
+    "PlanMode": false,
+    "InputPlane": true,
+    "Timeout": 2700000000000,
+    "LoopGuard": {
+      "RepeatThreshold": 3,
+      "MaxNudges": 3,
+      "CooldownTurns": 2
+    },
+    "SilenceGuard": {
+      "SilenceSecs": 120,
+      "NudgeText": "[Orchestrator] No activity for a while. If your validation report is ready, call mcp__orqestra__SubmitReport with the full report markdown; otherwise continue executing.",
+      "MaxNudges": 3
+    },
+    "PreTimeoutNudge": "[Orchestrator] Session deadline approaching. If your Validation Report is complete, call mcp__orqestra__SubmitReport with the full report markdown now. Otherwise continue executing — your file changes are already saved."
+  },
+  "worktree": {
+    "Args": [
+      "-p",
+      "",
+      "--output-format",
+      "stream-json",
+      "--input-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--append-system-prompt",
+      "Execute autonomously. Do not ask questions — make reasonable judgments and\ndocument assumptions in your report.\n\nYou will receive a complete implementation plan. If the plan names a worktree\ndirectory, `cd` into it before any other command and do all work there.\nExecute the plan top to bottom, work package by work package — never skip a\npackage; if a step is impossible, document why and continue.\n\nAfter all work packages: run every \"Done when\" criterion and the plan's\nVerification commands. Leave all changes uncommitted in the working tree — do\nNOT run any git state-changing command (add/commit/merge/checkout/branch/reset);\na separate Integrator agent commits and merges your work.\n\nThen report honestly: what you did, command outputs verbatim (never\nsummarized or paraphrased), assumptions you made, and any failures stated\nplainly as failures — one failed check means the work is not done. Call\nmcp__orqestra__SubmitReport once with that report as the `report` argument.",
+      "--permission-mode",
+      "bypassPermissions",
+      "--dangerously-skip-permissions",
+      "--settings",
+      "{\"permissions\":{\"allow\":[\"mcp__*\"]}}",
+      "--mcp-config",
+      "{\"mcpServers\":{\"orqestra\":{\"command\":\"\u003cSELF_BIN\u003e\",\"args\":[\"mcp-bridge\",\"--socket\",\"\u003cSOCKET\u003e\",\"--agent-id\",\"worker\"]}}}"
+    ],
+    "Model": {
+      "Provider": "openai",
+      "Model": "test-medium",
+      "BaseURL": "http://127.0.0.1:9999",
+      "APIKey": "test-key",
+      "SmallModel": "test-small"
+    },
+    "SandboxRepoPath": "/fixture/repo",
+    "SandboxWorktree": "/fixture/worktree",
+    "SandboxWritable": false,
+    "SandboxEnv": [
+      "ANTHROPIC_API_KEY=test-key",
+      "ANTHROPIC_BASE_URL=http://127.0.0.1:9999",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL=test-small",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL=test-medium",
+      "ANTHROPIC_MODEL=test-medium",
+      "ANTHROPIC_SMALL_FAST_MODEL=test-small"
+    ],
+    "AgentID": "worker",
+    "ExpectsReport": true,
+    "PlanMode": false,
+    "InputPlane": true,
+    "Timeout": 2700000000000,
+    "LoopGuard": {
+      "RepeatThreshold": 3,
+      "MaxNudges": 3,
+      "CooldownTurns": 2
+    },
+    "SilenceGuard": {
+      "SilenceSecs": 120,
+      "NudgeText": "[Orchestrator] No activity for a while. If your validation report is ready, call mcp__orqestra__SubmitReport with the full report markdown; otherwise continue executing.",
+      "MaxNudges": 3
+    },
+    "PreTimeoutNudge": "[Orchestrator] Session deadline approaching. If your Validation Report is complete, call mcp__orqestra__SubmitReport with the full report markdown now. Otherwise continue executing — your file changes are already saved."
+  }
+}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/xiii/orqestra/internal/agent"
+	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
 )
 
@@ -15,19 +16,27 @@ import (
 // order is a property of the CALLING STEP, not something derivable from
 // harness.ProcessSpec alone: worker and critic both set ExpectsReport=true
 // and leave PlanMode false, yet need entirely different tier orders (RC3).
-type RoleClass int
+//
+// RoleClass is a type alias of config.RoleClass (WP14/RC4) — report-harvest
+// tier selection and harness.SpecForRole's spec-building defaults share one
+// role-classification vocabulary. config.RoleClassUtility (the integrator's
+// one-shot commit-message/conflict-resolution invocations) never reaches
+// Harvest: those steps read Output/INTEGRATOR-GIVE-UP directly (see
+// step_integrate.go), so only two of the three classes have a RoleXxx alias
+// here.
+type RoleClass = config.RoleClass
 
 const (
 	// RoleReporter is researcher/architect/critic and the gate-loop revise
 	// turn: SubmitReport → plan file (only when spec.PlanMode, and only if
 	// it changed THIS invocation — J35) → final message (conversation
 	// probe, sanity-checked).
-	RoleReporter RoleClass = iota
+	RoleReporter = config.RoleClassReporter
 	// RoleExecutor is the worker: SubmitReport → raw subprocess output. Raw
 	// output is not a structured report and is never sanity-checked — there
 	// is nowhere left to fall back to, and today's behavior already accepts
 	// whatever the worker produced.
-	RoleExecutor
+	RoleExecutor = config.RoleClassExecutor
 )
 
 // Report source names — used both as ReportProvenance.Source and as the

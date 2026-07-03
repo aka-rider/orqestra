@@ -169,45 +169,25 @@ func runInitCommand(baseDir string, stderr io.Writer) error {
 	return nil
 }
 
-// buildEngine constructs the Engine with ProcessSpecs for the RunPipeline path.
+// buildEngine constructs the Engine with ProcessSpecs for the RunPipeline
+// path. WP14/RC4: detects the sandbox tiers once, then calls
+// harness.SpecForRole per role — adding a role is one YAML block
+// (config.Config.ExtraRoles) plus one such call, not ~200 lines of
+// per-role option-function assembly.
 func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPath string) *orchestrator.Engine {
-	// Question bridge for AskUserQuestion MCP tool
+	// Question bridge for AskUserQuestion/SubmitReport MCP tools.
 	socketPath := filepath.Join("/tmp", fmt.Sprintf("orqestra-q-%d.sock", os.Getpid()))
 	bridge := mcp.NewQuestionBridge(socketPath)
 
+	// selfBin == "" disables the bridge for every role (degraded, not
+	// fatal — CLAUDE.md SS5.3): reporter/executor specs simply omit the
+	// inline "orqestra" MCP server, and AskUserQuestion/SubmitReport are
+	// unavailable for this run.
 	selfBin, selfErr := os.Executable()
 	if selfErr != nil {
 		slog.Warn("cannot determine self path for MCP bridge, questions disabled", "err", selfErr)
+		selfBin = ""
 	}
-
-	// bridgeOptFor returns a per-role MCP server option.
-	// Returns a no-op when selfBin is unavailable.
-	bridgeOptFor := func(agentID string) harness.ClaudeCLIOption {
-		if selfErr != nil {
-			return func(*harness.ClaudeCLI) {}
-		}
-		return harness.WithInlineMCPServer("orqestra", selfBin, []string{"mcp-bridge", "--socket", socketPath, "--agent-id", agentID})
-	}
-
-	// The researcher is no longer a standalone stage: it is an inline subagent the
-	// planners spawn on demand via the Agent tool. Build its definition once from the
-	// curated researcher persona (cfg.Researcher) and attach it to architect + critic.
-	// Model is intentionally OMITTED → "inherit": cfg.Researcher.Model is an orqestra
-	// alias the CLI cannot read, and models are env-routed, so the subagent inherits
-	// the parent's model. The subagent has no MCP — it returns its report as its final
-	// message (its prompt's COMPLETION clause says so).
-	researcherDef := harness.AgentDef{
-		Description:     cfg.Researcher.Description,
-		Prompt:          cfg.Researcher.SystemPrompt,
-		Tools:           cfg.Researcher.AllowedTools,
-		DisallowedTools: cfg.Researcher.DisallowedTools,
-	}
-
-	// Build per-agent ClaudeCLIOptions for BuildProcessSpec.
-	plnOpts := append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Architect.BaseAgentConfig)...)
-	plnOpts = append(plnOpts, bridgeOptFor("architect"), harness.WithMaxTurns(cfg.Architect.MaxTurns), harness.WithInlineAgent("orqestra-researcher", researcherDef))
-	criticOpts := append([]harness.ClaudeCLIOption{harness.WithWorkDir(repoPath)}, bridgeToolOpts(cfg.Critic.BaseAgentConfig)...)
-	criticOpts = append(criticOpts, bridgeOptFor("critic"), harness.WithMaxTurns(cfg.Critic.MaxTurns), harness.WithInlineAgent("orqestra-researcher", researcherDef))
 
 	// Worker sandbox environment (model-specific env vars for API keys etc.)
 	resolved, resolveErr := cfg.ResolveModel(cfg.Worker.Model)
@@ -233,27 +213,15 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		os.Exit(exitInvalidInput)
 	}
 
-	workerSandboxCfg := harness.SandboxConfig{
-		RepoPath: repoPath,
-		Profiles: sandboxProfiles,
-		Env:      modelEnv,
-		Writable: true,
-	}
-	worktreeSandboxCfg := harness.SandboxConfig{
-		RepoPath: repoPath,
-		Profiles: sandboxProfiles,
-		Env:      modelEnv,
-		Writable: false,
-	}
-	roSandboxCfg := harness.SandboxConfig{
-		RepoPath: repoPath,
-		Profiles: sandboxProfiles,
-		Writable: false,
-	}
+	// The four sandbox tiers (config.SandboxTierReadOnly/WorkerWritable/
+	// Worktree/Conflict), built once at startup.
+	roSandboxCfg := harness.SandboxConfig{RepoPath: repoPath, Profiles: sandboxProfiles, Writable: false}
+	workerSandboxCfg := harness.SandboxConfig{RepoPath: repoPath, Profiles: sandboxProfiles, Env: modelEnv, Writable: true}
+	worktreeSandboxCfg := harness.SandboxConfig{RepoPath: repoPath, Profiles: sandboxProfiles, Env: modelEnv, Writable: false}
 
 	// Allow the exact orqestra binary to exec inside the read-only planning sandbox.
 	// This is required for the mcp-bridge subprocess (AskUserQuestion) to start.
-	if selfErr == nil {
+	if selfBin != "" {
 		home := os.Getenv("HOME")
 		orqProfile := sandbox.NewToolProfile("orqestra-bridge", home)
 		if err := orqProfile.Allow(selfBin, sandbox.Exec); err != nil {
@@ -265,85 +233,39 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		worktreeSandboxCfg.Profiles = append(worktreeSandboxCfg.Profiles, orqProfile.Snapshot())
 	}
 
-	// BuildProcessSpec inherits all options already set in plnOpts/criticOpts,
-	// including the role system prompt that bridgeToolOpts now delivers via
-	// MergeAppendPrompts(SystemPrompt, AppendSystemPrompt). Do NOT add another
-	// WithAppendSystemPrompt here — the last one wins and would drop the role prompt.
-	archSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Architect.Model, roSandboxCfg, plnOpts...)
-	if specErr != nil {
-		slog.Error("failed to build architect spec", "err", specErr)
+	// specInput returns the shared per-role invocation input: work dir at the
+	// repo root and the bridge wired in (SpecForRole only attaches it for
+	// reporter/executor-class roles).
+	specInput := func(name string) config.RoleSpecInput {
+		return config.RoleSpecInput{
+			Name:             name,
+			WorkDir:          repoPath,
+			BridgeSocketPath: socketPath,
+			BridgeBinary:     selfBin,
+		}
+	}
+
+	archSpec, err := harness.SpecForRole(cfg, specInput("architect"), roSandboxCfg)
+	if err != nil {
+		slog.Error("failed to build architect spec", "err", err)
 		os.Exit(exitInvalidInput)
 	}
-	archSpec.AgentID = "architect"
-	archSpec.ExpectsReport = true
-	archSpec.InputPlane = true // WP13/J6: reporter role class — always interactive
-	archSpec.PlanMode = cfg.Architect.PermissionMode == "plan"
-	archSpec.Timeout = cfg.Architect.Timeout.Duration
-	archSpec.LoopGuard = harness.LoopGuardSpec{
-		RepeatThreshold: cfg.Architect.LoopGuard.RepeatThreshold,
-		MaxNudges:       cfg.Architect.LoopGuard.MaxNudges,
-		CooldownTurns:   cfg.Architect.LoopGuard.CooldownTurns,
-	}
-	archSpec.SilenceGuard = harness.SilenceGuardSpec{
-		SilenceSecs: cfg.Architect.SilenceGuard.SilenceSecs,
-		NudgeText:   cfg.Architect.SilenceGuard.NudgeText,
-		MaxNudges:   cfg.Architect.SilenceGuard.MaxNudges,
-	}
-	archSpec.PreTimeoutNudge = preTimeoutNudgeFor("architect")
 
-	criticSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Critic.Model, roSandboxCfg, criticOpts...)
-	if specErr != nil {
-		slog.Error("failed to build critic spec", "err", specErr)
+	criticSpec, err := harness.SpecForRole(cfg, specInput("critic"), roSandboxCfg)
+	if err != nil {
+		slog.Error("failed to build critic spec", "err", err)
 		os.Exit(exitInvalidInput)
 	}
-	criticSpec.AgentID = "critic"
-	criticSpec.ExpectsReport = true
-	criticSpec.InputPlane = true // WP13/J6: reporter role class — always interactive
-	criticSpec.Timeout = cfg.Critic.Timeout.Duration
-	criticSpec.LoopGuard = harness.LoopGuardSpec{
-		RepeatThreshold: cfg.Critic.LoopGuard.RepeatThreshold,
-		MaxNudges:       cfg.Critic.LoopGuard.MaxNudges,
-		CooldownTurns:   cfg.Critic.LoopGuard.CooldownTurns,
-	}
-	criticSpec.SilenceGuard = harness.SilenceGuardSpec{
-		SilenceSecs: cfg.Critic.SilenceGuard.SilenceSecs,
-		NudgeText:   cfg.Critic.SilenceGuard.NudgeText,
-		MaxNudges:   cfg.Critic.SilenceGuard.MaxNudges,
-	}
-	criticSpec.PreTimeoutNudge = preTimeoutNudgeFor("critic")
 
-	// The worker does not route through bridgeToolOpts (it never asks questions);
-	// deliver its permission mode and system prompt explicitly. The seatbelt sandbox
-	// is the security boundary — bypassPermissions + --dangerously-skip-permissions
-	// disables Claude Code's own permission prompts so headless execution is unblocked.
-	workerOpts := []harness.ClaudeCLIOption{
-		harness.WithWorkDir(repoPath),
-		harness.WithPermissionMode(cfg.Worker.PermissionMode),
-		bridgeOptFor("worker"),
-		harness.WithAppendSystemPrompt(harness.MergeAppendPrompts(cfg.Worker.SystemPrompt, cfg.Worker.AppendSystemPrompt)),
-	}
-	workerOpts = append(workerOpts, openAgentOpts()...)
-	workerSpec, specErr := harness.BuildProcessSpec(cfg, cfg.Worker.Model, workerSandboxCfg, workerOpts...)
-	if specErr != nil {
-		slog.Error("failed to build worker spec", "err", specErr)
+	workerSpec, err := harness.SpecForRole(cfg, specInput("worker"), workerSandboxCfg)
+	if err != nil {
+		slog.Error("failed to build worker spec", "err", err)
 		os.Exit(exitInvalidInput)
 	}
-	workerSpec.AgentID = "worker"
-	workerSpec.ExpectsReport = true
-	workerSpec.InputPlane = true // WP13/J6: executor role class — always interactive
-	workerSpec.Timeout = cfg.Worker.Timeout.Duration
-	workerSpec.LoopGuard = harness.LoopGuardSpec{
-		RepeatThreshold: cfg.Worker.LoopGuard.RepeatThreshold,
-		MaxNudges:       cfg.Worker.LoopGuard.MaxNudges,
-		CooldownTurns:   cfg.Worker.LoopGuard.CooldownTurns,
-	}
-	workerSpec.SilenceGuard = harness.SilenceGuardSpec{
-		SilenceSecs: cfg.Worker.SilenceGuard.SilenceSecs,
-		NudgeText:   cfg.Worker.SilenceGuard.NudgeText,
-		MaxNudges:   cfg.Worker.SilenceGuard.MaxNudges,
-	}
-	workerSpec.PreTimeoutNudge = preTimeoutNudgeFor("worker")
 
+	// wtSpecFn scopes the already-built worker spec to a worktree — a plain
+	// value copy (infallible, matches ProcessSpecs.WorktreeSpecFn's
+	// no-error signature), not a second SpecForRole call.
 	wtSpecFn := func(wtPath string) harness.ProcessSpec {
 		spec := workerSpec
 		sc := worktreeSandboxCfg
@@ -354,23 +276,19 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 	}
 
 	// Integrator commit-message spec: RO sandbox, no tools, fresh process.
-	integratorCommitOpts := []harness.ClaudeCLIOption{
-		harness.WithWorkDir(repoPath),
-		harness.WithNoTools(),
-		harness.WithAppendSystemPrompt(harness.MergeAppendPrompts(cfg.Integrator.SystemPrompt, cfg.Integrator.AppendSystemPrompt)),
-	}
-	commitMsgSpec, commitSpecErr := harness.BuildProcessSpec(cfg, cfg.Integrator.Model, roSandboxCfg, integratorCommitOpts...)
-	if commitSpecErr != nil {
-		slog.Error("failed to build integrator commit-msg spec", "err", commitSpecErr)
+	commitIn := specInput("integrator")
+	commitIn.ToolsOverride = &config.RoleToolsOverride{NoTools: true}
+	commitMsgSpec, err := harness.SpecForRole(cfg, commitIn, roSandboxCfg)
+	if err != nil {
+		slog.Error("failed to build integrator commit-msg spec", "err", err)
 		os.Exit(exitInvalidInput)
 	}
-	commitMsgSpec.AgentID = "integrator"
-	commitMsgSpec.Timeout = cfg.Integrator.Timeout.Duration
 
-	// Integrator conflict-resolution spec fn: worktree-writable sandbox, Read/Edit tools.
-	// A build error is returned (never a zero ProcessSpec, J19) — the caller
-	// (IntegrateStep.handleConflict) treats it as give-up-and-preserve, carrying
-	// this error in the give-up reason.
+	// Integrator conflict-resolution spec fn: worktree-writable sandbox,
+	// Read/Edit tools (the role's own AllowedTools/DisallowedTools — no
+	// ToolsOverride). A build error is returned (never a zero ProcessSpec,
+	// J19) — the caller (IntegrateStep.handleConflict) treats it as
+	// give-up-and-preserve, carrying this error in the give-up reason.
 	integratorConflictSpecFn := func(wtPath string) (harness.ProcessSpec, error) {
 		conflictSandboxCfg := harness.SandboxConfig{
 			RepoPath:     repoPath,
@@ -379,19 +297,12 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 			Writable:     false,
 			WorktreePath: wtPath,
 		}
-		conflictOpts := []harness.ClaudeCLIOption{
-			harness.WithWorkDir(wtPath),
-			harness.WithPermissionMode(cfg.Integrator.PermissionMode),
-			harness.WithAllowedTools(cfg.Integrator.AllowedTools),
-			harness.WithDisallowedTools(cfg.Integrator.DisallowedTools),
-			harness.WithAppendSystemPrompt(harness.MergeAppendPrompts(cfg.Integrator.SystemPrompt, cfg.Integrator.AppendSystemPrompt)),
+		in := specInput("integrator")
+		in.WorkDir = wtPath
+		conflictSpec, specErr := harness.SpecForRole(cfg, in, conflictSandboxCfg)
+		if specErr != nil {
+			return harness.ProcessSpec{}, fmt.Errorf("build integrator conflict spec for worktree %q: %w", wtPath, specErr)
 		}
-		conflictSpec, conflictSpecErr := harness.BuildProcessSpec(cfg, cfg.Integrator.Model, conflictSandboxCfg, conflictOpts...)
-		if conflictSpecErr != nil {
-			return harness.ProcessSpec{}, fmt.Errorf("build integrator conflict spec for worktree %q: %w", wtPath, conflictSpecErr)
-		}
-		conflictSpec.AgentID = "integrator"
-		conflictSpec.Timeout = cfg.Integrator.Timeout.Duration
 		return conflictSpec, nil
 	}
 
@@ -408,31 +319,6 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		},
 		RunDirFactory:  orchestrator.DefaultRunDirFactory(repoPath),
 		QuestionBridge: bridge,
-	}
-}
-
-// genericReportNudge is sent to report roles (researcher, architect, critic) both
-// 60 s before the hard deadline and when the driftPolicy detects implementation intent.
-const genericReportNudge = "[Orchestrator] Session deadline approaching. " +
-	"Stop what you are doing and submit your report now by calling " +
-	"mcp__orqestra__SubmitReport with the full markdown in the \"report\" argument. " +
-	"Partial output is acceptable."
-
-// preTimeoutNudgeFor returns the steering message for a role.
-// architect/critic share the generic report-nudge text; worker is kept verbatim.
-// The researcher runs as an inline subagent (buildEngine), not as its own
-// top-level role passed through this selector.
-func preTimeoutNudgeFor(role string) string {
-	switch role {
-	case "architect", "critic":
-		return genericReportNudge
-	case "worker":
-		return "[Orchestrator] Session deadline approaching. " +
-			"If your Validation Report is complete, call mcp__orqestra__SubmitReport " +
-			"with the full report markdown now. " +
-			"Otherwise continue executing — your file changes are already saved."
-	default:
-		return ""
 	}
 }
 
@@ -473,91 +359,6 @@ func resolveConfigPath(name, repoPath string) (string, error) {
 		return "", fmt.Errorf("config file search encountered error: %w", statErr)
 	}
 	return "", fmt.Errorf("config file %q not found in any of: %v", name, candidates)
-}
-
-func toolOpts(mcpServers *[]string, allowed, disallowed []string, permissionMode string) []harness.ClaudeCLIOption {
-	var opts []harness.ClaudeCLIOption
-	if permissionMode != "" {
-		opts = append(opts, harness.WithPermissionMode(permissionMode))
-	}
-
-	// MCP server selection: controls which servers start and how many tool
-	// definitions reach the model (context-window impact).
-	// nil = all user MCPs available, [] = no user MCPs, ["x"] = only x.
-	if mcpServers != nil {
-		if len(*mcpServers) == 0 {
-			opts = append(opts, harness.WithNoTools())
-		} else {
-			opts = append(opts, harness.WithMCPServers(*mcpServers))
-		}
-	}
-
-	// Tool permission pre-approval. Orqestra agents run in -p pipe mode
-	// where interactive permission prompts are impossible. Process
-	// allowed/disallowed unconditionally — even in no-tools mode the
-	// orqestra bridge MCP tool must be pre-approved.
-	if len(allowed) > 0 {
-		opts = append(opts, harness.WithAllowedTools(allowed))
-	}
-
-	if len(disallowed) > 0 {
-		opts = append(opts, harness.WithDisallowedTools(disallowed))
-	}
-	return opts
-}
-
-// openAgentOpts returns permission options applied to every headless agent:
-// all MCP tools pre-approved and interactive prompts bypassed. Single
-// chokepoint — add here, not per-agent.
-func openAgentOpts() []harness.ClaudeCLIOption {
-	return []harness.ClaudeCLIOption{
-		harness.WithExtraArgs("--dangerously-skip-permissions"),
-		harness.WithSettings(`{"permissions":{"allow":["mcp__*"]}}`),
-	}
-}
-
-// bridgeToolOpts returns CLI options that configure the common agent baseline
-// for bridge-enabled agents: block built-in AskUserQuestion, pre-approve all
-// tools for pipe mode, and inject the question-routing system prompt nudge.
-func bridgeToolOpts(base config.BaseAgentConfig) []harness.ClaudeCLIOption {
-	// Block built-in AskUserQuestion — the MCP bridge version replaces it.
-	disallowed := append([]string(nil), base.DisallowedTools...)
-	if !stringSliceContains(disallowed, "AskUserQuestion") {
-		disallowed = append(disallowed, "AskUserQuestion")
-	}
-
-	// Use the role's explicit allowed list from config, then add MCP bridge tools.
-	// Never add "*" — least-privilege: only the tools the role needs are approved.
-	allowed := append([]string(nil), base.AllowedTools...)
-	for _, tool := range []string{"mcp__*", "mcp__orqestra__AskUserQuestion"} {
-		if !stringSliceContains(allowed, tool) {
-			allowed = append(allowed, tool)
-		}
-	}
-
-	opts := toolOpts(base.MCPServers, allowed, disallowed, base.PermissionMode)
-
-	opts = append(opts, openAgentOpts()...)
-
-	// Deliver the role's full system prompt to the model. It rides --append-system-prompt
-	// (layer 5) alongside the question-routing default, so Claude Code's base prompt and
-	// CLAUDE.md (layer 4) are preserved. Without this the role instructions never reach the
-	// model and every role collapses into plain plan-mode behavior.
-	if merged := harness.MergeAppendPrompts(base.SystemPrompt, base.AppendSystemPrompt); merged != "" {
-		opts = append(opts, harness.WithAppendSystemPrompt(merged))
-	}
-
-	return opts
-}
-
-// stringSliceContains reports whether s contains v.
-func stringSliceContains(s []string, v string) bool {
-	for _, x := range s {
-		if x == v {
-			return true
-		}
-	}
-	return false
 }
 
 // parseMCPBridgeArgs extracts --socket, --agent-id, and --invocation-id from

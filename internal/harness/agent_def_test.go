@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"github.com/xiii/orqestra/internal/config"
 )
 
 // findAgentsJSON returns the value following the --agents flag, or "" if absent.
@@ -19,19 +17,20 @@ func findAgentsJSON(args []string) string {
 }
 
 func TestWithInlineAgent_SerializedToAgentsFlag(t *testing.T) {
-	cli := NewClaudeCLI(
-		config.ResolvedModel{Type: config.ProviderTypeAnthropic, Model: "x"},
-		WithInlineAgent("orqestra-researcher", AgentDef{
-			Description: "researcher",
-			Prompt:      "do research",
-			Tools:       []string{"Read", "Glob", "Grep", "Bash", "WebFetch", "WebSearch"},
-		}),
-	)
+	spec := ProcessSpec{
+		Model: ModelSpec{Provider: "anthropic", Model: "x"},
+		Agents: []InlineAgent{{
+			Name: "orqestra-researcher",
+			Def: AgentDef{
+				Description: "researcher",
+				Prompt:      "do research",
+				Tools:       []string{"Read", "Glob", "Grep", "Bash", "WebFetch", "WebSearch"},
+			},
+		}},
+	}
 
-	// toSpec must carry the inline agent onto the ProcessSpec.
-	spec := cli.toSpec(SandboxConfig{})
 	if len(spec.Agents) != 1 || spec.Agents[0].Name != "orqestra-researcher" {
-		t.Fatalf("toSpec did not carry the inline agent: %+v", spec.Agents)
+		t.Fatalf("spec did not carry the inline agent: %+v", spec.Agents)
 	}
 
 	args := buildSpecArgs(spec, false)

@@ -1,0 +1,16 @@
+providers:
+  local:
+    base_url: http://127.0.0.1:9999
+    type: openai
+    api_key: test-key
+
+models:
+  large:
+    provider: local
+    model: test-large
+  medium:
+    provider: local
+    model: test-medium
+  small:
+    provider: local
+    model: test-small
