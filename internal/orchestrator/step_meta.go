@@ -15,7 +15,7 @@ type StepMeta struct {
 	ClaudeProjectPath    string    `json:"claude_project_path,omitempty"`
 	ClaudeSessionLogPath string    `json:"claude_session_log_path,omitempty"`
 	ClaudePlanFilePath   string    `json:"claude_plan_file_path,omitempty"`
-	Status               string    `json:"status"` // "done" or "failed"
+	Status               string    `json:"status"` // "done", "failed", or "fallback" (J12: chat-only architect revision that produced no plan rewrite)
 	Error                string    `json:"error,omitempty"`
 	PlanSource           string    `json:"plan_source,omitempty"` // "plan_file" (default) or "stream_fallback"
 	InputTokens          int64     `json:"input_tokens"`

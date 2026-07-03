@@ -62,12 +62,15 @@ func fakeExecuteStep(output string) Step[ExecuteInput, ExecuteOutput] {
 	}
 }
 
-// fakeValidateStep returns a step that emits a fixed validation string.
+// fakeValidateStep returns a step that emits a fixed validation string,
+// parsed the same way ValidateStep.Run parses real worker output (J33/WP8) —
+// so tests exercising RunPipeline's verdict threading see a real Parsed.Verdict,
+// not an always-zero one.
 func fakeValidateStep(output string) Step[ValidateInput, ValidateOutput] {
 	return &fakeStep[ValidateInput, ValidateOutput]{
 		agentID: "worker",
 		fn: func(ctx context.Context, in ValidateInput, sc StepContext) (ValidateOutput, error) {
-			return ValidateOutput{Output: output}, nil
+			return ValidateOutput{Output: output, Parsed: agent.ParseValidationOutput(output)}, nil
 		},
 	}
 }
@@ -302,6 +305,12 @@ func TestEngine_ValidationFailureDetection(t *testing.T) {
 	if !strings.Contains(result.WorkerValidation, agent.MarkerFail) {
 		t.Errorf("WorkerValidation %q should contain fail marker %q", result.WorkerValidation, agent.MarkerFail)
 	}
+	// J33/WP8: the parsed verdict must reach Result — not be silently discarded.
+	// Validation stays advisory (status above is still StatusSuccess); only the
+	// verdict itself must be truthfully carried through.
+	if result.ValidationVerdict != agent.VerdictFail {
+		t.Errorf("ValidationVerdict = %q, want %q (J33: parsed verdict discarded)", result.ValidationVerdict, agent.VerdictFail)
+	}
 }
 
 func TestEngine_ValidationSuccessDetection(t *testing.T) {
@@ -322,6 +331,9 @@ func TestEngine_ValidationSuccessDetection(t *testing.T) {
 	}
 	if !strings.Contains(result.WorkerValidation, agent.MarkerPass) {
 		t.Errorf("WorkerValidation %q should contain pass marker %q", result.WorkerValidation, agent.MarkerPass)
+	}
+	if result.ValidationVerdict != agent.VerdictPass {
+		t.Errorf("ValidationVerdict = %q, want %q (J33: parsed verdict discarded)", result.ValidationVerdict, agent.VerdictPass)
 	}
 }
 
@@ -493,5 +505,3 @@ func TestNoDeadKnob_GateAfterDeliberation_FiresWhenEnabled(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
-
-

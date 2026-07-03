@@ -134,6 +134,12 @@ func (s *DeliberateStep) runRound(
 	revStart := time.Now()
 	revRes, revised, revErr := runReportAgent(ctx, sc, revSpec, s.ArchMeta, 1)
 
+	// chatOnlyFallback marks the J12 case: revision extraction failed with a
+	// non-fatal (non-ctx) error, so the loop falls back to the previous plan.
+	// Falling back is correct (fail-forward, do not change it) — but the meta
+	// artifact must say "fallback", not claim a clean "done" for a revision
+	// that produced nothing (J12: a failed revision was recorded as success).
+	chatOnlyFallback := false
 	if revErr != nil {
 		// Distinguish fatal context/budget/loop errors from "chat-only, no plan produced".
 		// Fatal: propagate. Chat-only: fall back to the existing plan.
@@ -148,12 +154,19 @@ func (s *DeliberateStep) runRound(
 		// No report extracted — treat as chat-only continuation (no plan rewrite).
 		sc.Log.Debug("architect critic revision: plan unchanged (chat continuation)", "err", revErr)
 		revised = planMarkdown
+		chatOnlyFallback = true
 	}
 	if revised == "" {
 		revised = planMarkdown
 	}
 
-	writeMeta(sc, fmt.Sprintf("architect_critic_revision_meta_round%d.json", roundNum+1), string(s.ID()), s.ArchMeta, sessionID, revStart, "done", nil, revRes.Usage)
+	metaStatus := "done"
+	var metaErr error
+	if chatOnlyFallback {
+		metaStatus = "fallback"
+		metaErr = revErr
+	}
+	writeMeta(sc, fmt.Sprintf("architect_critic_revision_meta_round%d.json", roundNum+1), string(s.ID()), s.ArchMeta, sessionID, revStart, metaStatus, metaErr, revRes.Usage)
 	sc.Obs.AgentDone("architect", revRes.Usage)
 
 	// Only advance the session ID when the plan actually changed; keep the original when

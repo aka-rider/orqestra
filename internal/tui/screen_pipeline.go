@@ -63,7 +63,11 @@ type PipelineScreen struct {
 	// Completion state
 	lastErr          error
 	workerValidation string
-	conflictFiles    []string // populated when Integrate gives up on a merge conflict
+	// validationVerdict is the worker self-validation verdict as a lowercase
+	// string ("pass"/"warn"/"fail", or "" when validation did not run —
+	// J33/WP8); rendered PASS/WARN/FAIL/UNKNOWN by viewCompletion.
+	validationVerdict string
+	conflictFiles     []string // populated when Integrate gives up on a merge conflict
 
 	// Live stream (written by orchestrator, polled by TUI on tick)
 	streamBuf *orchestrator.StreamRing
@@ -123,6 +127,7 @@ func (s *PipelineScreen) Reset() {
 	s.finalPlan = ""
 	s.hasPlan = false
 	s.workerValidation = ""
+	s.validationVerdict = ""
 	s.conflictFiles = nil
 	s.streamBuf = nil
 	s.awaitingPlanDecision = false

@@ -131,6 +131,10 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 		// Build pipeline steps.
 		steps := e.buildPipelineSteps(sup)
 		setup := resolveSetup(input)
+		// BlockMergeOnValidationFail is a global safety config (like TokenBudget
+		// above), not a per-run TUI setup-panel knob — always take it from Config,
+		// overriding whatever the caller's Input.Setup carried (J33/WP8).
+		setup.BlockMergeOnValidationFail = e.Config.Pipeline.BlockMergeOnValidationFail
 
 		if err := setup.Validate(); err != nil {
 			finish(Result{Status: StatusFailed}, fmt.Errorf("invalid pipeline setup: %w", err))

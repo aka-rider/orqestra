@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/mcp"
@@ -911,6 +912,61 @@ func TestApplySnapshot_ConflictFilesShowInCompletion(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(out), "conflict") {
 		t.Errorf("viewCompletion does not mention the merge conflict:\n%s", out)
+	}
+}
+
+// TestApplySnapshot_ValidationVerdictShowsInCompletion is the WP8/J33 TUI
+// gate: when Result.ValidationVerdict is FAIL (worker self-reported failure),
+// the done screen must render it — never leave a failed self-validation
+// invisible next to the completion summary.
+func TestApplySnapshot_ValidationVerdictShowsInCompletion(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.active = true
+
+	obs := orchestrator.NewObsStore()
+	m.obs = obs
+	m.ctrl = orchestrator.NewControl(obs)
+
+	// Deliberately no WorkerValidation raw text here: this isolates the check to
+	// the parsed verdict label itself, not incidental substring overlap with raw
+	// validation prose (e.g. "...tests failed" would contain "FAIL" too).
+	obs.Finished(orchestrator.Result{
+		Status:            orchestrator.StatusSuccess,
+		ValidationVerdict: agent.VerdictFail,
+	}, nil)
+	result, _ := m.Update(obsNotifyMsg{})
+	model := result.(Model)
+
+	out := model.pipelineScreen.viewCompletion(80)
+	if !strings.Contains(strings.ToUpper(out), "FAIL") {
+		t.Errorf("viewCompletion does not render the FAIL validation verdict:\n%s", out)
+	}
+}
+
+// TestApplySnapshot_ValidationVerdictUnknownWhenNotRun proves the done screen
+// never claims a verdict it doesn't have: when validation never ran (empty
+// Result.ValidationVerdict) but other completion state exists, it renders
+// UNKNOWN rather than defaulting to something that looks like a pass.
+func TestApplySnapshot_ValidationVerdictUnknownWhenNotRun(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.active = true
+
+	obs := orchestrator.NewObsStore()
+	m.obs = obs
+	m.ctrl = orchestrator.NewControl(obs)
+
+	obs.Finished(orchestrator.Result{
+		Status:           orchestrator.StatusSuccess,
+		WorkerValidation: "some raw text but no parsed verdict",
+	}, nil)
+	result, _ := m.Update(obsNotifyMsg{})
+	model := result.(Model)
+
+	out := model.pipelineScreen.viewCompletion(80)
+	if !strings.Contains(strings.ToUpper(out), "UNKNOWN") {
+		t.Errorf("viewCompletion does not render UNKNOWN for an absent validation verdict:\n%s", out)
 	}
 }
 

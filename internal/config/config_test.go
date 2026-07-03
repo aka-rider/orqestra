@@ -491,3 +491,54 @@ func TestApplyDefaults_SilenceGuardMaxNudgesPreservesExplicitValue(t *testing.T)
 		t.Errorf("SilenceGuard.MaxNudges = %d, want explicit 7 preserved", cfg.Architect.SilenceGuard.MaxNudges)
 	}
 }
+
+// TestDefaultConfig_BlockMergeOnValidationFailDefaultsFalse is the WP8/J33 gate:
+// the embedded pipeline.yaml must default this safety knob to false — today's
+// behavior (Integrate always runs; validation stays advisory) must not change
+// for users who don't opt in.
+func TestDefaultConfig_BlockMergeOnValidationFailDefaultsFalse(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Pipeline.BlockMergeOnValidationFail {
+		t.Error("Pipeline.BlockMergeOnValidationFail should default to false")
+	}
+}
+
+// TestLoad_BlockMergeOnValidationFailOverride proves a user config can opt
+// into the safety gate via pipeline.block_merge_on_validation_fail.
+func TestLoad_BlockMergeOnValidationFailOverride(t *testing.T) {
+	content := `
+providers:
+  local:
+    base_url: http://localhost
+    type: openai
+models:
+  medium:
+    provider: local
+    model: big
+  small:
+    provider: local
+    model: small
+pipeline:
+  block_merge_on_validation_fail: true
+researcher:
+  model: medium
+architect:
+  model: medium
+worker:
+  model: medium
+`
+	f, err := os.CreateTemp(t.TempDir(), "*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(content)
+	f.Close()
+
+	cfg, err := Load(f.Name())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.Pipeline.BlockMergeOnValidationFail {
+		t.Error("Pipeline.BlockMergeOnValidationFail = false, want true (set via pipeline.block_merge_on_validation_fail)")
+	}
+}

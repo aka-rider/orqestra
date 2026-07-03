@@ -220,6 +220,12 @@ type PipelineConfig struct {
 	TokenBudget       int64  `yaml:"token_budget"`       // total token budget for a run
 	RunDir            string `yaml:"run_dir"`            // base directory for run artifacts
 	WorkerConcurrency int    `yaml:"worker_concurrency"` // max concurrent workers
+	// BlockMergeOnValidationFail gates Integrate on worker self-validation's
+	// parsed verdict (J33/WP8): when true and the verdict is FAIL, the pipeline
+	// skips Integrate and fails the run instead of merging silently. Default
+	// false = today's behavior (validation stays advisory; Integrate always
+	// runs) — the verdict is still threaded into Result either way.
+	BlockMergeOnValidationFail bool `yaml:"block_merge_on_validation_fail"`
 }
 
 // SandboxConfig configures macOS-native sandbox (sandbox-exec) agent sandboxing.

@@ -41,7 +41,14 @@ type Result struct {
 	Status           RunStatus
 	FinalPlan        string
 	WorkerValidation string
-	RunDir           string
+	// ValidationVerdict is the parsed verdict from worker self-validation
+	// (agent.ParseValidationOutput / ValidateOutput.Parsed.Verdict — J33). Empty
+	// when validation did not run (Validation disabled or Validate step nil);
+	// otherwise one of agent.VerdictPass/VerdictWarn/VerdictFail. Validation
+	// stays advisory: a FAIL verdict here does NOT fail the pipeline unless
+	// pipeline.block_merge_on_validation_fail is enabled (see run_pipeline.go).
+	ValidationVerdict agent.Verdict
+	RunDir            string
 	// ConflictFiles is populated when Integrate gives up on a merge conflict
 	// (see IntegrateOutput.ConflictFiles); empty otherwise.
 	ConflictFiles []string

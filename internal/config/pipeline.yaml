@@ -1,5 +1,12 @@
 # Pipeline definition -- compile-time embedded.
 
+# Global pipeline behavior (not per-agent).
+pipeline:
+  # When true, a FAIL verdict from worker self-validation skips Integrate and
+  # fails the run instead of merging silently (J33). Default false keeps
+  # today's behavior: validation stays advisory and Integrate always runs.
+  block_merge_on_validation_fail: false
+
 # Defaults applied to every agent unless the agent overrides a field.
 defaults:
   disallowed_tools: [AskUserQuestion]

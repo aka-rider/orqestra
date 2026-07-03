@@ -15,9 +15,10 @@ import (
 // View renders the pipeline screen in its alt-screen layout.
 //
 // Row layout (total = height):
-//   body rows      : timeline (streaming/gate) or completion summary
-//   +2 rows (input): divider + input zone
-//   +2 rows (footer): divider + key hints
+//
+//	body rows      : timeline (streaming/gate) or completion summary
+//	+2 rows (input): divider + input zone
+//	+2 rows (footer): divider + key hints
 //
 // There is no status bar: the active agent + model is shown by the phase-rule
 // frame at the start of its turn, and an end-of-turn summary frame on completion.
@@ -83,6 +84,23 @@ func (s PipelineScreen) viewInputZone() string {
 	return ""
 }
 
+// renderValidationVerdict renders the worker self-validation verdict as a
+// styled PASS/WARN/FAIL/UNKNOWN label (J33/WP8: the verdict used to be parsed
+// and silently discarded — this is the done-screen's only display of it).
+// verdict is the lowercase agent.Verdict string ("pass"/"warn"/"fail") or ""
+// when validation did not run (Validation disabled or Validate step nil).
+func renderValidationVerdict(verdict string) string {
+	switch verdict {
+	case "pass":
+		return passStyle.Render("PASS")
+	case "fail":
+		return errorStyle.Render("FAIL")
+	case "warn":
+		return warnStyle.Render("WARN")
+	default:
+		return warnStyle.Render("UNKNOWN")
+	}
+}
 
 func (s PipelineScreen) viewCompletion(width int) string {
 	var b strings.Builder
@@ -99,11 +117,13 @@ func (s PipelineScreen) viewCompletion(width int) string {
 			b.WriteString("   - " + f + "\n")
 		}
 	}
-	if s.workerValidation != "" {
-		b.WriteString(" Validation:\n")
-		// The worker's final output is markdown — render it as markdown, not as
-		// plain wrapped text (bug: final model output showed as simple text).
-		b.WriteString(renderMarkdown(s.workerValidation, width))
+	if s.workerValidation != "" || s.validationVerdict != "" {
+		b.WriteString(" Validation: " + renderValidationVerdict(s.validationVerdict) + "\n")
+		if s.workerValidation != "" {
+			// The worker's final output is markdown — render it as markdown, not as
+			// plain wrapped text (bug: final model output showed as simple text).
+			b.WriteString(renderMarkdown(s.workerValidation, width))
+		}
 	}
 	elapsed := time.Since(s.startTime).Truncate(time.Second)
 	b.WriteString(fmt.Sprintf("\n Elapsed: %s\n", elapsed))

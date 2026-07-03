@@ -11,6 +11,14 @@ type PipelineSetup struct {
 	Validation         bool
 	DeliberationRounds int
 	HumanGates         HumanGateSet
+
+	// BlockMergeOnValidationFail mirrors config.PipelineConfig.BlockMergeOnValidationFail
+	// (set by the caller from Config, not a TUI-facing knob — J33/WP8). When true
+	// and worker self-validation's parsed verdict is agent.VerdictFail, RunPipeline
+	// skips Integrate and returns StatusFailed with an explicit reason instead of
+	// merging silently. Default false preserves today's behavior: validation stays
+	// advisory and Integrate always runs.
+	BlockMergeOnValidationFail bool
 }
 
 // DefaultPipelineSetup returns the default pipeline configuration.

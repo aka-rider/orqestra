@@ -82,10 +82,10 @@ type IntegrateOutput struct {
 // Validate and Integrate are optional (nil = skip).
 type PipelineSteps struct {
 	Deliberate Step[DeliberateInput, PlanOutput]
-	Revise     Step[ReviseInput, PlanOutput]       // used inside gate loop
+	Revise     Step[ReviseInput, PlanOutput] // used inside gate loop
 	Execute    Step[ExecuteInput, ExecuteOutput]
-	Validate   Step[ValidateInput, ValidateOutput]    // nil = skip
-	Integrate  Step[IntegrateInput, IntegrateOutput]  // nil = skip
+	Validate   Step[ValidateInput, ValidateOutput]   // nil = skip
+	Integrate  Step[IntegrateInput, IntegrateOutput] // nil = skip
 }
 
 // --- RunPipeline ---
@@ -163,7 +163,13 @@ func RunPipeline(ctx context.Context, setup PipelineSetup, in PipelineRunInput,
 	}
 
 	// --- Validation (advisory) ---
+	// Validation is advisory (fail-forward zone): a FAIL verdict never fails the
+	// pipeline by default. But the verdict is no longer discarded (J33) — it
+	// is threaded into Result below, and the optional
+	// BlockMergeOnValidationFail gate (J33/WP8) reads it to decide whether to
+	// skip Integrate.
 	var valOutput string
+	var valVerdict agent.Verdict
 	if setup.Validation && steps.Validate != nil {
 		sc.Obs.PhaseChanged(PhaseSelfValidating)
 		val, _ := steps.Validate.Run(ctx, ValidateInput{ // fire-and-forget: validation is advisory; failure does not block merge
@@ -171,6 +177,24 @@ func RunPipeline(ctx context.Context, setup PipelineSetup, in PipelineRunInput,
 			FinalPlan:       plan.Markdown,
 		}, sc)
 		valOutput = val.Output
+		valVerdict = val.Parsed.Verdict
+	}
+
+	// --- Optional gate: block merge on a FAIL verdict (J33/WP8) ---
+	// Default false = today's behavior (Integrate always runs), now honest:
+	// the verdict is visible in Result either way. When enabled and the
+	// worker self-reported FAILED, refuse to merge — the worktree is left
+	// exactly as Execute produced it (Integrate never runs, so nothing is
+	// committed, merged, or removed) so the user's base and the work stay
+	// fully recoverable (CLAUDE.md §0).
+	if setup.BlockMergeOnValidationFail && valVerdict == agent.VerdictFail {
+		return Result{
+				Status:            StatusFailed,
+				FinalPlan:         plan.Markdown,
+				WorkerValidation:  valOutput,
+				ValidationVerdict: valVerdict,
+			}, fmt.Errorf("block_merge_on_validation_fail: worker self-validation verdict is FAIL — refusing to merge, worktree preserved at %q (branch %q)",
+				exec.Worktree.Path, exec.TargetBranch)
 	}
 
 	// --- Integrate (commit + merge) ---
@@ -191,9 +215,10 @@ func RunPipeline(ctx context.Context, setup PipelineSetup, in PipelineRunInput,
 	}
 
 	return Result{
-		Status:           integrateStatus,
-		FinalPlan:        plan.Markdown,
-		WorkerValidation: valOutput,
-		ConflictFiles:    conflictFiles,
+		Status:            integrateStatus,
+		FinalPlan:         plan.Markdown,
+		WorkerValidation:  valOutput,
+		ValidationVerdict: valVerdict,
+		ConflictFiles:     conflictFiles,
 	}, nil
 }

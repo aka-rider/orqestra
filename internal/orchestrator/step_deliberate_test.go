@@ -7,12 +7,33 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"testing"
 
 	"github.com/xiii/orqestra/internal/harness"
 )
+
+// recordingArtifactSink records every WriteBestEffort/Write call by name, so
+// tests can inspect the meta JSON a step persisted (J12/WP8: proving the meta
+// artifact's Status field, not just the step's return value).
+type recordingArtifactSink struct {
+	writes map[string][]byte
+}
+
+func newRecordingArtifactSink() *recordingArtifactSink {
+	return &recordingArtifactSink{writes: make(map[string][]byte)}
+}
+
+func (r *recordingArtifactSink) Write(name string, data []byte) error {
+	r.writes[name] = data
+	return nil
+}
+
+func (r *recordingArtifactSink) WriteBestEffort(name string, data []byte) {
+	r.writes[name] = data
+}
 
 // sequencedExecutor returns each configured (RunResult, error) pair in order
 // across successive Run calls — used to drive runRound's critic-then-revision
@@ -48,10 +69,11 @@ func TestDeliberateStep_RunRound_SilenceEscalationFallsBackNonFatal(t *testing.T
 		HasCritic:  true,
 	}
 
+	artifacts := newRecordingArtifactSink()
 	sc := StepContext{
 		Exec:      exec,
 		Obs:       NewObsStore(),
-		Artifacts: NoopArtifactSink(),
+		Artifacts: artifacts,
 		Log:       slog.Default(),
 	}
 
@@ -64,6 +86,21 @@ func TestDeliberateStep_RunRound_SilenceEscalationFallsBackNonFatal(t *testing.T
 	}
 	if sessionID != "orig-sid" {
 		t.Errorf("expected session ID to stay at the last known-good plan's session, got %q", sessionID)
+	}
+
+	// J12/WP8: a chat-only fallback (no plan rewrite) must NOT be recorded as a
+	// clean "done" in the meta artifact — that would show a successful revision
+	// that never happened.
+	data, ok := artifacts.writes["architect_critic_revision_meta_round1.json"]
+	if !ok {
+		t.Fatal("expected architect_critic_revision_meta_round1.json to be written")
+	}
+	var meta StepMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("failed to unmarshal meta artifact: %v", err)
+	}
+	if meta.Status != "fallback" {
+		t.Errorf("J12: meta Status = %q, want %q (a chat-only fallback revision must not claim \"done\")", meta.Status, "fallback")
 	}
 }
 
