@@ -16,7 +16,6 @@ type ProfileBuilder struct {
 	tmpDir       string // resolved TMPDIR
 	snapshots    []Snapshot
 	RepoWritable bool  // if false, workspace (repo) is read-only
-	SessionPath  *Path // optional separate session directory (always read+write)
 	WorktreePath *Path // optional worktree directory (always read+write; main repo stays read-only)
 }
 
@@ -146,15 +145,6 @@ func (b *ProfileBuilder) Build() (string, error) {
 ;; Repo (read-only)
 (allow file-read*
   (subpath "` + b.workspace.Resolved + `"))
-`)
-	}
-
-	// --- Session directory (always read+write if provided) ---
-	if b.SessionPath != nil {
-		sb.WriteString(`
-;; Session (always read+write)
-(allow file-read* file-write* file-map-executable process-exec
-  (subpath "` + b.SessionPath.Resolved + `"))
 `)
 	}
 

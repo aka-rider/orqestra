@@ -120,7 +120,7 @@ func TestBridgeToolOpts_Constraints(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			opts := bridgeToolOpts(tt.base)
-			args := harness.BuildTestArgs(opts...)
+			args := harness.SpecArgsFromOptions(opts...)
 
 			allowed := flagValue(args, "--allowedTools")
 			disallowed := flagValue(args, "--disallowedTools")
@@ -203,7 +203,7 @@ func TestLeastPrivilege_NoWildcardStar(t *testing.T) {
 			DisallowedTools: []string{"AskUserQuestion"},
 		}
 		opts := bridgeToolOpts(base)
-		args := harness.BuildTestArgs(opts...)
+		args := harness.SpecArgsFromOptions(opts...)
 		allowedStr := flagValue(args, "--allowedTools")
 
 		for _, part := range strings.Split(allowedStr, ",") {

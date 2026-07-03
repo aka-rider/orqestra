@@ -21,10 +21,18 @@ type RestartInput struct {
 }
 
 // Input is the user's request to the orchestrator.
+// SetupValid distinguishes "caller did not provide a setup" (use defaults)
+// from "caller explicitly chose this PipelineSetup" (use it as-is, even when
+// every field is a zero value — e.g. plan-only, no gates). Without this
+// marker a genuine all-zero-fields request is indistinguishable from an
+// unset Setup and gets silently replaced by DefaultPipelineSetup, which
+// enables Execution — a caller that asked only to plan could have a worker
+// run and modify the repo (J24).
 type Input struct {
 	Prompt      string
 	RestartFrom RestartInput
-	Setup       PipelineSetup // optional pipeline configuration (set by TUI setup panel)
+	Setup       PipelineSetup // used as-is when SetupValid; ignored otherwise
+	SetupValid  bool
 }
 
 // RunStatus classifies the final outcome.
@@ -69,7 +77,9 @@ type ProcessSpecs struct {
 	Integrator harness.ProcessSpec
 	// IntegratorConflictSpecFn returns a spec for the integrator's conflict-resolution
 	// mode scoped to the given worktree path (Read/Edit tools, worktree-writable sandbox).
-	IntegratorConflictSpecFn func(wtPath string) harness.ProcessSpec
+	// A returned error means the spec could not be built; IntegrateStep.handleConflict
+	// treats it as give-up-and-preserve, never executes a zero ProcessSpec (J19).
+	IntegratorConflictSpecFn func(wtPath string) (harness.ProcessSpec, error)
 }
 
 // Engine is the hardcoded Go orchestrator that runs the full pipeline.

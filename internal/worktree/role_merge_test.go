@@ -92,22 +92,31 @@ func TestRole_Merge_Lifecycle(t *testing.T) {
 		t.Fatalf("write worktree artifact: %v", err)
 	}
 
-	// Commit lands in the worktree branch.
-	committed, err := wt.CommitAll(ctx, "worker change")
+	// Commit lands in the worktree branch via the stage-and-commit primitive.
+	staged, err := wt.StageAll(ctx)
 	if err != nil {
-		t.Fatalf("CommitAll: %v", err)
+		t.Fatalf("StageAll: %v", err)
 	}
-	if !committed {
-		t.Fatal("CommitAll reported nothing to commit — the artifact was not staged")
+	if !staged {
+		t.Fatal("StageAll reported nothing to stage — the artifact was not staged")
+	}
+	if err := wt.CommitStaged(ctx, "worker change"); err != nil {
+		t.Fatalf("CommitStaged: %v", err)
 	}
 
-	// Merge into the target branch.
-	res, err := wt.MergeInto(ctx, target, "merge run merge-lifecycle")
+	// Merge into the target branch via the base-into-worktree merge plus a
+	// fast-forward. No drift has occurred on target since the worktree was
+	// created, so the merge is clean and the fast-forward lands the artifact
+	// on target.
+	res, err := wt.MergeBaseIntoWorktree(ctx, target)
 	if err != nil {
-		t.Fatalf("MergeInto: %v", err)
+		t.Fatalf("MergeBaseIntoWorktree: %v", err)
 	}
 	if !res.Merged {
 		t.Fatalf("merge did not complete cleanly: conflicts=%v", res.ConflictFiles)
+	}
+	if err := wt.FastForwardBase(ctx, target); err != nil {
+		t.Fatalf("FastForwardBase: %v", err)
 	}
 
 	// The artifact must now exist on the target branch in the main repo.

@@ -4,29 +4,6 @@ import (
 	"testing"
 )
 
-func TestDeriveVerdict(t *testing.T) {
-	// INV-P3-VALID: verdict is derived solely from the blocking field of reported issues
-	tests := []struct {
-		name   string
-		issues []Issue
-		want   Verdict
-	}{
-		{"no issues", nil, VerdictPass},
-		{"non-blocking only", []Issue{{Blocking: false, Message: "minor"}}, VerdictWarn},
-		{"blocking", []Issue{{Blocking: true, Message: "broken"}}, VerdictFail},
-		{"blocking overrides non-blocking", []Issue{{Blocking: false}, {Blocking: true}}, VerdictFail},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := DeriveVerdict(tt.issues)
-			if got != tt.want {
-				t.Errorf("DeriveVerdict() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestParseValidationOutput(t *testing.T) {
 	// INV-P4-PARSE: structured marker extraction from raw worker output
 	// INV-P3-VALID: verdict follows parsed markers (PASS/FAIL/WARN)
@@ -198,4 +175,3 @@ func TestParseValidationOutput(t *testing.T) {
 		})
 	}
 }
-

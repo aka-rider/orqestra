@@ -204,7 +204,6 @@ type IntegratorConfig struct {
 }
 
 type RetryConfig struct {
-	ResearcherAttempts      int `yaml:"researcher_attempts"`
 	ArchitectAttempts       int `yaml:"architect_attempts"`
 	CriticAttempts          int `yaml:"critic_attempts"`
 	WorkerValidationRetries int `yaml:"worker_validation_retries"`
@@ -230,12 +229,10 @@ type PipelineConfig struct {
 
 // SandboxConfig configures macOS-native sandbox (sandbox-exec) agent sandboxing.
 type SandboxConfig struct {
-	MaxLifetime Duration          `yaml:"max_lifetime"`
-	ProxyEnv    []string          `yaml:"proxy_env"`
-	ExtraEnv    map[string]string `yaml:"extra_env"`
-	AllowRead   []string          `yaml:"allow_read"`
-	AllowWrite  []string          `yaml:"allow_write"`
-	AllowExec   []string          `yaml:"allow_exec"`
+	MaxLifetime Duration `yaml:"max_lifetime"`
+	AllowRead   []string `yaml:"allow_read"`
+	AllowWrite  []string `yaml:"allow_write"`
+	AllowExec   []string `yaml:"allow_exec"`
 }
 
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {

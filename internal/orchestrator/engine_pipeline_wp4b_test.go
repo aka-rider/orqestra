@@ -164,10 +164,10 @@ func wp4bTestEngine(t *testing.T, bridge *mcp.QuestionBridge) *Engine {
 	}
 }
 
-// wp4bInput sets DeliberationRounds explicitly (a known-live gap, J24) so
-// resolveSetup doesn't silently fall back to DefaultPipelineSetup (which
-// enables Execution and a gate) — Execution:false/Validation:false alone is
-// the PipelineSetup zero value.
+// wp4bInput sets SetupValid so resolveSetup honors this explicit
+// Execution:false/Validation:false/no-gates setup as-is instead of falling
+// back to DefaultPipelineSetup (which enables Execution and a gate, J24).
+// DeliberationRounds must still be in [1,3] for PipelineSetup.Validate().
 func wp4bInput() Input {
 	return Input{
 		Prompt: "wp4b lifecycle probe",
@@ -175,6 +175,7 @@ func wp4bInput() Input {
 			Execution: false, Validation: false,
 			DeliberationRounds: 1,
 		},
+		SetupValid: true,
 	}
 }
 

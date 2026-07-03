@@ -222,7 +222,6 @@ integrator:
     INTEGRATOR-GIVE-UP: both sides rewrote parseConfig and intent is unclear
 
 retry:
-  researcher_attempts: 1
   architect_attempts: 2
   critic_attempts: 1
   worker_validation_retries: 1

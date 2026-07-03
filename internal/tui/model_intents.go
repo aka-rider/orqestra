@@ -126,8 +126,9 @@ func (m *Model) startPipeline(prompt string) tea.Cmd {
 	m.cancelCause = cancel
 
 	handle := m.engine.Start(ctx, orchestrator.Input{
-		Prompt: prompt,
-		Setup:  m.confirmedSetup,
+		Prompt:     prompt,
+		Setup:      m.confirmedSetup,
+		SetupValid: true,
 	})
 	m.obs = handle.Obs
 	m.ctrl = handle.Ctrl

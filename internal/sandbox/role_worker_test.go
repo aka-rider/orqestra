@@ -28,8 +28,7 @@ func TestRole_Worker_WritesInWorkspaceDeniedOutside(t *testing.T) {
 		t.Skip("sandbox-exec not available")
 	}
 
-	repoDir := t.TempDir()    // the worker's writable workspace
-	sessionDir := t.TempDir() // session artifacts
+	repoDir := t.TempDir() // the worker's writable workspace
 
 	// The "outside" target must be in a region seatbelt denies. The system temp
 	// dir is broadly writable, so a sibling under HOME is the honest out-of-bounds
@@ -46,7 +45,6 @@ func TestRole_Worker_WritesInWorkspaceDeniedOutside(t *testing.T) {
 
 	sb, err := sandbox.New(sandbox.Config{
 		RepoPath:     repoDir,
-		SessionPath:  sessionDir,
 		RepoWritable: true, // worker role
 	})
 	if err != nil {
@@ -57,11 +55,20 @@ func TestRole_Worker_WritesInWorkspaceDeniedOutside(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
+	// run wraps and executes cmd synchronously (start+wait). Equivalent to the
+	// deleted Sandbox.Run minus its ctx-cancel-kill path — that group-kill
+	// logic was ported to harness.Run in WP1 and is covered there.
 	run := func(script string) error {
 		cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
 		cmd.Stdout = &bytes.Buffer{}
 		cmd.Stderr = &bytes.Buffer{}
-		return sb.Run(ctx, cmd)
+		if err := sb.Wrap(cmd); err != nil {
+			return err
+		}
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		return cmd.Wait()
 	}
 
 	// Capability: write a code file inside the workspace via a shell command.

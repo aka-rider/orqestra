@@ -142,6 +142,21 @@ func TestBaseEnv_NoLeak(t *testing.T) {
 
 // ===== INV-P2-WRITE: security property tests (require sandbox-exec) =====
 
+// runWrapped wraps cmd with the sandbox and runs it synchronously (start+wait).
+// Equivalent to the deleted Sandbox.Run minus its ctx-cancel-kill path — that
+// group-kill logic was ported to harness.Run in WP1 and is covered there;
+// these tests only need synchronous start+wait against a bounded ctx timeout
+// already attached via exec.CommandContext.
+func runWrapped(sb *Sandbox, cmd *exec.Cmd) error {
+	if err := sb.Wrap(cmd); err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Wait()
+}
+
 func TestDeny_ReadFileOutsideAllowlist(t *testing.T) {
 	// INV-P2-WRITE: worker cannot read files outside the allowed set
 	workspace := t.TempDir()
@@ -167,7 +182,7 @@ func TestDeny_ReadFileOutsideAllowlist(t *testing.T) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &bytes.Buffer{}
 
-	sb.Run(ctx, cmd) // may error — that's expected
+	runWrapped(sb, cmd) // may error — that's expected
 
 	if strings.Contains(stdout.String(), "TOP_SECRET_DATA") {
 		t.Fatal("SECURITY FAILURE: sandbox leaked secret file content")
@@ -197,7 +212,7 @@ func TestDeny_WriteOutsideWorkspace(t *testing.T) {
 	cmd.Stdout = &bytes.Buffer{}
 	cmd.Stderr = &bytes.Buffer{}
 
-	sb.Run(ctx, cmd) // expected to fail
+	runWrapped(sb, cmd) // expected to fail
 
 	if _, err := os.Stat(targetFile); err == nil {
 		content, _ := os.ReadFile(targetFile)
@@ -236,7 +251,7 @@ func TestAllow_ReadFromProfile(t *testing.T) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &bytes.Buffer{}
 
-	if err := sb.Run(ctx, cmd); err != nil {
+	if err := runWrapped(sb, cmd); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
 
@@ -263,7 +278,7 @@ func TestAllow_WriteInWorkspace(t *testing.T) {
 	cmd.Stdout = &bytes.Buffer{}
 	cmd.Stderr = &bytes.Buffer{}
 
-	if err := sb.Run(ctx, cmd); err != nil {
+	if err := runWrapped(sb, cmd); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
 
@@ -306,7 +321,7 @@ func TestDeny_ExecArbitraryBinary(t *testing.T) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &bytes.Buffer{}
 
-	sb.Run(ctx, cmd) // expected to fail
+	runWrapped(sb, cmd) // expected to fail
 
 	if strings.Contains(stdout.String(), "EXEC_LEAKED") {
 		t.Fatal("SECURITY FAILURE: sandbox allowed exec of arbitrary binary outside profile")
@@ -336,7 +351,7 @@ func TestAllow_ExecFromProfile(t *testing.T) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &bytes.Buffer{}
 
-	if err := sb.Run(ctx, cmd); err != nil {
+	if err := runWrapped(sb, cmd); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
 
@@ -371,12 +386,10 @@ func TestSeatbelt_ReadonlyRepoWriteDenied(t *testing.T) {
 	os.MkdirAll(repoDir, 0755)
 	defer os.RemoveAll(repoDir)
 
-	sessionDir := t.TempDir()
 	os.WriteFile(filepath.Join(repoDir, "existing.txt"), []byte("readonly"), 0644)
 
 	sb, err := New(Config{
 		RepoPath:     repoDir,
-		SessionPath:  sessionDir,
 		RepoWritable: false,
 	})
 	if err != nil {
@@ -392,7 +405,7 @@ func TestSeatbelt_ReadonlyRepoWriteDenied(t *testing.T) {
 	cmd.Stdout = &bytes.Buffer{}
 	cmd.Stderr = &bytes.Buffer{}
 
-	sb.Run(ctx, cmd)
+	runWrapped(sb, cmd)
 
 	if _, err := os.Stat(targetFile); err == nil {
 		os.Remove(targetFile)
@@ -400,14 +413,18 @@ func TestSeatbelt_ReadonlyRepoWriteDenied(t *testing.T) {
 	}
 }
 
-func TestSeatbelt_ReadonlySessionWriteAllowed(t *testing.T) {
-	// INV-P2-WRITE: with RepoWritable=false, writes to the session dir are permitted
+// TestSeatbelt_ReadonlyRepoWritableWorktreeAllowed covers the CLAUDE.md §5.2
+// invariant "read-only repo + writable worktree": with RepoWritable=false, the
+// worktree directory (the isolated workspace production actually wires via
+// spec.Sandbox.WorktreePath, see harness/exec.go) is still read+write.
+func TestSeatbelt_ReadonlyRepoWritableWorktreeAllowed(t *testing.T) {
+	// INV-P2-WRITE: with RepoWritable=false, writes to the worktree dir are permitted
 	repoDir := t.TempDir()
-	sessionDir := t.TempDir()
+	worktreeDir := t.TempDir()
 
 	sb, err := New(Config{
 		RepoPath:     repoDir,
-		SessionPath:  sessionDir,
+		WorktreePath: worktreeDir,
 		RepoWritable: false,
 	})
 	if err != nil {
@@ -418,18 +435,18 @@ func TestSeatbelt_ReadonlySessionWriteAllowed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	targetFile := filepath.Join(sessionDir, "artifact.json")
+	targetFile := filepath.Join(worktreeDir, "artifact.json")
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "echo '{\"ok\":true}' > '"+targetFile+"'")
 	cmd.Stdout = &bytes.Buffer{}
 	cmd.Stderr = &bytes.Buffer{}
 
-	if err := sb.Run(ctx, cmd); err != nil {
+	if err := runWrapped(sb, cmd); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
 
 	data, err := os.ReadFile(targetFile)
 	if err != nil {
-		t.Fatalf("session write failed — file not created: %v", err)
+		t.Fatalf("worktree write failed — file not created: %v", err)
 	}
 	if !strings.Contains(string(data), "ok") {
 		t.Errorf("unexpected content: %s", data)
@@ -439,11 +456,9 @@ func TestSeatbelt_ReadonlySessionWriteAllowed(t *testing.T) {
 func TestSeatbelt_WorkerRepoWriteAllowed(t *testing.T) {
 	// INV-P2-WRITE: with RepoWritable=true, the worker can write code files to the repo
 	repoDir := t.TempDir()
-	sessionDir := t.TempDir()
 
 	sb, err := New(Config{
 		RepoPath:     repoDir,
-		SessionPath:  sessionDir,
 		RepoWritable: true,
 	})
 	if err != nil {
@@ -459,7 +474,7 @@ func TestSeatbelt_WorkerRepoWriteAllowed(t *testing.T) {
 	cmd.Stdout = &bytes.Buffer{}
 	cmd.Stderr = &bytes.Buffer{}
 
-	if err := sb.Run(ctx, cmd); err != nil {
+	if err := runWrapped(sb, cmd); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
 

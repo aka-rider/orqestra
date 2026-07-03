@@ -23,7 +23,6 @@ type PipelineScreen struct {
 	keys       keymap.Bindings
 	configName string
 	goal       string
-	phase      orchestrator.Phase
 	startTime  time.Time
 	active     bool
 
@@ -136,7 +135,6 @@ func (s *PipelineScreen) Reset() {
 	s.pendingTools = nil
 	s.currentTurn = nil
 	s.active = false
-	s.phase = ""
 	s.editConfirm = editConfirmModel{}
 	s.animFrame = 0
 	s.toolFrameExpanded = false

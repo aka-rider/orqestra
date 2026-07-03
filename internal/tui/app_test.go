@@ -685,10 +685,6 @@ func TestTUI_PlanGateBlocksOverwrite(t *testing.T) {
 	if !m.pipelineScreen.awaitingPlanDecision {
 		t.Errorf("gate was overwritten by stale phase change: content=%d", m.pipelineScreen.content)
 	}
-	// Phase should not be updated while gate is active
-	if m.pipelineScreen.phase == orchestrator.PhaseExecuting {
-		t.Error("phase was updated despite awaitingPlanDecision being true")
-	}
 }
 
 func TestTUI_EditorReturn(t *testing.T) {
@@ -756,7 +752,6 @@ func TestTUI_DrainLoopPlanGate(t *testing.T) {
 	obs.GateOpened(orchestrator.GateRequest{
 		Position:          orchestrator.GateAfterDeliberation,
 		FinalPlanMarkdown: planMD,
-		PlanFilePath:      "/tmp/plan.md",
 	})
 
 	// Fire obsNotifyMsg — ApplySnapshot detects the gate and switches to ContentHumanGate.

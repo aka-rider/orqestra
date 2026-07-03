@@ -4,20 +4,16 @@ package orchestrator
 type Phase string
 
 const (
-	PhaseResearching    Phase = "researching"
 	PhasePlanning       Phase = "planning"
-	PhaseDeliberating   Phase = "deliberating"
 	PhaseCritiquing     Phase = "critiquing"
 	PhaseExecuting      Phase = "executing"
 	PhaseSelfValidating Phase = "self-validating"
-	PhaseDone           Phase = "done"
 )
 
 // GateRequest is emitted when the pipeline needs user input.
 type GateRequest struct {
 	Position          HumanGatePosition
 	FinalPlanMarkdown string
-	PlanFilePath      string
 	PlanWarnings      []string
 }
 
@@ -27,10 +23,8 @@ type DecisionType int
 const (
 	DecisionApprove DecisionType = iota
 	DecisionEdit
-	DecisionSkip
 	DecisionCancel
-	DecisionComment    // comment-only refinement at plan gate
-	DecisionMergeAbort // abort the post-run merge, keep the worktree branch
+	DecisionComment // comment-only refinement at plan gate
 )
 
 // Decision is sent from TUI to pipeline at gates.

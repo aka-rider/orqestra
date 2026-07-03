@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -78,7 +77,11 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 			}
 		}
 
-		// Per-run logger.
+		// Per-run logger. Flows ONLY through StepContext.Log — NEVER installed as
+		// the process-global default (J4): mutating the global default here would
+		// race concurrent/overlapping runs and silently discard all process
+		// logging after the first run's defer reset it. Any code that needs to
+		// log during a run must receive this logger explicitly.
 		logger := slog.Default()
 		if session.Path != "" {
 			logPath := filepath.Join(session.Path, "run.log")
@@ -87,18 +90,14 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 				slog.Warn("could not create run log", "err", logErr)
 			} else {
 				logger = slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug}))
-				slog.SetDefault(logger)
-				defer func() {
-					slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-					logFile.Close()
-				}()
+				defer logFile.Close()
 			}
 		}
 		logger.Info("run started (pipeline)", "prompt_len", len(input.Prompt))
 
 		// Write prompt artifact.
 		if session.Path != "" {
-			artifacts := NewArtifactSink(session)
+			artifacts := NewArtifactSink(session, logger)
 			artifacts.WriteBestEffort("prompt.md", []byte(input.Prompt))
 		}
 
@@ -118,7 +117,7 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 		sc := StepContext{
 			Exec:      exec,
 			Obs:       obs,
-			Artifacts: NewArtifactSink(session),
+			Artifacts: NewArtifactSink(session, logger),
 			Control:   ctrl,
 			Sessions:  session,
 			Log:       logger,

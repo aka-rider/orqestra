@@ -412,80 +412,17 @@ func filterMCPConfig(names []string) string {
 	return string(out)
 }
 
-// BuildTestArgs applies the given options to a fresh ClaudeCLI and returns the
-// resulting CLI arguments. Intended for tests in packages that compose
-// ClaudeCLIOption slices and need to verify the resulting argument list.
-func BuildTestArgs(opts ...ClaudeCLIOption) []string {
+// SpecArgsFromOptions applies opts to a bare ClaudeCLI, converts it to a
+// ProcessSpec via toSpec, and returns the final CLI arguments through
+// buildSpecArgs — the SAME arg builder harness.Run uses in production.
+// Callers (e.g. cmd/orqestra) that compose ClaudeCLIOption slices and need to
+// verify the resulting argument list use this instead of hand-rolling a
+// second arg-assembly path (J21: two arg builders describing the same thing).
+func SpecArgsFromOptions(opts ...ClaudeCLIOption) []string {
 	c := &ClaudeCLI{binary: "claude"}
 	for _, opt := range opts {
 		opt(c)
 	}
-	return c.buildFinalArgs()
+	spec := c.toSpec(SandboxConfig{})
+	return buildSpecArgs(spec, false)
 }
-
-// buildFinalArgs returns extraArgs with inline MCP servers merged in.
-// buildFinalArgs merges inlineMCPServers into existing --mcp-config if present.
-// When --strict-mcp-config was already set (via WithMCPServers), inline servers
-// are merged into the existing filtered config. When no strict filtering was
-// requested, inline servers are added via --mcp-config only (additive — the
-// user's default MCPs from ~/.claude.json remain available).
-func (c *ClaudeCLI) buildFinalArgs() []string {
-	if len(c.inlineMCPServers) == 0 {
-		return c.extraArgs
-	}
-
-	// Deep copy extraArgs so we can modify
-	args := make([]string, len(c.extraArgs))
-	copy(args, c.extraArgs)
-
-	// Find and merge --mcp-config
-	type mcpConfig struct {
-		MCPServers map[string]json.RawMessage `json:"mcpServers"`
-	}
-
-	var existing mcpConfig
-	mcpIdx := -1
-	for i, arg := range args {
-		if arg == "--mcp-config" && i+1 < len(args) {
-			mcpIdx = i + 1
-			if err := json.Unmarshal([]byte(args[mcpIdx]), &existing); err != nil {
-				existing = mcpConfig{MCPServers: make(map[string]json.RawMessage)}
-			}
-			break
-		}
-	}
-
-	if existing.MCPServers == nil {
-		existing.MCPServers = make(map[string]json.RawMessage)
-	}
-
-	// Merge inline servers
-	for name, def := range c.inlineMCPServers {
-		data, err := json.Marshal(def)
-		if err != nil {
-			slog.Error("buildFinalArgs: marshal inline MCP server", "name", name, "err", err)
-			continue
-		}
-		existing.MCPServers[name] = data
-	}
-
-	merged, err := json.Marshal(existing)
-	if err != nil {
-		slog.Error("buildFinalArgs: marshal merged MCP config", "err", err)
-		return c.extraArgs
-	}
-
-	if mcpIdx >= 0 {
-		// --mcp-config already exists (with --strict-mcp-config from WithMCPServers);
-		// update the config in place, keeping strict filtering.
-		args[mcpIdx] = string(merged)
-	} else {
-		// No explicit MCP filtering — add inline servers additively.
-		// Do NOT add --strict-mcp-config: let user's default MCPs from
-		// ~/.claude.json remain available alongside the inline servers.
-		args = append(args, "--mcp-config", string(merged))
-	}
-
-	return args
-}
-

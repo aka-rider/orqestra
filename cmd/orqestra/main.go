@@ -1,4 +1,3 @@
-// E2E headless test
 package main
 
 import (
@@ -342,7 +341,10 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 	commitMsgSpec.Timeout = cfg.Integrator.Timeout.Duration
 
 	// Integrator conflict-resolution spec fn: worktree-writable sandbox, Read/Edit tools.
-	integratorConflictSpecFn := func(wtPath string) harness.ProcessSpec {
+	// A build error is returned (never a zero ProcessSpec, J19) — the caller
+	// (IntegrateStep.handleConflict) treats it as give-up-and-preserve, carrying
+	// this error in the give-up reason.
+	integratorConflictSpecFn := func(wtPath string) (harness.ProcessSpec, error) {
 		conflictSandboxCfg := harness.SandboxConfig{
 			RepoPath:     repoPath,
 			Profiles:     sandboxProfiles,
@@ -359,12 +361,11 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		}
 		conflictSpec, conflictSpecErr := harness.BuildProcessSpec(cfg, cfg.Integrator.Model, conflictSandboxCfg, conflictOpts...)
 		if conflictSpecErr != nil {
-			slog.Error("failed to build integrator conflict spec", "err", conflictSpecErr, "wt", wtPath)
-			return harness.ProcessSpec{}
+			return harness.ProcessSpec{}, fmt.Errorf("build integrator conflict spec for worktree %q: %w", wtPath, conflictSpecErr)
 		}
 		conflictSpec.AgentID = "integrator"
 		conflictSpec.Timeout = cfg.Integrator.Timeout.Duration
-		return conflictSpec
+		return conflictSpec, nil
 	}
 
 	return &orchestrator.Engine{
@@ -391,10 +392,12 @@ const genericReportNudge = "[Orchestrator] Session deadline approaching. " +
 	"Partial output is acceptable."
 
 // preTimeoutNudgeFor returns the steering message for a role.
-// researcher/architect/critic share the generic report-nudge text; worker is kept verbatim.
+// architect/critic share the generic report-nudge text; worker is kept verbatim.
+// The researcher runs as an inline subagent (buildEngine), not as its own
+// top-level role passed through this selector.
 func preTimeoutNudgeFor(role string) string {
 	switch role {
-	case "researcher", "architect", "critic":
+	case "architect", "critic":
 		return genericReportNudge
 	case "worker":
 		return "[Orchestrator] Session deadline approaching. " +

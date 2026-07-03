@@ -63,8 +63,11 @@ func TestWorktree_CreateAndRemove(t *testing.T) {
 	}
 }
 
-// Contract: worktree.go — CommitAll stages and commits all changes
-func TestWorktree_CommitAll(t *testing.T) {
+// Contract: worktree.go — StageAll + CommitStaged stage and commit changes
+// (the surviving stage-and-commit primitive). Full merge round-trip coverage
+// lives in role_merge_test.go's TestRole_Merge_Lifecycle and
+// TestRole_Integrator_MergeAndResolve.
+func TestWorktree_StageAllCommitStaged(t *testing.T) {
 	ctx := context.Background()
 	repoPath := initRepo(t)
 	sessionDir := filepath.Join(t.TempDir(), "session")
@@ -79,96 +82,23 @@ func TestWorktree_CommitAll(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	committed, err := wt.CommitAll(ctx, "add work.txt")
+	staged, err := wt.StageAll(ctx)
 	if err != nil {
-		t.Fatalf("CommitAll() error: %v", err)
+		t.Fatalf("StageAll() error: %v", err)
 	}
-	if !committed {
-		t.Error("CommitAll() = false, want true (changes exist)")
+	if !staged {
+		t.Error("StageAll() = false, want true (changes exist)")
+	}
+	if err := wt.CommitStaged(ctx, "add work.txt"); err != nil {
+		t.Fatalf("CommitStaged() error: %v", err)
 	}
 
-	// Second call on clean tree should return false
-	committed2, err := wt.CommitAll(ctx, "nothing to commit")
+	// Second call on clean tree should report nothing staged.
+	staged2, err := wt.StageAll(ctx)
 	if err != nil {
-		t.Fatalf("CommitAll() second call error: %v", err)
+		t.Fatalf("StageAll() second call error: %v", err)
 	}
-	if committed2 {
-		t.Error("CommitAll() = true on clean tree, want false")
-	}
-}
-
-// Contract: worktree.go — MergeInto merges branch back; MergeResult.Merged = true on clean merge
-func TestWorktree_MergeInto_Clean(t *testing.T) {
-	ctx := context.Background()
-	repoPath := initRepo(t)
-	sessionDir := filepath.Join(t.TempDir(), "session")
-
-	wt, err := Create(ctx, repoPath, sessionDir, "run-merge")
-	if err != nil {
-		t.Fatalf("Create() error: %v", err)
-	}
-	t.Cleanup(func() { wt.Remove(ctx, true) })
-
-	if err := os.WriteFile(filepath.Join(wt.Path, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := wt.CommitAll(ctx, "add feature.txt"); err != nil {
-		t.Fatalf("CommitAll() error: %v", err)
-	}
-
-	result, err := wt.MergeInto(ctx, "main", "test: clean merge")
-	if err != nil {
-		t.Fatalf("MergeInto() error: %v", err)
-	}
-	if !result.Merged {
-		t.Error("MergeResult.Merged = false, want true")
-	}
-	if len(result.ConflictFiles) != 0 {
-		t.Errorf("ConflictFiles = %v, want empty", result.ConflictFiles)
-	}
-}
-
-// Contract: worktree.go — MergeInto populates ConflictFiles when merge conflicts occur
-func TestWorktree_MergeInto_Conflict(t *testing.T) {
-	ctx := context.Background()
-	repoPath := initRepo(t)
-	sessionDir := filepath.Join(t.TempDir(), "session")
-
-	wt, err := Create(ctx, repoPath, sessionDir, "run-conflict")
-	if err != nil {
-		t.Fatalf("Create() error: %v", err)
-	}
-	t.Cleanup(func() { wt.Remove(ctx, true) })
-
-	// Conflicting commit on the worktree branch
-	if err := os.WriteFile(filepath.Join(wt.Path, "README.md"), []byte("branch version\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := wt.CommitAll(ctx, "branch change"); err != nil {
-		t.Fatalf("CommitAll() error: %v", err)
-	}
-
-	// Conflicting commit directly on main (repoPath is checked out to main after initRepo)
-	if err := os.WriteFile(filepath.Join(repoPath, "README.md"), []byte("main version\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	addCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "add", "-A")
-	if out, err := addCmd.CombinedOutput(); err != nil {
-		t.Fatalf("git add: %v (output: %s)", err, out)
-	}
-	commitCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "commit", "-m", "main change")
-	if out, err := commitCmd.CombinedOutput(); err != nil {
-		t.Fatalf("git commit: %v (output: %s)", err, out)
-	}
-
-	result, err := wt.MergeInto(ctx, "main", "test: conflict merge")
-	if err != nil {
-		t.Fatalf("MergeInto() error: %v", err)
-	}
-	if result.Merged {
-		t.Error("MergeResult.Merged = true, want false (conflict expected)")
-	}
-	if len(result.ConflictFiles) == 0 {
-		t.Error("expected non-empty ConflictFiles")
+	if staged2 {
+		t.Error("StageAll() = true on clean tree, want false")
 	}
 }

@@ -42,11 +42,6 @@ func (s *PipelineScreen) sealAndPromoteTurn() {
 // ApplySnapshot updates the screen from an ObsStore snapshot, detecting state
 // transitions (new agent, agent done/failed, gate open, question, terminal).
 func (s *PipelineScreen) ApplySnapshot(snap orchestrator.ObsSnapshot, width int) {
-	// Phase (only update when not awaiting plan decision)
-	if !s.awaitingPlanDecision {
-		s.phase = snap.Phase
-	}
-
 	// Agent transitions: new agents or status changes.
 	for _, a := range snap.Agents {
 		prev, seen := s.knownAgents[a.AgentID]

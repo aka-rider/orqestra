@@ -39,10 +39,12 @@ func TestClaudeCLI_InSandbox(t *testing.T) {
 
 	workspace := t.TempDir()
 
-	// Build sandbox with API key if available
-	extraEnv := map[string]string{}
+	// Build sandbox with API key if available, via HarnessEnv (the same
+	// key=value channel harness.Run uses for model routing env — ExtraEnv was
+	// Tier-A dead code, never wired from config to the sandbox).
+	var harnessEnv []string
 	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-		extraEnv["ANTHROPIC_API_KEY"] = key
+		harnessEnv = append(harnessEnv, "ANTHROPIC_API_KEY="+key)
 	}
 
 	homeEnv := os.Getenv("HOME")
@@ -53,8 +55,8 @@ func TestClaudeCLI_InSandbox(t *testing.T) {
 
 	sb, err := sandbox.New(sandbox.Config{
 		RepoPath: workspace, RepoWritable: true,
-		ExtraEnv: extraEnv,
-		Profiles: []sandbox.Snapshot{claudeSnap},
+		HarnessEnv: harnessEnv,
+		Profiles:   []sandbox.Snapshot{claudeSnap},
 	})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -156,9 +158,9 @@ func TestClaudeCLI_SandboxDeniesSSH(t *testing.T) {
 	}
 
 	workspace := t.TempDir()
-	extraEnv := map[string]string{}
+	var harnessEnv []string
 	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-		extraEnv["ANTHROPIC_API_KEY"] = key
+		harnessEnv = append(harnessEnv, "ANTHROPIC_API_KEY="+key)
 	}
 
 	homeEnv := os.Getenv("HOME")
@@ -169,8 +171,8 @@ func TestClaudeCLI_SandboxDeniesSSH(t *testing.T) {
 
 	sb, err := sandbox.New(sandbox.Config{
 		RepoPath: workspace, RepoWritable: true,
-		ExtraEnv: extraEnv,
-		Profiles: []sandbox.Snapshot{claudeSnap},
+		HarnessEnv: harnessEnv,
+		Profiles:   []sandbox.Snapshot{claudeSnap},
 	})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)

@@ -37,6 +37,5 @@ sandbox:
   max_lifetime: 20m
 
 retry:
-  researcher_attempts: 1
   architect_attempts: 1
   worker_validation_retries: 1

@@ -16,7 +16,6 @@ func hydratedModels(t *testing.T) map[string]Model {
 	base := func() Model {
 		m := testModel()
 		m.pipelineScreen.goal = "test goal"
-		m.pipelineScreen.phase = orchestrator.Phase("executing")
 		return m
 	}
 
@@ -136,7 +135,6 @@ func TestLayout_EditorReturnError(t *testing.T) {
 	m.pipelineScreen.finalPlan = "# Plan"
 	m.pipelineScreen.editorFilePath = "/tmp/orqestra-plan-test.md"
 	m.pipelineScreen.goal = "test goal"
-	m.pipelineScreen.phase = orchestrator.Phase("executing")
 	m.width = 120
 	m.height = 40
 	m.recalculateLayout()

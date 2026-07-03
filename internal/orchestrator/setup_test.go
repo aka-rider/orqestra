@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"reflect"
 	"testing"
 )
 
@@ -67,19 +68,34 @@ func TestPipelineSetup_Validate(t *testing.T) {
 	}
 }
 
-func TestIsZeroSetup_DeliberationRounds(t *testing.T) {
-	// Pure zero value — nothing set by caller.
-	if !isZeroSetup(PipelineSetup{}) {
-		t.Error("zero PipelineSetup should be zero")
+// TestResolveSetup_Invalid_UsesDefault: SetupValid=false (caller did not
+// provide a setup) always falls back to DefaultPipelineSetup, regardless of
+// whatever happens to be in the (ignored) Setup field.
+func TestResolveSetup_Invalid_UsesDefault(t *testing.T) {
+	got := resolveSetup(Input{})
+	want := DefaultPipelineSetup()
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("resolveSetup(Input{}) = %+v, want default %+v", got, want)
 	}
 
-	// Execution=true alone breaks zero-ness.
-	if isZeroSetup(PipelineSetup{Execution: true}) {
-		t.Error("PipelineSetup{Execution:true} should not be zero")
+	// Even a non-zero-looking Setup is ignored when SetupValid is false.
+	got2 := resolveSetup(Input{Setup: PipelineSetup{Execution: true, DeliberationRounds: 2}})
+	if !reflect.DeepEqual(got2, want) {
+		t.Errorf("resolveSetup with SetupValid=false ignored Setup contents: got %+v, want default %+v", got2, want)
 	}
+}
 
-	// DeliberationRounds=1 alone breaks zero-ness (caller explicitly set it).
-	if isZeroSetup(PipelineSetup{DeliberationRounds: 1}) {
-		t.Error("PipelineSetup{DeliberationRounds:1} should not be zero")
+// TestResolveSetup_Valid_UsesAsIs: SetupValid=true is honored AS-IS even when
+// every PipelineSetup field is a zero value (J24) — a caller that explicitly
+// asked for plan-only (no execution, no validation, no gates) must never be
+// silently upgraded to DefaultPipelineSetup (which enables Execution).
+func TestResolveSetup_Valid_UsesAsIs(t *testing.T) {
+	explicit := PipelineSetup{} // all-zero: plan-only, no gates
+	got := resolveSetup(Input{Setup: explicit, SetupValid: true})
+	if !reflect.DeepEqual(got, explicit) {
+		t.Errorf("resolveSetup(SetupValid=true, all-zero Setup) = %+v, want the explicit zero setup %+v (not defaulted)", got, explicit)
+	}
+	if got.Execution {
+		t.Error("an explicit all-zero setup must not gain Execution:true from DefaultPipelineSetup")
 	}
 }

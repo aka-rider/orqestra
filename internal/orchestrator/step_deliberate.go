@@ -32,6 +32,7 @@ func (s *DeliberateStep) Run(ctx context.Context, in DeliberateInput, sc StepCon
 	sc.Obs.PhaseChanged(PhasePlanning)
 
 	archPrompt := guardPrompt(
+		sc.Log,
 		agent.ArchitectPrompt(in.OriginalPrompt),
 		in.OriginalPrompt,
 		"architect",
@@ -99,6 +100,7 @@ func (s *DeliberateStep) runRound(
 	sc.Obs.PhaseChanged(PhaseCritiquing)
 
 	criticPrompt := guardPrompt(
+		sc.Log,
 		agent.CriticReviewPrompt(originalPrompt, planMarkdown),
 		originalPrompt,
 		"critic",

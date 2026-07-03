@@ -46,12 +46,12 @@ func ResumeSession(id string) SessionRef { return SessionRef{ID: id, Valid: id !
 // args still imply identical subprocesses.
 type ProcessSpec struct {
 	Model        ModelSpec
-	SystemPrompt string  // merged into --append-system-prompt
-	Prompt       string  // initial -p prompt; empty when using input plane (in != nil)
+	SystemPrompt string // merged into --append-system-prompt
+	Prompt       string // initial -p prompt; empty when using input plane (in != nil)
 	Resume       SessionRef
 	WorkDir      string
-	Binary       string     // "" => "claude"
-	ExtraArgs    []string   // permission-mode, allowed/disallowed tools, MCP, etc.
+	Binary       string   // "" => "claude"
+	ExtraArgs    []string // permission-mode, allowed/disallowed tools, MCP, etc.
 	Inline       []InlineMCP
 	Agents       []InlineAgent // inline subagent definitions serialized into --agents
 	Sandbox      SandboxConfig
@@ -417,7 +417,7 @@ func buildSpecArgs(spec ProcessSpec, hasInputPlane bool) []string {
 	// Caller-supplied extra args (allowedTools, disallowedTools, permission-mode, etc.)
 	args = append(args, spec.ExtraArgs...)
 
-	// Merge inline MCP servers into --mcp-config (same logic as buildFinalArgs).
+	// Merge inline MCP servers into --mcp-config.
 	if len(spec.Inline) > 0 {
 		args = mergeInlineMCP(args, spec.Inline)
 	}
@@ -454,7 +454,7 @@ func appendAgentsArg(args []string, agents []InlineAgent) []string {
 }
 
 // mergeInlineMCP merges named inline MCP server definitions into an existing
-// --mcp-config arg or appends a new one. Mirrors the logic in buildFinalArgs.
+// --mcp-config arg or appends a new one.
 func mergeInlineMCP(args []string, inline []InlineMCP) []string {
 	type mcpConfig struct {
 		MCPServers map[string]json.RawMessage `json:"mcpServers"`

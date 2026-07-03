@@ -5,9 +5,8 @@ import (
 	"testing"
 )
 
-func TestRunUsage_ConcurrentRecordSnapshot(t *testing.T) {
+func TestRunUsage_ConcurrentRecordTotalUsed(t *testing.T) {
 	u := NewRunUsage(0)
-	u.StartAgent("test", AgentMeta{})
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -22,14 +21,13 @@ func TestRunUsage_ConcurrentRecordSnapshot(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 1000; i++ {
-			u.Snapshot()
+			u.TotalUsed()
 		}
 	}()
 
 	wg.Wait()
 
-	snap := u.Snapshot()
-	if snap.Input != 10000 {
-		t.Errorf("input = %d, want 10000", snap.Input)
+	if got := u.TotalUsed(); got != 15000 {
+		t.Errorf("TotalUsed() = %d, want 15000", got)
 	}
 }

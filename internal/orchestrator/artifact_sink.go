@@ -22,12 +22,14 @@ type ArtifactSink interface {
 // sessionArtifactSink implements ArtifactSink backed by an agent.SessionDir.
 type sessionArtifactSink struct {
 	dir agent.SessionDir
+	log *slog.Logger
 }
 
 // NewArtifactSink returns an ArtifactSink that writes to the given session directory.
 // If dir.Path is empty, Write returns an error and WriteBestEffort is a no-op.
-func NewArtifactSink(dir agent.SessionDir) ArtifactSink {
-	return &sessionArtifactSink{dir: dir}
+// log is the per-run injected logger (StepContext.Log) — never slog.Default().
+func NewArtifactSink(dir agent.SessionDir, log *slog.Logger) ArtifactSink {
+	return &sessionArtifactSink{dir: dir, log: log}
 }
 
 func (s *sessionArtifactSink) Write(name string, data []byte) error {
@@ -45,7 +47,7 @@ func (s *sessionArtifactSink) WriteBestEffort(name string, data []byte) {
 		return
 	}
 	if err := s.dir.WriteArtifact(name, data); err != nil {
-		slog.Error("artifact_sink: best-effort write failed", "path", s.dir.ArtifactPath(name), "err", err)
+		s.log.Error("artifact_sink: best-effort write failed", "path", s.dir.ArtifactPath(name), "err", err)
 	}
 }
 
@@ -54,5 +56,5 @@ type noopArtifactSink struct{}
 
 func NoopArtifactSink() ArtifactSink { return noopArtifactSink{} }
 
-func (noopArtifactSink) Write(_ string, _ []byte) error  { return nil }
+func (noopArtifactSink) Write(_ string, _ []byte) error     { return nil }
 func (noopArtifactSink) WriteBestEffort(_ string, _ []byte) {}

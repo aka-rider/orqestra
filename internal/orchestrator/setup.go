@@ -41,18 +41,17 @@ func (p PipelineSetup) Validate() error {
 	return nil
 }
 
-// isZeroSetup reports whether s is the zero value (no fields set by the caller).
-// Can't use == because HumanGateSet is a slice.
-func isZeroSetup(s PipelineSetup) bool {
-	return !s.Execution && !s.Validation && s.DeliberationRounds == 0 && len(s.HumanGates) == 0
-}
-
 // resolveSetup converts user Input into a PipelineSetup.
-// A zero-value Input.Setup falls back to DefaultPipelineSetup.
-// An explicitly-set Input.Setup is used as-is so callers that want
-// no gates pass HumanGates: nil and the gate does not fire.
+// SetupValid=false (the caller did not provide a setup) falls back to
+// DefaultPipelineSetup. SetupValid=true uses in.Setup AS-IS — including an
+// all-zero-fields "everything off" request — so callers that want no gates
+// pass HumanGates: nil and the gate does not fire. The caller (engine_pipeline.go)
+// enforces PipelineSetup.Validate() on the result and fails the run via
+// obs.Finished rather than silently substituting defaults (J24): an explicit
+// but invalid setup must surface as an error, never as a quiet default that
+// could enable Execution when the caller asked only to plan.
 func resolveSetup(in Input) PipelineSetup {
-	if isZeroSetup(in.Setup) {
+	if !in.SetupValid {
 		return DefaultPipelineSetup()
 	}
 	return in.Setup

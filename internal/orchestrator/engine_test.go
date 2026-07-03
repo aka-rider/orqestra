@@ -432,31 +432,133 @@ func TestEngine_BudgetExhausted(t *testing.T) {
 	}
 }
 
-// --- Engine.Run integration test ---
+// --- Engine.Start integration test ---
 
-func TestEngine_Run_NoGate(t *testing.T) {
-	// Verify Engine.Run (the synchronous polling wrapper) works end-to-end
-	// with the new architecture using a config-only engine (no real claude CLI).
+func TestEngine_Start_NoGate(t *testing.T) {
+	// Verify Engine.Start works end-to-end with the new architecture using a
+	// config-only engine (no real claude CLI).
 	// This test must NOT call testutil.MustTempHome; it exercises Engine directly.
 	cfg := config.DefaultConfig()
 	engine := &Engine{Config: cfg}
 
-	// Engine.Run with a zero-setup (defaults to DefaultPipelineSetup which has a gate)
-	// would block. Use explicit setup with no gates.
+	// An unset Setup (SetupValid=false) defaults to DefaultPipelineSetup, which
+	// has a gate and would block. Use an explicit, valid, no-gates setup instead.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	// The engine uses real harness.Run internally, which would require a claude binary.
 	// We can't test end-to-end without the binary, so just verify Start returns a handle.
 	handle := engine.Start(ctx, Input{
-		Prompt: "test",
-		Setup:  PipelineSetup{Execution: false, Validation: false},
+		Prompt:     "test",
+		Setup:      PipelineSetup{Execution: false, Validation: false, DeliberationRounds: 1},
+		SetupValid: true,
 	})
 	if handle.Obs == nil {
 		t.Fatal("Start returned nil ObsStore")
 	}
 	if handle.Ctrl == nil {
 		t.Fatal("Start returned nil Control")
+	}
+}
+
+// TestEngineStart_SetupValidInvalidSetup_FailsRun is the J24 end-to-end proof:
+// a caller that explicitly asks for an all-zero-fields "everything off"
+// PipelineSetup (SetupValid=true) with an invalid DeliberationRounds must have
+// the run FAIL with the validation error — never silently substitute
+// DefaultPipelineSetup (which would enable Execution and could let a worker
+// modify the repo the caller only asked to plan for). This never reaches
+// harness.Run: PipelineSetup.Validate() fails before any agent is invoked, so
+// the test needs no claude binary and completes fast.
+func TestEngineStart_SetupValidInvalidSetup_FailsRun(t *testing.T) {
+	cfg := config.DefaultConfig()
+	engine := &Engine{Config: cfg}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// All-zero fields: exactly the shape that used to trip the old
+	// zero-value-detection heuristic into silently substituting defaults,
+	// regardless of the caller's explicit intent.
+	handle := engine.Start(ctx, Input{
+		Prompt:     "test",
+		Setup:      PipelineSetup{},
+		SetupValid: true,
+	})
+
+	for {
+		snap := handle.Obs.Snapshot()
+		if snap.Terminal.Done {
+			if snap.Terminal.Result.Status != StatusFailed {
+				t.Fatalf("expected StatusFailed for an invalid explicit setup, got %s", snap.Terminal.Result.Status)
+			}
+			if snap.Terminal.Err == nil {
+				t.Fatal("expected a non-nil error for an invalid explicit setup, got nil (setup was silently defaulted?)")
+			}
+			if !strings.Contains(snap.Terminal.Err.Error(), "invalid pipeline setup") {
+				t.Errorf("expected 'invalid pipeline setup' in the terminal error, got: %v", snap.Terminal.Err)
+			}
+			return
+		}
+		select {
+		case <-handle.Obs.NotifyCh():
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for the run to fail on invalid explicit setup — was it silently defaulted and left waiting on a gate?")
+		}
+	}
+}
+
+// TestEngineStart_DoesNotSwapGlobalLogger is the J4 regression proof: a run
+// with a real session directory (so the per-run log-file logger path is
+// exercised) must NEVER install its logger as the process-global default via
+// slog.SetDefault. Before the fix, engine_pipeline.go called
+// slog.SetDefault(logger) on every run with a session directory and reset the
+// global to an io.Discard-backed logger in a deferred cleanup afterward —
+// racing concurrent/overlapping runs and silently discarding ALL process
+// logging once the first run completed. slog.Default() identity must be
+// unchanged before and after the run.
+func TestEngineStart_DoesNotSwapGlobalLogger(t *testing.T) {
+	before := slog.Default()
+
+	cfg := config.DefaultConfig()
+	engine := &Engine{
+		Config: cfg,
+		RunDirFactory: func(slug string) (agent.SessionDir, error) {
+			return agent.SessionDir{Path: t.TempDir()}, nil
+		},
+		Specs: ProcessSpecs{
+			// A binary that cannot exist makes harness.Run fail immediately
+			// (no such file) without invoking any real claude CLI, while still
+			// exercising the full startNew goroutine — including opening
+			// session.Path/run.log, the exact code path J4's slog.SetDefault
+			// calls used to wrap.
+			Architect: harness.ProcessSpec{Binary: "/nonexistent-orqestra-test-binary-j4"},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	handle := engine.Start(ctx, Input{
+		Prompt:     "test",
+		Setup:      PipelineSetup{Execution: false, Validation: false, DeliberationRounds: 1},
+		SetupValid: true,
+	})
+
+	for {
+		snap := handle.Obs.Snapshot()
+		if snap.Terminal.Done {
+			break
+		}
+		select {
+		case <-handle.Obs.NotifyCh():
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for the run to complete")
+		}
+	}
+
+	after := slog.Default()
+	if before != after {
+		t.Error("slog.Default() identity changed across the run — the per-run logger (or its io.Discard reset) leaked into the process-global default")
 	}
 }
 

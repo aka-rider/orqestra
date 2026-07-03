@@ -19,8 +19,10 @@ type IntegrateStep struct {
 	// AgentID must be non-empty for the agent call to fire; falls back on failure.
 	CommitMsgSpec harness.ProcessSpec
 	// ConflictSpecFn returns a worktree-writable spec for conflict resolution.
-	// If nil, conflicts are always surfaced to the user.
-	ConflictSpecFn func(wtPath string) harness.ProcessSpec
+	// If nil, conflicts are always surfaced to the user. A returned error means
+	// the spec could not be built (e.g. model resolution failure) — handleConflict
+	// treats this as give-up-and-preserve, never executes a zero ProcessSpec (J19).
+	ConflictSpecFn func(wtPath string) (harness.ProcessSpec, error)
 	// Meta is used for agent-started observations.
 	Meta AgentMeta
 	// Sup is used to untrack the worktree after a successful merge.
@@ -158,8 +160,14 @@ func (s *IntegrateStep) handleConflict(
 		return preserve("resolve_conflicts=false")
 	}
 
-	// Spawn integrator in conflict-resolution mode.
-	spec := s.ConflictSpecFn(wt.Path)
+	// Spawn integrator in conflict-resolution mode. A spec-build error is
+	// fail-forward truth (J19): give up and preserve the worktree, with the
+	// build error carried in the give-up reason — never execute a zero
+	// ProcessSpec (no sandbox, no model routing, empty AgentID).
+	spec, specErr := s.ConflictSpecFn(wt.Path)
+	if specErr != nil {
+		return preserve("conflict spec build error: " + specErr.Error())
+	}
 	spec.Prompt = agent.IntegratorConflictPrompt(conflictFiles)
 	res, execErr := sc.Exec.Run(ctx, spec, nil, nil)
 	if execErr != nil {

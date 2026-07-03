@@ -18,7 +18,6 @@ func TestBudgetGuard_Unlimited(t *testing.T) {
 
 func TestBudgetGuard_UnderBudget(t *testing.T) {
 	u := NewRunUsage(1000)
-	u.StartAgent("test", AgentMeta{})
 	u.Record("test", 200, 100)
 
 	g := NewBudgetGuard(u)
@@ -29,7 +28,6 @@ func TestBudgetGuard_UnderBudget(t *testing.T) {
 
 func TestBudgetGuard_OverBudget(t *testing.T) {
 	u := NewRunUsage(500)
-	u.StartAgent("test", AgentMeta{})
 	u.Record("test", 300, 300)
 
 	g := NewBudgetGuard(u)

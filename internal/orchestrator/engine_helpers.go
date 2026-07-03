@@ -8,10 +8,11 @@ import (
 )
 
 // guardPrompt runs the prompt integrity canary and returns the sanitized prompt.
-func guardPrompt(assembled, original, agentID string) string {
+// log is the per-run injected logger (StepContext.Log) — never slog.Default().
+func guardPrompt(log *slog.Logger, assembled, original, agentID string) string {
 	out, tripped := agent.CheckPromptIntegrity(assembled, original)
 	if tripped {
-		slog.Warn("prompt integrity canary tripped", "agent", agentID)
+		log.Warn("prompt integrity canary tripped", "agent", agentID)
 	}
 	return out
 }
