@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/rundir"
 )
 
@@ -56,18 +57,32 @@ const bridgeReadyTimeout = 2 * time.Second
 // (WP5/J17,J25). This keeps GateID correlation and question-ID correlation
 // as two independent, non-interfering concerns sharing one inbound channel.
 func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
-	em := newEmitter(eventBusBufSize)
+	runID := RunID(e.runSeq.Add(1))
+
+	runCtx, runCancel := context.WithCancel(ctx)
+
+	// em is bound to runCtx (WP17/A2), not ctx directly: runCtx is cancelled
+	// both when the caller abandons this run (ctx cancelled) AND,
+	// unconditionally, by finish() below at the end of every run — so the
+	// emitter's forwarder can never leak past either "abandoned" or
+	// "naturally finished" (see emitter.go's type doc for the exact
+	// terminal-close semantics this implies).
+	em := newEmitter(runCtx, eventBusBufSize)
 	obs := newEventObserver(em)
 
 	intentsIn := make(chan Intent, intentBufSize)
 	gateDecisions := make(chan GateDecisionIntent, 1)
 	gateFn := newGateFunc(em, gateDecisions)
 
-	runCtx, runCancel := context.WithCancel(ctx)
 	forwarderDone := make(chan struct{})
 	if e.QuestionBridge != nil {
 		go func() {
 			defer close(forwarderDone)
+			// WP17/F3: discard anything already sitting in Questions() at
+			// forwarder startup, before relaying a single one of THIS run's
+			// own. See drainStaleQuestion's doc for why this is provably
+			// safe (not a race against this run's own first question).
+			drainStaleQuestion(e.QuestionBridge.Questions())
 			for {
 				select {
 				case q, ok := <-e.QuestionBridge.Questions():
@@ -95,10 +110,7 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 				}
 				switch it := in.(type) {
 				case GateDecisionIntent:
-					select {
-					case gateDecisions <- it:
-					default: // fire-and-forget: superseded by a later decision, or dropped as stale — the gate's own drain-before-open handles staleness (WP4a)
-					}
+					supersedeGateDecision(gateDecisions, it)
 				case QuestionAnswerIntent:
 					if e.QuestionBridge != nil {
 						e.QuestionBridge.SendAnswer(it.Answer)
@@ -245,10 +257,60 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 	}()
 
 	return RunHandle{
+		RunID:         runID,
 		Events:        em.Events(),
 		Intents:       intentsIn,
 		forwarderDone: forwarderDone,
 		runDone:       runDone,
+	}
+}
+
+// supersedeGateDecision delivers it onto the cap-1 gateDecisions buffer so
+// the NEWEST decision always occupies the slot (WP17/F4). A plain
+// non-blocking send ("drop the newer one if the buffer is already full")
+// silently discards a VALID decision whenever a stale one — a double
+// submit, or a decision racing the previous gate's close — is still sitting
+// in the buffer, wedging the gate until the user cancels the whole pipeline:
+// gate.go's own drain-before-open only protects the NEXT gate, not this
+// one. Draining first, then sending, means only ever the most recent
+// decision can be waiting; gate.go's GateID-mismatch check still rejects a
+// decision meant for a different (older/newer) gate — this only fixes
+// WHICH decision wins the single buffered slot.
+func supersedeGateDecision(gateDecisions chan GateDecisionIntent, it GateDecisionIntent) {
+	select {
+	case <-gateDecisions:
+	default:
+	}
+	select {
+	case gateDecisions <- it:
+	default: // fire-and-forget: extremely unlikely (we just drained the only slot above) — a concurrent drain by the gate itself beat us to it, which is fine, nothing left to supersede
+	}
+}
+
+// drainStaleQuestion discards a single question already sitting in
+// questions, if any, logging it (WP17/F3 — "a stale question buffered
+// across runs surfaces as a phantom on the next run's bus"). Call ONCE, at
+// the very start of a run's question-forwarder goroutine, before it relays
+// anything of its own.
+//
+// This is provably safe, not a race against THIS run's own first question:
+// the forwarder goroutine is spawned synchronously inside startNew, well
+// before any agent process for this run has even been launched (session
+// directory setup, the bridge-readiness handshake, and building the
+// pipeline steps all happen afterward, in a SEPARATE goroutine — see below).
+// A subprocess cannot dial the bridge and ask a question before it exists,
+// so anything already buffered in Questions() at this exact moment can only
+// be a phantom left over from an earlier run's forwarder — one that raced
+// its own runCtx.Done() against a question landing in the channel and lost,
+// exiting without ever relaying it (Questions() is a single channel shared
+// for the QuestionBridge's whole process lifetime, WP4b/J5,J41).
+func drainStaleQuestion(questions <-chan mcp.ToolCall) {
+	select {
+	case q, ok := <-questions:
+		if ok {
+			slog.Debug("dropped stale cross-run question at forwarder startup (WP17/F3)", "question", q.Question)
+		}
+	default:
 	}
 }
 

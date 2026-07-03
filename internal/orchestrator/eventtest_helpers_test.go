@@ -52,7 +52,7 @@ func (r *recordingObserver) Failed(id string) bool {
 // simplified to a direct channel since these tests call RunPipeline
 // directly, not through Engine.Start).
 func newGateTestContext() (sc StepContext, events <-chan RunEvent, decisions chan<- GateDecisionIntent) {
-	em := newEmitter(256)
+	em := newEmitter(context.Background(), 256)
 	decisionsCh := make(chan GateDecisionIntent, 1)
 	sc = StepContext{
 		Exec:      nil,

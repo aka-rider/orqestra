@@ -764,10 +764,11 @@ func TestTUI_FinalDeltaRenderedBeforeRunFinished(t *testing.T) {
 	events <- orchestrator.EventAgentDone{AgentID: "worker"}
 	events <- orchestrator.EventRunFinished{Result: orchestrator.Result{Status: orchestrator.StatusSuccess}}
 	m.events = events
+	m.activeRunID = 7
 
 	// Drive the loop exactly as bubbletea would: invoke the Cmd, feed its Msg
 	// back into Update, repeat until Update stops returning a Cmd (RunFinished).
-	var cmd tea.Cmd = waitForEvent(m.events)
+	var cmd tea.Cmd = waitForEvent(m.activeRunID, m.events)
 	for cmd != nil {
 		msg := cmd()
 		if msg == nil {

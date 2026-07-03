@@ -97,6 +97,25 @@ type Model struct {
 	intents     chan<- orchestrator.Intent
 	cancelCause context.CancelCauseFunc
 
+	// activeRunID is the RunID of the run this Model is currently willing to
+	// accept events from (WP17/F1,A3 — "run identity on the event/intent
+	// chain"). Zero means no active run. Set the instant a run starts
+	// (startPipeline) and cleared/advanced the instant the user abandons it
+	// (ConfirmNewRunIntent/NavigateToPromptIntent, model_intents.go) — BEFORE
+	// the replacement run (if any) is even started, so a late event from a
+	// just-abandoned run can never be mistaken for the new one's.
+	activeRunID orchestrator.RunID
+
+	// intentsDone is closed exactly once the active run is over — either it
+	// finished naturally (Update's runEventMsg/EventRunFinished case) or the
+	// user abandoned it (ConfirmNewRunIntent/NavigateToPromptIntent) — see
+	// closeIntentsDone. sendIntent (model_intents.go) selects on it so a
+	// send to m.intents can never block its Cmd goroutine forever once
+	// nobody is left to drain that channel (WP17 hardening note). Created
+	// fresh per run in startPipeline; nil (never fires in a select) when no
+	// run has ever started.
+	intentsDone chan struct{}
+
 	// Engine
 	engine *orchestrator.Engine
 
@@ -167,31 +186,6 @@ func animTickCmd() tea.Cmd {
 	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
 		return animTickMsg(t)
 	})
-}
-
-// runEventMsg wraps one orchestrator.RunEvent for the Bubble Tea message
-// loop (WP10 — replaces the pre-WP10 notify-wakeup + snapshot-diffing
-// message pair). RunEvent crosses the orchestrator→TUI package boundary
-// already carrying its own producer-defined type identity; this thin
-// wrapper is the "orchestration events flow down through typed messages"
-// case internal/tui/CLAUDE.md §2.4 calls out.
-type runEventMsg struct{ ev orchestrator.RunEvent }
-
-// waitForEvent returns a tea.Cmd that receives exactly one RunEvent from
-// events and wraps it as a runEventMsg. The caller re-arms by calling this
-// again after handling each runEventMsg — see Update's runEventMsg case,
-// which stops re-arming once it sees EventRunFinished (events closes
-// immediately after that event, so the chain would stop on its own anyway,
-// but stopping explicitly is clearer than relying on channel-close/nil-msg
-// semantics).
-func waitForEvent(events <-chan orchestrator.RunEvent) tea.Cmd {
-	return func() tea.Msg {
-		ev, ok := <-events
-		if !ok {
-			return nil
-		}
-		return runEventMsg{ev: ev}
-	}
 }
 
 // Update handles messages and returns the updated model.
@@ -291,11 +285,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case runEventMsg:
-		// runEventMsg only ever originates from waitForEvent(m.events) — by
-		// construction m.events is already non-nil whenever this case is
-		// reached via the real production Cmd chain (startPipeline sets it
-		// before the first waitForEvent call, and every re-arm below reuses
-		// the same value) — no nil-guard needed.
+		// WP17/F1,A3: a runEventMsg whose runID no longer matches the
+		// model's active run is DROPPED outright — no ApplyEvent, no
+		// re-arm. This is what makes a stale event chain (run N's late
+		// EventRunFinished arriving after the user cancelled it and started
+		// run N+1) die on its very first delivery, instead of painting a
+		// false terminal state over the new run or double-arming a second
+		// concurrent consumer on the new run's channel.
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		// runEventMsg only ever originates from waitForEvent(m.activeRunID,
+		// m.events) — by construction m.events is already non-nil whenever
+		// this case is reached via the real production Cmd chain
+		// (startPipeline sets it before the first waitForEvent call, and
+		// every re-arm below reuses the same values) — no nil-guard needed.
 		prevInputH := m.pipelineScreen.inputZoneHeight()
 		m.pipelineScreen.ApplyEvent(msg.ev, m.width)
 
@@ -307,10 +311,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if _, done := msg.ev.(orchestrator.EventRunFinished); done {
 			// Events closes immediately after this event (emitter.go) — stop
 			// re-arming rather than issuing one more (harmless but pointless)
-			// waitForEvent that would just see the closed channel.
+			// waitForEvent that would just see the closed channel. Also
+			// release any sendIntent Cmd still waiting to send on this run's
+			// (now-draining) intents channel (WP17 hardening note).
+			m.closeIntentsDone()
 			return m, nil
 		}
-		return m, waitForEvent(m.events)
+		return m, waitForEvent(msg.runID, m.events)
 	}
 
 	// Pass non-key messages to focused sub-models

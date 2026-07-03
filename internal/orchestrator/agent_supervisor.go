@@ -31,6 +31,14 @@ type ReportSignaler interface {
 	// pre-closed channel if the report has already arrived. Callers must not
 	// close the returned channel.
 	ReportSignal(agentID, nonce string) <-chan struct{}
+
+	// Release removes the report-correlation WAITER armed by ReportSignal for
+	// this (agentID, nonce) invocation, once it is known nothing will ever
+	// read it again (WP17 hardening note: an armed-but-never-fulfilled
+	// waiter otherwise leaks for the life of the process — nothing else ever
+	// removes one). Call AFTER the subprocess has finished — see Run below,
+	// which defers it immediately after arming.
+	Release(agentID, nonce string)
 }
 
 // invocationSeq generates the per-invocation nonce counter component. A
@@ -171,6 +179,16 @@ func (s *AgentSupervisor) Run(
 	var reportSigCh <-chan struct{}
 	if expectsReport {
 		reportSigCh = s.reports.ReportSignal(spec.AgentID, nonce)
+		// WP17 hardening note: release the waiter the instant this
+		// invocation's Run call returns (defer, so it fires on every exit
+		// path — natural completion, timeout, cancellation, or report
+		// arrival). Deliberately does NOT touch the bridge's stored report
+		// or agentID→nonce mapping — see QuestionBridge.Release's doc for
+		// why: ReportHarvester.Harvest (report_harvest.go) calls
+		// TakeReport(agentID) strictly AFTER this Run call returns, and
+		// must still be able to resolve a report that arrived moments
+		// before it did.
+		defer s.reports.Release(spec.AgentID, nonce)
 	}
 	var reportSig <-chan struct{}
 
@@ -227,7 +245,7 @@ func (s *AgentSupervisor) Run(
 		baseIn = msgs
 
 		events = make(chan harness.Event, 64)
-		runSink = &fanoutSink{inner: sink, events: events}
+		runSink = &fanoutSink{inner: sink, events: events, done: ctx.Done()}
 	} else {
 		baseIn = in
 		runSink = sink
@@ -464,26 +482,3 @@ func buildPolicies(spec harness.ProcessSpec) []supervisorPolicy {
 	return ps
 }
 
-// fanoutSink forwards every event to both the real sink and the events
-// channel. Observe is called from the harness sink goroutine — the events
-// channel send is non-blocking to avoid stalling the sink.
-//
-// WP12/RC3: EventSessionStart capture used to require a dedicated sessionC
-// channel here, feeding the supervise loop's lazy report-signal bind. Report
-// correlation is now nonce-based and armed before the subprocess even starts
-// (see AgentSupervisor.Run), so fanoutSink no longer needs to single out
-// EventSessionStart at all — the supervise loop reads it directly off events.
-type fanoutSink struct {
-	inner  harness.Sink
-	events chan<- harness.Event
-}
-
-func (f *fanoutSink) Observe(ev harness.Event) {
-	if f.inner != nil {
-		f.inner.Observe(ev)
-	}
-	select {
-	case f.events <- ev:
-	default: // supervisor events channel is lossy — drop if full
-	}
-}

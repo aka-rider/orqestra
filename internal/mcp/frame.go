@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"net"
+	"time"
 )
 
 // maxFrameBytes bounds a single length-prefixed bridge frame (question,
@@ -40,4 +42,37 @@ func readFrame(r io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	return data, nil
+}
+
+// readFrameDeadline reads one length-prefixed frame off conn, bounded by
+// timeout (A7 — "readFrame has no deadline, a hung peer leaks past Run's
+// return"): a connected-but-silent peer (or one that sends a partial frame
+// and stops) now fails with a deadline-exceeded error instead of blocking
+// the caller's goroutine forever. timeout<=0 disables the bound (readFrame
+// itself, used directly against plain io.Reader values such as bytes.Buffer
+// in frame_test.go, has no deadline concept at all).
+func readFrameDeadline(conn net.Conn, timeout time.Duration) ([]byte, error) {
+	if timeout <= 0 {
+		return readFrame(conn)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, fmt.Errorf("set read deadline: %w", err)
+	}
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }() // fire-and-forget: best-effort reset — conn is handled or closed regardless of whether this succeeds
+	return readFrame(conn)
+}
+
+// writeFrameDeadline writes one length-prefixed frame to conn, bounded by
+// timeout — the write-side counterpart of readFrameDeadline: a peer that
+// stops reading (e.g. it crashed after sending its request) cannot block
+// the caller's goroutine forever on the response write either.
+func writeFrameDeadline(conn net.Conn, data []byte, timeout time.Duration) error {
+	if timeout <= 0 {
+		return writeFrame(conn, data)
+	}
+	if err := conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("set write deadline: %w", err)
+	}
+	defer func() { _ = conn.SetWriteDeadline(time.Time{}) }() // fire-and-forget: best-effort reset — conn is handled or closed regardless of whether this succeeds
+	return writeFrame(conn, data)
 }

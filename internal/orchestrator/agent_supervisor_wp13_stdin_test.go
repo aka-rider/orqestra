@@ -61,6 +61,8 @@ func (neverSignaler) ReportSignal(_, _ string) <-chan struct{} {
 	return make(chan struct{})
 }
 
+func (neverSignaler) Release(_, _ string) {}
+
 // TestWP13_GracefulStdinClose_NoReportExpected is the WP13.0-CONFIRMED branch
 // gate (b), first half: a spec that never expects a report must have its
 // input plane closed as soon as EventSessionDone fires, letting the

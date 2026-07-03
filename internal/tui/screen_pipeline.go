@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
 	"github.com/xiii/orqestra/internal/tui/frame"
 	"github.com/xiii/orqestra/internal/tui/keymap"
@@ -39,6 +40,13 @@ type PipelineScreen struct {
 	// Chat is the bottom input (always visible during ContentStreaming); it
 	// hosts a plan-gate revision reply or an open AskUserQuestion.
 	chat chat
+
+	// pendingQuestions queues a question that arrived while the chat already
+	// had one open (WP17/F3): the pre-fix behavior silently dropped it
+	// (onQuestionAsked's `if !s.chat.QuestionOpen()` guard). A live agent's
+	// second question is real, truthful state — surfacing it, even delayed
+	// until the first resolves, beats losing it outright. FIFO order.
+	pendingQuestions []mcp.ToolCall
 
 	// Plan tracking
 	finalPlan            string
@@ -144,6 +152,7 @@ func (s *PipelineScreen) Reset() {
 	s.timeline.Clear()
 	s.timeline.styles = timelineStyles{selectionBg: selectionBg}
 	s.lastAgentID = ""
+	s.pendingQuestions = nil
 	s.chat.Reset()
 	s.chat.Blur()
 }
@@ -273,12 +282,20 @@ func (s PipelineScreen) HandleCtrlCCancel() PipelineScreen {
 
 // resolveQuestion closes the chat's open question, echoes the answer to the
 // timeline, and queues the answer for the model. Shared by the Enter and the
-// ^C-skip paths so both stay in lockstep.
+// ^C-skip paths so both stay in lockstep. If another question arrived while
+// this one was open (WP17/F3 — queued by onQuestionAsked instead of being
+// silently dropped), the next one in FIFO order is opened immediately
+// afterward so it is never left invisible once the first resolves.
 func (s PipelineScreen) resolveQuestion(q userQuestionModel) PipelineScreen {
 	s.chat.question = q
 	s.timeline.Append(frame.NewAnswer(q.QuestionText(), q.AnswerSummary()))
 	s.PendingIntent = SubmitQuestionAnswerIntent{Answer: q.Answer()}
 	s.chat.CloseQuestion()
+	if len(s.pendingQuestions) > 0 {
+		next := s.pendingQuestions[0]
+		s.pendingQuestions = s.pendingQuestions[1:]
+		s.chat.OpenQuestion(next, s.chat.width)
+	}
 	s.enterStreaming()
 	return s
 }

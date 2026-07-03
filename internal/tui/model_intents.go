@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/orchestrator"
@@ -14,10 +16,25 @@ import (
 // WP10 step 7's "sends from Update wrapped in a tea.Cmd if they could ever
 // block". ch is nil when no pipeline is running (no gate/question possible
 // then either), so the nil-guard is defensive, not load-bearing.
-func sendIntent(ch chan<- orchestrator.Intent, in orchestrator.Intent) tea.Cmd {
+//
+// done (WP17 hardening note) bounds that send: once the run this intent
+// belongs to has ended — naturally, or because the user abandoned it — done
+// is closed (Model.closeIntentsDone) and nobody will ever drain ch again.
+// Without this, a send that happened to arrive after that point (a Cmd
+// already queued by bubbletea before the run ended) would block this Cmd's
+// goroutine forever once the buffer filled. done may be nil (no run has
+// ever started) — a nil channel never fires in a select, so the send just
+// behaves as a plain (possibly still momentarily blocking, per the comment
+// above) send in that case, same as before this hardening.
+func sendIntent(ch chan<- orchestrator.Intent, done <-chan struct{}, in orchestrator.Intent) tea.Cmd {
 	return func() tea.Msg {
-		if ch != nil {
-			ch <- in
+		if ch == nil {
+			return nil
+		}
+		select {
+		case ch <- in:
+		case <-done:
+			slog.Debug("tui: dropped intent — its run already ended", "intent_type", fmt.Sprintf("%T", in))
 		}
 		return nil
 	}
@@ -37,17 +54,17 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 	}
 	switch i := intent.(type) {
 	case SubmitQuestionAnswerIntent:
-		return m, batch(sendIntent(m.intents, orchestrator.QuestionAnswerIntent{
+		return m, batch(sendIntent(m.intents, m.intentsDone, orchestrator.QuestionAnswerIntent{
 			QuestionID: i.Answer.ID,
 			Answer:     i.Answer,
 		}))
 	case ApprovePlanIntent:
-		return m, batch(sendIntent(m.intents, orchestrator.GateDecisionIntent{
+		return m, batch(sendIntent(m.intents, m.intentsDone, orchestrator.GateDecisionIntent{
 			GateID:   m.pipelineScreen.gateID,
 			Decision: orchestrator.Decision{Type: orchestrator.DecisionApprove},
 		}))
 	case ConfirmEditIntent:
-		cmd := sendIntent(m.intents, orchestrator.GateDecisionIntent{
+		cmd := sendIntent(m.intents, m.intentsDone, orchestrator.GateDecisionIntent{
 			GateID: m.pipelineScreen.gateID,
 			Decision: orchestrator.Decision{
 				Type:          orchestrator.DecisionEdit,
@@ -60,7 +77,7 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 		m.pipelineScreen.enterStreaming()
 		return m, batch(cmd)
 	case CommentPlanIntent:
-		return m, batch(sendIntent(m.intents, orchestrator.GateDecisionIntent{
+		return m, batch(sendIntent(m.intents, m.intentsDone, orchestrator.GateDecisionIntent{
 			GateID: m.pipelineScreen.gateID,
 			Decision: orchestrator.Decision{
 				Type:    orchestrator.DecisionComment,
@@ -68,7 +85,7 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 			},
 		}))
 	case CancelPlanIntent:
-		return m, batch(sendIntent(m.intents, orchestrator.GateDecisionIntent{
+		return m, batch(sendIntent(m.intents, m.intentsDone, orchestrator.GateDecisionIntent{
 			GateID:   m.pipelineScreen.gateID,
 			Decision: orchestrator.Decision{Type: orchestrator.DecisionCancel},
 		}))
@@ -78,6 +95,15 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 		}
 		return m, batch(nil)
 	case NavigateToPromptIntent:
+		// WP17/F1,A3: invalidate the active run BEFORE resetting screen
+		// state — a late event from whatever run was active (finished or
+		// not) must never be delivered to the fresh prompt/next run. Zero is
+		// never a real RunID (Engine.runSeq starts at 1), so this always
+		// mismatches every future runEventMsg until the next startPipeline.
+		m.activeRunID = 0
+		// WP17 hardening note: release any sendIntent Cmd still waiting on
+		// this (now-abandoned) run's intents channel.
+		m.closeIntentsDone()
 		m.pipelineScreen.Reset()
 		m.state = StatePrompt
 		m.promptScreen.Reset()
@@ -89,6 +115,14 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 		m.navigateToRunsList()
 		return m, batch(nil)
 	case ConfirmNewRunIntent:
+		// WP17/F1,A3 — the exact ^N-while-active scenario: invalidate the
+		// active run FIRST, before cancelling it or resetting any screen
+		// state, so run 1's late events (including its own cancelled-run
+		// EventRunFinished) are rejected by Update even before run 2 exists.
+		m.activeRunID = 0
+		// WP17 hardening note: release any sendIntent Cmd still waiting on
+		// run 1's intents channel before run 2 gets its own fresh one.
+		m.closeIntentsDone()
 		if m.cancelCause != nil {
 			m.cancelCause(orchestrator.ErrUserCancelled)
 		}
@@ -118,6 +152,15 @@ func (m *Model) startPipeline(prompt string) tea.Cmd {
 	})
 	m.events = handle.Events
 	m.intents = handle.Intents
+	// WP17/F1,A3: this run becomes the ONLY one whose events Update will
+	// accept from now on — set before the first waitForEvent so there is no
+	// window where an in-flight message from a just-abandoned prior run
+	// could still slip through.
+	m.activeRunID = handle.RunID
+	// WP17 hardening note: a fresh done-signal for THIS run's intents —
+	// closed by closeIntentsDone once it ends (naturally or abandoned), so
+	// sendIntent can never block its Cmd goroutine forever past that point.
+	m.intentsDone = make(chan struct{})
 
-	return tea.Batch(waitForEvent(handle.Events), tickCmd())
+	return tea.Batch(waitForEvent(handle.RunID, handle.Events), tickCmd())
 }

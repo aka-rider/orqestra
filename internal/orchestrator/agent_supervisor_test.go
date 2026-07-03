@@ -91,6 +91,8 @@ func (preFiredSignaler) ReportSignal(_, _ string) <-chan struct{} {
 	return ch
 }
 
+func (preFiredSignaler) Release(_, _ string) {}
+
 // sessionEmittingBlocker emits EventSessionStart with sessionID via the sink,
 // then blocks until ctx is cancelled. Used to exercise the session-ID capture
 // path (WP12: captured directly in the supervise loop's events case).

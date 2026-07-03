@@ -29,7 +29,7 @@ import (
 // lifecycle sends non-blocking drops") and failed with a lifecycle-count
 // mismatch; reverting the break made it pass again.
 func TestEmitter_SlowConsumerNeverDropsLifecycleAndPreservesDeltaText(t *testing.T) {
-	em := newEmitter(4) // deliberately small output buffer: the queue must do the work
+	em := newEmitter(context.Background(), 4) // deliberately small output buffer: the queue must do the work
 
 	const agentID = AgentID("worker")
 	const numDeltas = 10000
@@ -105,7 +105,7 @@ func TestEmitter_SlowConsumerNeverDropsLifecycleAndPreservesDeltaText(t *testing
 // (LIFO) instead of its head (FIFO) — RunFinished (queued last) was
 // delivered FIRST — and failed; reverting the break made it pass again.
 func TestEmitter_OrderingAgentStartedPrecedesDeltaAndRunFinishedIsLast(t *testing.T) {
-	em := newEmitter(1)
+	em := newEmitter(context.Background(), 1)
 
 	em.Emit(EventAgentStarted{AgentID: "worker", Meta: AgentMeta{}})
 	em.Emit(EventDelta{AgentID: "worker", Text: "partial"})
@@ -149,6 +149,40 @@ func TestEmitter_OrderingAgentStartedPrecedesDeltaAndRunFinishedIsLast(t *testin
 	// this; assert explicitly too for a clearer failure message.
 	if _, ok := <-em.Events(); ok {
 		t.Fatal("Events() produced a value after RunFinished — the channel should already be closed")
+	}
+}
+
+// TestEmitter_ForwarderExitsWhenRunAbandoned is the WP17/A2 QA gate: a
+// forwarder blocked trying to send to an Events() channel nobody will ever
+// read again (the run's consumer abandoned it, e.g. F1's cross-run-bleed
+// scenario) must exit instead of leaking forever. bufSize is 1 so the
+// output channel fills almost immediately, guaranteeing forward() is
+// genuinely blocked on `e.out <-` (not just idle) by the time ctx is
+// cancelled.
+//
+// RED-first proof (quoted verbatim in the WP17 report): run against a
+// forward() that ignores the `done` parameter entirely (the pre-fix shape,
+// simulated by not selecting on it), this test times out waiting for
+// em.forwardDone to close — the forwarder is permanently parked on the
+// blocking send. Selecting on `done` in the blocking fallback (the real
+// fix) makes it pass.
+func TestEmitter_ForwarderExitsWhenRunAbandoned(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	em := newEmitter(ctx, 1)
+
+	em.Emit(EventAgentStarted{AgentID: "worker"})
+	for i := 0; i < 16; i++ {
+		em.Emit(EventToolCall{AgentID: "worker", Tool: "Bash", Detail: fmt.Sprintf("call-%d", i)})
+	}
+	// Deliberately never read em.Events() — the adversarial "abandoned
+	// consumer" condition (the TUI moved on to a new run, or quit).
+
+	cancel() // the run's own ctx is cancelled: nobody will ever read Events() again.
+
+	select {
+	case <-em.forwardDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("forward() did not exit after its run's ctx was cancelled — leaked forever blocked on a send to an abandoned Events() channel (WP17/A2)")
 	}
 }
 

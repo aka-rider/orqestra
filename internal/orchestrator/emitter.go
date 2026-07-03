@@ -1,6 +1,9 @@
 package orchestrator
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 // emitter is the single-producer-side forwarder that turns Observer-driven
 // pipeline calls into one ordered RunEvent stream (WP9/RC2 — "one pipe
@@ -25,49 +28,68 @@ import "sync"
 //     Emit was called (coalesced deltas keep the position of the first of
 //     the run they merged into).
 //   - Events() is closed exactly once, immediately after an EventRunFinished
-//     has been sent — the forwarding goroutine sends RunFinished, closes the
-//     channel, then exits. No separate Close call exists or is needed.
+//     has been sent OR — WP17/A2 — the run's ctx (passed to newEmitter) is
+//     Done while forward() is genuinely BLOCKED trying to send some earlier,
+//     already-queued event to a consumer that stopped draining (the
+//     cross-run-bleed scenario, F1/A3: the TUI moved on to a new run and
+//     will never read this one's Events() again). This is deliberately
+//     narrow: ctx-Done is only ever consulted from inside the SECOND,
+//     buffer-full-only select below — never while the queue is merely idle
+//     (empty, waiting for the next event). A run's own ctx is cancelled by
+//     startNew's runCancel() as literally the first step of every run's
+//     finish() — well BEFORE EventRunFinished is even Emitted — so if an
+//     idle wait were also abandonment-aware, it would race ahead of (and
+//     usually win against) a real, still-attached consumer's terminal
+//     event on every ordinary run; this was caught and reverted during WP17
+//     development (see the emitter_test.go RED/GREEN pair, and the
+//     regression it originally caused in TestEngineStart_* before the
+//     narrower fix). Gating on actual buffer fullness means the escape hatch
+//     only ever fires when there is truly a backlog nobody is draining.
 //   - No time.Sleep anywhere: the forwarder blocks only on a channel send or
-//     a sync.Cond wait; both are released by Emit/queue activity, never by a
-//     fixed delay (root CLAUDE.md §8).
+//     a sync.Cond wait; both are released by Emit/queue activity or ctx
+//     cancellation, never by a fixed delay (root CLAUDE.md §8).
 //
 // No-consumer policy (WP9 step 4): if nobody ever reads Events(), the
 // forwarding goroutine fills the buffered output channel and then blocks
 // trying to send the next event — but that block is confined to the
 // forwarder's own goroutine, never to the caller of Emit (the pipeline). A
 // run therefore always completes without blocking even when Events is never
-// drained; the cost is a leaked, permanently-blocked forwarder goroutine
-// (and its already-queued backlog) for that one run — an accepted tradeoff
-// until WP10 wires a real consumer. This is the "accumulate" policy named in
-// plan-simplify-architecture.md WP9 step 4, chosen over "drop when no
-// consumer was ever attached" because there is no reliable, race-free way
-// for the emitter to know in advance that a consumer will never attach
-// (RunHandle.Events is exposed unconditionally, per step 4's "may be nil
-// when unused" being the ALTERNATIVE this design does not need: it always
-// hands back a real, usable channel).
+// drained. WP17/A2 refines the *forwarder's own* fate once the run's ctx is
+// Done: instead of blocking forever on that stalled send, it gives up and
+// closes Events() — see forward() below.
 type emitter struct {
 	mu       sync.Mutex
 	cond     *sync.Cond
 	queue    []RunEvent
 	terminal bool // true once EventRunFinished has been queued; Emit becomes a no-op after
 	out      chan RunEvent
+
+	// forwardDone is closed once forward() has returned, on ANY exit path
+	// (EventRunFinished delivered, or a stalled send abandoned via ctx).
+	// Unexported: white-box test instrumentation only, proving the "forward
+	// never leaks past an abandoned run" invariant (WP17/A2 QA gate)
+	// without an exported API.
+	forwardDone chan struct{}
 }
 
-// newEmitter creates an emitter and starts its forwarding goroutine. bufSize
-// sizes only the OUTPUT channel (a convenience for a fast, attentive
-// consumer); it never bounds the internal queue and never applies
-// backpressure to Emit.
-func newEmitter(bufSize int) *emitter {
+// newEmitter creates an emitter and starts its forwarding goroutine, bound
+// to ctx's lifetime (WP17/A2 — pass the RUN's own ctx, e.g.
+// engine_pipeline.go's runCtx). bufSize sizes only the OUTPUT channel (a
+// convenience for a fast, attentive consumer); it never bounds the internal
+// queue and never applies backpressure to Emit.
+func newEmitter(ctx context.Context, bufSize int) *emitter {
 	e := &emitter{
-		out: make(chan RunEvent, bufSize),
+		out:         make(chan RunEvent, bufSize),
+		forwardDone: make(chan struct{}),
 	}
 	e.cond = sync.NewCond(&e.mu)
-	go e.forward()
+	go e.forward(ctx.Done())
 	return e
 }
 
-// Events returns the single ordered consumer channel. Closed exactly once,
-// always after an EventRunFinished has been sent.
+// Events returns the single ordered consumer channel. Closed exactly once —
+// see the type doc for the two terminal conditions (RunFinished delivered,
+// or a stalled send abandoned via ctx).
 func (e *emitter) Events() <-chan RunEvent { return e.out }
 
 // Emit enqueues ev for delivery and returns immediately — it never blocks on
@@ -100,10 +122,20 @@ func (e *emitter) Emit(ev RunEvent) {
 }
 
 // forward drains the internal queue in FIFO order onto Events(), blocking
-// only on the sync.Cond (when the queue is empty) or the output channel send
-// (when the consumer lags) — never on a timer. It exits, closing Events(),
-// immediately after delivering EventRunFinished.
-func (e *emitter) forward() {
+// only on the sync.Cond (when the queue is empty — this wait is NEVER
+// abandonment-aware, see the type doc for why) or the output channel send
+// (when the consumer lags). A send always tries a plain non-blocking path
+// first: when the output buffer has room — the overwhelming common case for
+// a live, attentive consumer — that is the ONLY case considered, so no race
+// with ctx is even possible (a select with one communicating case plus
+// `default` is deterministic). Only when the buffer is genuinely full does
+// forward fall back to a real blocking select that also watches ctx.Done(),
+// so a forwarder stuck behind a consumer that will never come back (WP17/A2)
+// can still exit rather than leak forever. It exits, closing Events(),
+// immediately after delivering EventRunFinished, or the moment that
+// abandonment escape fires.
+func (e *emitter) forward(done <-chan struct{}) {
+	defer close(e.forwardDone)
 	for {
 		e.mu.Lock()
 		for len(e.queue) == 0 {
@@ -117,7 +149,16 @@ func (e *emitter) forward() {
 		}
 		e.mu.Unlock()
 
-		e.out <- ev // may block here on a slow/absent consumer — confined to this goroutine, never the producer
+		select {
+		case e.out <- ev:
+		default:
+			select {
+			case e.out <- ev:
+			case <-done:
+				close(e.out)
+				return
+			}
+		}
 
 		if _, ok := ev.(EventRunFinished); ok {
 			close(e.out)

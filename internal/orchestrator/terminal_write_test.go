@@ -21,7 +21,7 @@ import (
 // end-to-end sequence rather than asserting the invariant only by reading
 // the emitter's doc comment.
 func TestSingleTerminalWrite_NoExecute(t *testing.T) {
-	em := newEmitter(64)
+	em := newEmitter(context.Background(), 64)
 	obs := newEventObserver(em)
 	sc := noopStepContext(obs, nil)
 

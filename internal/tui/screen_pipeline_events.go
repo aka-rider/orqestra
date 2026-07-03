@@ -197,11 +197,16 @@ func (s *PipelineScreen) onGateClosed(gid orchestrator.GateID) {
 
 // onQuestionAsked surfaces a model question on the chat. EventQuestionAsked
 // is edge-triggered (one event per real question), so the J25 re-open class
-// dies by construction; QuestionOpen() is still checked defensively.
+// dies by construction; QuestionOpen() is still checked defensively. A
+// second question arriving while one is already open is a genuinely live,
+// truthful event — WP17/F3: it is queued (FIFO, surfaced once the current
+// question resolves — see resolveQuestion) rather than silently dropped.
 func (s *PipelineScreen) onQuestionAsked(tc mcp.ToolCall, width int) {
-	if !s.chat.QuestionOpen() {
-		s.chat.OpenQuestion(tc, width)
+	if s.chat.QuestionOpen() {
+		s.pendingQuestions = append(s.pendingQuestions, tc)
+		return
 	}
+	s.chat.OpenQuestion(tc, width)
 }
 
 // onRunFinished renders the completion screen from the terminal Result.

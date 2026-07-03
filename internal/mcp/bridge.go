@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // bridgeEnvelope is the framed wire format for bridge messages.
@@ -32,6 +33,14 @@ type ReportSubmission struct {
 	Summary string `json:"summary,omitempty"`
 }
 
+// connFrameTimeout bounds a single frame read/write on an accepted
+// connection (WP17/A7 — "readFrame has no deadline, a hung peer leaks past
+// Run's return"). Generous enough for a SubmitReport payload approaching
+// maxFrameBytes (frame.go) over a local Unix socket, which transfers in low
+// milliseconds even under load — 30s means only a genuinely stuck/dead peer
+// ever trips it.
+const connFrameTimeout = 30 * time.Second
+
 // QuestionBridge listens on a Unix socket for questions from MCP bridge
 // subprocesses and routes them to the orchestrator via channels.
 //
@@ -50,11 +59,29 @@ type ReportSubmission struct {
 // invocations of the same agentID (sequential retries, or a role with no
 // session ID at all) can never collide, and there is no re-arming step: a new
 // invocation's key has never been used before.
+//
+// Question correlation (WP17/F2): each in-flight question gets its own
+// dedicated answer channel, keyed by ToolCall.ID, in waiters — see the field
+// doc for why this replaces a single shared answer slot.
 type QuestionBridge struct {
-	socketPath    string
-	questions     chan ToolCall
-	pendingAnswer chan Answer
-	questionSeq   atomic.Uint64 // generates unique ToolCall.ID values (WP5/J17,J25)
+	socketPath  string
+	questions   chan ToolCall
+	questionSeq atomic.Uint64 // generates unique ToolCall.ID values (WP5/J17,J25)
+
+	// waitersMu/waiters (WP17/F2) — one dedicated, cap-1 Answer channel per
+	// in-flight question, keyed by ToolCall.ID. This replaces the pre-WP17
+	// shared cap-1 pendingAnswer channel: with a single shared slot, a
+	// zombie handleQuestion goroutine (its agent/connection already dead,
+	// still blocked waiting) and the CURRENT question's real handler were
+	// both reading from the same channel — an answer meant for the current
+	// question could be consumed by the zombie on an ID mismatch and
+	// silently dropped there (never re-queued), so the real waiter never
+	// saw it (F2's "theft"). With per-question channels, SendAnswer routes
+	// directly to the matching waiter by ID; there is no shared slot left
+	// to steal from, and a stale/unknown ID is simply dropped at the
+	// router (logged), never handed to some unrelated question.
+	waitersMu sync.Mutex
+	waiters   map[string]chan Answer
 
 	reportsMu     sync.Mutex
 	reports       map[string]ReportSubmission // key: invocation nonce (fallback agentID) → report
@@ -75,6 +102,21 @@ type QuestionBridge struct {
 	// the bind (an agent dialing immediately after starting the bridge)
 	// wait on Ready().
 	ready chan struct{}
+
+	// connWG tracks every per-connection goroutine spawned by acceptLoop
+	// (WP17/A7): Run() joins it before returning, so no connection handler
+	// can ever outlive the bridge itself — closing the "bridge per-connection
+	// goroutines unjoined" gap (readFrame's new deadline, above, closes the
+	// complementary "hung peer" half of the same finding).
+	connWG sync.WaitGroup
+
+	// frameTimeout bounds a single connection's frame read/write (defaults
+	// to connFrameTimeout). Unexported: white-box test instrumentation
+	// only, letting bridge_wp17_test.go exercise the hung-peer deadline
+	// path deterministically without waiting out the real 30s production
+	// bound. Set (if at all) BEFORE Run() is called — every reader is
+	// spawned by Run/acceptLoop, so there is no concurrent-mutation window.
+	frameTimeout time.Duration
 }
 
 // NewQuestionBridge creates a bridge that will listen on the given socket path.
@@ -82,11 +124,12 @@ func NewQuestionBridge(socketPath string) *QuestionBridge {
 	return &QuestionBridge{
 		socketPath:    socketPath,
 		questions:     make(chan ToolCall, 1),
-		pendingAnswer: make(chan Answer, 1),
+		waiters:       make(map[string]chan Answer),
 		reports:       make(map[string]ReportSubmission),
 		reportWaiters: make(map[string]chan struct{}),
 		agentNonce:    make(map[string]string),
 		ready:         make(chan struct{}),
+		frameTimeout:  connFrameTimeout,
 	}
 }
 
@@ -94,7 +137,9 @@ func NewQuestionBridge(socketPath string) *QuestionBridge {
 // It cleans up the socket on return. The listener is bound SYNCHRONOUSLY,
 // before Ready() closes and before the accept loop starts (WP12/J36) — a
 // caller that waits on Ready() before dialing or launching an agent can never
-// see ECONNREFUSED from a bind that hasn't happened yet.
+// see ECONNREFUSED from a bind that hasn't happened yet. Run does not return
+// until every per-connection goroutine it ever spawned has also returned
+// (WP17/A7).
 func (b *QuestionBridge) Run(ctx context.Context) error {
 	_ = os.Remove(b.socketPath) // fire-and-forget: stale socket from a prior run
 
@@ -112,6 +157,7 @@ func (b *QuestionBridge) Run(ctx context.Context) error {
 	defer stopAfter()
 
 	b.acceptLoop(ctx, ln)
+	b.connWG.Wait() // WP17/A7: join every per-connection goroutine before Run returns.
 	return nil
 }
 
@@ -166,15 +212,24 @@ func (b *QuestionBridge) acceptLoop(ctx context.Context, ln net.Listener) {
 		// exchange on one connection must never delay a SubmitReport (or any
 		// other message) arriving on a different connection. The accept loop
 		// itself stays single-threaded and non-blocking — only handling the
-		// connection's request/response is concurrent.
-		go b.handleConnection(ctx, conn)
+		// connection's request/response is concurrent. Tracked in connWG
+		// (WP17/A7) so Run() can join every one of these before it returns.
+		b.connWG.Add(1)
+		go func() {
+			defer b.connWG.Done()
+			b.handleConnection(ctx, conn)
+		}()
 	}
 }
 
 func (b *QuestionBridge) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
-	data, err := readFrame(conn)
+	// WP17/A7: bounded — a peer that connects but never completes sending a
+	// frame (a hung/dead process, or a misbehaving client) is torn down by
+	// this deadline instead of leaking the connection (and this goroutine)
+	// past Run's return.
+	data, err := readFrameDeadline(conn, b.frameTimeout)
 	if err != nil {
 		slog.Debug("question bridge read error", "err", err)
 		return
@@ -196,151 +251,6 @@ func (b *QuestionBridge) handleConnection(ctx context.Context, conn net.Conn) {
 	}
 }
 
-func (b *QuestionBridge) handleQuestion(ctx context.Context, conn net.Conn, env bridgeEnvelope) {
-	var question ToolCall
-	if err := json.Unmarshal(env.Payload, &question); err != nil {
-		slog.Debug("question bridge question unmarshal error", "err", err)
-		return
-	}
-	// Generate a unique ID BEFORE forwarding (WP5/J17,J25): this is the only
-	// question this call will ever accept an answer for.
-	question.ID = fmt.Sprintf("q-%d", b.questionSeq.Add(1))
-
-	select {
-	case b.questions <- question:
-	case <-ctx.Done():
-		return
-	}
-
-	// Wait for an answer whose ID matches THIS question. SendAnswer is a
-	// non-blocking send into a cap-1 buffer that nothing drains when no
-	// question is pending, so a stale/double-submitted answer (J17) can sit
-	// there from before this question was even asked — accepting it on ID
-	// mismatch would silently misanswer this question. Drop it and keep
-	// waiting for the real one.
-	var answer Answer
-	for {
-		select {
-		case answer = <-b.pendingAnswer:
-		case <-ctx.Done():
-			answer = Answer{Skipped: true}
-		}
-		if ctx.Err() != nil || answer.ID == question.ID {
-			break
-		}
-		slog.Debug("question bridge dropped stale/mismatched answer",
-			"want_id", question.ID, "got_id", answer.ID)
-	}
-
-	answerData, err := json.Marshal(answer)
-	if err != nil {
-		slog.Debug("question bridge marshal answer error", "err", err)
-		return
-	}
-	if err := writeFrame(conn, answerData); err != nil {
-		slog.Debug("question bridge write answer error", "err", err)
-	}
-}
-
-func (b *QuestionBridge) handleReport(conn net.Conn, env bridgeEnvelope) {
-	var sub ReportSubmission
-	if err := json.Unmarshal(env.Payload, &sub); err != nil {
-		slog.Debug("question bridge report unmarshal error", "err", err)
-		return
-	}
-
-	key := env.InvocationID
-	if key == "" {
-		// Fail-safe: no --invocation-id was threaded through (a degraded or
-		// pre-WP12 caller) — fall back to keying by agentID, and say so.
-		key = env.AgentID
-		slog.Debug("question bridge report envelope missing invocation_id; falling back to agent_id key", "agent_id", env.AgentID)
-	}
-
-	b.reportsMu.Lock()
-	b.reports[key] = sub
-	if ch, ok := b.reportWaiters[key]; ok {
-		close(ch)
-		delete(b.reportWaiters, key)
-	}
-	b.reportsMu.Unlock()
-
-	ack, _ := json.Marshal(map[string]bool{"ok": true}) // fire-and-forget: map[string]bool marshal cannot fail
-	if err := writeFrame(conn, ack); err != nil {
-		slog.Debug("question bridge write report ack error", "err", err)
-	}
-}
-
-// ReportSignal arms the report-correlation slot for one agent invocation,
-// identified by nonce (the value AgentSupervisor.Run injected into the
-// subprocess's --invocation-id arg), and returns a channel that closes when a
-// report arrives for it. Call this BEFORE starting the subprocess — there is
-// no re-arming step (WP12/J34-reports): nonce is unique per invocation by
-// construction, so a fresh invocation's key has never been used before and
-// can never collide with a still-pending earlier one, even for the same
-// agentID.
-//
-// It also records agentID → nonce in agentNonce so TakeReport(agentID) can
-// resolve the CURRENT invocation's key without the caller ever threading a
-// nonce through the ReportStore interface (see the agentNonce field comment).
-//
-// nonce == "" (no --invocation-id, a degraded/pre-WP12 caller) falls back to
-// keying directly by agentID — the same fallback handleReport applies.
-// If a report has already arrived under this key, the returned channel is
-// pre-closed. Callers must not close it.
-func (b *QuestionBridge) ReportSignal(agentID, nonce string) <-chan struct{} {
-	key := nonce
-	if key == "" {
-		key = agentID
-	}
-
-	b.reportsMu.Lock()
-	defer b.reportsMu.Unlock()
-
-	b.agentNonce[agentID] = key
-
-	if _, ok := b.reports[key]; ok {
-		ch := make(chan struct{})
-		close(ch)
-		return ch
-	}
-	if ch, ok := b.reportWaiters[key]; ok {
-		return ch
-	}
-	ch := make(chan struct{})
-	b.reportWaiters[key] = ch
-	return ch
-}
-
-// TakeReport returns and removes the report submitted by agentID, if any.
-// The correlation key is resolved internally via agentNonce (the nonce most
-// recently armed for agentID by ReportSignal) — identical to handleReport's
-// storage derivation — so report harvesting never depends on a separately
-// captured session ID or the caller knowing the invocation's nonce. See the
-// agentNonce field comment for why this indirection exists: it is what keeps
-// every pre-WP12 ReportStore.TakeReport(agentID) call site unchanged.
-//
-// If ReportSignal was never called for agentID (e.g. a bridge-less test, or a
-// role that never arms report correlation), TakeReport falls back to keying
-// directly by agentID — matching handleReport's own fallback for a
-// missing-nonce envelope.
-func (b *QuestionBridge) TakeReport(agentID string) (string, bool) {
-	b.reportsMu.Lock()
-	defer b.reportsMu.Unlock()
-
-	key, ok := b.agentNonce[agentID]
-	if !ok {
-		key = agentID
-	}
-
-	sub, ok := b.reports[key]
-	if !ok {
-		return "", false
-	}
-	delete(b.reports, key)
-	return sub.Report, true
-}
-
 // SocketPath returns the Unix socket path for MCP config injection.
 func (b *QuestionBridge) SocketPath() string {
 	return b.socketPath
@@ -349,14 +259,4 @@ func (b *QuestionBridge) SocketPath() string {
 // Questions returns the channel that receives questions from MCP bridge subprocesses.
 func (b *QuestionBridge) Questions() <-chan ToolCall {
 	return b.questions
-}
-
-// SendAnswer delivers a user's answer back to the waiting MCP bridge subprocess.
-// Non-blocking: drops the answer if no question is pending (bridge not running
-// or connection already dropped).
-func (b *QuestionBridge) SendAnswer(answer Answer) {
-	select {
-	case b.pendingAnswer <- answer:
-	default:
-	}
 }

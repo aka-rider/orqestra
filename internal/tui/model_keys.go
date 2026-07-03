@@ -50,9 +50,15 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		}
-		// Pipeline is idle or completed → quit immediately (nothing to cancel)
-		pipelineActive := m.state == StatePipeline &&
-			m.pipelineScreen.active &&
+		// Pipeline is idle or completed → quit immediately (nothing to cancel).
+		// WP17 (pre-existing bug, model_keys.go:53-58): deliberately NOT
+		// gated on m.state == StatePipeline — a run started on the pipeline
+		// screen stays active in the background after the user navigates to
+		// the runs list (or anywhere else); quitting from THERE with ^C must
+		// still see it as active and go through the cancel-then-quit gate
+		// below, not skip straight to tea.Quit and leave the run's process
+		// group orphaned.
+		pipelineActive := m.pipelineScreen.active &&
 			m.pipelineScreen.content != ContentCompletion
 		if !pipelineActive {
 			return m, tea.Quit

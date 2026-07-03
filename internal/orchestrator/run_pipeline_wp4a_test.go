@@ -15,7 +15,7 @@ import (
 // blocking, so only a FRESH decision, submitted while THIS gate is open,
 // satisfies it.
 func TestGateFunc_StaleDecisionNotConsumedAtNextGate(t *testing.T) {
-	em := newEmitter(64)
+	em := newEmitter(context.Background(), 64)
 	decisions := make(chan GateDecisionIntent, 1)
 	gate := newGateFunc(em, decisions)
 

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"errors"
+	"sync/atomic"
 
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
@@ -83,7 +84,21 @@ type Engine struct {
 	Specs          ProcessSpecs
 	RunDirFactory  RunDirFactory
 	QuestionBridge *mcp.QuestionBridge
+
+	// runSeq generates RunID values (WP17/F1,A3): a process-wide monotonic
+	// counter, one increment per Engine.Start call. It is deliberately NOT
+	// the session-dir base name (rundir.Dir.Path) — RunDirFactory may be nil
+	// (session.Path == ""), and a run's identity on the event/intent chain
+	// must exist independent of whether artifact persistence is configured.
+	runSeq atomic.Uint64
 }
+
+// RunID identifies one Engine.Start call for the lifetime of the process
+// (WP17/F1,A3 — "run identity on the event/intent chain"). The zero value
+// (0) is never assigned to a real run (Engine.runSeq starts counting at 1
+// via atomic.Add), so callers may use RunID(0) as an explicit "no active
+// run" sentinel — see tui.Model.activeRunID.
+type RunID uint64
 
 // RunHandle is the whole TUI (or headless driver) ⇄ engine surface for one
 // run (WP10/RC1 — "one pipe out, one pipe in"; replaces the pre-WP10
@@ -93,6 +108,12 @@ type Engine struct {
 // dropped rather than misapplied (WP4a/WP5 invariants, preserved by
 // construction — see gate.go and engine_pipeline.go's intents consumer).
 type RunHandle struct {
+	// RunID identifies this run (WP17/F1,A3). A caller juggling multiple
+	// runs over time (the TUI: ^N cancel + restart) stamps this onto every
+	// message derived from Events so a stale run's late delivery can be
+	// told apart from the currently-active run's — see tui's runEventMsg.
+	RunID RunID
+
 	// Events is the WP9/WP10 ordered event bus for this run (RunEvent — see
 	// event.go/emitter.go). Always a real, non-nil channel (startNew always
 	// attaches an emitter); a run completes without blocking even when
