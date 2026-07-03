@@ -288,6 +288,50 @@ func setupGhostPlan(t *testing.T, sessionID string, extraLines ...string) (ghost
 // "NEVER scrape a plan from stdout." Unlike the deleted ReadPlan (which had a
 // withFallback tier-4 for this), ReadPlanFile has exactly one behavior here:
 // fail closed when the plan file was never written.
+func TestResolvePlanFilePath_NoSessionID(t *testing.T) {
+	_, err := ResolvePlanFilePath("", "", "")
+	if err == nil {
+		t.Fatal("expected error for missing session ID")
+	}
+}
+
+func TestResolvePlanFilePath_ReturnsDirectPathWithoutTouchingDisk(t *testing.T) {
+	// ResolvePlanFilePath never reads or security-checks the path — it just
+	// echoes it back when one was supplied directly, even for a path that
+	// does not exist on disk (that is the caller's problem, e.g. os.Stat).
+	got, err := ResolvePlanFilePath("some-session", "/does/not/exist/plan.md", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "/does/not/exist/plan.md" {
+		t.Errorf("got %q, want the path echoed back unchanged", got)
+	}
+}
+
+func TestResolvePlanFilePath_FallsBackToJSONLAttachment(t *testing.T) {
+	ghostPlan, cwd := setupGhostPlan(t, "test-resolve-fallback")
+	got, err := ResolvePlanFilePath("test-resolve-fallback", "", cwd)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != ghostPlan {
+		t.Errorf("got %q, want %q (from the JSONL plan_mode attachment)", got, ghostPlan)
+	}
+}
+
+func TestResolvePlanFilePath_NoJSONLIsAnError(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ResolvePlanFilePath("nonexistent-session", "", cwd)
+	if err == nil {
+		t.Fatal("expected error when no JSONL session log exists")
+	}
+}
+
 func TestReadPlanFile_NeverUsesJSONLTextFallback(t *testing.T) {
 	wantText := "## Plan\nContent that should not be recovered."
 	textLine := fmt.Sprintf(`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":%q}]}}`, wantText)

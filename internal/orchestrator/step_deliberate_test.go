@@ -77,7 +77,7 @@ func TestDeliberateStep_RunRound_SilenceEscalationFallsBackNonFatal(t *testing.T
 		Log:       slog.Default(),
 	}
 
-	revised, sessionID, err := step.runRound(context.Background(), prevPlan, "orig-sid", 0, "do the thing", sc)
+	revised, sessionID, _, err := step.runRound(context.Background(), prevPlan, "orig-sid", "", 0, "do the thing", sc)
 	if err != nil {
 		t.Fatalf("expected non-fatal fallback (nil error), got %v", err)
 	}
@@ -130,7 +130,7 @@ func TestDeliberateStep_RunRound_UserCancelIsFatalWithAttributedCause(t *testing
 	ctx, cancelCause := context.WithCancelCause(context.Background())
 	cancelCause(ErrUserCancelled)
 
-	_, _, err := step.runRound(ctx, prevPlan, "orig-sid", 0, "do the thing", sc)
+	_, _, _, err := step.runRound(ctx, prevPlan, "orig-sid", "", 0, "do the thing", sc)
 	if err == nil {
 		t.Fatal("expected an error when the outer context is cancelled")
 	}

@@ -57,6 +57,44 @@ func ReadPlanFile(sessionID, planFilePath, repoCWD string) (string, error) {
 	return strings.TrimSpace(c), nil
 }
 
+// ResolvePlanFilePath returns the on-disk path to a session's plan file,
+// using the SAME resolution order as ReadPlanFile (the stream-reported path,
+// then the JSONL plan_mode attachment) — but it only resolves the PATH; it
+// never reads or security-validates the file's content. Used by report-
+// freshness snapshots (WP11/J35) that need to stat a plan file's mtime/size
+// before AND after an invocation without trusting anything read from it —
+// the actual content read for a harvested report still goes exclusively
+// through ReadPlanFile → readSecurePlanFile's full symlink-containment
+// check.
+func ResolvePlanFilePath(sessionID, planFilePath, repoCWD string) (string, error) {
+	if sessionID == "" {
+		return "", fmt.Errorf("no session ID")
+	}
+	if planFilePath != "" {
+		return planFilePath, nil
+	}
+
+	cwd := repoCWD
+	if cwd == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("get cwd: %w", err)
+		}
+	}
+
+	jsonlPath, err := harness.ResolveSessionLogPath(cwd, sessionID)
+	if err != nil {
+		return "", fmt.Errorf("resolve session log for %s: %w", sessionID, err)
+	}
+
+	jsonlPlanPath, err := harness.ExtractPlanFilePath(jsonlPath)
+	if err != nil {
+		return "", fmt.Errorf("no plan file for session %s: JSONL scan failed (%w)", sessionID, err)
+	}
+	return jsonlPlanPath, nil
+}
+
 // readSecurePlanFile reads a plan file after verifying it resides under
 // ~/.claude/plans/. The containment check is symlink-resolved, not merely
 // lexical: filepath.Abs + strings.HasPrefix alone would accept a symlink

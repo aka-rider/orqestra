@@ -35,6 +35,15 @@ type StepMeta struct {
 	Error                string    `json:"error,omitempty"`
 	InputTokens          int64     `json:"input_tokens"`
 	OutputTokens         int64     `json:"output_tokens"`
+
+	// Report harvest provenance (WP11/RC3): populated by report-producing
+	// steps (architect, critic, worker, gate-loop revisions) via
+	// orchestrator.ReportHarvester so a scavenged report (tier 2/3) is never
+	// silently indistinguishable from a SubmitReport delivery (tier 1).
+	ReportTier     int      `json:"report_tier,omitempty"`
+	ReportSource   string   `json:"report_source,omitempty"`   // "submit_report" | "plan_file" | "final_message" | "raw_output"
+	ReportDetail   string   `json:"report_detail,omitempty"`   // path/session/agent detail, or "freshness-unverified" (J35)
+	ReportRejected []string `json:"report_rejected,omitempty"` // tier Source names that produced text but failed the sanity check
 }
 
 // SaveStepMeta persists m as "<role>_meta.json" under the run directory.

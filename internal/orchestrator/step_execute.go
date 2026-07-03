@@ -37,7 +37,7 @@ func (s *ExecuteStep) Run(ctx context.Context, in ExecuteInput, sc StepContext) 
 	if branchErr != nil {
 		err := fmt.Errorf("determine current branch: %w", branchErr)
 		sc.Obs.AgentFailed(s.ID(), err)
-		s.writeMeta(sc, "", start, "failed", err, harness.TokenUsage{})
+		s.writeMeta(sc, "", start, "failed", err, harness.TokenUsage{}, ReportProvenance{})
 		return ExecuteOutput{}, fmt.Errorf("worker: %w", err)
 	}
 
@@ -56,7 +56,7 @@ func (s *ExecuteStep) Run(ctx context.Context, in ExecuteInput, sc StepContext) 
 			// Fail closed — surface the failure, never fall back to the direct repo.
 			isoErr := fmt.Errorf("worktree isolation requested but creation failed: %w", wtErr)
 			sc.Obs.AgentFailed(s.ID(), isoErr)
-			s.writeMeta(sc, "", start, "failed", isoErr, harness.TokenUsage{})
+			s.writeMeta(sc, "", start, "failed", isoErr, harness.TokenUsage{}, ReportProvenance{})
 			return ExecuteOutput{}, fmt.Errorf("worker: %w", isoErr)
 		}
 		if s.Sup != nil {
@@ -79,7 +79,7 @@ func (s *ExecuteStep) Run(ctx context.Context, in ExecuteInput, sc StepContext) 
 			s.Sup.UntrackWorktree(wt.Path)
 		}
 		sc.Obs.AgentFailed(s.ID(), err)
-		s.writeMeta(sc, res.SessionID, start, "failed", err, res.Usage)
+		s.writeMeta(sc, res.SessionID, start, "failed", err, res.Usage, ReportProvenance{})
 		return ExecuteOutput{}, fmt.Errorf("worker: %w", err)
 	}
 
@@ -87,15 +87,12 @@ func (s *ExecuteStep) Run(ctx context.Context, in ExecuteInput, sc StepContext) 
 	// The worker runs in input-plane mode (LoopGuard forces it), so the subprocess
 	// stays alive after producing its text output; ExpectsReport=true lets the
 	// supervisor stop cleanly on SubmitReport and propagates the report via TakeReport.
-	workOutput := res.Output
-	if sc.Reports != nil {
-		if rep, ok := sc.Reports.TakeReport(string(s.ID())); ok && rep != "" {
-			workOutput = rep
-		}
-	}
+	harvester := NewReportHarvester(sc, RoleExecutor)
+	workOutput, prov, _ := harvester.Harvest(ctx, spec, res, nil) // RoleExecutor never errors (see harvestExecutor)
+	sc.Obs.ReportHarvested(s.ID(), prov)
 
 	sc.Artifacts.WriteBestEffort("worker_output.txt", []byte(workOutput))
-	s.writeMeta(sc, res.SessionID, start, "done", nil, res.Usage)
+	s.writeMeta(sc, res.SessionID, start, "done", nil, res.Usage, prov)
 	sc.Obs.AgentDone(s.ID(), res.Usage)
 
 	return ExecuteOutput{
@@ -107,7 +104,7 @@ func (s *ExecuteStep) Run(ctx context.Context, in ExecuteInput, sc StepContext) 
 	}, nil
 }
 
-func (s *ExecuteStep) writeMeta(sc StepContext, sid string, start time.Time, status string, err error, usage harness.TokenUsage) {
+func (s *ExecuteStep) writeMeta(sc StepContext, sid string, start time.Time, status string, err error, usage harness.TokenUsage, prov ReportProvenance) {
 	meta := StepMeta{
 		AgentID:              string(s.ID()),
 		ModelRef:             s.Meta.ModelRef,
@@ -121,6 +118,10 @@ func (s *ExecuteStep) writeMeta(sc StepContext, sid string, start time.Time, sta
 		Status:               status,
 		InputTokens:          usage.Input,
 		OutputTokens:         usage.Output,
+		ReportTier:           prov.Tier,
+		ReportSource:         prov.Source,
+		ReportDetail:         prov.Detail,
+		ReportRejected:       prov.Rejected,
 	}
 	if err != nil {
 		meta.Error = err.Error()

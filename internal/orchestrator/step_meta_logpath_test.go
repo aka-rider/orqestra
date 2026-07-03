@@ -58,7 +58,7 @@ func TestDeliberateStep_WriteArchMeta_PopulatesClaudeSessionLogPath(t *testing.T
 		RepoPath:  repoPath,
 	}
 	step := &DeliberateStep{ArchSpec: harness.ProcessSpec{AgentID: "architect"}}
-	step.writeArchMeta(sc, sessionID, time.Now(), "done", nil, harness.TokenUsage{Input: 1, Output: 2})
+	step.writeArchMeta(sc, sessionID, time.Now(), "done", nil, harness.TokenUsage{Input: 1, Output: 2}, ReportProvenance{})
 
 	data, ok := artifacts.writes["architect_meta.json"]
 	if !ok {
@@ -88,7 +88,7 @@ func TestExecuteStep_WriteMeta_PopulatesClaudeSessionLogPath(t *testing.T) {
 		RepoPath:  repoPath,
 	}
 	step := &ExecuteStep{RepoPath: repoPath}
-	step.writeMeta(sc, sessionID, time.Now(), "done", nil, harness.TokenUsage{Input: 1, Output: 2})
+	step.writeMeta(sc, sessionID, time.Now(), "done", nil, harness.TokenUsage{Input: 1, Output: 2}, ReportProvenance{})
 
 	data, ok := artifacts.writes["worker_meta.json"]
 	if !ok {
@@ -170,7 +170,7 @@ func TestLoadRunDetail_SurfacesClaudeSessionLogPath(t *testing.T) {
 		RepoPath:  repoPath,
 	}
 	step := &ExecuteStep{RepoPath: repoPath}
-	step.writeMeta(sc, sessionID, time.Now(), "done", nil, harness.TokenUsage{Input: 3, Output: 4})
+	step.writeMeta(sc, sessionID, time.Now(), "done", nil, harness.TokenUsage{Input: 3, Output: 4}, ReportProvenance{})
 
 	detail, err := LoadRunDetail(runDir.Path)
 	if err != nil {

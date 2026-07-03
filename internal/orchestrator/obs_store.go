@@ -318,3 +318,18 @@ func (s *ObsStore) Finished(res Result, err error) {
 
 // Ring returns the underlying StreamRing for TUI snapshot reads.
 func (s *ObsStore) Ring() *StreamRing { return s.ring }
+
+// ReportHarvested is a WP9-bus-only signal (see AttachEmitter): unlike every
+// other Observer method, it carries no legacy-snapshot state to mutate — the
+// report text itself is already persisted as an artifact by the calling
+// step — so this only forwards to the emitter when one is attached. A
+// report-producing step still behaves identically when no emitter is
+// attached (e.g. every pre-WP9 test), matching AttachEmitter's contract.
+func (s *ObsStore) ReportHarvested(id AgentID, prov ReportProvenance) {
+	s.mu.Lock()
+	em := s.em
+	s.mu.Unlock()
+	if em != nil {
+		em.Emit(EventReportHarvested{AgentID: id, Provenance: prov})
+	}
+}

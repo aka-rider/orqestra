@@ -22,6 +22,13 @@ type PlanOutput struct {
 	Markdown  string
 	Warnings  []string
 	SessionID string
+	// PlanFilePath is the last known on-disk plan file path for SessionID —
+	// execution metadata (§1.8, same justification as SessionID) carried
+	// forward so a later Revise call can snapshot the plan file's
+	// PRE-invocation state (WP11/J35: tier 2 of the report harvester must
+	// fire only when the plan file changed during the invocation it is
+	// being read for, not whenever it merely exists).
+	PlanFilePath string
 }
 
 // DeliberateInput is the input to the deliberation step.

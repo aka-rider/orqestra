@@ -13,4 +13,7 @@ type Observer interface {
 	Stream(AgentID, harness.Event)
 	GateOpened(GateRequest)
 	Finished(Result, error)
+	// ReportHarvested records which tier supplied a report-producing step's
+	// deliverable (WP11/RC3) — a scavenge is fine, a SILENT scavenge is not.
+	ReportHarvested(AgentID, ReportProvenance)
 }

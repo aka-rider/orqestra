@@ -57,9 +57,9 @@ func TestPreferReport_NoSessionID(t *testing.T) {
 	}
 }
 
-// TestExtractReport_SubmitReportTierOneShot verifies tier-1 (SubmitReport) is used
-// when a valid report is in the store, without calling the executor at all.
-func TestExtractReport_SubmitReportTierOneShot(t *testing.T) {
+// TestReportHarvester_SubmitReportTierOneShot verifies tier-1 (SubmitReport) is
+// used when a valid report is in the store, without calling the executor at all.
+func TestReportHarvester_SubmitReportTierOneShot(t *testing.T) {
 	const agentID = "architect"
 	const validPlan = "# Plan\n\n## Goal\nAdd a flag.\n\n## Work Packages\n### 1. Edit main.go\n"
 
@@ -75,18 +75,22 @@ func TestExtractReport_SubmitReportTierOneShot(t *testing.T) {
 	spec := harness.ProcessSpec{AgentID: agentID}
 	res := harness.RunResult{SessionID: "fake-session-abc"}
 
-	out, err := extractReport(context.Background(), spec, res, nil, sc)
+	harvester := NewReportHarvester(sc, RoleReporter)
+	out, prov, err := harvester.Harvest(context.Background(), spec, res, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if out == "" {
 		t.Error("expected non-empty plan, got empty")
 	}
+	if prov.Tier != 1 || prov.Source != SourceSubmitReport {
+		t.Errorf("provenance = %+v, want Tier 1 / Source %q", prov, SourceSubmitReport)
+	}
 }
 
-// TestExtractReport_FailClosed verifies that an empty store + no session output
+// TestReportHarvester_FailClosed verifies that an empty store + no session output
 // returns a descriptive error (not a bare context.Canceled or empty string).
-func TestExtractReport_FailClosed(t *testing.T) {
+func TestReportHarvester_FailClosed(t *testing.T) {
 	sc := StepContext{
 		Log:      slog.Default(),
 		RepoPath: t.TempDir(),
@@ -95,7 +99,8 @@ func TestExtractReport_FailClosed(t *testing.T) {
 	spec := harness.ProcessSpec{AgentID: "researcher"}
 	res := harness.RunResult{} // no output, no session
 
-	_, err := extractReport(context.Background(), spec, res, nil, sc)
+	harvester := NewReportHarvester(sc, RoleReporter)
+	_, _, err := harvester.Harvest(context.Background(), spec, res, nil)
 	if err == nil {
 		t.Fatal("expected error for empty extraction, got nil")
 	}
