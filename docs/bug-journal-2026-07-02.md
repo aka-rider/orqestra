@@ -1,9 +1,18 @@
 # Bug journal — architecture review 2026-07-02
 
-Branch: `tui-rehaul`. Every entry cites file:line into that tree and states a concrete failure
-scenario. Companion doc: `plan-simplify-architecture.md` (root causes, target architecture, work
-packages WP1–WP16). Journal numbers (J*) are referenced from that plan. Entries marked
-**[FIXED WP1]** etc. as packages land.
+Branch: `tui-rehaul`. Every entry cites file:line into the PRE-REFACTOR tree (`3ebaa5f` and
+earlier) and states a concrete failure scenario. Companion doc: `plan-simplify-architecture.md`
+(root causes, target architecture, work packages WP1–WP16 — ALL EXECUTED 2026-07-03, commits
+620150b..8dc9201).
+
+## Resolution table (post-execution, 2026-07-03)
+
+| Status | Entries |
+|---|---|
+| Fixed by a WP | J2(WP4a) J3(WP2) J4(WP6) J5(WP4b) J6(WP13) J8(WP3) J9(WP3) J10(WP3) J11(WP15+WP10) J12(WP8, revErr branch) J15(WP1) J16(WP12) J17(WP5) J18(WP16) J19(WP6) J21(WP6+WP14 — one arg builder remains) J22(WP14, env.go) J23(WP2) J24(WP6) J25(WP5) J26(WP4a) J32(WP1) J33(WP8) J34(WP7) J35(WP11) J36(WP12+WP7) J37(WP7) J38(WP7 — divergence CONFIRMED, claude folds `.`/`_`) J40(WP10) J41(WP4b) J42(WP1+WP7) J43(WP15) |
+| Moot — machinery deleted by the event-bus rewrite | J1 J7 J14 J27 J28 J30 J39 (ObsStore/Control/StreamRing/snapshot-diffing gone, WP10) J20 (ClaudeCLI deleted, WP14; args were already deterministic — critic-corrected) |
+| Deliberately preserved (fail-forward / out of scope) | J13 (revise keeps pre-revision session ID — flagged by WP11, open) J12's `revised==""` defensive branch still writes "done" |
+| Still open | J29 (embedded config cannot boot standalone — no WP claimed it), J31 minors (tick relayout, setup-overlay keys, case-folded aliases) |
 
 ## Critical / truth violations (harm-ladder rung 1–2)
 

@@ -1,8 +1,18 @@
 # Plan: simplify orqestra to a linear feature-factory pipeline
 
-Status: **WP1 DONE** (uncommitted in working tree) · critic-vetted (orqestra-critic:
-`blockers: 2, risks: 5`, all incorporated) · companion: `docs/bug-journal-2026-07-02.md` (J*
-references below).
+Status: **ALL 16 WORK PACKAGES DONE** (2026-07-03, commits 620150b..8dc9201 on `tui-rehaul`) ·
+critic-vetted before execution (orqestra-critic: `blockers: 2, risks: 5`, all incorporated) ·
+companion: `docs/bug-journal-2026-07-02.md` (J* references below; see its resolution table).
+
+Execution record: WP1 solo-verified; WP2–WP16 implemented by parallel Sonnet workers in isolated
+worktrees, integrated wave-by-wave (A: WP2/3/4a/4b/5/7 · B: WP6/8 · C: WP9/15 · D: WP10/11 ·
+E: WP12+13 · F: WP14/16), each wave closed with a fresh `QA-ATTEST … SUITE-COMPLETE`. Four
+integration fixups resolved cross-package collisions (duplicate test fake, RunDirFactory retype,
+ReportHarvested observer port). WP13.0 spike outcome: **CONFIRMED** — claude v2.1.199 exits when
+stdin closes after the current turn (decisive test: process waited out a `sleep 6` holding stdin);
+implemented with the report-pending guard so drift nudges keep their window. Final tree:
+`make test` GREEN (`QA-ATTEST commit=8dc9201 dur=15s SUITE-COMPLETE`), `make test-integration`
+GREEN including the new headless e2e lane.
 
 ## Context
 
