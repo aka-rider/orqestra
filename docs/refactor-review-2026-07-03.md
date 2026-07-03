@@ -1,5 +1,16 @@
 # Final review — simplification refactor (WP1–WP16, commits 620150b..8dc9201)
 
+> **RESOLUTION (2026-07-03, commits d7b07dc..49aaa24):** every finding below was addressed by
+> WP17 (cross-run lifecycle hardening: F1–F4, A2/A3/A7, fanoutSink session-event guarantee,
+> bridge Release, sendIntent bound, quit-cancels-run) and WP18 (F5 zero-delta prose fallback,
+> A1/A4/A5/A6/A8/A9 error-fate + size sweep, J12-residual, J13, J29, J31b/c, executor tool
+> filters). All RED-first proven; final tree GREEN (`QA-ATTEST commit=1d1518a dur=16s
+> SUITE-COMPLETE`, integration lane green). Documented residuals: executor filtering keys off
+> `AllowedTools` only (blanket disallowed-tools default makes the other field non-discriminating
+> — commented in spec_for_role.go); bridge retains `reports`/`agentNonce` entries by design
+> (deleting them races the harvester's TakeReport — see bridge_report.go); §4's doc-drift list
+> remains for the owner's in-flight CLAUDE.md restyle (incl. the G3 warning).
+
 Three independent review passes (correctness / plan-gap audit / CLAUDE.md compliance) over the
 cumulative diff (+10,662/−4,854, 140 files), findings verified first-hand before inclusion.
 Verdict: **the refactor is sound and fully landed** — every wave closed green
