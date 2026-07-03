@@ -102,9 +102,8 @@ func (EventStats) runEvent() {}
 // GateID identifies one gate opening/closing pair so a later intent (WP10's
 // Intents channel) can be correlated to the specific gate it answers, even
 // across a stale or duplicate submission. Generated once per gate opening by
-// ObsStore's internal sequence counter (see ObsStore.GateOpened) — Control
-// itself has no notion of gate identity, matching the plan's "keep minimal"
-// guidance.
+// the gate mechanism's own internal sequence counter (see gate.go's
+// newGateFunc), matching the plan's "keep minimal" guidance.
 type GateID uint64
 
 // EventGateOpened marks a human gate opening.
@@ -117,8 +116,9 @@ func (EventGateOpened) runEvent() {}
 
 // EventGateClosed marks the matching gate's close (decision received, or ctx
 // cancelled while waiting). GateID matches the EventGateOpened that opened
-// it — gates are never concurrent in this pipeline (Control.Gate blocks the
-// single pipeline goroutine), so "the current gate" is unambiguous.
+// it — gates are never concurrent in this pipeline (the gate mechanism
+// blocks the single pipeline goroutine), so "the current gate" is
+// unambiguous.
 type EventGateClosed struct {
 	GateID GateID
 }
@@ -134,11 +134,11 @@ type EventQuestionAsked struct {
 
 func (EventQuestionAsked) runEvent() {}
 
-// EventRunFinished is the terminal event: emitted exactly once, from the same
-// call that drives ObsStore.Finished (startNew's finish closure — WP2's
-// single terminal writer), always LAST on the bus. The emitter closes its
-// output channel immediately after delivering this event; no further Emit
-// call is accepted (see emitter.go).
+// EventRunFinished is the terminal event: emitted exactly once, from
+// eventObserver.Finished (startNew's finish closure — WP2's single terminal
+// writer), always LAST on the bus. The emitter closes its output channel
+// immediately after delivering this event; no further Emit call is accepted
+// (see emitter.go).
 type EventRunFinished struct {
 	Result Result
 	Err    error

@@ -4,9 +4,24 @@ import (
 	"context"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/orchestrator"
 )
+
+// sendIntent returns a tea.Cmd that delivers in on ch. Wrapping the send in
+// a Cmd (rather than sending synchronously inside Update) means even a send
+// that DID block momentarily (e.g. an unusually full buffer) would only
+// block this async goroutine, never the Bubble Tea event loop — plan
+// WP10 step 7's "sends from Update wrapped in a tea.Cmd if they could ever
+// block". ch is nil when no pipeline is running (no gate/question possible
+// then either), so the nil-guard is defensive, not load-bearing.
+func sendIntent(ch chan<- orchestrator.Intent, in orchestrator.Intent) tea.Cmd {
+	return func() tea.Msg {
+		if ch != nil {
+			ch <- in
+		}
+		return nil
+	}
+}
 
 // processIntent executes a pipeline screen intent and optionally batches with
 // an additional command (e.g. the Ctrl+C timeout tick).
@@ -22,48 +37,41 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 	}
 	switch i := intent.(type) {
 	case SubmitQuestionAnswerIntent:
-		if m.engine != nil {
-			ans := i.Answer
-			// Clear the pending question from the snapshot NOW (J25): otherwise
-			// the next stream event's snapshot still reports it pending and
-			// ApplySnapshot re-opens the identical, already-answered question.
-			if m.obs != nil {
-				m.obs.ClearQuestion()
-			}
-			return m, batch(func() tea.Msg {
-				m.engine.SendAnswer(ans)
-				return nil
-			})
-		}
-		return m, batch(nil)
+		return m, batch(sendIntent(m.intents, orchestrator.QuestionAnswerIntent{
+			QuestionID: i.Answer.ID,
+			Answer:     i.Answer,
+		}))
 	case ApprovePlanIntent:
-		m.ctrl.Submit(orchestrator.Decision{Type: orchestrator.DecisionApprove})
-		return m, batch(nil)
+		return m, batch(sendIntent(m.intents, orchestrator.GateDecisionIntent{
+			GateID:   m.pipelineScreen.gateID,
+			Decision: orchestrator.Decision{Type: orchestrator.DecisionApprove},
+		}))
 	case ConfirmEditIntent:
-		m.ctrl.Submit(orchestrator.Decision{
-			Type:          orchestrator.DecisionEdit,
-			EditedContent: i.EditedContent,
-			Comment:       i.Comment,
-			AutoApprove:   i.AutoApprove,
+		cmd := sendIntent(m.intents, orchestrator.GateDecisionIntent{
+			GateID: m.pipelineScreen.gateID,
+			Decision: orchestrator.Decision{
+				Type:          orchestrator.DecisionEdit,
+				EditedContent: i.EditedContent,
+				Comment:       i.Comment,
+				AutoApprove:   i.AutoApprove,
+			},
 		})
 		m.pipelineScreen.awaitingPlanDecision = false
 		m.pipelineScreen.enterStreaming()
-		return m, batch(nil)
-	case EditPlanIntent:
-		m.ctrl.Submit(orchestrator.Decision{
-			Type:          orchestrator.DecisionEdit,
-			EditedContent: i.ModifiedMarkdown,
-		})
-		return m, batch(nil)
+		return m, batch(cmd)
 	case CommentPlanIntent:
-		m.ctrl.Submit(orchestrator.Decision{
-			Type:    orchestrator.DecisionComment,
-			Comment: i.Comment,
-		})
-		return m, batch(nil)
+		return m, batch(sendIntent(m.intents, orchestrator.GateDecisionIntent{
+			GateID: m.pipelineScreen.gateID,
+			Decision: orchestrator.Decision{
+				Type:    orchestrator.DecisionComment,
+				Comment: i.Comment,
+			},
+		}))
 	case CancelPlanIntent:
-		m.ctrl.Submit(orchestrator.Decision{Type: orchestrator.DecisionCancel})
-		return m, batch(nil)
+		return m, batch(sendIntent(m.intents, orchestrator.GateDecisionIntent{
+			GateID:   m.pipelineScreen.gateID,
+			Decision: orchestrator.Decision{Type: orchestrator.DecisionCancel},
+		}))
 	case CancelPipelineIntent:
 		if m.cancelCause != nil {
 			m.cancelCause(orchestrator.ErrUserCancelled)
@@ -94,28 +102,6 @@ func (m Model) processIntent(intent tea.Msg, extraCmd tea.Cmd) (tea.Model, tea.C
 		return m, batch(nil)
 	case OpenExternalEditorIntent:
 		return m, batch(openExternalEditor(i.FilePath))
-	case RestartRunIntent:
-		m.lastRestartRunPath = i.RunPath
-		m.lastRestartPhase = i.Phase
-		m.pipelineScreen.Reset()
-		m.state = StatePrompt
-		m.promptScreen.Reset()
-		// Pre-fill with a restart prompt that includes the missing agent context.
-		prompt := "Restart run from phase: " + string(i.Phase)
-		m.promptScreen.SetValue(prompt)
-		return m, batch(nil)
-	case PostMessageIntent:
-		if m.ctrl != nil && i.Text != "" {
-			text := i.Text
-			agentID := orchestrator.AgentID(i.AgentID)
-			return m, batch(func() tea.Msg {
-				if ch := m.ctrl.Input(agentID); ch != nil {
-					ch <- harness.Message{Text: text}
-				}
-				return nil
-			})
-		}
-		return m, batch(nil)
 	}
 	return m, batch(nil)
 }
@@ -130,31 +116,8 @@ func (m *Model) startPipeline(prompt string) tea.Cmd {
 		Setup:      m.confirmedSetup,
 		SetupValid: true,
 	})
-	m.obs = handle.Obs
-	m.ctrl = handle.Ctrl
-	m.lastRev = 0
-	m.pipelineScreen.SetStreamBuf(orchestrator.NewStreamRing(200))
+	m.events = handle.Events
+	m.intents = handle.Intents
 
-	return tea.Batch(notifyCmd(handle.Obs.NotifyCh()), tickCmd())
-}
-
-// startPipelineRestart launches the orchestrator for a restart run and returns
-// a command to start listening. The restart context is passed through the Input.
-func (m *Model) startPipelineRestart(prompt, runPath string, phase orchestrator.RestartPhase) tea.Cmd {
-	ctx, cancel := context.WithCancelCause(context.Background())
-	m.cancelCause = cancel
-
-	handle := m.engine.Start(ctx, orchestrator.Input{
-		Prompt: prompt,
-		RestartFrom: orchestrator.RestartInput{
-			RunPath: runPath,
-			Phase:   phase,
-		},
-	})
-	m.obs = handle.Obs
-	m.ctrl = handle.Ctrl
-	m.lastRev = 0
-	m.pipelineScreen.SetStreamBuf(orchestrator.NewStreamRing(200))
-
-	return tea.Batch(notifyCmd(handle.Obs.NotifyCh()), tickCmd())
+	return tea.Batch(waitForEvent(handle.Events), tickCmd())
 }

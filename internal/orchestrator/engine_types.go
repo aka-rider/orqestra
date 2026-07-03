@@ -15,12 +15,6 @@ import (
 // an intentional stop from an internal failure in run.log and Result.Status.
 var ErrUserCancelled = errors.New("run cancelled by user")
 
-// RestartInput carries context for restarting a failed or incomplete run.
-type RestartInput struct {
-	RunPath string       // session directory of the original run
-	Phase   RestartPhase // which phase to restart from
-}
-
 // Input is the user's request to the orchestrator.
 // SetupValid distinguishes "caller did not provide a setup" (use defaults)
 // from "caller explicitly chose this PipelineSetup" (use it as-is, even when
@@ -30,10 +24,9 @@ type RestartInput struct {
 // enables Execution — a caller that asked only to plan could have a worker
 // run and modify the repo (J24).
 type Input struct {
-	Prompt      string
-	RestartFrom RestartInput
-	Setup       PipelineSetup // used as-is when SetupValid; ignored otherwise
-	SetupValid  bool
+	Prompt     string
+	Setup      PipelineSetup // used as-is when SetupValid; ignored otherwise
+	SetupValid bool
 }
 
 // RunStatus classifies the final outcome.
@@ -92,30 +85,44 @@ type Engine struct {
 	QuestionBridge *mcp.QuestionBridge
 }
 
-// RunHandle provides the TUI with observation and control handles for an active run.
-// The pipeline writes non-blocking updates to Obs; the TUI polls Obs.Snapshot() on
-// each notify wakeup or tick. Control carries gate + live Post semantics.
+// RunHandle is the whole TUI (or headless driver) ⇄ engine surface for one
+// run (WP10/RC1 — "one pipe out, one pipe in"; replaces the pre-WP10
+// Obs/Ctrl pair). Events is the ordered, one-way observation stream; Intents
+// is the one-way channel back — every gate decision and question answer is
+// correlated by GateID/QuestionID, so a stale or mismatched intent is
+// dropped rather than misapplied (WP4a/WP5 invariants, preserved by
+// construction — see gate.go and engine_pipeline.go's intents consumer).
 type RunHandle struct {
-	Obs  *ObsStore
-	Ctrl Control
-
-	// Events is the WP9 ordered event bus for this run (RunEvent — see
-	// event.go/emitter.go). It is additive: nothing in this WP reads it, and
-	// ObsStore keeps driving the TUI exactly as before through Obs/Ctrl.
-	// WP10 will replace ObsStore-snapshot polling with a single
-	// waitForEvent loop over this channel. Always a real, non-nil channel
-	// today (startNew always attaches an emitter); a run completes without
-	// blocking even when nobody ever reads from it — see emitter.go's
-	// "No-consumer policy". Closed exactly once, immediately after the
-	// EventRunFinished event.
+	// Events is the WP9/WP10 ordered event bus for this run (RunEvent — see
+	// event.go/emitter.go). Always a real, non-nil channel (startNew always
+	// attaches an emitter); a run completes without blocking even when
+	// nobody ever reads from it — see emitter.go's "No-consumer policy".
+	// Closed exactly once, immediately after the EventRunFinished event.
 	Events <-chan RunEvent
 
+	// Intents is the send-only channel a caller uses to deliver gate
+	// decisions and question answers back to the running pipeline.
+	// Buffered (intentBufSize) so a caller's send is very unlikely ever to
+	// block in practice — engine_pipeline.go's intents consumer drains it
+	// continuously — but a caller that could ever send from a context that
+	// must not block (e.g. a Bubble Tea Update) should still wrap the send
+	// in an async command, since "never" is not "cannot" (plan WP10 step 7).
+	Intents chan<- Intent
+
 	// forwarderDone is closed once this run's question-forwarder goroutine has
-	// been joined (WP4b/J5,J41) — always before Obs.Finished is called, so an
-	// observer reacting to Obs's terminal state (e.g. starting the next run)
-	// never races this run's forwarder teardown, guaranteeing at most one
-	// consumer of the shared QuestionBridge.Questions() channel at a time.
-	// Unexported: white-box test instrumentation only, invisible outside this
-	// package (the TUI never depends on it).
+	// been joined (WP4b/J5,J41) — always before Finished is called, so an
+	// observer reacting to the run's terminal state (e.g. starting the next
+	// run) never races this run's forwarder teardown, guaranteeing at most
+	// one consumer of the shared QuestionBridge.Questions() channel at a
+	// time. Unexported: white-box test instrumentation only, invisible
+	// outside this package (the TUI never depends on it).
 	forwarderDone chan struct{}
+
+	// runDone is closed as the LAST statement of the run's pipeline
+	// goroutine (after Finished has been called) — independent of whether
+	// Events is ever drained. Unexported: white-box test instrumentation
+	// only, used to prove the "no consumer never blocks the pipeline"
+	// invariant (WP9 QA gate (c)) without relying on the pre-WP10
+	// snapshot store, which no longer exists.
+	runDone chan struct{}
 }

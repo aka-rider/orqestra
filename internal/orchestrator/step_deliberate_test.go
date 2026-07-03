@@ -72,7 +72,7 @@ func TestDeliberateStep_RunRound_SilenceEscalationFallsBackNonFatal(t *testing.T
 	artifacts := newRecordingArtifactSink()
 	sc := StepContext{
 		Exec:      exec,
-		Obs:       NewObsStore(),
+		Obs:       newRecordingObserver(),
 		Artifacts: artifacts,
 		Log:       slog.Default(),
 	}
@@ -122,7 +122,7 @@ func TestDeliberateStep_RunRound_UserCancelIsFatalWithAttributedCause(t *testing
 
 	sc := StepContext{
 		Exec:      exec,
-		Obs:       NewObsStore(),
+		Obs:       newRecordingObserver(),
 		Artifacts: NoopArtifactSink(),
 		Log:       slog.Default(),
 	}

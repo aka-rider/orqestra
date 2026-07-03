@@ -100,7 +100,7 @@ func (m Model) handleRunsListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case NavigateBackIntent:
 			// Return to where we came from. If a pipeline is still live, go back
 			// to its view (the tick/anim loops stayed alive while we were away).
-			if m.prevState == StatePipeline && (m.pipelineScreen.active || m.obs != nil) {
+			if m.prevState == StatePipeline && (m.pipelineScreen.active || m.events != nil) {
 				m.state = StatePipeline
 				m.recalculateLayout()
 				return m, nil
@@ -140,8 +140,6 @@ func (m Model) handleRunDetailKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.recalculateLayout()
 			m.runsListScreen.SyncViewport(m.runsListScreen.viewport.Width())
 			return m, nil
-		case RestartRunIntent:
-			return m.processIntent(intent, cmd)
 		}
 	}
 	return m, cmd
@@ -172,18 +170,6 @@ func (m Model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.promptScreen.PendingIntent = nil
 		switch i := intent.(type) {
 		case StartPipelineIntent:
-			// If we have a restart context, start a restart pipeline instead.
-			if m.lastRestartRunPath != "" {
-				runPath := m.lastRestartRunPath
-				phase := m.lastRestartPhase
-				m.lastRestartRunPath = ""
-				m.lastRestartPhase = ""
-				blinkCmd := m.pipelineScreen.Start(i.Prompt)
-				m.state = StatePipeline
-				m.recalculateLayout()
-				pipelineCmd := m.startPipelineRestart(i.Prompt, runPath, phase)
-				return m, tea.Batch(blinkCmd, pipelineCmd, animTickCmd())
-			}
 			blinkCmd := m.pipelineScreen.Start(i.Prompt)
 			m.state = StatePipeline
 			m.recalculateLayout()

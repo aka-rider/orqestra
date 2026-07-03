@@ -122,7 +122,7 @@ func TestValidateStep_Run_PopulatesClaudeSessionLogPath(t *testing.T) {
 	artifacts := newRecordingArtifactSink()
 	sc := StepContext{
 		Exec:      exec,
-		Obs:       NewObsStore(),
+		Obs:       newRecordingObserver(),
 		Artifacts: artifacts,
 		Log:       slog.Default(),
 		RepoPath:  repoPath,

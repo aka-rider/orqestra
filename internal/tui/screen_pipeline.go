@@ -3,7 +3,6 @@ package tui
 import (
 	"os"
 	"regexp"
-	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -37,18 +36,25 @@ type PipelineScreen struct {
 	editConfirm    editConfirmModel
 	editorFilePath string // temp file the external editor edits in place
 
-	// Chat is the bottom steering input (always visible during ContentStreaming).
+	// Chat is the bottom input (always visible during ContentStreaming); it
+	// hosts a plan-gate revision reply or an open AskUserQuestion.
 	chat chat
 
 	// Plan tracking
 	finalPlan            string
 	hasPlan              bool
-	seenGateMarkdown     string
 	awaitingPlanDecision bool
+	// gateID is the GateID of the currently-open gate (set by onGateOpened),
+	// carried on every GateDecisionIntent this screen's decisions produce so
+	// the pipeline can correlate — and drop stale/mismatched — decisions
+	// (WP10/WP4a).
+	gateID orchestrator.GateID
 
-	// Agent tracking for status bar
-	agents      []AgentRow
-	knownAgents map[string]string
+	// Agent tracking for status bar. Keyed by agent identity (string(AgentID))
+	// so repeated passes of the same agent (e.g. architect across revise
+	// rounds) accumulate onto ONE row rather than resetting it (J40).
+	agents        []AgentRow
+	agentRowIndex map[string]int
 
 	// currentTurn is the active TurnGroup (live ⏺ header + tool rows). The same
 	// pointer is set as the Timeline's tail so both views share the state.
@@ -68,9 +74,7 @@ type PipelineScreen struct {
 	validationVerdict string
 	conflictFiles     []string // populated when Integrate gives up on a merge conflict
 
-	// Live stream (written by orchestrator, polled by TUI on tick)
-	streamBuf *orchestrator.StreamRing
-	cwd       string
+	cwd string
 
 	// Animation frame counter (for spinner)
 	animFrame int
@@ -89,12 +93,12 @@ type PipelineScreen struct {
 // NewPipelineScreen creates a new pipeline screen.
 func NewPipelineScreen(configName string, ui runeUI, keys keymap.Bindings) PipelineScreen {
 	return PipelineScreen{
-		keys:        keys,
-		configName:  configName,
-		knownAgents: make(map[string]string),
-		md:          ui.mdDeps(),
-		timeline:    NewTimeline(keys, timelineStyles{selectionBg: selectionBg}),
-		chat:        newChat(keys),
+		keys:          keys,
+		configName:    configName,
+		agentRowIndex: make(map[string]int),
+		md:            ui.mdDeps(),
+		timeline:      NewTimeline(keys, timelineStyles{selectionBg: selectionBg}),
+		chat:          newChat(keys),
 	}
 }
 
@@ -122,22 +126,21 @@ func (s *PipelineScreen) Start(goal string) tea.Cmd {
 // Reset clears all pipeline state for a fresh run.
 func (s *PipelineScreen) Reset() {
 	s.agents = nil
+	s.agentRowIndex = make(map[string]int)
 	s.lastErr = nil
 	s.finalPlan = ""
 	s.hasPlan = false
-	s.workerValidation = ""
-	s.validationVerdict = ""
-	s.conflictFiles = nil
-	s.streamBuf = nil
 	s.awaitingPlanDecision = false
-	s.seenGateMarkdown = ""
-	s.knownAgents = make(map[string]string)
+	s.gateID = 0
 	s.pendingTools = nil
 	s.currentTurn = nil
 	s.active = false
 	s.editConfirm = editConfirmModel{}
 	s.animFrame = 0
 	s.toolFrameExpanded = false
+	s.workerValidation = ""
+	s.validationVerdict = ""
+	s.conflictFiles = nil
 	s.timeline.Clear()
 	s.timeline.styles = timelineStyles{selectionBg: selectionBg}
 	s.lastAgentID = ""
@@ -154,11 +157,9 @@ func (s *PipelineScreen) enterStreaming() {
 	s.chat.Focus()
 }
 
-// closeGate ends a plan gate and resumes the live flow. seenGateMarkdown is
-// cleared so the next gate (e.g. a revised plan) re-triggers.
+// closeGate ends a plan gate and resumes the live flow.
 func (s *PipelineScreen) closeGate() {
 	s.awaitingPlanDecision = false
-	s.seenGateMarkdown = ""
 	s.enterStreaming()
 }
 
@@ -181,11 +182,6 @@ func (s *PipelineScreen) SetToolFrameExpanded(expanded bool) {
 	}
 	s.toolFrameExpanded = expanded
 	s.currentTurn.SetExpanded(expanded)
-}
-
-// SetStreamBuf sets the shared stream buffer for live output.
-func (s *PipelineScreen) SetStreamBuf(buf *orchestrator.StreamRing) {
-	s.streamBuf = buf
 }
 
 // pendingTool tracks a tool entry awaiting its result by local TurnGroup index.
@@ -218,62 +214,6 @@ func (s *PipelineScreen) reconcilePendingTools() {
 		}
 	}
 	s.pendingTools = nil
-}
-
-// DrainStreamUpdates consumes currently buffered stream updates without blocking.
-// Completed text lines go to the transcript sub-model; tool events and streaming
-// deltas go to the streaming console.
-func (s *PipelineScreen) DrainStreamUpdates(updates <-chan orchestrator.StreamEntry) {
-	if updates == nil {
-		return
-	}
-	for {
-		select {
-		case u, ok := <-updates:
-			if !ok {
-				return
-			}
-			switch u.Kind {
-			case orchestrator.EntryDelta:
-				s.timeline.AppendDelta(u.Text)
-				if s.streamBuf != nil {
-					s.streamBuf.AppendDelta(u.Text)
-				}
-			case orchestrator.EntryText:
-				var line string
-				if s.streamBuf != nil {
-					// Prefer the partial accumulated from prior EntryDelta events.
-					// EntryText.Text repeats that same content; re-appending doubles the line.
-					line = s.streamBuf.CurrentPartial()
-					s.streamBuf.FlushPartial()
-					if line == "" {
-						line = strings.TrimRight(u.Text, "\n\r")
-					}
-				} else {
-					line = strings.TrimRight(u.Text, "\n\r")
-				}
-				// Finalize the prose in the active TurnGroup (updates the brief header).
-				if s.currentTurn != nil {
-					s.currentTurn.FinalizeProse(line)
-				}
-			case orchestrator.EntryToolUse:
-				if u.Detail != "" {
-					if s.streamBuf != nil {
-						s.streamBuf.AppendActivity(u.Tool, u.Detail)
-					}
-					text := stripAnsi(u.Detail)
-					if s.currentTurn != nil {
-						localIdx := s.currentTurn.AddTool(u.Tool, text)
-						s.pendingTools = append(s.pendingTools, pendingTool{localIdx: localIdx})
-					}
-				}
-			case orchestrator.EntryToolResult:
-				s.resolvePendingTool(u.ToolErr)
-			}
-		default:
-			return
-		}
-	}
 }
 
 // Update handles key events for the pipeline screen.

@@ -51,6 +51,29 @@ type AgentRow struct {
 	StartedAt    time.Time
 	InputTokens  int64
 	OutputTokens int64
+
+	// Meta is captured at AgentStarted and reused when building the done/failed
+	// summary line (EventAgentDone/EventAgentFailed carry no Meta of their own).
+	Meta orchestrator.AgentMeta
+
+	// Activities accumulates every tool call observed for this agent identity
+	// across all its passes (WP10 Tier-B: replaces the deleted ring buffer's
+	// per-agent activity accumulator — the completion screen's file-activity
+	// log is now TUI-accumulated event state, not a ring read).
+	Activities []toolActivity
+
+	// currentPassStart is the start time of the pass currently in flight
+	// (set on AgentStarted, consumed on AgentDone/AgentFailed to accumulate
+	// Elapsed). Unexported: internal bookkeeping only.
+	currentPassStart time.Time
+}
+
+// toolActivity is one tool invocation recorded against an AgentRow — the
+// TUI's own minimal replacement for the deleted orchestrator ring buffer's
+// per-agent activity type (Tier-B deletion, WP10).
+type toolActivity struct {
+	Tool   string
+	Detail string
 }
 
 // regionBounds holds the absolute terminal rectangles for the pipeline
@@ -68,10 +91,10 @@ type Model struct {
 	height    int
 	regions   regionBounds // pipeline alt-screen layout regions
 
-	// Pipeline observation + control (ObsStore polling path)
-	obs         *orchestrator.ObsStore
-	ctrl        orchestrator.Control
-	lastRev     uint64
+	// Pipeline observation + control (WP10 — event bus "one pipe out, one
+	// pipe in"; replaces the pre-WP10 snapshot-store + gate-control pair).
+	events      <-chan orchestrator.RunEvent
+	intents     chan<- orchestrator.Intent
 	cancelCause context.CancelCauseFunc
 
 	// Engine
@@ -93,10 +116,6 @@ type Model struct {
 	ctrlCPending  bool
 	ctrlCDeadline time.Time
 	lastErr       error // navigation-level errors (e.g. loading runs)
-
-	// Restart state: carries restart context from run detail to prompt screen.
-	lastRestartRunPath string
-	lastRestartPhase   orchestrator.RestartPhase
 
 	// Setup panel state.
 	setupScreen    setupModel
@@ -150,16 +169,30 @@ func animTickCmd() tea.Cmd {
 	})
 }
 
-// notifyCmd returns a tea.Cmd that waits for the next ObsStore notify signal.
-func notifyCmd(ch <-chan struct{}) tea.Cmd {
+// runEventMsg wraps one orchestrator.RunEvent for the Bubble Tea message
+// loop (WP10 — replaces the pre-WP10 notify-wakeup + snapshot-diffing
+// message pair). RunEvent crosses the orchestrator→TUI package boundary
+// already carrying its own producer-defined type identity; this thin
+// wrapper is the "orchestration events flow down through typed messages"
+// case internal/tui/CLAUDE.md §2.4 calls out.
+type runEventMsg struct{ ev orchestrator.RunEvent }
+
+// waitForEvent returns a tea.Cmd that receives exactly one RunEvent from
+// events and wraps it as a runEventMsg. The caller re-arms by calling this
+// again after handling each runEventMsg — see Update's runEventMsg case,
+// which stops re-arming once it sees EventRunFinished (events closes
+// immediately after that event, so the chain would stop on its own anyway,
+// but stopping explicitly is clearer than relying on channel-close/nil-msg
+// semantics).
+func waitForEvent(events <-chan orchestrator.RunEvent) tea.Cmd {
 	return func() tea.Msg {
-		<-ch
-		return obsNotifyMsg{}
+		ev, ok := <-events
+		if !ok {
+			return nil
+		}
+		return runEventMsg{ev: ev}
 	}
 }
-
-// obsNotifyMsg fires when ObsStore has an updated snapshot for the TUI to consume.
-type obsNotifyMsg struct{}
 
 // Update handles messages and returns the updated model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -234,22 +267,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case tickMsg:
-		// Keep the tick loop alive while the pipeline screen is visible OR a run
-		// is still active in the background (user navigated to runs list). This
-		// keeps the stream ring fresh so returning shows live state, and avoids
-		// spawning duplicate loops on re-entry.
-		switch {
-		case m.state == StatePipeline:
-			if m.obs != nil {
-				m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
-			}
-			m.recalculateLayout() // refresh streaming console height after drain
-			return m, tickCmd()
-		case m.pipelineScreen.active:
-			// Background ingest — user is in runs list; transcript updates silently.
-			if m.obs != nil {
-				m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
-			}
+		// Elapsed-time refresh ONLY (WP10 — stream draining/tick-drain duality
+		// is gone; live content now arrives via runEventMsg). Keep the tick loop
+		// alive while the pipeline screen is visible OR a run is still active in
+		// the background (user navigated to runs list), so elapsed timers stay
+		// fresh and returning to the screen shows an up-to-date value.
+		if m.state == StatePipeline || m.pipelineScreen.active {
 			return m, tickCmd()
 		}
 		return m, nil
@@ -267,25 +290,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ctrlCPending = false
 		return m, nil
 
-	case obsNotifyMsg:
-		if m.obs == nil {
-			return m, nil
-		}
-		snap := m.obs.Snapshot()
+	case runEventMsg:
+		// runEventMsg only ever originates from waitForEvent(m.events) — by
+		// construction m.events is already non-nil whenever this case is
+		// reached via the real production Cmd chain (startPipeline sets it
+		// before the first waitForEvent call, and every re-arm below reuses
+		// the same value) — no nil-guard needed.
 		prevInputH := m.pipelineScreen.inputZoneHeight()
-		m.pipelineScreen.DrainStreamUpdates(m.obs.StreamCh())
-		m.pipelineScreen.ApplySnapshot(snap, m.width)
-		m.lastRev = snap.Rev
+		m.pipelineScreen.ApplyEvent(msg.ev, m.width)
 
 		if m.state == StatePipeline {
 			if m.pipelineScreen.inputZoneHeight() != prevInputH {
 				m.recalculateLayout()
 			}
 		}
-		if !snap.Terminal.Done {
-			return m, notifyCmd(m.obs.NotifyCh())
+		if _, done := msg.ev.(orchestrator.EventRunFinished); done {
+			// Events closes immediately after this event (emitter.go) — stop
+			// re-arming rather than issuing one more (harmless but pointless)
+			// waitForEvent that would just see the closed channel.
+			return m, nil
 		}
-		return m, nil
+		return m, waitForEvent(m.events)
 	}
 
 	// Pass non-key messages to focused sub-models

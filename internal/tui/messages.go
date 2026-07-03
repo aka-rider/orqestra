@@ -54,13 +54,6 @@ func (ConfirmSetupIntent) isIntent() {}
 
 func (ApprovePlanIntent) isIntent() {}
 
-// EditPlanIntent submits a user-modified plan for re-validation.
-type EditPlanIntent struct {
-	ModifiedMarkdown string
-}
-
-func (EditPlanIntent) isIntent() {}
-
 // CommentPlanIntent sends a comment to refine the current plan.
 type CommentPlanIntent struct {
 	Comment string
@@ -128,25 +121,8 @@ func (ConfirmEditIntent) isIntent() {}
 // ctrlCTimeoutMsg resets the Ctrl+C pending-quit state after the time gate expires.
 type ctrlCTimeoutMsg struct{}
 
-// RestartRunIntent requests restarting a failed or incomplete historical run.
-type RestartRunIntent struct {
-	RunPath string
-	Phase   orchestrator.RestartPhase
-}
-
-func (RestartRunIntent) isIntent() {}
-
 // ToggleSetupIntent opens or closes the pipeline setup overlay.
 type ToggleSetupIntent struct{}
 
 func (ToggleSetupIntent) isIntent() {}
-
-// PostMessageIntent sends a freeform text message to the active running agent
-// via ctrl.Input. Used for mid-run steering without blocking the pipeline.
-type PostMessageIntent struct {
-	AgentID string
-	Text    string
-}
-
-func (PostMessageIntent) isIntent() {}
 

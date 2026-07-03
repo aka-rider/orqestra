@@ -1,7 +1,9 @@
 package orchestrator
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 )
 
 // HumanGatePosition marks where in the pipeline a human gate fires.
@@ -49,11 +51,52 @@ func (h HumanGateSet) Toggle(pos HumanGatePosition) HumanGateSet {
 	return append(append(HumanGateSet(nil), h...), pos)
 }
 
-// RestartPhase identifies which phase to restart from.
-type RestartPhase string
+// GateFunc publishes a gate request and blocks until a decision arrives or
+// ctx is done. It replaces the pre-WP10 Control interface: StepContext.Gate
+// (step.go) is the pipeline's sole gate mechanism now.
+type GateFunc func(ctx context.Context, req GateRequest) (Decision, error)
 
-const (
-	RestartDeliberation RestartPhase = "deliberation"
-	RestartExecution    RestartPhase = "execution"
-	RestartValidation   RestartPhase = "validation"
-)
+// newGateFunc returns a GateFunc bound to em (for EventGateOpened/
+// EventGateClosed lifecycle events) and decisions (the run's internal,
+// forwarded-from-Intents channel of GateDecisionIntent values — see
+// engine_pipeline.go's intents consumer). Gates in this pipeline are never
+// concurrent — RunPipeline's gate loop blocks the single pipeline goroutine —
+// so the unsynchronized sequence counter closed over by the returned func is
+// safe. GateID generation lives here now, replacing the pre-WP10 snapshot
+// store's own gate sequence counter (WP10/RC2).
+func newGateFunc(em *emitter, decisions <-chan GateDecisionIntent) GateFunc {
+	var seq uint64
+	return func(ctx context.Context, req GateRequest) (Decision, error) {
+		// Drain any stale buffered decision before opening (WP4a/J2): a
+		// decision delivered while no gate was open (a double submit, or a
+		// race with the previous gate's close) must never silently satisfy
+		// the NEXT gate before the user has even seen it.
+		select {
+		case <-decisions:
+		default:
+		}
+
+		seq++
+		gid := GateID(seq)
+		em.Emit(EventGateOpened{GateID: gid, Request: req})
+		defer em.Emit(EventGateClosed{GateID: gid})
+
+		for {
+			select {
+			case dec, ok := <-decisions:
+				if !ok {
+					return Decision{}, fmt.Errorf("gate: intents channel closed")
+				}
+				if dec.GateID != gid {
+					// Mismatched IDs are drained and dropped, never applied to
+					// this gate (WP4a/J2 invariant, preserved by construction).
+					slog.Debug("gate: dropped decision for a different gate", "want", gid, "got", dec.GateID)
+					continue
+				}
+				return dec.Decision, nil
+			case <-ctx.Done():
+				return Decision{}, fmt.Errorf("gate: %w", ctx.Err())
+			}
+		}
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
 	"github.com/xiii/orqestra/internal/tui/frame"
@@ -42,31 +43,11 @@ func TestFileHyperlink_RelativePath(t *testing.T) {
 func setupTestPipelineScreen() PipelineScreen {
 	s := NewPipelineScreen("test", runeUI{}, keymap.Default())
 	s.cwd = "/test/dir"
-	sb := orchestrator.NewStreamRing(50)
-	sb.SetAgent("researcher")
-	sb.AppendText("stream line 01\n")
-	sb.AppendText("stream line 02\n")
-	sb.AppendText("stream line 03\n")
-	sb.AppendText("stream line 04\n")
-	sb.AppendText("stream line 05\n")
-	sb.AppendText("stream line 06\n")
-	sb.AppendText("stream line 07\n")
-	sb.AppendText("stream line 08\n")
-	sb.AppendText("stream line 09\n")
-	sb.AppendText("stream line 10\n")
-	sb.AppendText("stream line 11\n")
-	sb.AppendText("stream line 12\n")
-	sb.AppendText("stream line 13\n")
-	sb.AppendText("stream line 14\n")
-	sb.AppendText("stream line 15\n")
-	sb.AppendText("stream line 16\n") // > 15 lines to test preview
-
-	sb.AppendActivity("Read", "file1.txt")
-	sb.AppendActivity("Bash", "ls -l")
-
-	s.SetStreamBuf(sb)
 	s.agents = []AgentRow{
-		{ID: "researcher", State: AgentStateDone, Elapsed: time.Second, InputTokens: 100, OutputTokens: 50},
+		{
+			ID: "researcher", State: AgentStateDone, Elapsed: time.Second, InputTokens: 100, OutputTokens: 50,
+			Activities: []toolActivity{{Tool: "Read", Detail: "file1.txt"}, {Tool: "Bash", Detail: "ls -l"}},
+		},
 		{ID: "architect", State: AgentStateRunning, StartedAt: time.Now()},
 	}
 	return s
@@ -83,30 +64,25 @@ func TestViewStreaming_FilePathsAreFullPaths(t *testing.T) {
 	}
 }
 
-// TestDrainStreamUpdates_TextLineGoesToTimeline verifies that a newline-terminated
-// EntryText is stored in the active TurnGroup's prose and appears in the view.
-func TestDrainStreamUpdates_TextLineGoesToTimeline(t *testing.T) {
+// TestApplyEvent_DeltaGoesToTimeline verifies that an EventDelta reaches the
+// active TurnGroup's live tail and appears in the view.
+func TestApplyEvent_DeltaGoesToTimeline(t *testing.T) {
 	s := PipelineScreen{
-		streamBuf:   orchestrator.NewStreamRing(200),
-		timeline:    NewTimeline(keymap.Default(), timelineStyles{selectionBg: selectionBg}),
-		knownAgents: make(map[string]string),
+		timeline:      NewTimeline(keymap.Default(), timelineStyles{selectionBg: selectionBg}),
+		agentRowIndex: make(map[string]int),
 	}
 	s.timeline.SetRect(image.Rect(0, 0, 80, 20))
 	tg := frame.NewTurnGroup()
 	s.currentTurn = tg
 	s.timeline.SetTail(tg)
 
-	updates := make(chan orchestrator.StreamEntry, 2)
-	updates <- orchestrator.StreamEntry{Kind: orchestrator.EntryText, Text: "hello world\n"}
-	close(updates)
-
-	s.DrainStreamUpdates(updates)
+	s.ApplyEvent(orchestrator.EventDelta{AgentID: "researcher", Text: "hello world"}, 80)
 
 	if !s.timeline.HasContent() {
 		t.Fatal("expected timeline to have content (active tail)")
 	}
 	if !strings.Contains(s.timeline.View(), "hello world") {
-		t.Error("expected 'hello world' in the brief header after FinalizeProse")
+		t.Error("expected 'hello world' in the brief header after the delta")
 	}
 }
 
@@ -114,19 +90,16 @@ func TestDrainStreamUpdates_TextLineGoesToTimeline(t *testing.T) {
 // and the matching result resolves it in place via ResolveTool.
 func TestPipeline_ToolResolvedByProducer(t *testing.T) {
 	s := PipelineScreen{
-		timeline:    NewTimeline(keymap.Default(), timelineStyles{selectionBg: selectionBg}),
-		knownAgents: make(map[string]string),
+		timeline:      NewTimeline(keymap.Default(), timelineStyles{selectionBg: selectionBg}),
+		agentRowIndex: make(map[string]int),
 	}
 	s.timeline.SetRect(image.Rect(0, 0, 80, 20))
 	tg := frame.NewTurnGroup()
 	s.currentTurn = tg
 	s.timeline.SetTail(tg)
 
-	ch := make(chan orchestrator.StreamEntry, 4)
-	ch <- orchestrator.StreamEntry{Kind: orchestrator.EntryToolUse, Tool: "Read", Detail: "foo.go"}
-	ch <- orchestrator.StreamEntry{Kind: orchestrator.EntryToolResult, ToolErr: false}
-	close(ch)
-	s.DrainStreamUpdates(ch)
+	s.ApplyEvent(orchestrator.EventToolCall{AgentID: "researcher", Tool: "Read", Detail: "foo.go"}, 80)
+	s.ApplyEvent(orchestrator.EventToolResult{AgentID: "researcher", IsError: false}, 80)
 
 	if len(s.pendingTools) != 0 {
 		t.Errorf("expected the pending tool resolved, %d left", len(s.pendingTools))
@@ -139,7 +112,6 @@ func TestPipeline_ToolResolvedByProducer(t *testing.T) {
 
 func TestViewCompletion_ShowsAgentSummary(t *testing.T) {
 	s := setupTestPipelineScreen()
-	s.streamBuf.SetAgent("architect") // Snapshot researcher
 
 	out := s.viewCompletion(120)
 
@@ -364,13 +336,8 @@ func TestUserQuestion_MultiSelectToggleVisible(t *testing.T) {
 // --- Agent summary tests (replaced the removed live status bar) ---
 
 func TestAgentSummaryLine(t *testing.T) {
-	a := orchestrator.AgentSnapshot{
-		AgentID: "architect",
-		Meta:    orchestrator.AgentMeta{ModelDisplay: "qwen3.6"},
-		Input:   236000,
-		Output:  456000,
-	}
-	got := agentSummaryLine("Done:", "✓", a, 3*time.Minute+28*time.Second)
+	meta := orchestrator.AgentMeta{ModelDisplay: "qwen3.6"}
+	got := agentSummaryLine("Done:", "✓", "architect", meta, 236000, 456000, 3*time.Minute+28*time.Second)
 	for _, want := range []string{"Done:", "✓", "architect", "(qwen3.6)", "↑236k", "↓456k", "3m28s"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("agentSummaryLine = %q, want substring %q", got, want)
@@ -378,15 +345,15 @@ func TestAgentSummaryLine(t *testing.T) {
 	}
 
 	// Falls back to ModelRef when ModelDisplay is empty; omits elapsed when zero.
-	a2 := orchestrator.AgentSnapshot{AgentID: "worker", Meta: orchestrator.AgentMeta{ModelRef: "opus"}}
-	if got := agentSummaryLine("Failed:", "✗", a2, 0); !strings.Contains(got, "(opus)") {
+	meta2 := orchestrator.AgentMeta{ModelRef: "opus"}
+	if got := agentSummaryLine("Failed:", "✗", "worker", meta2, 0, 0, 0); !strings.Contains(got, "(opus)") {
 		t.Errorf("expected ModelRef fallback (opus), got %q", got)
 	}
 }
 
-// TestApplySnapshot_AppendsDoneSummary verifies the end-of-agent summary line is
+// TestApplyEvent_AppendsDoneSummary verifies the end-of-agent summary line is
 // appended to the transcript (with real tokens) when an agent transitions to done.
-func TestApplySnapshot_AppendsDoneSummary(t *testing.T) {
+func TestApplyEvent_AppendsDoneSummary(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
@@ -395,14 +362,8 @@ func TestApplySnapshot_AppendsDoneSummary(t *testing.T) {
 	m.recalculateLayout() // sets the timeline rect so appended rows are built
 
 	meta := orchestrator.AgentMeta{ModelDisplay: "qwen3.6"}
-	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
-		Agents: []orchestrator.AgentSnapshot{{AgentID: "architect", Status: "running", Meta: meta}},
-	}, m.width)
-	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
-		Agents: []orchestrator.AgentSnapshot{
-			{AgentID: "architect", Status: "done", Meta: meta, Input: 236000, Output: 456000},
-		},
-	}, m.width)
+	m = applyEvent(m, orchestrator.EventAgentStarted{AgentID: "architect", Meta: meta})
+	m = applyEvent(m, orchestrator.EventAgentDone{AgentID: "architect", Usage: harness.TokenUsage{Input: 236000, Output: 456000}})
 
 	out := m.pipelineScreen.timeline.View()
 	for _, want := range []string{"Done:", "architect", "qwen3.6", "236k", "456k"} {
@@ -412,24 +373,57 @@ func TestApplySnapshot_AppendsDoneSummary(t *testing.T) {
 	}
 }
 
-func TestDrainStreamUpdates_SkipsEmptyTool(t *testing.T) {
-	s := PipelineScreen{
-		streamBuf: orchestrator.NewStreamRing(200),
+// TestApplyEvent_TokenTotalsAccumulateAcrossPasses is the J40 gate proof:
+// the architect agent identity is started and completed TWICE in one run
+// (deliberation, then a revise round) — the second EventAgentStarted must
+// NOT reset the row's accumulated token totals, and the second
+// EventAgentDone must ADD its usage onto the first pass's, not overwrite it.
+//
+// RED-first proof (quoted verbatim in the WP10 report): with onAgentDone
+// changed to assign (row.InputTokens = usage.Input) instead of accumulate
+// (row.InputTokens += usage.Input) — mirroring the pre-WP10
+// ObsStore.AgentStarted bug of constructing a brand-new agentEntry on every
+// AgentStarted call, discarding prior usage — this test failed with
+// "expected accumulated InputTokens=300, got 200" (the second pass's usage
+// alone, first pass's 100 lost). Restoring the += fix makes it pass again.
+func TestApplyEvent_TokenTotalsAccumulateAcrossPasses(t *testing.T) {
+	s := PipelineScreen{agentRowIndex: make(map[string]int)}
+
+	s.ApplyEvent(orchestrator.EventAgentStarted{AgentID: "architect"}, 80)
+	s.ApplyEvent(orchestrator.EventAgentDone{AgentID: "architect", Usage: harness.TokenUsage{Input: 100, Output: 50}}, 80)
+
+	// Second pass for the SAME agent identity (e.g. a revise round).
+	s.ApplyEvent(orchestrator.EventAgentStarted{AgentID: "architect"}, 80)
+	s.ApplyEvent(orchestrator.EventAgentDone{AgentID: "architect", Usage: harness.TokenUsage{Input: 200, Output: 100}}, 80)
+
+	row := s.ensureAgentRow("architect")
+	if row.InputTokens != 300 {
+		t.Errorf("expected accumulated InputTokens=300, got %d", row.InputTokens)
 	}
-
-	updates := make(chan orchestrator.StreamEntry, 4)
-	updates <- orchestrator.StreamEntry{Kind: orchestrator.EntryToolUse, Tool: "Read", Detail: ""}
-	updates <- orchestrator.StreamEntry{Kind: orchestrator.EntryToolUse, Tool: "Bash", Detail: "ls -la"}
-	close(updates)
-
-	s.DrainStreamUpdates(updates)
-
-	// Only the tool with non-empty detail should be in the ring.
-	_, _, _, activities := s.streamBuf.SnapshotText()
-	if len(activities) != 1 {
-		t.Fatalf("expected 1 activity, got %d", len(activities))
+	if row.OutputTokens != 150 {
+		t.Errorf("expected accumulated OutputTokens=150, got %d", row.OutputTokens)
 	}
-	if activities[0].Tool != "Bash" {
-		t.Fatalf("expected Bash tool, got %s", activities[0].Tool)
+	// Only ONE row exists for this agent identity — passes accumulate onto
+	// it rather than each creating a fresh entry.
+	if len(s.agents) != 1 {
+		t.Errorf("expected exactly 1 agent row across both passes, got %d", len(s.agents))
+	}
+}
+
+// TestApplyEvent_SkipsEmptyTool verifies a tool call with an empty Detail is
+// never recorded as an activity (matches the pre-WP10 ring's behavior of
+// dropping empty-detail tool entries).
+func TestApplyEvent_SkipsEmptyTool(t *testing.T) {
+	s := PipelineScreen{agentRowIndex: make(map[string]int)}
+
+	s.ApplyEvent(orchestrator.EventToolCall{AgentID: "researcher", Tool: "Read", Detail: ""}, 80)
+	s.ApplyEvent(orchestrator.EventToolCall{AgentID: "researcher", Tool: "Bash", Detail: "ls -la"}, 80)
+
+	row := s.ensureAgentRow("researcher")
+	if len(row.Activities) != 1 {
+		t.Fatalf("expected 1 activity, got %d", len(row.Activities))
+	}
+	if row.Activities[0].Tool != "Bash" {
+		t.Fatalf("expected Bash tool, got %s", row.Activities[0].Tool)
 	}
 }

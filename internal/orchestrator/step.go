@@ -31,7 +31,7 @@ type StepContext struct {
 	Exec      harness.Executor // P1: returns a value, never blocks the pipeline
 	Obs       Observer         // P4: one-way, lossy observation
 	Artifacts ArtifactSink     // P7: fail-closed at integrity boundaries
-	Control   Control          // P5: gate request/response + live Post handle
+	Gate      GateFunc         // P5: gate publish+block, GateID-correlated (replaces Control, WP10)
 	Sessions  rundir.Dir       // session artifact directory
 	Log       *slog.Logger
 	RepoPath  string      // absolute path to the repository root

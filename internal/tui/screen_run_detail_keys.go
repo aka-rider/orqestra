@@ -3,8 +3,6 @@ package tui
 import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
-
-	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
 // Update handles key events for the run detail screen.
@@ -15,17 +13,8 @@ func (s RunDetailScreen) Update(msg tea.Msg) (RunDetailScreen, tea.Cmd) {
 	}
 
 	// Global keys — not focus-dependent.
-	switch {
-	case key.Matches(keyMsg, s.keys.OpenStepLog):
+	if key.Matches(keyMsg, s.keys.OpenStepLog) {
 		return s.openStepLog()
-	case key.Matches(keyMsg, s.keys.RestartRun):
-		if !s.completeness.Complete && s.detail.Path != "" {
-			s.PendingIntent = RestartRunIntent{
-				RunPath: s.detail.Path,
-				Phase:   orchestrator.RestartPhase(s.completeness.RestartPhase),
-			}
-		}
-		return s, nil
 	}
 
 	// Focus-dependent key dispatch.

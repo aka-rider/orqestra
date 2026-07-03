@@ -46,9 +46,8 @@ type Bindings struct {
 	Quit   key.Binding // ctrl+q — quit outright
 
 	// Run management.
-	NewRun     key.Binding // ctrl+n
-	RunsList   key.Binding // ctrl+r
-	RestartRun key.Binding // ctrl+shift+r
+	NewRun   key.Binding // ctrl+n
+	RunsList key.Binding // ctrl+r
 
 	// Transcript / plan actions.
 	ExpandTools      key.Binding // ctrl+o — expand/collapse the tool frames
@@ -85,9 +84,8 @@ func Default() Bindings {
 		Cancel: key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("^c", "cancel")),
 		Quit:   key.NewBinding(key.WithKeys("ctrl+q"), key.WithHelp("^q", "quit")),
 
-		NewRun:     key.NewBinding(key.WithKeys("ctrl+n"), key.WithHelp("^n", "new run")),
-		RunsList:   key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("^r", "runs")),
-		RestartRun: key.NewBinding(key.WithKeys("ctrl+shift+r"), key.WithHelp("^⇧r", "restart")),
+		NewRun:   key.NewBinding(key.WithKeys("ctrl+n"), key.WithHelp("^n", "new run")),
+		RunsList: key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("^r", "runs")),
 
 		ExpandTools:      key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("^o", "expand tools")),
 		ApprovePlan:      key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("^a", "approve")),

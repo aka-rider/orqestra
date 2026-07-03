@@ -40,15 +40,6 @@ func (s PipelineScreen) handleStreamingKey(msg tea.KeyPressMsg) (PipelineScreen,
 	case key.Matches(msg, s.keys.ExpandTools):
 		s.SetToolFrameExpanded(!s.toolFrameExpanded)
 		return s, nil
-	case key.Matches(msg, s.keys.Submit):
-		if text, ok := s.chat.Submit(); ok {
-			s.timeline.Append(frame.NewSteer(text))
-			agentID := s.lastAgentID
-			return s, func() tea.Msg {
-				return PostMessageIntent{AgentID: agentID, Text: text}
-			}
-		}
-		return s, nil
 	}
 	var cmd tea.Cmd
 	s.chat, cmd = s.chat.Update(msg)
@@ -161,7 +152,7 @@ func (s PipelineScreen) viewFooter(ctrlCPending bool) string {
 		if s.currentTurn != nil {
 			nTools = s.currentTurn.ToolCount()
 		}
-		baseHint := " [⏎] post  [^N] new run  [^R] runs"
+		baseHint := " [^N] new run  [^R] runs"
 		if s.active && nTools > frame.ConstToolGroupMax {
 			if s.toolFrameExpanded {
 				baseHint += "  [^O] collapse"

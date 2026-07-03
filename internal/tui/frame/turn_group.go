@@ -78,10 +78,24 @@ func (tg *TurnGroup) SetExpanded(v bool) {
 	tg.rows = tg.layout(tg.width)
 }
 
-// Seal marks the turn complete and auto-expands all tools. Must be called before
-// Resolve() so the TurnSnapshot shows the full tool list.
+// Seal marks the turn complete and auto-expands all tools. Must be called
+// before Resolve() so the TurnSnapshot shows the full tool list.
+//
+// WP10/RC2: the event bus (orchestrator.EventDelta) no longer signals "this
+// text block just completed" separately from "here is another streaming
+// chunk" — both a partial content_block_delta and the model's own
+// paragraph/segment boundaries arrive as the same event kind (see
+// observer_emitter.go's Stream doc comment). Seal is therefore the one place
+// that finalizes whatever accumulated in partial into prose, so a turn's
+// streamed text is never silently dropped from its resolved TurnSnapshot —
+// the accepted tradeoff is that a turn's text renders as one combined prose
+// block instead of per-segment lines.
 func (tg *TurnGroup) Seal() {
 	tg.active = false
+	if tg.partial != "" {
+		tg.prose = append(tg.prose, tg.partial)
+		tg.partial = ""
+	}
 	tg.expanded = true
 	tg.rows = tg.layout(tg.width)
 }

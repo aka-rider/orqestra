@@ -9,12 +9,13 @@ import (
 	"github.com/xiii/orqestra/internal/tui/keymap"
 )
 
-// chat is the bottom input component — the single text surface the user types
-// into to steer the model. It is a real component rather than a bare textarea
-// on the screen so it can model its own openness: when the model asks an
-// AskUserQuestion, the chat hosts that question (its options/answer) as a
-// sub-component instead of a separate screen mode. The text input and the
-// question are mutually exclusive — `question` is the chat's open state.
+// chat is the bottom input component — the single text surface hosting a
+// plan-gate revision reply or an open AskUserQuestion. It is a real
+// component rather than a bare textarea on the screen so it can model its
+// own openness: when the model asks an AskUserQuestion, the chat hosts that
+// question (its options/answer) as a sub-component instead of a separate
+// screen mode. The text input and the question are mutually exclusive —
+// `question` is the chat's open state.
 //
 // Value sub-model: callers hold a copy; mutating methods take a pointer.
 type chat struct {
@@ -27,10 +28,13 @@ type chat struct {
 	questionOpen bool
 }
 
-// newChat builds a focused, single-line steering input.
+// newChat builds a focused, single-line input. It stays empty/inert during
+// plain streaming (live steering was removed — J39, WP10: the feature was
+// inert in production, since nothing ever wired the old gate-control plane's
+// per-agent input registration to a running agent's stdin); it hosts a
+// plan-gate revision reply or an open AskUserQuestion when either is active.
 func newChat(keys keymap.Bindings) chat {
 	ta := textarea.New()
-	ta.Placeholder = "post to steer the model"
 	ta.SetHeight(1)
 	ta.CharLimit = 4096
 	return chat{input: ta, keys: keys, question: userQuestionModel{activeEditor: -1}}

@@ -18,8 +18,9 @@ import (
 // so its lifetime already IS the bridge's intended lifetime; owning it here
 // needs no new parameter on Run's signature and no change at the cmd/orqestra
 // call site (the simplest correct owner). Engine.startNew only ever forwards
-// questions from the bridge into each run's own ObsStore — it never starts or
-// stops the bridge itself (see the lifecycle comment on startNew). A future
+// questions from the bridge onto each run's own event bus (RunEvent) — it
+// never starts or stops the bridge itself (see the lifecycle comment on
+// startNew). A future
 // headless entry point (WP16) would own its own bridge lifecycle the same
 // way, at its own place, since it won't call tui.Run.
 func Run(engine *orchestrator.Engine, configName string) error {

@@ -117,7 +117,7 @@ func RunPipeline(ctx context.Context, setup PipelineSetup, in PipelineRunInput,
 	// --- Gate after deliberation (plan review loop) ---
 	if setup.HumanGates.Active(GateAfterDeliberation) {
 		for {
-			dec, gateErr := sc.Control.Gate(ctx, GateRequest{
+			dec, gateErr := sc.Gate(ctx, GateRequest{
 				Position:          GateAfterDeliberation,
 				FinalPlanMarkdown: plan.Markdown,
 				PlanWarnings:      plan.Warnings,

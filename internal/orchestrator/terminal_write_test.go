@@ -2,98 +2,49 @@ package orchestrator
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 )
 
-// completer is satisfied by any Observer that still exposes the pre-WP2
-// Complete(RunStatus) method. Once WP2 deletes Complete from Observer and
-// ObsStore, no concrete Observer implementation satisfies this interface —
-// the type assertion in gateObs.Complete below is simply never true, and
-// gateObs.Complete becomes unreachable dead code (nothing calls it, because
-// RunPipeline no longer calls sc.Obs.Complete at all). This lets the same
-// test file compile and run meaningfully both before and after the fix.
-type completer interface {
-	Complete(RunStatus)
-}
-
-// gateObs wraps an Observer and, if the wrapped Observer still implements the
-// pre-WP2 Complete(RunStatus) method, performs the real write and then blocks
-// the caller until the test signals proceed. This gives a concurrently
-// polling reader a deterministic window in which to observe the intermediate,
-// status-only terminal write BEFORE the real Finished(Result, error) write
-// lands — reproducing J3/J23 without relying on incidental goroutine timing.
-type gateObs struct {
-	Observer
-	proceed chan struct{}
-}
-
-func (g *gateObs) Complete(status RunStatus) {
-	if c, ok := g.Observer.(completer); ok {
-		c.Complete(status)
-	}
-	<-g.proceed
-}
-
 // TestSingleTerminalWrite_NoExecute drives a plan-only pipeline
 // (Execution: false) through the same sequence startNew uses in production —
-// RunPipeline followed by obs.Finished(result, err) (engine_pipeline.go:126-
-// 135) — and asserts that the FIRST snapshot observing Terminal.Done carries
-// the real Result (FinalPlan non-empty, RunDir set), never a partial
-// status-only write (J3/J23).
+// RunPipeline followed by obs.Finished(result, err) (engine_pipeline.go's
+// finish closure) — and asserts that EventRunFinished carries the real
+// Result (FinalPlan non-empty, RunDir set), never a partial status-only
+// write (J3/J23).
+//
+// WP10 note: this invariant is now structurally guaranteed by the emitter's
+// contract (EventRunFinished is emitted exactly once, atomically, from a
+// single Finished(res, err) call — there is no longer a separate
+// status-only write to race against, since ObsStore/Control's terminal
+// snapshot mutation no longer exists). This test still exercises the real
+// end-to-end sequence rather than asserting the invariant only by reading
+// the emitter's doc comment.
 func TestSingleTerminalWrite_NoExecute(t *testing.T) {
-	obs := NewObsStore()
-	ctrl := NewControl(obs)
-
-	proceed := make(chan struct{})
-	var proceedOnce sync.Once
-	release := func() { proceedOnce.Do(func() { close(proceed) }) }
-
-	gated := &gateObs{Observer: obs, proceed: proceed}
-	sc := noopStepContext(gated, ctrl)
+	em := newEmitter(64)
+	obs := newEventObserver(em)
+	sc := noopStepContext(obs, nil)
 
 	setup := PipelineSetup{Execution: false, Validation: false, HumanGates: nil}
 	steps := defaultTestSteps()
 
 	const wantRunDir = "/fake/run/dir"
 
-	runDone := make(chan struct{})
 	go func() {
-		defer close(runDone)
 		result, err := RunPipeline(context.Background(), setup,
 			PipelineRunInput{Prompt: "test", RunID: "run-1"}, sc, steps)
-		// Mirror startNew (engine_pipeline.go:134-135): RunDir is stamped
-		// after RunPipeline returns, then Finished is the terminal write.
+		// Mirror startNew: RunDir is stamped after RunPipeline returns, then
+		// Finished is the terminal write.
 		result.RunDir = wantRunDir
 		obs.Finished(result, err)
 	}()
 
-	// Poll for the FIRST Terminal.Done observation. While RunPipeline is
-	// blocked inside gateObs.Complete (pre-WP2 only), this tight loop has a
-	// deterministic window in which to observe the intermediate write.
-	var first ObsSnapshot
-	found := false
-	deadline := time.Now().Add(5 * time.Second)
-	for !found {
-		snap := obs.Snapshot()
-		if snap.Terminal.Done {
-			first = snap
-			found = true
-			break
-		}
-		if time.Now().After(deadline) {
-			release()
-			t.Fatal("timeout waiting for Terminal.Done")
-		}
-	}
-	release() // unblock gateObs.Complete if it's waiting (pre-WP2); no-op post-WP2
-	<-runDone
+	result, _ := waitRunFinished(t, em.Events(), 5*time.Second)
 
-	if first.Terminal.Result.FinalPlan == "" {
-		t.Errorf("first observed Terminal.Done has empty FinalPlan (partial terminal write): %+v", first.Terminal)
+	if result.FinalPlan == "" {
+		t.Errorf("EventRunFinished has empty FinalPlan (partial terminal write): %+v", result)
 	}
-	if first.Terminal.Result.RunDir == "" {
-		t.Errorf("first observed Terminal.Done has empty RunDir (partial terminal write): %+v", first.Terminal)
+	if result.RunDir == "" {
+		t.Errorf("EventRunFinished has empty RunDir (partial terminal write): %+v", result)
 	}
 }

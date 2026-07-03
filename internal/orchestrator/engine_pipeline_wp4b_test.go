@@ -103,25 +103,6 @@ func waitSocketDialable(t *testing.T, socketPath string, timeout time.Duration) 
 	t.Fatalf("socket %s never became dialable within %s", socketPath, timeout)
 }
 
-// waitTerminal polls (bounded) until obs reports the run finished.
-func waitTerminal(t *testing.T, obs *ObsStore, timeout time.Duration) ObsSnapshot {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		snap := obs.Snapshot()
-		if snap.Terminal.Done {
-			return snap
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("run did not reach Terminal.Done within %s", timeout)
-		}
-		select {
-		case <-obs.NotifyCh():
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
-}
-
 // writeSleepyStub writes a small self-terminating script that sleeps briefly
 // before exiting cleanly — long enough that a run driven by it is reliably
 // still "in flight" (its forwarder still alive) when the test injects a
@@ -183,8 +164,8 @@ func wp4bInput() Input {
 // sequential Engine.Start runs on one Engine, with the QuestionBridge started
 // exactly once (as tui.Run would), must (a) join run 1's question-forwarder
 // before its terminal state is observable, (b) route a question arriving
-// during run 2 to run 2's ObsStore — never run 1's — and (c) never rebind the
-// bridge's socket.
+// during run 2 onto run 2's event bus — never run 1's (already-finished and
+// closed) bus — and (c) never rebind the bridge's socket.
 func TestEngineStart_QuestionBridgeLifecycle(t *testing.T) {
 	// A Unix domain socket path is capped at ~104 bytes (macOS sockaddr_un);
 	// t.TempDir() nests under the test name and easily overflows that, so this
@@ -213,7 +194,7 @@ func TestEngineStart_QuestionBridgeLifecycle(t *testing.T) {
 	run1Ctx, run1Cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer run1Cancel()
 	handle1 := engine.Start(run1Ctx, wp4bInput())
-	waitTerminal(t, handle1.Obs, 10*time.Second)
+	waitRunFinished(t, handle1.Events, 10*time.Second)
 
 	// (a) run-1's forwarder must already be joined by the time its terminal
 	// state is observable — otherwise an observer reacting to completion (the
@@ -232,8 +213,8 @@ func TestEngineStart_QuestionBridgeLifecycle(t *testing.T) {
 	defer run2Cancel()
 	handle2 := engine.Start(run2Ctx, wp4bInput())
 
-	// (b) A question arriving while run 2 is in flight must land in run 2's
-	// ObsStore — never run 1's (already-finished) store.
+	// (b) A question arriving while run 2 is in flight must land on run 2's
+	// event bus — never run 1's (already-finished and closed) bus.
 	answerCh := make(chan mcp.Answer, 1)
 	askErrCh := make(chan error, 1)
 	askCtx, askCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -248,24 +229,26 @@ func TestEngineStart_QuestionBridgeLifecycle(t *testing.T) {
 	}()
 
 	var questionID string
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.After(5 * time.Second)
+waitQuestion:
 	for {
-		if snap2 := handle2.Obs.Snapshot(); snap2.HasQuestion {
-			questionID = snap2.UserQuestion.ID
-			break
+		select {
+		case ev, ok := <-handle2.Events:
+			if !ok {
+				t.Fatal("run-2's event bus closed before a question arrived")
+			}
+			if qa, ok := ev.(EventQuestionAsked); ok {
+				questionID = qa.ToolCall.ID
+				break waitQuestion
+			}
+		case <-deadline:
+			t.Fatal("question never landed on run-2's event bus within the grace period")
 		}
-		if handle1.Obs.Snapshot().HasQuestion {
-			t.Fatal("question landed in run-1's (finished) ObsStore instead of run-2's (J5/J41)")
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("question never landed in run-2's ObsStore within grace period")
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 
 	// Complete the round trip so the dialing goroutine above unblocks. The
 	// bridge only accepts an answer whose ID matches its pending question
-	// (WP5/J17) — echo the ID this test just observed in run-2's ObsStore.
+	// (WP5/J17) — echo the ID this test just observed on run-2's event bus.
 	bridge.SendAnswer(mcp.Answer{ID: questionID, FreeformText: "ack"})
 	select {
 	case askErr := <-askErrCh:
@@ -275,7 +258,9 @@ func TestEngineStart_QuestionBridgeLifecycle(t *testing.T) {
 		t.Fatal("never received an answer round-trip")
 	}
 
-	waitTerminal(t, handle2.Obs, 10*time.Second)
+	// Drain the rest of run-2's bus until RunFinished (the question event
+	// already consumed above was the first of possibly several events).
+	waitRunFinished(t, handle2.Events, 10*time.Second)
 
 	// (c) exactly one bound socket listener across both runs: if Engine.Start
 	// had (incorrectly) re-run the bridge internally, the socket file would

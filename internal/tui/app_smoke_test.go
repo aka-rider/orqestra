@@ -6,7 +6,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
 // hydratedModels returns a named set of models covering all stateful TUI views.
@@ -40,14 +39,13 @@ func hydratedModels(t *testing.T) map[string]Model {
 		m.pipelineScreen.finalPlan = "# Plan\n\n## Goal\nDone."
 		m.pipelineScreen.workerValidation = "pass"
 		m.pipelineScreen.agents = []AgentRow{
-			{ID: "researcher", State: AgentStateDone, Elapsed: 30 * time.Second, StartedAt: time.Now().Add(-30 * time.Second), InputTokens: 2000, OutputTokens: 1000},
+			{
+				ID: "researcher", State: AgentStateDone,
+				Elapsed: 30 * time.Second, StartedAt: time.Now().Add(-30 * time.Second),
+				InputTokens: 2000, OutputTokens: 1000,
+				Activities: []toolActivity{{Tool: "Read", Detail: "file.go"}},
+			},
 		}
-
-		sb := orchestrator.NewStreamRing(50)
-		sb.SetAgent("researcher")
-		sb.AppendActivity("Read", "file.go")
-		sb.SetAgent("architect") // snaps "researcher"
-		m.pipelineScreen.SetStreamBuf(sb)
 
 		models["pipeline-completion"] = m
 	}

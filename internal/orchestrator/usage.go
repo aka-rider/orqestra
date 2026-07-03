@@ -5,25 +5,18 @@ import (
 	"time"
 )
 
+// AgentID is the typed identifier for orchestrator agents. Moved here from
+// the deleted stream_history.go (Tier B/WP10): this is a core cross-cutting
+// type (Observer, StepContext, RunEvent all use it), not stream-display
+// state, so it survives the stream-ring deletion.
+type AgentID string
+
 // AgentMeta describes the model configuration for an agent role.
 type AgentMeta struct {
 	ModelRef      string `json:"model_ref"`
 	ModelDisplay  string `json:"model_display,omitempty"`
 	Provider      string `json:"provider,omitempty"`
 	ContextWindow int64  `json:"context_window,omitempty"`
-}
-
-// AgentSnapshot captures the execution state of a single agent.
-type AgentSnapshot struct {
-	AgentID   string    `json:"agent_id"`
-	Meta      AgentMeta `json:"meta"`
-	Input     int64     `json:"input"`
-	Output    int64     `json:"output"`
-	CallCount int       `json:"call_count"`
-	StartTime time.Time `json:"start_time"`
-	EndTime   time.Time `json:"end_time,omitempty"`
-	Status    string    `json:"status"` // "running", "done", "failed"
-	Error     string    `json:"error,omitempty"`
 }
 
 // agentAccum is the mutable internal state for a single agent.

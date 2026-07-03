@@ -11,7 +11,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
-	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
 	"github.com/xiii/orqestra/internal/tui/keymap"
@@ -65,6 +64,13 @@ func viewString(m Model) string {
 	return m.View().Content
 }
 
+// applyEvent drives one RunEvent through Model.Update as a real runEventMsg
+// would arrive off handle.Events, returning the updated Model.
+func applyEvent(m Model, ev orchestrator.RunEvent) Model {
+	result, _ := m.Update(runEventMsg{ev: ev})
+	return result.(Model)
+}
+
 func TestTUI_PromptSubmit(t *testing.T) {
 	m := testModel()
 	// Set prompt value directly (textarea handles rune input internally)
@@ -83,15 +89,12 @@ func TestTUI_PromptSubmit(t *testing.T) {
 	if model.pipelineScreen.goal != "add a feature" {
 		t.Errorf("expected goal 'add a feature', got %q", model.pipelineScreen.goal)
 	}
-	// ObsStore + Control must be set on the returned model (regression: evaluation-order bug).
-	if model.obs == nil {
-		t.Error("model.obs is nil after prompt submit — pipeline state will never be received")
+	// Events + Intents must be set on the returned model (regression: evaluation-order bug).
+	if model.events == nil {
+		t.Error("model.events is nil after prompt submit — pipeline state will never be received")
 	}
-	if model.pipelineScreen.streamBuf == nil {
-		t.Error("model.pipelineScreen.streamBuf is nil after prompt submit — streaming output will not display")
-	}
-	if model.ctrl == nil {
-		t.Error("model.ctrl is nil after prompt submit — gate responses will never be sent")
+	if model.intents == nil {
+		t.Error("model.intents is nil after prompt submit — gate/question responses will never be sent")
 	}
 	if model.cancelCause == nil {
 		t.Error("model.cancelCause is nil after prompt submit — pipeline cannot be stopped")
@@ -120,14 +123,13 @@ func TestTUI_PlanApproval(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
 
-	snap := orchestrator.ObsSnapshot{
-		HasGate: true,
-		Gate: orchestrator.GateRequest{
+	m = applyEvent(m, orchestrator.EventGateOpened{
+		GateID: 1,
+		Request: orchestrator.GateRequest{
 			Position:          orchestrator.GateAfterDeliberation,
 			FinalPlanMarkdown: "# Plan\n\n## Goal\nAdd feature X\n\n## Work Packages\n\n### 1. Step 1",
 		},
-	}
-	m.pipelineScreen.ApplySnapshot(snap, m.width)
+	})
 
 	if !m.pipelineScreen.awaitingPlanDecision {
 		t.Error("expected the gate to open (awaitingPlanDecision)")
@@ -246,10 +248,9 @@ func TestTUI_UserQuestion_CtrlCSkipsWithDefault(t *testing.T) {
 	if !mm.ctrlCPending {
 		t.Fatalf("expected ctrlCPending after first Ctrl+C")
 	}
-	// testModel() does not wire QuestionBridge, so processIntent silently
-	// drops the SubmitQuestionAnswerIntent (model.go: bridge==nil branch).
-	// The bridge-receives-Skipped:true assertion lives in the direct
-	// HandleCtrlCCancel test in screen_pipeline_test.go.
+	// testModel() does not wire an Intents channel, so processIntent's
+	// sendIntent Cmd is a no-op when invoked (nil-guarded). The bridge
+	// round-trip assertion lives in the orchestrator/mcp packages' own tests.
 }
 
 func TestTUI_NewRun(t *testing.T) {
@@ -298,23 +299,15 @@ func TestTUI_SidebarUpdates(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
 
-	// Agent appears in snapshot as running.
-	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
-		Agents: []orchestrator.AgentSnapshot{
-			{AgentID: "researcher", Status: "running"},
-		},
-	}, m.width)
+	// Agent appears as running.
+	m = applyEvent(m, orchestrator.EventAgentStarted{AgentID: "researcher"})
 
 	if len(m.pipelineScreen.agents) != 1 || m.pipelineScreen.agents[0].State != AgentStateRunning {
 		t.Errorf("expected 1 agent running, got %+v", m.pipelineScreen.agents)
 	}
 
 	// Agent transitions to done.
-	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
-		Agents: []orchestrator.AgentSnapshot{
-			{AgentID: "researcher", Status: "done"},
-		},
-	}, m.width)
+	m = applyEvent(m, orchestrator.EventAgentDone{AgentID: "researcher"})
 
 	if m.pipelineScreen.agents[0].State != AgentStateDone {
 		t.Errorf("expected agent state 'done', got %q", m.pipelineScreen.agents[0].State)
@@ -383,12 +376,9 @@ func TestTUI_CompletionValidation(t *testing.T) {
 	m.pipelineScreen.content = ContentStreaming
 	m.pipelineScreen.active = true
 
-	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
-		Terminal: orchestrator.TerminalState{
-			Done:   true,
-			Result: orchestrator.Result{WorkerValidation: "✓ tests pass\n✓ build succeeds"},
-		},
-	}, m.width)
+	m = applyEvent(m, orchestrator.EventRunFinished{
+		Result: orchestrator.Result{WorkerValidation: "✓ tests pass\n✓ build succeeds"},
+	})
 
 	if m.pipelineScreen.content != ContentCompletion {
 		t.Errorf("expected ContentCompletion, got %d", m.pipelineScreen.content)
@@ -469,7 +459,7 @@ func TestTUI_TickStopsAfterPrompt(t *testing.T) {
 	m := testModel()
 	m.state = StatePrompt
 
-	// tickMsg should not schedule another tick when not in pipeline
+	// tickMsg should not schedule another tick when not in pipeline state
 	_, cmd := m.Update(tickMsg(time.Now()))
 	if cmd != nil {
 		t.Error("expected no tick command when not in pipeline state")
@@ -485,22 +475,13 @@ func TestTUI_StreamingOutput(t *testing.T) {
 	m.height = 40
 
 	_ = m.pipelineScreen.Start("stream test") // activates streaming console
-	stream := orchestrator.NewStreamRing(200)
-	m.pipelineScreen.streamBuf = stream
-	stream.SetAgent("researcher")
+	m.pipelineScreen.timeline.SetRect(m.regions.timeline)
 
-	// Drain a completed line + a streaming delta through DrainStreamUpdates.
-	updates := make(chan orchestrator.StreamEntry, 3)
-	updates <- orchestrator.StreamEntry{Kind: orchestrator.EntryText, Text: "Completed line\n"}
-	updates <- orchestrator.StreamEntry{Kind: orchestrator.EntryDelta, Text: "Partial in progress"}
-	close(updates)
-	m.pipelineScreen.DrainStreamUpdates(updates)
+	m = applyEvent(m, orchestrator.EventAgentStarted{AgentID: "researcher"})
+	m = applyEvent(m, orchestrator.EventDelta{AgentID: "researcher", Text: "Partial in progress"})
 
 	m.recalculateLayout()
 
-	// With TurnGroup: completed prose accumulates in prose[], partial in brief.
-	// Once a delta arrives it becomes the brief, so "Completed line" is stored
-	// but the view shows the streaming partial as the ⏺ header.
 	view := viewString(m)
 	if !strings.Contains(view, "Partial in progress") {
 		t.Error("expected streaming delta to appear in view (TurnGroup brief and console)")
@@ -511,67 +492,6 @@ func TestTUI_StreamingOutput(t *testing.T) {
 	}
 	if m.pipelineScreen.currentTurn == nil {
 		t.Error("expected active TurnGroup after streaming")
-	}
-}
-
-func TestTUI_StreamingOutputReset(t *testing.T) {
-	stream := orchestrator.NewStreamRing(200)
-
-	// Simulate first agent
-	stream.SetAgent("researcher")
-	stream.AppendText("researcher output line\n")
-
-	agentID, lines, _ := stream.SnapshotCompat()
-	if agentID != "researcher" {
-		t.Errorf("expected agent 'researcher', got %q", agentID)
-	}
-	if len(lines) == 0 {
-		t.Fatal("expected stream lines from researcher")
-	}
-
-	// Simulate second agent — buffer should reset
-	stream.SetAgent("architect")
-
-	agentID2, lines2, _ := stream.SnapshotCompat()
-	if agentID2 != "architect" {
-		t.Errorf("expected agent 'architect', got %q", agentID2)
-	}
-	if len(lines2) != 0 {
-		t.Errorf("expected stream buffer cleared on new agent, got %d lines", len(lines2))
-	}
-}
-
-func TestStreamBuffer_TokenAccumulation(t *testing.T) {
-	stream := orchestrator.NewStreamRing(200)
-	stream.SetAgent("researcher")
-
-	// Simulate token-level writes (each content_block_delta is a few chars)
-	stream.AppendText("I")
-	stream.AppendText("'ll")
-	stream.AppendText(" analyze")
-	stream.AppendText(" the")
-	stream.AppendText(" request")
-
-	_, lines, _ := stream.SnapshotCompat()
-	if len(lines) != 1 {
-		t.Errorf("expected 1 line from token-level writes, got %d: %v", len(lines), lines)
-	}
-	if lines[0] != "I'll analyze the request" {
-		t.Errorf("unexpected accumulated line: %q", lines[0])
-	}
-
-	// Now write a newline to start a new line
-	stream.AppendText(".\nNext line here")
-
-	_, lines, _ = stream.SnapshotCompat()
-	if len(lines) != 2 {
-		t.Errorf("expected 2 lines after newline, got %d: %v", len(lines), lines)
-	}
-	if lines[0] != "I'll analyze the request." {
-		t.Errorf("unexpected first line: %q", lines[0])
-	}
-	if lines[1] != "Next line here" {
-		t.Errorf("unexpected second line: %q", lines[1])
 	}
 }
 
@@ -655,35 +575,24 @@ func TestTUI_PlanGateBlocksOverwrite(t *testing.T) {
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
 
-	// Snapshot with gate open
-	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
-		HasGate: true,
-		Gate: orchestrator.GateRequest{
+	m = applyEvent(m, orchestrator.EventGateOpened{
+		GateID: 1,
+		Request: orchestrator.GateRequest{
 			Position:          orchestrator.GateAfterDeliberation,
 			FinalPlanMarkdown: "# Plan\n\n## Goal\nTest",
 		},
-	}, m.width)
+	})
 
 	if !m.pipelineScreen.awaitingPlanDecision {
 		t.Fatalf("expected ContentHumanGate, got %d", m.pipelineScreen.content)
 	}
-	if !m.pipelineScreen.awaitingPlanDecision {
-		t.Fatal("expected awaitingPlanDecision=true")
-	}
 
-	// Snapshot with a stale phase change but gate still open
-	m.pipelineScreen.ApplySnapshot(orchestrator.ObsSnapshot{
-		Phase:   orchestrator.PhaseExecuting,
-		HasGate: true,
-		Gate: orchestrator.GateRequest{
-			Position:          orchestrator.GateAfterDeliberation,
-			FinalPlanMarkdown: "# Plan\n\n## Goal\nTest",
-		},
-	}, m.width)
+	// An unrelated event (e.g. a phase transition) arriving while the gate is
+	// open must never clobber the open gate.
+	m = applyEvent(m, orchestrator.EventPhaseStarted{Phase: orchestrator.PhaseExecuting})
 
-	// Gate must NOT be overwritten
 	if !m.pipelineScreen.awaitingPlanDecision {
-		t.Errorf("gate was overwritten by stale phase change: content=%d", m.pipelineScreen.content)
+		t.Errorf("gate was overwritten by an unrelated event: content=%d", m.pipelineScreen.content)
 	}
 }
 
@@ -729,40 +638,33 @@ func TestTUI_EditorReturn(t *testing.T) {
 	// channel removed — no decision should be sent yet (confirmation is pending), checked by state only
 }
 
-// TestTUI_DrainLoopPlanGate exercises the ObsStore-based snapshot path:
-// agent-done and gate-open are written to the store, then obsNotifyMsg fires,
-// leaving the model in ContentHumanGate.
-func TestTUI_DrainLoopPlanGate(t *testing.T) {
+// TestTUI_EventLoopPlanGate exercises the event-driven path end to end: a
+// runEventMsg carrying EventAgentStarted then EventGateOpened arrives, and
+// Update leaves the model awaiting the plan decision with a re-armed
+// waitForEvent command.
+func TestTUI_EventLoopPlanGate(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.content = ContentStreaming
 	m.pipelineScreen.active = true
 	m.pipelineScreen.agents = []AgentRow{{ID: "architect", State: AgentStateRunning, StartedAt: time.Now()}}
 
-	obs := orchestrator.NewObsStore()
-	ctrl := orchestrator.NewControl(obs)
-	m.obs = obs
-	m.ctrl = ctrl
+	events := make(chan orchestrator.RunEvent, 4)
+	m.events = events
 
 	planMD := "# Plan\n\n## Goal\nAdd X.\n\n## Work Packages\n\n### 1. Step 1"
 
-	// Populate obs state: agent done, then gate opened.
-	obs.AgentStarted("architect", orchestrator.AgentMeta{})
-	obs.AgentDone("architect", harness.TokenUsage{Input: 100, Output: 50})
-	obs.GateOpened(orchestrator.GateRequest{
-		Position:          orchestrator.GateAfterDeliberation,
-		FinalPlanMarkdown: planMD,
-	})
-
-	// Fire obsNotifyMsg — ApplySnapshot detects the gate and switches to ContentHumanGate.
-	result, cmd := m.Update(obsNotifyMsg{})
+	result, cmd := m.Update(runEventMsg{ev: orchestrator.EventGateOpened{
+		GateID: 1,
+		Request: orchestrator.GateRequest{
+			Position:          orchestrator.GateAfterDeliberation,
+			FinalPlanMarkdown: planMD,
+		},
+	}})
 	model := result.(Model)
 
 	if !model.pipelineScreen.awaitingPlanDecision {
-		t.Errorf("expected ContentHumanGate after obsNotifyMsg, got %d", model.pipelineScreen.content)
-	}
-	if !model.pipelineScreen.awaitingPlanDecision {
-		t.Error("expected awaitingPlanDecision=true")
+		t.Errorf("expected the gate to open, got content=%d", model.pipelineScreen.content)
 	}
 	if !model.pipelineScreen.hasPlan {
 		t.Error("expected hasPlan=true")
@@ -770,56 +672,42 @@ func TestTUI_DrainLoopPlanGate(t *testing.T) {
 	if model.pipelineScreen.finalPlan != planMD {
 		t.Errorf("expected finalPlan to be set, got %q", model.pipelineScreen.finalPlan)
 	}
-	// cmd should be non-nil: notifyCmd(obs.NotifyCh()) since terminal.Done=false
+	// cmd should be non-nil: waitForEvent re-arms since this was not RunFinished.
 	if cmd == nil {
-		t.Error("expected non-nil cmd (notifyCmd)")
+		t.Error("expected non-nil cmd (waitForEvent re-arm)")
 	}
 }
 
-// TestTUI_ChannelCloseDoesNotOverwriteGate verifies that when the pipeline
-// finishes (terminal.Done=true) while awaitingPlanDecision, the gate is NOT
-// overwritten by the Terminal.Done branch in ApplySnapshot.
-func TestTUI_ChannelCloseDoesNotOverwriteGate(t *testing.T) {
+// TestTUI_RunFinishedDoesNotOverwriteGate verifies that when the pipeline
+// finishes while awaitingPlanDecision, onRunFinished forces the gate closed
+// (defensive: EventRunFinished is only ever emitted after any real gate
+// loop concluded, but the TUI must never get stuck awaiting a decision no
+// one will send).
+func TestTUI_RunFinishedDoesNotOverwriteGate(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.active = true
 
-	obs := orchestrator.NewObsStore()
-	m.obs = obs
-	m.ctrl = orchestrator.NewControl(obs)
-
-	// Open the gate first so awaitingPlanDecision is set.
-	obs.GateOpened(orchestrator.GateRequest{
-		Position:          orchestrator.GateAfterDeliberation,
-		FinalPlanMarkdown: "# Plan\n\n## Goal\nTest",
+	m = applyEvent(m, orchestrator.EventGateOpened{
+		GateID: 1,
+		Request: orchestrator.GateRequest{
+			Position:          orchestrator.GateAfterDeliberation,
+			FinalPlanMarkdown: "# Plan\n\n## Goal\nTest",
+		},
 	})
-	result, _ := m.Update(obsNotifyMsg{})
-	m = result.(Model)
 
 	if !m.pipelineScreen.awaitingPlanDecision {
-		t.Fatalf("expected ContentHumanGate after gate opened, got %d", m.pipelineScreen.content)
-	}
-	if !m.pipelineScreen.awaitingPlanDecision {
-		t.Fatal("expected awaitingPlanDecision=true")
+		t.Fatalf("expected the gate open, got content=%d", m.pipelineScreen.content)
 	}
 
-	// Now simulate terminal done — the gate guard must prevent overwrite.
-	obs.Finished(orchestrator.Result{Status: orchestrator.StatusFailed}, nil)
-	result, _ = m.Update(obsNotifyMsg{})
-	model := result.(Model)
+	m = applyEvent(m, orchestrator.EventRunFinished{Result: orchestrator.Result{Status: orchestrator.StatusFailed}})
 
-	if !model.pipelineScreen.awaitingPlanDecision {
-		t.Errorf("terminal done overwrote gate: expected ContentHumanGate, got %d", model.pipelineScreen.content)
+	if m.pipelineScreen.awaitingPlanDecision {
+		t.Error("expected onRunFinished to force the gate closed")
 	}
-}
-
-// TestTUI_DrainLoopChannelCloseAfterGate is skipped: the ObsStore path does not
-// have a channel-close race because the pipeline goroutine blocks on the gate
-// (ctrl.Gate blocks until the user decides), so terminal.Done cannot be set
-// while the gate is open. The gate-guard invariant is covered by
-// TestTUI_ChannelCloseDoesNotOverwriteGate.
-func TestTUI_DrainLoopChannelCloseAfterGate(t *testing.T) {
-	t.Skip("skipped: channel-close race not possible with ObsStore/Control gate blocking")
+	if m.pipelineScreen.content != ContentCompletion {
+		t.Errorf("expected ContentCompletion, got %d", m.pipelineScreen.content)
+	}
 }
 
 func TestTUI_ShiftEnterNewline(t *testing.T) {
@@ -852,54 +740,91 @@ func TestTUI_ShiftEnterNewline(t *testing.T) {
 	model3.cancelCause(nil)
 }
 
-// TestApplySnapshot_TerminalErrShowsInCompletion verifies that a pipeline failure
-// reported via obs.Finished is visible in the completion screen — the real path
-// through obsNotifyMsg → ApplySnapshot (not ApplyEvent, which is never called).
-func TestApplySnapshot_TerminalErrShowsInCompletion(t *testing.T) {
+// TestTUI_FinalDeltaRenderedBeforeRunFinished is the J30 gate proof: the
+// emitter guarantees FIFO ordering (a Delta emitted before EventRunFinished
+// is always delivered before it — emitter.go), so by the time the TUI
+// applies EventRunFinished, an EventDelta from the run's final turn must
+// already be reflected in the pipeline screen's accumulated state — never
+// dropped or "arriving too late" to render. This drives the REAL
+// waitForEvent → runEventMsg → Update → re-arm loop (not just a direct
+// ApplyEvent call) over a real buffered channel, with the same event order
+// a real run produces (AgentDone always precedes RunFinished — RunPipeline
+// only reaches Finished after its last agent's Done/Failed).
+func TestTUI_FinalDeltaRenderedBeforeRunFinished(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
+	m.pipelineScreen.content = ContentStreaming
 	m.pipelineScreen.active = true
+	_ = m.pipelineScreen.Start("final delta test")
+	m.recalculateLayout()
 
-	obs := orchestrator.NewObsStore()
-	m.obs = obs
-	m.ctrl = orchestrator.NewControl(obs)
+	events := make(chan orchestrator.RunEvent, 4)
+	events <- orchestrator.EventAgentStarted{AgentID: "worker"}
+	events <- orchestrator.EventDelta{AgentID: "worker", Text: "final words before done"}
+	events <- orchestrator.EventAgentDone{AgentID: "worker"}
+	events <- orchestrator.EventRunFinished{Result: orchestrator.Result{Status: orchestrator.StatusSuccess}}
+	m.events = events
 
-	runErr := errors.New("research: read plan: model session x completed but did not write a plan file")
-	obs.Finished(orchestrator.Result{Status: orchestrator.StatusFailed}, runErr)
-	result, _ := m.Update(obsNotifyMsg{})
-	model := result.(Model)
-
-	if model.pipelineScreen.lastErr == nil {
-		t.Fatal("lastErr is nil after failed pipeline; ApplySnapshot must copy snap.Terminal.Err")
+	// Drive the loop exactly as bubbletea would: invoke the Cmd, feed its Msg
+	// back into Update, repeat until Update stops returning a Cmd (RunFinished).
+	var cmd tea.Cmd = waitForEvent(m.events)
+	for cmd != nil {
+		msg := cmd()
+		if msg == nil {
+			break
+		}
+		var result tea.Model
+		result, cmd = m.Update(msg)
+		m = result.(Model)
 	}
-	out := model.pipelineScreen.viewCompletion(80)
-	if !strings.Contains(out, "Error:") {
-		t.Errorf("viewCompletion missing 'Error:' line:\n%s", out)
+
+	if m.pipelineScreen.content != ContentCompletion {
+		t.Fatalf("expected ContentCompletion after RunFinished, got %d", m.pipelineScreen.content)
 	}
-	if !strings.Contains(model.pipelineScreen.lastErr.Error(), "did not write a plan file") {
-		t.Errorf("unexpected lastErr content: %v", model.pipelineScreen.lastErr)
+	// The delta must have reached the timeline (accumulated into the turn
+	// that was sealed+promoted before the done-summary was appended) — never
+	// silently dropped or arriving "too late" to render.
+	if !strings.Contains(m.pipelineScreen.timeline.View(), "final words before done") {
+		t.Errorf("expected the final delta text in the timeline, got:\n%s", m.pipelineScreen.timeline.View())
 	}
 }
 
-// TestApplySnapshot_ConflictFilesShowInCompletion is the WP3/J10 TUI gate: when
-// Result.ConflictFiles is non-empty (integrator gave up on a merge conflict),
-// the done screen must render the conflict file list — never hide it behind a
-// bare completion event.
-func TestApplySnapshot_ConflictFilesShowInCompletion(t *testing.T) {
+// TestApplyEvent_TerminalErrShowsInCompletion verifies that a pipeline
+// failure reported via EventRunFinished is visible in the completion screen
+// — the real path through runEventMsg → ApplyEvent.
+func TestApplyEvent_TerminalErrShowsInCompletion(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.active = true
 
-	obs := orchestrator.NewObsStore()
-	m.obs = obs
-	m.ctrl = orchestrator.NewControl(obs)
+	runErr := errors.New("research: read plan: model session x completed but did not write a plan file")
+	m = applyEvent(m, orchestrator.EventRunFinished{Result: orchestrator.Result{Status: orchestrator.StatusFailed}, Err: runErr})
+
+	if m.pipelineScreen.lastErr == nil {
+		t.Fatal("lastErr is nil after failed pipeline; ApplyEvent must copy EventRunFinished.Err")
+	}
+	out := m.pipelineScreen.viewCompletion(80)
+	if !strings.Contains(out, "Error:") {
+		t.Errorf("viewCompletion missing 'Error:' line:\n%s", out)
+	}
+	if !strings.Contains(m.pipelineScreen.lastErr.Error(), "did not write a plan file") {
+		t.Errorf("unexpected lastErr content: %v", m.pipelineScreen.lastErr)
+	}
+}
+
+// TestApplyEvent_ConflictFilesShowInCompletion is the WP3/J10 TUI gate: when
+// Result.ConflictFiles is non-empty (integrator gave up on a merge conflict),
+// the done screen must render the conflict file list — never hide it behind a
+// bare completion event.
+func TestApplyEvent_ConflictFilesShowInCompletion(t *testing.T) {
+	m := testModel()
+	m.state = StatePipeline
+	m.pipelineScreen.active = true
 
 	conflictFiles := []string{"internal/foo.go", "internal/bar.go"}
-	obs.Finished(orchestrator.Result{Status: orchestrator.StatusFailed, ConflictFiles: conflictFiles}, nil)
-	result, _ := m.Update(obsNotifyMsg{})
-	model := result.(Model)
+	m = applyEvent(m, orchestrator.EventRunFinished{Result: orchestrator.Result{Status: orchestrator.StatusFailed, ConflictFiles: conflictFiles}})
 
-	out := model.pipelineScreen.viewCompletion(80)
+	out := m.pipelineScreen.viewCompletion(80)
 	for _, f := range conflictFiles {
 		if !strings.Contains(out, f) {
 			t.Errorf("viewCompletion missing conflict file %q:\n%s", f, out)
@@ -910,87 +835,64 @@ func TestApplySnapshot_ConflictFilesShowInCompletion(t *testing.T) {
 	}
 }
 
-// TestApplySnapshot_ValidationVerdictShowsInCompletion is the WP8/J33 TUI
+// TestApplyEvent_ValidationVerdictShowsInCompletion is the WP8/J33 TUI
 // gate: when Result.ValidationVerdict is FAIL (worker self-reported failure),
 // the done screen must render it — never leave a failed self-validation
 // invisible next to the completion summary.
-func TestApplySnapshot_ValidationVerdictShowsInCompletion(t *testing.T) {
+func TestApplyEvent_ValidationVerdictShowsInCompletion(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.active = true
 
-	obs := orchestrator.NewObsStore()
-	m.obs = obs
-	m.ctrl = orchestrator.NewControl(obs)
-
 	// Deliberately no WorkerValidation raw text here: this isolates the check to
 	// the parsed verdict label itself, not incidental substring overlap with raw
 	// validation prose (e.g. "...tests failed" would contain "FAIL" too).
-	obs.Finished(orchestrator.Result{
+	m = applyEvent(m, orchestrator.EventRunFinished{Result: orchestrator.Result{
 		Status:            orchestrator.StatusSuccess,
 		ValidationVerdict: agent.VerdictFail,
-	}, nil)
-	result, _ := m.Update(obsNotifyMsg{})
-	model := result.(Model)
+	}})
 
-	out := model.pipelineScreen.viewCompletion(80)
+	out := m.pipelineScreen.viewCompletion(80)
 	if !strings.Contains(strings.ToUpper(out), "FAIL") {
 		t.Errorf("viewCompletion does not render the FAIL validation verdict:\n%s", out)
 	}
 }
 
-// TestApplySnapshot_ValidationVerdictUnknownWhenNotRun proves the done screen
+// TestApplyEvent_ValidationVerdictUnknownWhenNotRun proves the done screen
 // never claims a verdict it doesn't have: when validation never ran (empty
 // Result.ValidationVerdict) but other completion state exists, it renders
 // UNKNOWN rather than defaulting to something that looks like a pass.
-func TestApplySnapshot_ValidationVerdictUnknownWhenNotRun(t *testing.T) {
+func TestApplyEvent_ValidationVerdictUnknownWhenNotRun(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.active = true
 
-	obs := orchestrator.NewObsStore()
-	m.obs = obs
-	m.ctrl = orchestrator.NewControl(obs)
-
-	obs.Finished(orchestrator.Result{
+	m = applyEvent(m, orchestrator.EventRunFinished{Result: orchestrator.Result{
 		Status:           orchestrator.StatusSuccess,
 		WorkerValidation: "some raw text but no parsed verdict",
-	}, nil)
-	result, _ := m.Update(obsNotifyMsg{})
-	model := result.(Model)
+	}})
 
-	out := model.pipelineScreen.viewCompletion(80)
+	out := m.pipelineScreen.viewCompletion(80)
 	if !strings.Contains(strings.ToUpper(out), "UNKNOWN") {
 		t.Errorf("viewCompletion does not render UNKNOWN for an absent validation verdict:\n%s", out)
 	}
 }
 
-// TestApplySnapshot_AgentFailedErrShowsInCompletion verifies that an agent
-// failure error stored in AgentSnapshot.Error reaches s.lastErr via ApplySnapshot.
-func TestApplySnapshot_AgentFailedErrShowsInCompletion(t *testing.T) {
+// TestApplyEvent_AgentFailedErrShowsInCompletion verifies that an agent
+// failure error carried on EventAgentFailed reaches s.lastErr via ApplyEvent.
+func TestApplyEvent_AgentFailedErrShowsInCompletion(t *testing.T) {
 	m := testModel()
 	m.state = StatePipeline
 	m.pipelineScreen.active = true
 
-	obs := orchestrator.NewObsStore()
-	m.obs = obs
-	m.ctrl = orchestrator.NewControl(obs)
-
 	agentErr := errors.New("research: read plan: model did not write a plan file")
-	obs.AgentStarted("researcher", orchestrator.AgentMeta{ModelRef: "test"})
-	// First tick: registers agent in knownAgents as "running".
-	result, _ := m.Update(obsNotifyMsg{})
-	m = result.(Model)
+	m = applyEvent(m, orchestrator.EventAgentStarted{AgentID: "researcher", Meta: orchestrator.AgentMeta{ModelRef: "test"}})
+	m = applyEvent(m, orchestrator.EventAgentFailed{AgentID: "researcher", Err: agentErr})
 
-	obs.AgentFailed("researcher", agentErr)
-	// Second tick: "running" → "failed" transition sets lastErr.
-	result, _ = m.Update(obsNotifyMsg{})
-	model := result.(Model)
-
-	if model.pipelineScreen.lastErr == nil {
-		t.Fatal("lastErr is nil after agent failure; AgentSnapshot.Error must propagate through ApplySnapshot")
+	if m.pipelineScreen.lastErr == nil {
+		t.Fatal("lastErr is nil after agent failure; EventAgentFailed.Err must propagate through ApplyEvent")
 	}
-	if !strings.Contains(model.pipelineScreen.lastErr.Error(), "did not write a plan file") {
-		t.Errorf("unexpected lastErr: %v", model.pipelineScreen.lastErr)
+	if !strings.Contains(m.pipelineScreen.lastErr.Error(), "did not write a plan file") {
+		t.Errorf("unexpected lastErr: %v", m.pipelineScreen.lastErr)
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
-	"github.com/xiii/orqestra/internal/orchestrator"
 )
 
 // --- View rendering ---
@@ -156,12 +155,8 @@ func (s PipelineScreen) viewCompletion(width int) string {
 		b.WriteString(fmt.Sprintf(" Agent: %s (%s)  ⏱ %s  Tokens: %s\n",
 			goalStyle.Render(a.ID), a.State, agentElapsed, tokens))
 
-		var activities []orchestrator.Activity
-		if s.streamBuf != nil {
-			activities = s.streamBuf.AgentActivities(a.ID)
-		}
-		var fileActivities []orchestrator.Activity
-		for _, act := range activities {
+		var fileActivities []toolActivity
+		for _, act := range a.Activities {
 			if isFilePathTool(act.Tool) {
 				fileActivities = append(fileActivities, act)
 			}
@@ -189,7 +184,7 @@ func formatActivityLine(tool, detail, cwd string) string {
 }
 
 // renderActivityLog renders the most recent tool-use entries as a compact log.
-func renderActivityLog(activities []orchestrator.Activity, cwd string, maxShow int) string {
+func renderActivityLog(activities []toolActivity, cwd string, maxShow int) string {
 	start := 0
 	if len(activities) > maxShow {
 		start = len(activities) - maxShow

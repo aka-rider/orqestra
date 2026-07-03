@@ -7,15 +7,57 @@ import (
 	"time"
 )
 
+// TestGateFunc_StaleDecisionNotConsumedAtNextGate is the WP4a/J2 gate proof,
+// ported to the WP10 gate mechanism (gate.go's newGateFunc replaces
+// Control.Gate): a GateDecisionIntent delivered while NO gate is open (a
+// double keypress, or a decision racing a gate's close) must NOT be
+// silently handed to the NEXT Gate call — newGateFunc must drain it before
+// blocking, so only a FRESH decision, submitted while THIS gate is open,
+// satisfies it.
+func TestGateFunc_StaleDecisionNotConsumedAtNextGate(t *testing.T) {
+	em := newEmitter(64)
+	decisions := make(chan GateDecisionIntent, 1)
+	gate := newGateFunc(em, decisions)
+
+	// Simulate a decision landing in the buffer with no gate open to receive
+	// it. GateID 1 deliberately matches what the FIRST real gate below will
+	// be assigned (newGateFunc's sequence counter starts at 1) — this is the
+	// case the GateID-mismatch check alone would NOT catch; only draining the
+	// stale decision before the gate opens (not just matching IDs) prevents
+	// it from satisfying the gate.
+	decisions <- GateDecisionIntent{GateID: 1, Decision: Decision{Type: DecisionApprove}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	type gateResult struct {
+		dec Decision
+		err error
+	}
+	resultCh := make(chan gateResult, 1)
+	go func() {
+		dec, err := gate(ctx, GateRequest{Position: GateAfterDeliberation})
+		resultCh <- gateResult{dec, err}
+	}()
+
+	select {
+	case res := <-resultCh:
+		if res.err == nil {
+			t.Fatalf("Gate returned decision %+v with no error — a stale pre-gate decision satisfied "+
+				"this gate before the user ever saw it (J2)", res.dec)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Gate did not return within the grace period")
+	}
+}
+
 // TestRunPipeline_EditAutoApprove_OneGateCycle is the WP4a/J26 gate proof: a
 // confirmed edit (DecisionEdit with AutoApprove and no Comment) is final
 // approval. It must NOT route through Revise and re-open the gate for a
 // second confirmation — the pipeline's final plan must equal the edited text
 // after exactly one gate presentation.
 func TestRunPipeline_EditAutoApprove_OneGateCycle(t *testing.T) {
-	obs := NewObsStore()
-	ctrl := NewControl(obs)
-	sc := noopStepContext(obs, ctrl)
+	sc, events, decisions := newGateTestContext()
 
 	setup := PipelineSetup{
 		Execution: true, Validation: true,
@@ -32,39 +74,35 @@ func TestRunPipeline_EditAutoApprove_OneGateCycle(t *testing.T) {
 	gateCount := 0
 	var gateMu sync.Mutex
 	go func() {
-		// Edge-triggered via Rev, not via observing a HasGate true→false→true
-		// transition: NotifyCh is a coalescing wake signal and Snapshot is a
-		// point-in-time poll, so a fast open→close→reopen can skip the closed
-		// window entirely between two polls. GateOpened always bumps Rev, so a
-		// distinct gate opening always carries a Rev this driver hasn't handled
-		// yet — even if the closed state between two openings was never observed
-		// — while redundant wakeups on the SAME still-open gate keep the same
-		// Rev and are correctly ignored.
-		var lastHandledRev uint64
-		handled := false
+		// EventGateOpened is edge-triggered — every delivery is a genuinely NEW
+		// gate opening (unlike the pre-WP10 Snapshot/NotifyCh polling loop,
+		// which needed a Rev-based dedup to avoid double-counting the SAME
+		// still-open gate observed twice).
 		for {
-			snap := obs.Snapshot()
-			if snap.HasGate && snap.Gate.Position == GateAfterDeliberation && (!handled || snap.Rev != lastHandledRev) {
-				handled = true
-				lastHandledRev = snap.Rev
+			select {
+			case ev, ok := <-events:
+				if !ok {
+					return
+				}
+				g, ok := ev.(EventGateOpened)
+				if !ok || g.Request.Position != GateAfterDeliberation {
+					continue
+				}
 				gateMu.Lock()
 				gateCount++
 				first := gateCount == 1
 				gateMu.Unlock()
 				if first {
-					ctrl.Submit(Decision{
+					decisions <- GateDecisionIntent{GateID: g.GateID, Decision: Decision{
 						Type:          DecisionEdit,
 						EditedContent: editedContent,
 						AutoApprove:   true,
-					})
+					}}
 				} else {
 					// Only reached if the gate incorrectly re-opens (J26) — approve
 					// so RunPipeline still completes quickly instead of timing out.
-					ctrl.Submit(Decision{Type: DecisionApprove})
+					decisions <- GateDecisionIntent{GateID: g.GateID, Decision: Decision{Type: DecisionApprove}}
 				}
-			}
-			select {
-			case <-obs.NotifyCh():
 			case <-ctx.Done():
 				return
 			}

@@ -201,17 +201,13 @@ func TestEngineStart_NoEventConsumer_DoesNotBlockPipeline(t *testing.T) {
 
 	// Deliberately do NOT read from handle.Events while the run is in
 	// flight — the adversarial "no consumer" condition. The pipeline must
-	// still reach a terminal state.
-	for {
-		snap := handle.Obs.Snapshot()
-		if snap.Terminal.Done {
-			break
-		}
-		select {
-		case <-handle.Obs.NotifyCh():
-		case <-ctx.Done():
-			t.Fatal("timed out waiting for the run to finish — an undrained event bus must never block the pipeline")
-		}
+	// still reach a terminal state; runDone is closed independently of
+	// whether Events is ever drained (white-box test instrumentation, see
+	// RunHandle.runDone's doc comment).
+	select {
+	case <-handle.runDone:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for the run to finish — an undrained event bus must never block the pipeline")
 	}
 
 	// Now prove the bus actually accumulated everything (the "accumulate,

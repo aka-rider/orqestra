@@ -12,34 +12,43 @@ import (
 	"github.com/xiii/orqestra/internal/rundir"
 )
 
-// startNew is the RunPipeline-based pipeline path.
-// It creates ObsStore + Control and uses ObsStore directly as the Observer —
-// no bridging channels, no backpressure. The TUI polls Obs.Snapshot() on each
-// notify wakeup or tick.
+// startNew is the RunPipeline-based pipeline path. It wires the WP9 emitter
+// directly behind an eventObserver (no snapshot-store/gate-control
+// intermediary, WP10/RC1-RC2) and returns a RunHandle whose Events/Intents
+// pair is the whole caller-facing surface.
 //
 // QuestionBridge lifecycle (WP4b/J5,J41): e.QuestionBridge.Run is started
 // exactly ONCE, for the whole engine/TUI-session lifetime, by whoever hands
 // the Engine to the TUI (see tui.Run) — never here. Each run only owns a
-// question-FORWARDER goroutine that relays e.QuestionBridge.Questions() into
-// THIS run's ObsStore. That forwarder runs on its own run-scoped context
-// (derived from ctx, not ctx itself) so it is torn down deterministically
-// when this run's pipeline work concludes, independent of whether ctx is
-// ever cancelled — a natural completion never cancels ctx (J41), so without
-// this the forwarder would leak and stay a live consumer of the shared
-// Questions() channel forever. The forwarder is joined BEFORE obs.Finished
-// signals completion (not merely deferred to goroutine exit), so any
-// observer reacting to Terminal.Done — the TUI, or a test starting the next
-// run — can never race this run's forwarder teardown: at most one consumer
-// of Questions() exists at any time, even across back-to-back runs.
+// question-FORWARDER goroutine that relays e.QuestionBridge.Questions() as
+// EventQuestionAsked onto THIS run's emitter. That forwarder runs on its own
+// run-scoped context (derived from ctx, not ctx itself) so it is torn down
+// deterministically when this run's pipeline work concludes, independent of
+// whether ctx is ever cancelled — a natural completion never cancels ctx
+// (J41), so without this the forwarder would leak and stay a live consumer
+// of the shared Questions() channel forever. The forwarder (and the intents
+// consumer below) are joined BEFORE obs.Finished signals completion (not
+// merely deferred to goroutine exit), so any observer reacting to the run's
+// terminal state — the TUI, or a test starting the next run — can never
+// race this run's forwarder teardown: at most one consumer of Questions()
+// exists at any time, even across back-to-back runs.
+//
+// Intents routing (WP10): a single per-run "intents consumer" goroutine
+// drains RunHandle.Intents and dispatches by concrete type — a
+// GateDecisionIntent is forwarded (non-blocking, cap-1, stale ones simply
+// get overwritten/dropped) to gateDecisions, the channel the gate mechanism
+// itself reads with its own drain-before-open/GateID-match loop (gate.go);
+// a QuestionAnswerIntent is routed directly to
+// e.QuestionBridge.SendAnswer, which independently validates the ID
+// (WP5/J17,J25). This keeps GateID correlation and question-ID correlation
+// as two independent, non-interfering concerns sharing one inbound channel.
 func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
-	obs := NewObsStore()
-	// WP9: wire the event bus behind ObsStore before any goroutine below can
-	// observe obs, so the attach is visible without extra synchronization
-	// (see AttachEmitter's doc comment). Additive only — Ctrl/obs still
-	// drive the TUI exactly as before; nothing yet reads RunHandle.Events.
 	em := newEmitter(eventBusBufSize)
-	obs.AttachEmitter(em)
-	ctrl := NewControl(obs)
+	obs := newEventObserver(em)
+
+	intentsIn := make(chan Intent, intentBufSize)
+	gateDecisions := make(chan GateDecisionIntent, 1)
+	gateFn := newGateFunc(em, gateDecisions)
 
 	runCtx, runCancel := context.WithCancel(ctx)
 	forwarderDone := make(chan struct{})
@@ -52,7 +61,7 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 					if !ok {
 						return
 					}
-					obs.UserQuestion(q)
+					em.Emit(EventQuestionAsked{ToolCall: q})
 				case <-runCtx.Done():
 					return
 				}
@@ -62,13 +71,44 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 		close(forwarderDone)
 	}
 
+	intentsDone := make(chan struct{})
 	go func() {
-		// finish joins the question-forwarder BEFORE signaling terminal state —
-		// see the lifecycle comment above. Every return path in this goroutine
-		// MUST go through finish, not obs.Finished directly.
+		defer close(intentsDone)
+		for {
+			select {
+			case in, ok := <-intentsIn:
+				if !ok {
+					return
+				}
+				switch it := in.(type) {
+				case GateDecisionIntent:
+					select {
+					case gateDecisions <- it:
+					default: // fire-and-forget: superseded by a later decision, or dropped as stale — the gate's own drain-before-open handles staleness (WP4a)
+					}
+				case QuestionAnswerIntent:
+					if e.QuestionBridge != nil {
+						e.QuestionBridge.SendAnswer(it.Answer)
+					}
+				}
+			case <-runCtx.Done():
+				return
+			}
+		}
+	}()
+
+	runDone := make(chan struct{})
+
+	go func() {
+		defer close(runDone)
+		// finish joins the question-forwarder and intents consumer BEFORE
+		// signaling terminal state — see the lifecycle comment above. Every
+		// return path in this goroutine MUST go through finish, not
+		// obs.Finished directly.
 		finish := func(res Result, err error) {
 			runCancel()
 			<-forwarderDone
+			<-intentsDone
 			obs.Finished(res, err)
 		}
 
@@ -124,7 +164,7 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 			Exec:      exec,
 			Obs:       obs,
 			Artifacts: NewArtifactSink(session, logger),
-			Control:   ctrl,
+			Gate:      gateFn,
 			Sessions:  session,
 			Log:       logger,
 			RepoPath:  e.RepoPath,
@@ -172,13 +212,24 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 		logger.Info("run_complete", "status", string(result.Status), "err", errText)
 	}()
 
-	return RunHandle{Obs: obs, Ctrl: ctrl, Events: em.Events(), forwarderDone: forwarderDone}
+	return RunHandle{
+		Events:        em.Events(),
+		Intents:       intentsIn,
+		forwarderDone: forwarderDone,
+		runDone:       runDone,
+	}
 }
 
 // eventBusBufSize sizes only the WP9 event bus's OUTPUT channel (a
 // convenience for a fast, attentive consumer) — it never bounds the
 // emitter's internal lifecycle-event queue (emitter.go).
 const eventBusBufSize = 64
+
+// intentBufSize sizes RunHandle.Intents — generously buffered so a caller's
+// send is very unlikely ever to block (the intents consumer above drains it
+// continuously); plan-simplify-architecture.md WP10 step 7 suggests cap 4 as
+// the floor for "never blocks the gate-decision path in practice".
+const intentBufSize = 8
 
 // buildPipelineSteps constructs PipelineSteps from e.Specs and e.Config.
 func (e *Engine) buildPipelineSteps(sup *Supervisor) PipelineSteps {

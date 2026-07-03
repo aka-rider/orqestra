@@ -26,7 +26,7 @@ func TestExecuteStep_BranchDetectFailure_ReturnsError(t *testing.T) {
 	// needing a real detached-HEAD checkout.
 	repoDir := t.TempDir()
 
-	obs := NewObsStore()
+	obs := newRecordingObserver()
 	step := &ExecuteStep{
 		Spec:     newReplaySpec("# Plan\nDo work."),
 		RepoPath: repoDir,
@@ -56,14 +56,7 @@ func TestExecuteStep_BranchDetectFailure_ReturnsError(t *testing.T) {
 	}
 
 	// ...and as an observable worker failure event, never a bare warning log.
-	snap := obs.Snapshot()
-	failed := false
-	for _, a := range snap.Agents {
-		if a.AgentID == "worker" && a.Status == "failed" {
-			failed = true
-		}
-	}
-	if !failed {
+	if !obs.Failed("worker") {
 		t.Error("INV-P3-BRANCH: Observer.AgentFailed was not called for the worker — " +
 			"the TUI/pipeline never learns branch detection failed")
 	}

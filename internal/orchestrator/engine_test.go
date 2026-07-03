@@ -76,18 +76,6 @@ func fakeValidateStep(output string) Step[ValidateInput, ValidateOutput] {
 	}
 }
 
-// noopStepContext returns a StepContext with nil Executor — engine routing tests
-// don't call sc.Exec.Run(); nil makes any accidental call panic visibly.
-func noopStepContext(obs Observer, ctrl Control) StepContext {
-	return StepContext{
-		Exec:      nil,
-		Obs:       obs,
-		Artifacts: NoopArtifactSink(),
-		Control:   ctrl,
-		Log:       slog.Default(),
-	}
-}
-
 // validPlanMarkdown returns a minimal valid plan markdown.
 const validPlanMarkdown = "# Plan\n\n## Goal\nTest.\n\n## Work Packages\n\n### 1. Do it\n\n**Steps:**\n1. Edit foo.go\n\n**Done when:**\n- Tests pass"
 
@@ -101,44 +89,11 @@ func defaultTestSteps() PipelineSteps {
 	}
 }
 
-// driveGate waits for a gate at pos and submits dec.
-// Must be launched in a goroutine before RunPipeline is called.
-// cancel is called on timeout so that the RunPipeline call in the parent goroutine unblocks.
-func driveGate(t *testing.T, obs *ObsStore, ctrl Control, pos HumanGatePosition, dec Decision, timeout time.Duration, cancel context.CancelFunc) {
-	t.Helper()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	for {
-		snap := obs.Snapshot()
-		if snap.HasGate && snap.Gate.Position == pos {
-			ctrl.Submit(dec)
-			return
-		}
-		select {
-		case <-obs.NotifyCh():
-		case <-timer.C:
-			t.Errorf("driveGate timeout waiting for gate at position %v", pos)
-			cancel()
-			return
-		}
-	}
-}
-
-// runPipelineSync is a convenience wrapper: builds obs+ctrl, returns result+err.
-func runPipelineSync(ctx context.Context, setup PipelineSetup, steps PipelineSteps) (Result, error) {
-	obs := NewObsStore()
-	ctrl := NewControl(obs)
-	sc := noopStepContext(obs, ctrl)
-	return RunPipeline(ctx, setup, PipelineRunInput{Prompt: "test prompt", RunID: "test-run"}, sc, steps)
-}
-
 // --- Active tests ---
 
 func TestEngine_PlanApprovalGate(t *testing.T) {
 	// INV-O1-FLOW: gate blocks pipeline; DecisionApprove resumes it → StatusSuccess.
-	obs := NewObsStore()
-	ctrl := NewControl(obs)
-	sc := noopStepContext(obs, ctrl)
+	sc, events, decisions := newGateTestContext()
 
 	setup := PipelineSetup{
 		Execution: true, Validation: true,
@@ -148,7 +103,7 @@ func TestEngine_PlanApprovalGate(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	go driveGate(t, obs, ctrl, GateAfterDeliberation, Decision{Type: DecisionApprove}, 5*time.Second, cancel)
+	go driveGate(t, events, decisions, GateAfterDeliberation, Decision{Type: DecisionApprove}, 5*time.Second, cancel)
 
 	result, err := RunPipeline(ctx, setup, PipelineRunInput{Prompt: "Add feature X", RunID: "run-1"}, sc, steps)
 	if err != nil {
@@ -161,9 +116,7 @@ func TestEngine_PlanApprovalGate(t *testing.T) {
 
 func TestEngine_CancelAtGate(t *testing.T) {
 	// INV-O1-FLOW: DecisionCancel at gate → StatusCancelled.
-	obs := NewObsStore()
-	ctrl := NewControl(obs)
-	sc := noopStepContext(obs, ctrl)
+	sc, events, decisions := newGateTestContext()
 
 	setup := PipelineSetup{
 		Execution: true, Validation: true,
@@ -173,7 +126,7 @@ func TestEngine_CancelAtGate(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	go driveGate(t, obs, ctrl, GateAfterDeliberation, Decision{Type: DecisionCancel}, 5*time.Second, cancel)
+	go driveGate(t, events, decisions, GateAfterDeliberation, Decision{Type: DecisionCancel}, 5*time.Second, cancel)
 
 	result, err := RunPipeline(ctx, setup, PipelineRunInput{Prompt: "Add feature X", RunID: "run-1"}, sc, steps)
 	if err != nil {
@@ -200,19 +153,11 @@ func TestEngine_SkipGateway(t *testing.T) {
 }
 
 func TestEngine_PhaseOrder(t *testing.T) {
-	obs := NewObsStore()
-	ctrl := NewControl(obs)
-
-	var mu sync.Mutex
-	var phases []Phase
-
-	recordingObs := &phaseRecorder{ObsStore: obs, record: func(p Phase) {
-		mu.Lock()
-		phases = append(phases, p)
-		mu.Unlock()
-	}}
-
-	sc := noopStepContext(recordingObs, ctrl)
+	// defaultTestSteps() are fakes that never call sc.Obs themselves — the
+	// only events this run emits are RunPipeline's own PhaseChanged calls, so
+	// draining exactly 3 events off the bus after RunPipeline returns
+	// deterministically captures the full phase sequence.
+	sc, events, _ := newGateTestContext()
 
 	setup := PipelineSetup{
 		Execution: true, Validation: true,
@@ -224,9 +169,7 @@ func TestEngine_PhaseOrder(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	mu.Lock()
-	got := append([]Phase(nil), phases...)
-	mu.Unlock()
+	got := collectPhases(t, events, 3, 5*time.Second)
 
 	expected := []Phase{PhasePlanning, PhaseExecuting, PhaseSelfValidating}
 	if len(got) != len(expected) {
@@ -239,30 +182,8 @@ func TestEngine_PhaseOrder(t *testing.T) {
 	}
 }
 
-// phaseRecorder wraps ObsStore to intercept PhaseChanged calls.
-type phaseRecorder struct {
-	*ObsStore
-	record func(Phase)
-}
-
-func (r *phaseRecorder) PhaseChanged(p Phase) {
-	r.record(p)
-	r.ObsStore.PhaseChanged(p)
-}
-
 func TestEngine_NoExecute(t *testing.T) {
-	obs := NewObsStore()
-	ctrl := NewControl(obs)
-
-	var mu sync.Mutex
-	var phases []Phase
-	recordingObs := &phaseRecorder{ObsStore: obs, record: func(p Phase) {
-		mu.Lock()
-		phases = append(phases, p)
-		mu.Unlock()
-	}}
-
-	sc := noopStepContext(recordingObs, ctrl)
+	sc, events, _ := newGateTestContext()
 
 	setup := PipelineSetup{
 		Execution: false, Validation: false,
@@ -277,10 +198,8 @@ func TestEngine_NoExecute(t *testing.T) {
 		t.Errorf("status = %q, want %q", result.Status, StatusSuccess)
 	}
 
-	mu.Lock()
-	got := append([]Phase(nil), phases...)
-	mu.Unlock()
-
+	// Execution disabled → only the PhasePlanning event, never PhaseExecuting.
+	got := collectPhases(t, events, 1, 5*time.Second)
 	for _, p := range got {
 		if p == PhaseExecuting {
 			t.Error("expected no executing phase with Execution disabled in PipelineSetup")
@@ -340,9 +259,7 @@ func TestEngine_ValidationSuccessDetection(t *testing.T) {
 
 func TestEngine_DecisionEdit(t *testing.T) {
 	// INV-O1-FLOW: DecisionEdit at gate → re-run with edited content → DecisionApprove → StatusSuccess.
-	obs := NewObsStore()
-	ctrl := NewControl(obs)
-	sc := noopStepContext(obs, ctrl)
+	sc, events, decisions := newGateTestContext()
 
 	setup := PipelineSetup{
 		Execution: true, Validation: true,
@@ -355,40 +272,33 @@ func TestEngine_DecisionEdit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// First gate: send Edit; second gate: send Approve.
-	//
-	// Edge-triggered via Rev, not via re-observing HasGate: NotifyCh is a
-	// coalescing wake signal and Snapshot is a point-in-time poll, so a stale
-	// wakeup can observe the SAME still-open gate twice before Gate() has
-	// consumed the decision and closed it. Without dedup that double-counts
-	// gate 1 as gate 2, submits the Approve decision while gate 1's Edit
-	// decision is still the one buffered (Approve is silently dropped, cap-1
-	// channel full), and this goroutine returns having never satisfied the
-	// real second gate — which then blocks until ctx times out. GateOpened
-	// always bumps Rev, so a distinct opening always carries an unhandled Rev.
+	// First gate: send Edit; second gate: send Approve. Unlike the pre-WP10
+	// Snapshot/NotifyCh polling loop, EventGateOpened is edge-triggered — every
+	// delivery is a genuinely NEW gate opening, so no Rev-based dedup is
+	// needed to avoid double-counting a still-open gate.
 	gateCount := 0
 	var gateMu sync.Mutex
 	go func() {
-		var lastHandledRev uint64
-		handled := false
 		for {
-			snap := obs.Snapshot()
-			if snap.HasGate && snap.Gate.Position == GateAfterDeliberation && (!handled || snap.Rev != lastHandledRev) {
-				handled = true
-				lastHandledRev = snap.Rev
+			select {
+			case ev, ok := <-events:
+				if !ok {
+					return
+				}
+				g, ok := ev.(EventGateOpened)
+				if !ok || g.Request.Position != GateAfterDeliberation {
+					continue
+				}
 				gateMu.Lock()
 				gateCount++
 				n := gateCount
 				gateMu.Unlock()
 				if n == 1 {
-					ctrl.Submit(Decision{Type: DecisionEdit, EditedContent: editedContent})
+					decisions <- GateDecisionIntent{GateID: g.GateID, Decision: Decision{Type: DecisionEdit, EditedContent: editedContent}}
 				} else {
-					ctrl.Submit(Decision{Type: DecisionApprove})
+					decisions <- GateDecisionIntent{GateID: g.GateID, Decision: Decision{Type: DecisionApprove}}
 					return
 				}
-			}
-			select {
-			case <-obs.NotifyCh():
 			case <-ctx.Done():
 				return
 			}
@@ -454,11 +364,11 @@ func TestEngine_Start_NoGate(t *testing.T) {
 		Setup:      PipelineSetup{Execution: false, Validation: false, DeliberationRounds: 1},
 		SetupValid: true,
 	})
-	if handle.Obs == nil {
-		t.Fatal("Start returned nil ObsStore")
+	if handle.Events == nil {
+		t.Fatal("Start returned a nil Events channel")
 	}
-	if handle.Ctrl == nil {
-		t.Fatal("Start returned nil Control")
+	if handle.Intents == nil {
+		t.Fatal("Start returned a nil Intents channel")
 	}
 }
 
@@ -486,25 +396,15 @@ func TestEngineStart_SetupValidInvalidSetup_FailsRun(t *testing.T) {
 		SetupValid: true,
 	})
 
-	for {
-		snap := handle.Obs.Snapshot()
-		if snap.Terminal.Done {
-			if snap.Terminal.Result.Status != StatusFailed {
-				t.Fatalf("expected StatusFailed for an invalid explicit setup, got %s", snap.Terminal.Result.Status)
-			}
-			if snap.Terminal.Err == nil {
-				t.Fatal("expected a non-nil error for an invalid explicit setup, got nil (setup was silently defaulted?)")
-			}
-			if !strings.Contains(snap.Terminal.Err.Error(), "invalid pipeline setup") {
-				t.Errorf("expected 'invalid pipeline setup' in the terminal error, got: %v", snap.Terminal.Err)
-			}
-			return
-		}
-		select {
-		case <-handle.Obs.NotifyCh():
-		case <-ctx.Done():
-			t.Fatal("timed out waiting for the run to fail on invalid explicit setup — was it silently defaulted and left waiting on a gate?")
-		}
+	result, err := waitRunFinished(t, handle.Events, 5*time.Second)
+	if result.Status != StatusFailed {
+		t.Fatalf("expected StatusFailed for an invalid explicit setup, got %s", result.Status)
+	}
+	if err == nil {
+		t.Fatal("expected a non-nil error for an invalid explicit setup, got nil (setup was silently defaulted?)")
+	}
+	if !strings.Contains(err.Error(), "invalid pipeline setup") {
+		t.Errorf("expected 'invalid pipeline setup' in the terminal error, got: %v", err)
 	}
 }
 
@@ -545,17 +445,7 @@ func TestEngineStart_DoesNotSwapGlobalLogger(t *testing.T) {
 		SetupValid: true,
 	})
 
-	for {
-		snap := handle.Obs.Snapshot()
-		if snap.Terminal.Done {
-			break
-		}
-		select {
-		case <-handle.Obs.NotifyCh():
-		case <-ctx.Done():
-			t.Fatal("timed out waiting for the run to complete")
-		}
-	}
+	waitRunFinished(t, handle.Events, 10*time.Second)
 
 	after := slog.Default()
 	if before != after {
@@ -589,19 +479,17 @@ func TestNoDeadKnob_ValidationFalse_NoValidationPhase(t *testing.T) {
 
 func TestNoDeadKnob_GateAfterDeliberation_FiresWhenEnabled(t *testing.T) {
 	// INV-O1-FLOW: GateAfterDeliberation in HumanGates → gate fires and blocks.
-	obs := NewObsStore()
-	ctrl := NewControl(obs)
+	sc, events, decisions := newGateTestContext()
 
 	setup := PipelineSetup{
 		Execution: false, Validation: false,
 		HumanGates: HumanGateSet{GateAfterDeliberation},
 	}
-	sc := noopStepContext(obs, ctrl)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go driveGate(t, obs, ctrl, GateAfterDeliberation, Decision{Type: DecisionApprove}, 3*time.Second, cancel)
+	go driveGate(t, events, decisions, GateAfterDeliberation, Decision{Type: DecisionApprove}, 3*time.Second, cancel)
 
 	_, err := RunPipeline(ctx, setup, PipelineRunInput{Prompt: "test"}, sc, defaultTestSteps())
 	if err != nil {
