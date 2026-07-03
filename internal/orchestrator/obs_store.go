@@ -42,8 +42,17 @@ type ObsStore struct {
 	hasQuestion bool
 	terminal    TerminalState
 	rev         uint64
-	notify      chan struct{}      // capacity-1 coalescing wake signal
-	streamCh    chan StreamEntry   // non-blocking stream relay to TUI frame list
+	notify      chan struct{}    // capacity-1 coalescing wake signal
+	streamCh    chan StreamEntry // non-blocking stream relay to TUI frame list
+
+	// em is the WP9 event-bus forwarder. Nil unless AttachEmitter was called
+	// (only startNew does this) — every emit call below is nil-guarded, so
+	// every existing caller/test that never attaches an emitter observes
+	// ObsStore behaving byte-for-bit as before WP9 (§ design note in
+	// AttachEmitter).
+	em          *emitter
+	gateSeq     uint64 // WP9: monotonic GateID source; only Control.Gate opens gates, one at a time
+	currentGate GateID // WP9: GateID of the currently-open gate, for the matching GateClosed event
 }
 
 type agentEntry struct {
@@ -63,6 +72,30 @@ func NewObsStore() *ObsStore {
 // StreamCh returns the non-blocking stream relay channel. The TUI drains this
 // on each tick to update the frame list. Writes are best-effort (dropped if full).
 func (s *ObsStore) StreamCh() <-chan StreamEntry { return s.streamCh }
+
+// AttachEmitter wires the WP9 event bus behind this ObsStore: every Observer
+// mutation below (PhaseChanged, AgentStarted, ..., GateOpened/GateClosed,
+// Finished) additionally emits the equivalent RunEvent. This is deliberately
+// an optional, nil-guarded field rather than a wrapping "teeObserver" type,
+// because Control (control.go) holds a concrete *ObsStore — not the Observer
+// interface — and calls GateClosed, which is not part of Observer at all.
+// Wrapping ObsStore would force either changing NewControl's signature
+// (breaking internal/tui and every existing orchestrator test that calls
+// NewControl(*ObsStore)) or duplicating gate dispatch outside the interface.
+// Attaching the emitter to ObsStore itself means every existing call site —
+// control.go, run_pipeline.go, every step_*.go, engine_pipeline.go, and every
+// pre-WP9 test that never calls AttachEmitter — keeps behaving exactly as
+// before; only ObsStore's method bodies gain an additional (no-op when
+// em==nil) emit. Must be called before any goroutine begins using obs (as
+// startNew does, right after NewObsStore and before any `go` statement) so
+// no additional locking is required to make the attach visible to later
+// readers under the Go memory model; the emit calls below still take s.mu
+// like every other field access, for consistency and race-detector clarity.
+func (s *ObsStore) AttachEmitter(em *emitter) {
+	s.mu.Lock()
+	s.em = em
+	s.mu.Unlock()
+}
 
 // NotifyCh returns the coalescing wake channel. TUI selects on it alongside
 // its tick timer. A send is non-blocking; multiple rapid writes coalesce.
@@ -106,7 +139,11 @@ func (s *ObsStore) UserQuestion(q mcp.ToolCall) {
 	s.question = q
 	s.hasQuestion = true
 	s.rev++
+	em := s.em
 	s.mu.Unlock()
+	if em != nil {
+		em.Emit(EventQuestionAsked{ToolCall: q})
+	}
 	s.poke()
 }
 
@@ -126,7 +163,11 @@ func (s *ObsStore) PhaseChanged(p Phase) {
 	s.mu.Lock()
 	s.phase = p
 	s.rev++
+	em := s.em
 	s.mu.Unlock()
+	if em != nil {
+		em.Emit(EventPhaseStarted{Phase: p})
+	}
 	s.poke()
 }
 
@@ -142,8 +183,12 @@ func (s *ObsStore) AgentStarted(id AgentID, meta AgentMeta) {
 		StartTime: time.Now(),
 	}}
 	s.rev++
+	em := s.em
 	s.mu.Unlock()
 	s.ring.SetAgent(string(id))
+	if em != nil {
+		em.Emit(EventAgentStarted{AgentID: id, Meta: meta})
+	}
 	s.poke()
 }
 
@@ -157,7 +202,11 @@ func (s *ObsStore) AgentDone(id AgentID, usage harness.TokenUsage) {
 		e.snapshot.CallCount++
 	}
 	s.rev++
+	em := s.em
 	s.mu.Unlock()
+	if em != nil {
+		em.Emit(EventAgentDone{AgentID: id, Usage: usage})
+	}
 	s.poke()
 }
 
@@ -171,24 +220,38 @@ func (s *ObsStore) AgentFailed(id AgentID, err error) {
 		}
 	}
 	s.rev++
+	em := s.em
 	s.mu.Unlock()
+	if em != nil {
+		em.Emit(EventAgentFailed{AgentID: id, Err: err})
+	}
 	s.poke()
 }
 
-func (s *ObsStore) Stream(_ AgentID, ev harness.Event) {
-	// Convert harness.Event → StreamEntry and append to the ring.
+func (s *ObsStore) Stream(id AgentID, ev harness.Event) {
+	// Convert harness.Event → StreamEntry (legacy ring/TUI relay) AND → the
+	// matching WP9 RunEvent (bus) in the SAME switch, so the two can never
+	// disagree about what an event meant. harness.Event kinds the legacy
+	// ring ignores (session start/done, error) get no RunEvent either — WP9
+	// did not request new bus kinds for them.
 	var entry StreamEntry
+	var busEvent RunEvent
 	switch {
 	case ev.IsDelta:
 		entry = StreamEntry{Kind: EntryDelta, Text: ev.Text}
+		busEvent = EventDelta{AgentID: id, Text: ev.Text}
 	case ev.Text != "":
 		entry = StreamEntry{Kind: EntryText, Text: ev.Text}
+		busEvent = EventDelta{AgentID: id, Text: ev.Text}
 	case ev.Tool != "":
 		entry = StreamEntry{Kind: EntryToolUse, Tool: ev.Tool, Detail: ev.Detail}
+		busEvent = EventToolCall{AgentID: id, Tool: ev.Tool, Detail: ev.Detail}
 	case ev.Kind == harness.EventToolResult:
 		entry = StreamEntry{Kind: EntryToolResult, ToolErr: ev.IsError}
+		busEvent = EventToolResult{AgentID: id, IsError: ev.IsError}
 	case ev.Kind == harness.EventUsage:
 		entry = StreamEntry{Kind: EntryStats, Stats: StreamStats{Input: ev.Input, Output: ev.Output, Valid: true}}
+		busEvent = EventStats{AgentID: id, Input: ev.Input, Output: ev.Output}
 	default:
 		return
 	}
@@ -196,6 +259,12 @@ func (s *ObsStore) Stream(_ AgentID, ev harness.Event) {
 	select {
 	case s.streamCh <- entry:
 	default: // TUI is slow; drop rather than block the pipeline
+	}
+	s.mu.Lock()
+	em := s.em
+	s.mu.Unlock()
+	if em != nil {
+		em.Emit(busEvent)
 	}
 	s.poke()
 }
@@ -205,7 +274,14 @@ func (s *ObsStore) GateOpened(req GateRequest) {
 	s.gate = req
 	s.hasGate = true
 	s.rev++
+	s.gateSeq++
+	gid := GateID(s.gateSeq)
+	s.currentGate = gid
+	em := s.em
 	s.mu.Unlock()
+	if em != nil {
+		em.Emit(EventGateOpened{GateID: gid, Request: req})
+	}
 	s.poke()
 }
 
@@ -214,7 +290,12 @@ func (s *ObsStore) GateClosed() {
 	s.hasGate = false
 	s.gate = GateRequest{}
 	s.rev++
+	gid := s.currentGate
+	em := s.em
 	s.mu.Unlock()
+	if em != nil {
+		em.Emit(EventGateClosed{GateID: gid})
+	}
 	s.poke()
 }
 
@@ -224,7 +305,14 @@ func (s *ObsStore) Finished(res Result, err error) {
 	s.terminal.Result = res
 	s.terminal.Err = err
 	s.rev++
+	em := s.em
 	s.mu.Unlock()
+	if em != nil {
+		// EventRunFinished is the terminal, always-last event on the bus
+		// (WP2's single terminal writer — obs.Finished is called exactly
+		// once per run, from startNew's finish closure).
+		em.Emit(EventRunFinished{Result: res, Err: err})
+	}
 	s.poke()
 }
 

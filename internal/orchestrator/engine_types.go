@@ -98,6 +98,17 @@ type RunHandle struct {
 	Obs  *ObsStore
 	Ctrl Control
 
+	// Events is the WP9 ordered event bus for this run (RunEvent — see
+	// event.go/emitter.go). It is additive: nothing in this WP reads it, and
+	// ObsStore keeps driving the TUI exactly as before through Obs/Ctrl.
+	// WP10 will replace ObsStore-snapshot polling with a single
+	// waitForEvent loop over this channel. Always a real, non-nil channel
+	// today (startNew always attaches an emitter); a run completes without
+	// blocking even when nobody ever reads from it — see emitter.go's
+	// "No-consumer policy". Closed exactly once, immediately after the
+	// EventRunFinished event.
+	Events <-chan RunEvent
+
 	// forwarderDone is closed once this run's question-forwarder goroutine has
 	// been joined (WP4b/J5,J41) — always before Obs.Finished is called, so an
 	// observer reacting to Obs's terminal state (e.g. starting the next run)

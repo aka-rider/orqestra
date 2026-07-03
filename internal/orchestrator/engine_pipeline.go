@@ -33,6 +33,12 @@ import (
 // of Questions() exists at any time, even across back-to-back runs.
 func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 	obs := NewObsStore()
+	// WP9: wire the event bus behind ObsStore before any goroutine below can
+	// observe obs, so the attach is visible without extra synchronization
+	// (see AttachEmitter's doc comment). Additive only — Ctrl/obs still
+	// drive the TUI exactly as before; nothing yet reads RunHandle.Events.
+	em := newEmitter(eventBusBufSize)
+	obs.AttachEmitter(em)
 	ctrl := NewControl(obs)
 
 	runCtx, runCancel := context.WithCancel(ctx)
@@ -166,8 +172,13 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 		logger.Info("run_complete", "status", string(result.Status), "err", errText)
 	}()
 
-	return RunHandle{Obs: obs, Ctrl: ctrl, forwarderDone: forwarderDone}
+	return RunHandle{Obs: obs, Ctrl: ctrl, Events: em.Events(), forwarderDone: forwarderDone}
 }
+
+// eventBusBufSize sizes only the WP9 event bus's OUTPUT channel (a
+// convenience for a fast, attentive consumer) — it never bounds the
+// emitter's internal lifecycle-event queue (emitter.go).
+const eventBusBufSize = 64
 
 // buildPipelineSteps constructs PipelineSteps from e.Specs and e.Config.
 func (e *Engine) buildPipelineSteps(sup *Supervisor) PipelineSteps {
