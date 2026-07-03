@@ -117,22 +117,8 @@ func TestRunPipeline_ConflictGiveUp_PopulatesResultConflictFiles(t *testing.T) {
 	}
 }
 
-// recordingArtifactSink is a test double that records every artifact written,
-// so a test can inspect the give-up reason IntegrateStep.writeMeta persists.
-type recordingArtifactSink struct {
-	writes map[string][]byte
-}
-
-func newRecordingArtifactSink() *recordingArtifactSink {
-	return &recordingArtifactSink{writes: make(map[string][]byte)}
-}
-func (r *recordingArtifactSink) Write(name string, data []byte) error {
-	r.writes[name] = data
-	return nil
-}
-func (r *recordingArtifactSink) WriteBestEffort(name string, data []byte) {
-	r.writes[name] = data
-}
+// recordingArtifactSink is declared in step_deliberate_test.go (shared test
+// double for inspecting persisted meta artifacts).
 
 // panicExecutor fails the test immediately if Run is ever called — used to
 // prove a code path never executes an agent (e.g. a zero ProcessSpec, J19).
