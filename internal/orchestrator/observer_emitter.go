@@ -61,6 +61,12 @@ func (o *eventObserver) Stream(id AgentID, ev harness.Event) {
 	o.em.Emit(busEvent)
 }
 
+// ReportHarvested surfaces which tier produced a report-producing step's
+// deliverable (WP11 provenance) as a bus event.
+func (o *eventObserver) ReportHarvested(id AgentID, prov ReportProvenance) {
+	o.em.Emit(EventReportHarvested{AgentID: id, Provenance: prov})
+}
+
 func (o *eventObserver) Finished(res Result, err error) {
 	// EventRunFinished is the terminal, always-last event on the bus (WP2's
 	// single terminal writer — Finished is called exactly once per run, from

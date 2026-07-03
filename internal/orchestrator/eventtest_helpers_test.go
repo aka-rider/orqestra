@@ -33,6 +33,7 @@ func (r *recordingObserver) AgentFailed(id AgentID, _ error) {
 	r.failed[string(id)] = true
 }
 func (r *recordingObserver) Stream(AgentID, harness.Event) {}
+func (r *recordingObserver) ReportHarvested(AgentID, ReportProvenance) {}
 func (r *recordingObserver) Finished(Result, error)        {}
 
 // Failed reports whether AgentFailed was ever called for id.

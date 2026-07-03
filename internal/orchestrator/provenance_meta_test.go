@@ -52,7 +52,7 @@ func TestReportProvenance_PersistedInEveryStepMeta(t *testing.T) {
 	}
 	archSC := StepContext{
 		Exec:      archExec,
-		Obs:       NewObsStore(),
+		Obs:       newRecordingObserver(),
 		Artifacts: artifacts,
 		Log:       slog.Default(),
 		RepoPath:  repoRoot,
@@ -71,7 +71,7 @@ func TestReportProvenance_PersistedInEveryStepMeta(t *testing.T) {
 	}
 	workerSC := StepContext{
 		Exec:      workerExec,
-		Obs:       NewObsStore(),
+		Obs:       newRecordingObserver(),
 		Artifacts: artifacts,
 		Sessions:  dir,
 		Log:       slog.Default(),

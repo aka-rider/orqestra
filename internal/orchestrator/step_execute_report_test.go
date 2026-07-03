@@ -13,15 +13,14 @@ import (
 	"github.com/xiii/orqestra/internal/harness"
 )
 
-// reportHarvestRecorder wraps ObsStore to intercept ReportHarvested calls.
+// reportHarvestRecorder is an Observer that records ReportHarvested calls.
 type reportHarvestRecorder struct {
-	*ObsStore
+	*recordingObserver
 	got []ReportProvenance
 }
 
-func (r *reportHarvestRecorder) ReportHarvested(id AgentID, prov ReportProvenance) {
+func (r *reportHarvestRecorder) ReportHarvested(_ AgentID, prov ReportProvenance) {
 	r.got = append(r.got, prov)
-	r.ObsStore.ReportHarvested(id, prov)
 }
 
 func setupExecuteStepGitRepo(t *testing.T) string {
@@ -53,7 +52,7 @@ func TestExecuteStep_ReportHarvest_SubmitReportPreferredOverRawOutput(t *testing
 		results: []harness.RunResult{{SessionID: "worker-sid", Output: "raw stdout, should be ignored"}},
 		errs:    []error{nil},
 	}
-	recorder := &reportHarvestRecorder{ObsStore: NewObsStore()}
+	recorder := &reportHarvestRecorder{recordingObserver: newRecordingObserver()}
 	sc := StepContext{
 		Exec:      execStub,
 		Obs:       recorder,
@@ -83,7 +82,7 @@ func TestExecuteStep_ReportHarvest_FallsBackToRawOutput(t *testing.T) {
 		results: []harness.RunResult{{SessionID: "worker-sid-2", Output: "raw worker output, no SubmitReport"}},
 		errs:    []error{nil},
 	}
-	recorder := &reportHarvestRecorder{ObsStore: NewObsStore()}
+	recorder := &reportHarvestRecorder{recordingObserver: newRecordingObserver()}
 	sc := StepContext{
 		Exec:      execStub,
 		Obs:       recorder,

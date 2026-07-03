@@ -64,7 +64,7 @@ func TestReviseStep_UnchangedPlanFile_FreshFinalMessageWins(t *testing.T) {
 	step := &ReviseStep{ArchSpec: harness.ProcessSpec{AgentID: "architect", PlanMode: true}}
 	sc := StepContext{
 		Exec:      exec,
-		Obs:       NewObsStore(),
+		Obs:       newRecordingObserver(),
 		Artifacts: NoopArtifactSink(),
 		Log:       slog.Default(),
 		RepoPath:  t.TempDir(),
@@ -114,7 +114,7 @@ func TestReviseStep_ChangedPlanFile_TierTwoWins(t *testing.T) {
 	step := &ReviseStep{ArchSpec: harness.ProcessSpec{AgentID: "architect", PlanMode: true}}
 	sc := StepContext{
 		Exec:      exec,
-		Obs:       NewObsStore(),
+		Obs:       newRecordingObserver(),
 		Artifacts: NoopArtifactSink(),
 		Log:       slog.Default(),
 		RepoPath:  t.TempDir(),
