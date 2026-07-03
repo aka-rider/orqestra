@@ -7,6 +7,7 @@ import (
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/mcp"
+	"github.com/xiii/orqestra/internal/rundir"
 )
 
 // ErrUserCancelled is the cancellation cause the TUI attributes to the root run
@@ -63,7 +64,7 @@ type Result struct {
 }
 
 // RunDirFactory creates a session directory for artifact persistence.
-type RunDirFactory func(slug string) (agent.SessionDir, error)
+type RunDirFactory func(slug string) (rundir.Dir, error)
 
 // ProcessSpecs holds per-role ProcessSpec values for the RunPipeline path.
 type ProcessSpecs struct {

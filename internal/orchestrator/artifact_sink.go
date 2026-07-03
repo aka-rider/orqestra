@@ -1,10 +1,9 @@
 package orchestrator
 
 import (
-	"fmt"
 	"log/slog"
 
-	"github.com/xiii/orqestra/internal/agent"
+	"github.com/xiii/orqestra/internal/rundir"
 )
 
 // ArtifactSink separates integrity writes (fail-closed) from diagnostic writes
@@ -19,35 +18,32 @@ type ArtifactSink interface {
 	WriteBestEffort(name string, data []byte)
 }
 
-// sessionArtifactSink implements ArtifactSink backed by an agent.SessionDir.
+// sessionArtifactSink implements ArtifactSink backed by a rundir.Dir (WP15:
+// rundir owns the artifact schema; ArtifactSink is a thin two-tier adapter
+// over it — Write/WriteBestEffort decide fail-closed vs best-effort, rundir
+// decides the actual file layout).
 type sessionArtifactSink struct {
-	dir agent.SessionDir
+	dir rundir.Dir
 	log *slog.Logger
 }
 
 // NewArtifactSink returns an ArtifactSink that writes to the given session directory.
 // If dir.Path is empty, Write returns an error and WriteBestEffort is a no-op.
 // log is the per-run injected logger (StepContext.Log) — never slog.Default().
-func NewArtifactSink(dir agent.SessionDir, log *slog.Logger) ArtifactSink {
+func NewArtifactSink(dir rundir.Dir, log *slog.Logger) ArtifactSink {
 	return &sessionArtifactSink{dir: dir, log: log}
 }
 
 func (s *sessionArtifactSink) Write(name string, data []byte) error {
-	if s.dir.Path == "" {
-		return fmt.Errorf("artifact_sink: session directory not set, cannot write %q", name)
-	}
-	if err := s.dir.WriteArtifact(name, data); err != nil {
-		return fmt.Errorf("artifact_sink: write %q: %w", s.dir.ArtifactPath(name), err)
-	}
-	return nil
+	return s.dir.SaveArtifact(name, data)
 }
 
 func (s *sessionArtifactSink) WriteBestEffort(name string, data []byte) {
 	if s.dir.Path == "" {
 		return
 	}
-	if err := s.dir.WriteArtifact(name, data); err != nil {
-		s.log.Error("artifact_sink: best-effort write failed", "path", s.dir.ArtifactPath(name), "err", err)
+	if err := s.dir.SaveArtifact(name, data); err != nil {
+		s.log.Error("artifact_sink: best-effort write failed", "name", name, "err", err)
 	}
 }
 

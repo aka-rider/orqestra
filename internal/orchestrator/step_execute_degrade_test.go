@@ -16,8 +16,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/rundir"
 )
 
 func TestExecuteStep_WorktreeFailure_EmitsEvent(t *testing.T) {
@@ -62,7 +62,7 @@ func TestExecuteStep_WorktreeFailure_EmitsEvent(t *testing.T) {
 		Exec:      &fixturePlayer{path: "../harness/testdata/worker_stream_sample.jsonl"},
 		Obs:       obs,
 		Artifacts: NoopArtifactSink(),
-		Sessions:  agent.SessionDir{Path: sessPath},
+		Sessions:  rundir.Dir{Path: sessPath},
 		Log:       slog.Default(),
 		RepoPath:  repoDir,
 	}

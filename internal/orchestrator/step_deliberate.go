@@ -185,17 +185,18 @@ func (s *DeliberateStep) writeArchMeta(sc StepContext, sid string, start time.Ti
 
 func writeMeta(sc StepContext, filename, agentID string, meta AgentMeta, sessionID string, start time.Time, status string, err error, usage harness.TokenUsage) {
 	m := StepMeta{
-		AgentID:         agentID,
-		ModelRef:        meta.ModelRef,
-		ModelDisplay:    meta.ModelDisplay,
-		Provider:        meta.Provider,
-		ContextWindow:   meta.ContextWindow,
-		ClaudeSessionID: sessionID,
-		StartTime:       start,
-		EndTime:         time.Now(),
-		Status:          status,
-		InputTokens:     usage.Input,
-		OutputTokens:    usage.Output,
+		AgentID:              agentID,
+		ModelRef:             meta.ModelRef,
+		ModelDisplay:         meta.ModelDisplay,
+		Provider:             meta.Provider,
+		ContextWindow:        meta.ContextWindow,
+		ClaudeSessionID:      sessionID,
+		ClaudeSessionLogPath: resolveSessionLogPath(sc, sessionID),
+		StartTime:            start,
+		EndTime:              time.Now(),
+		Status:               status,
+		InputTokens:          usage.Input,
+		OutputTokens:         usage.Output,
 	}
 	if err != nil {
 		m.Error = err.Error()

@@ -5,6 +5,7 @@ import (
 
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
+	"github.com/xiii/orqestra/internal/rundir"
 )
 
 // guardPrompt runs the prompt integrity canary and returns the sanitized prompt.
@@ -38,7 +39,7 @@ func resolveAgentMeta(cfg *config.Config, modelRef string) AgentMeta {
 // DefaultRunDirFactory returns a RunDirFactory that creates session directories
 // under the given project root.
 func DefaultRunDirFactory(repoPath string) RunDirFactory {
-	return func(slug string) (agent.SessionDir, error) {
-		return agent.NewSessionDir(repoPath, slug)
+	return func(slug string) (rundir.Dir, error) {
+		return rundir.Create(repoPath, slug)
 	}
 }

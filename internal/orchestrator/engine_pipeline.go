@@ -8,8 +8,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/rundir"
 )
 
 // startNew is the RunPipeline-based pipeline path.
@@ -73,7 +73,7 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 		}
 
 		// Setup session directory.
-		var session agent.SessionDir
+		var session rundir.Dir
 		if e.RunDirFactory != nil {
 			var err error
 			session, err = e.RunDirFactory("run")

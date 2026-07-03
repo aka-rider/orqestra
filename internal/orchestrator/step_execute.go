@@ -109,17 +109,18 @@ func (s *ExecuteStep) Run(ctx context.Context, in ExecuteInput, sc StepContext) 
 
 func (s *ExecuteStep) writeMeta(sc StepContext, sid string, start time.Time, status string, err error, usage harness.TokenUsage) {
 	meta := StepMeta{
-		AgentID:         string(s.ID()),
-		ModelRef:        s.Meta.ModelRef,
-		ModelDisplay:    s.Meta.ModelDisplay,
-		Provider:        s.Meta.Provider,
-		ContextWindow:   s.Meta.ContextWindow,
-		ClaudeSessionID: sid,
-		StartTime:       start,
-		EndTime:         time.Now(),
-		Status:          status,
-		InputTokens:     usage.Input,
-		OutputTokens:    usage.Output,
+		AgentID:              string(s.ID()),
+		ModelRef:             s.Meta.ModelRef,
+		ModelDisplay:         s.Meta.ModelDisplay,
+		Provider:             s.Meta.Provider,
+		ContextWindow:        s.Meta.ContextWindow,
+		ClaudeSessionID:      sid,
+		ClaudeSessionLogPath: resolveSessionLogPath(sc, sid),
+		StartTime:            start,
+		EndTime:              time.Now(),
+		Status:               status,
+		InputTokens:          usage.Input,
+		OutputTokens:         usage.Output,
 	}
 	if err != nil {
 		meta.Error = err.Error()

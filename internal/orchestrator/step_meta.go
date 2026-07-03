@@ -1,21 +1,34 @@
 package orchestrator
 
-import "time"
+import (
+	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/rundir"
+)
 
-// StepMeta is the per-agent metadata persisted as JSON in the session directory.
-type StepMeta struct {
-	AgentID              string    `json:"agent_id"`
-	ModelRef             string    `json:"model_ref,omitempty"`
-	ModelDisplay         string    `json:"model_display,omitempty"`
-	Provider             string    `json:"provider,omitempty"`
-	ContextWindow        int64     `json:"context_window,omitempty"`
-	StartTime            time.Time `json:"start_time"`
-	EndTime              time.Time `json:"end_time"`
-	ClaudeSessionID      string    `json:"claude_session_id,omitempty"`
-	ClaudeSessionLogPath string    `json:"claude_session_log_path,omitempty"`
-	ClaudePlanFilePath   string    `json:"claude_plan_file_path,omitempty"`
-	Status               string    `json:"status"` // "done", "failed", or "fallback" (J12: chat-only architect revision that produced no plan rewrite)
-	Error                string    `json:"error,omitempty"`
-	InputTokens          int64     `json:"input_tokens"`
-	OutputTokens         int64     `json:"output_tokens"`
+// StepMeta is an alias for rundir.StepMeta. rundir owns the artifact schema
+// (WP15/J11): the field set, JSON tags, and file-naming convention all live
+// there so the write side (steps, via ArtifactSink) and the read side
+// (ListRuns/LoadRunDetail) can never drift apart again. orchestrator keeps
+// the alias so every existing "StepMeta{...}" call site in this package
+// (step_deliberate.go, step_execute.go, step_validate.go, run_history.go)
+// compiles unchanged — orchestrator decides WHEN a step writes one; rundir
+// decides WHAT it looks like and how it's persisted.
+type StepMeta = rundir.StepMeta
+
+// resolveSessionLogPath best-effort resolves the on-disk path of a Claude CLI
+// session JSONL, for population into StepMeta.ClaudeSessionLogPath (J43: the
+// run-detail log viewer — internal/tui/screen_run_detail_log.go — reads this
+// field, but until now no writeMeta ever set it). An unresolvable path
+// (missing session ID, no RepoPath, JSONL not yet on disk) stays "" — this is
+// diagnostic metadata, not an integrity boundary, so resolution failure must
+// never fail the step it's attached to.
+func resolveSessionLogPath(sc StepContext, sessionID string) string {
+	if sessionID == "" || sc.RepoPath == "" {
+		return ""
+	}
+	path, err := harness.ResolveSessionLogPath(sc.RepoPath, sessionID)
+	if err != nil {
+		return "" // fire-and-forget: best-effort diagnostic metadata (J43)
+	}
+	return path
 }

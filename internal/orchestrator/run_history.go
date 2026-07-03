@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/xiii/orqestra/internal/rundir"
 )
 
 const sessionTimeFmt = "2006-01-02-150405"
@@ -72,8 +74,14 @@ func ListRuns(repoPath string) ([]RunSummary, error) {
 			continue
 		}
 
-		prompt := readStringArtifact(dirPath, "prompt.md")
-		status, duration, totalTokens := lastStepStatus(dirPath)
+		dir := rundir.Dir{Path: dirPath}
+		// fire-and-forget: advisory historical display — a genuine read
+		// failure on one run's prompt or step metas must not hide every other
+		// run from the list; it degrades to an empty/zero summary for this
+		// entry only.
+		prompt, _ := dir.LoadPrompt()
+		metas, _ := dir.LoadStepMetas()
+		status, duration, totalTokens := deriveSummary(metas)
 
 		runs = append(runs, RunSummary{
 			Timestamp:   ts,
@@ -92,15 +100,32 @@ func ListRuns(repoPath string) ([]RunSummary, error) {
 	return runs, nil
 }
 
-// LoadRunDetail loads all data for a single run.
+// LoadRunDetail loads all data for a single run. All artifact reads go
+// through rundir's typed accessors (WP15/J11) — this is the ONE reader of the
+// ONE schema every writer (steps, via ArtifactSink) persists through.
 func LoadRunDetail(runPath string) (RunDetail, error) {
 	name := filepath.Base(runPath)
 	ts, slug := parseSessionDirName(name)
 
-	prompt := readStringArtifact(runPath, "prompt.md")
-	status, duration, totalTokens := lastStepStatus(runPath)
+	dir := rundir.Dir{Path: runPath}
+	// fire-and-forget: advisory historical display — absence is expected for
+	// older/partial runs; a genuine read failure degrades to "" rather than
+	// failing the whole detail view over one optional artifact.
+	prompt, _ := dir.LoadPrompt()
+	planMarkdown, _ := dir.LoadFinalPlan()
+	workerOutput, _ := dir.LoadWorkerOutput()
+	validation, _ := dir.LoadValidation()
 
-	detail := RunDetail{
+	steps, err := dir.LoadStepMetas()
+	if err != nil {
+		// A genuine directory-read failure (not "no step metas found" — that
+		// returns nil, nil) — surface it truthfully rather than silently
+		// claiming a complete-but-empty step history (§0).
+		return RunDetail{}, fmt.Errorf("load step metas for %s: %w", runPath, err)
+	}
+	status, duration, totalTokens := deriveSummary(steps)
+
+	return RunDetail{
 		RunSummary: RunSummary{
 			Timestamp:   ts,
 			Slug:        slug,
@@ -110,32 +135,45 @@ func LoadRunDetail(runPath string) (RunDetail, error) {
 			Duration:    duration,
 			TotalTokens: totalTokens,
 		},
-		PlanMarkdown: readStringArtifact(runPath, "final_plan.md"),
-		WorkerOutput: readStringArtifact(runPath, "worker_output.txt"),
-		Validation:   readStringArtifact(runPath, "worker_validation.txt"),
+		Steps:        steps,
+		PlanMarkdown: planMarkdown,
+		WorkerOutput: workerOutput,
+		Validation:   validation,
+	}, nil
+}
+
+// deriveSummary derives the run's overall status, wall-clock duration, and
+// total token usage from its step metas: status is the Status of whichever
+// step ended latest; duration spans the earliest start to the latest end.
+func deriveSummary(metas []StepMeta) (status string, duration time.Duration, totalTokens int64) {
+	if len(metas) == 0 {
+		return "", 0, 0
 	}
 
-	matches, _ := filepath.Glob(filepath.Join(runPath, "*_meta.json")) // fire-and-forget: Glob errors only on malformed patterns, not fs issues
-	for _, match := range matches {
-		data, err := os.ReadFile(match)
-		if err != nil {
-			continue
+	var earliest, latest time.Time
+	for _, m := range metas {
+		totalTokens += m.InputTokens + m.OutputTokens
+		if earliest.IsZero() || m.StartTime.Before(earliest) {
+			earliest = m.StartTime
 		}
-		var meta StepMeta
-		if err := json.Unmarshal(data, &meta); err != nil {
-			continue
+		if m.EndTime.After(latest) {
+			latest = m.EndTime
+			status = m.Status
 		}
-		detail.Steps = append(detail.Steps, meta)
 	}
-	sort.Slice(detail.Steps, func(i, j int) bool {
-		return detail.Steps[i].StartTime.Before(detail.Steps[j].StartTime)
-	})
-
-	return detail, nil
+	if !earliest.IsZero() && !latest.IsZero() {
+		duration = latest.Sub(earliest)
+	}
+	return status, duration, totalTokens
 }
 
 // AnalyzeRunCompleteness inspects a session directory and returns a summary of
 // what is missing or failed.
+//
+// Tier-B dead code (critic-verified, docs/bug-journal-2026-07-02.md): no
+// current writer produces run_config.json, so this always reports "no
+// run_config.json (old format run)" for every run. Left compiling and
+// unchanged — it is owned by a later package/WP, not WP15 (J11).
 func AnalyzeRunCompleteness(runPath string) RunCompleteness {
 	var c RunCompleteness
 
@@ -203,48 +241,6 @@ func parseSessionDirName(name string) (time.Time, string) {
 		slug = rest[1:]
 	}
 	return ts, slug
-}
-
-func readStringArtifact(dir, name string) string {
-	data, err := os.ReadFile(filepath.Join(dir, name))
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}
-
-func lastStepStatus(dir string) (status string, duration time.Duration, totalTokens int64) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", 0, 0
-	}
-
-	var earliest, latest time.Time
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), "_meta.json") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		var meta StepMeta
-		if err := json.Unmarshal(data, &meta); err != nil {
-			continue
-		}
-		totalTokens += meta.InputTokens + meta.OutputTokens
-		if earliest.IsZero() || meta.StartTime.Before(earliest) {
-			earliest = meta.StartTime
-		}
-		if meta.EndTime.After(latest) {
-			latest = meta.EndTime
-			status = meta.Status
-		}
-	}
-	if !earliest.IsZero() && !latest.IsZero() {
-		duration = latest.Sub(earliest)
-	}
-	return status, duration, totalTokens
 }
 
 func dirHasPlans(runPath, phase string) bool {

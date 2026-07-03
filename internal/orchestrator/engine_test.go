@@ -13,6 +13,7 @@ import (
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/rundir"
 )
 
 // --- Test helpers ---
@@ -522,8 +523,8 @@ func TestEngineStart_DoesNotSwapGlobalLogger(t *testing.T) {
 	cfg := config.DefaultConfig()
 	engine := &Engine{
 		Config: cfg,
-		RunDirFactory: func(slug string) (agent.SessionDir, error) {
-			return agent.SessionDir{Path: t.TempDir()}, nil
+		RunDirFactory: func(slug string) (rundir.Dir, error) {
+			return rundir.Dir{Path: t.TempDir()}, nil
 		},
 		Specs: ProcessSpecs{
 			// A binary that cannot exist makes harness.Run fail immediately

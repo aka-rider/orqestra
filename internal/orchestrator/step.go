@@ -8,6 +8,7 @@ import (
 
 	"github.com/xiii/orqestra/internal/agent"
 	"github.com/xiii/orqestra/internal/harness"
+	"github.com/xiii/orqestra/internal/rundir"
 )
 
 // Step is a typed pipeline transform: Run takes In, returns Out.
@@ -30,14 +31,14 @@ type ReportStore interface {
 // StepContext carries cross-cutting capabilities by value.
 // ctx is never stored — it arrives as an argument to each Step.Run call.
 type StepContext struct {
-	Exec      harness.Executor    // P1: returns a value, never blocks the pipeline
-	Obs       Observer            // P4: one-way, lossy observation
-	Artifacts ArtifactSink        // P7: fail-closed at integrity boundaries
-	Control   Control             // P5: gate request/response + live Post handle
-	Sessions  agent.SessionDir    // session artifact directory
+	Exec      harness.Executor // P1: returns a value, never blocks the pipeline
+	Obs       Observer         // P4: one-way, lossy observation
+	Artifacts ArtifactSink     // P7: fail-closed at integrity boundaries
+	Control   Control          // P5: gate request/response + live Post handle
+	Sessions  rundir.Dir       // session artifact directory
 	Log       *slog.Logger
-	RepoPath  string              // absolute path to the repository root
-	Reports   ReportStore         // tier-1 report channel; nil when no bridge is configured
+	RepoPath  string      // absolute path to the repository root
+	Reports   ReportStore // tier-1 report channel; nil when no bridge is configured
 }
 
 // preferReport returns the plan written by the architect to its plan file.

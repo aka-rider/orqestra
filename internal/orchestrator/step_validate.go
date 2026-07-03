@@ -61,13 +61,14 @@ func (s *ValidateStep) writeMeta(sc StepContext, sid string, start time.Time, st
 	if err != nil {
 		// best-effort: don't let meta write block
 		meta := StepMeta{
-			AgentID:         string(s.ID()),
-			ModelRef:        s.Meta.ModelRef,
-			ClaudeSessionID: sid,
-			StartTime:       start,
-			EndTime:         time.Now(),
-			Status:          status,
-			Error:           fmt.Sprintf("%v", err),
+			AgentID:              string(s.ID()),
+			ModelRef:             s.Meta.ModelRef,
+			ClaudeSessionID:      sid,
+			ClaudeSessionLogPath: resolveSessionLogPath(sc, sid),
+			StartTime:            start,
+			EndTime:              time.Now(),
+			Status:               status,
+			Error:                fmt.Sprintf("%v", err),
 		}
 		data, jsonErr := json.MarshalIndent(meta, "", "  ")
 		if jsonErr != nil {
@@ -77,17 +78,18 @@ func (s *ValidateStep) writeMeta(sc StepContext, sid string, start time.Time, st
 		return
 	}
 	meta := StepMeta{
-		AgentID:         string(s.ID()),
-		ModelRef:        s.Meta.ModelRef,
-		ModelDisplay:    s.Meta.ModelDisplay,
-		Provider:        s.Meta.Provider,
-		ContextWindow:   s.Meta.ContextWindow,
-		ClaudeSessionID: sid,
-		StartTime:       start,
-		EndTime:         time.Now(),
-		Status:          status,
-		InputTokens:     usage.Input,
-		OutputTokens:    usage.Output,
+		AgentID:              string(s.ID()),
+		ModelRef:             s.Meta.ModelRef,
+		ModelDisplay:         s.Meta.ModelDisplay,
+		Provider:             s.Meta.Provider,
+		ContextWindow:        s.Meta.ContextWindow,
+		ClaudeSessionID:      sid,
+		ClaudeSessionLogPath: resolveSessionLogPath(sc, sid),
+		StartTime:            start,
+		EndTime:              time.Now(),
+		Status:               status,
+		InputTokens:          usage.Input,
+		OutputTokens:         usage.Output,
 	}
 	data, jsonErr := json.MarshalIndent(meta, "", "  ")
 	if jsonErr != nil {
