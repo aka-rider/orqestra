@@ -217,8 +217,10 @@ func parseStream(r io.Reader, events chan<- Event) (result string, isError bool,
 		// RunResult.SessionID survives an early stop — e.g. the report-arrival SIGKILL
 		// where the terminal result event never arrives. First-wins (not last-wins):
 		// if a subagent spawned mid-stream emits its own session_id, RunResult.SessionID
-		// must stay pinned to the run's own session, matching the supervisor's
-		// fanoutSink (agent_supervisor.go), which delivers only the first session_id.
+		// must stay pinned to the run's own session, matching the supervisor's own
+		// first-wins capturedSID logic (agent_supervisor.go's supervise loop, WP12) —
+		// every EventSessionStart reaches it (fanoutSink forwards all events
+		// unfiltered), and it keeps only the first.
 		if event.SessionID != "" && sessionID == "" {
 			sessionID = event.SessionID
 		}

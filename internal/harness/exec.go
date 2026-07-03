@@ -65,6 +65,19 @@ type ProcessSpec struct {
 	PreTimeoutNudge string           // role-specific message sent 60 s before deadline; "" = disabled
 	PlanMode        bool             // agent runs in plan mode; extractReport reads plan file
 	ExpectsReport   bool             // agent should submit via SubmitReport; enables driftPolicy
+
+	// InputPlane is a ROLE-CLASS property (WP13/J6): whether this invocation
+	// runs interactively (--input-format stream-json, an open stdin channel
+	// the supervisor can nudge and gracefully close) or one-shot (-p, the
+	// full prompt handed to the CLI directly, process exits when the CLI's
+	// own turn concludes). Set once per role by the spec builder (buildEngine)
+	// — reporters (architect/critic) and the executor (worker) are always on;
+	// the integrator's one-shot utility invocations (commit-msg generation,
+	// conflict resolution) are off. Policy presence (LoopGuard/SilenceGuard/
+	// PreTimeoutNudge) must NEVER flip this — see AgentSupervisor.Run's
+	// needsInputPlane, which used to (incorrectly) derive it from
+	// `len(policies) > 0` instead.
+	InputPlane bool
 }
 
 // Message is a user turn sent to a running process via the input plane.

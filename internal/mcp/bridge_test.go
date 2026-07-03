@@ -233,12 +233,35 @@ func TestQuestionBridge_ReportRoundTrip(t *testing.T) {
 	}
 }
 
-func TestQuestionBridge_TakeReport_ByAgentID_AfterSessionRegistered(t *testing.T) {
-	// Regression for the architect "no valid report produced" race: the report is
-	// stored under the session-id key (handleReport looks up sessions[agentID]),
-	// and harvesting must succeed when keyed by agentID alone — even though the
-	// caller's RunResult.SessionID is empty after an early stop.
-	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-sess-corr-%d.sock", os.Getpid()))
+// sendReportNonce dials the bridge and sends a report envelope carrying an
+// InvocationID (WP12/J34-reports), returning the ack.
+func sendReportNonce(sockPath, agentID, nonce, report, summary string) error {
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	payload, _ := json.Marshal(ReportSubmission{Report: report, Summary: summary})
+	env := bridgeEnvelope{Kind: "report", AgentID: agentID, InvocationID: nonce, Payload: payload}
+	envData, _ := json.Marshal(env)
+	if err := writeFrame(conn, envData); err != nil {
+		return err
+	}
+	ackData, err := readFrame(conn)
+	if err != nil {
+		return err
+	}
+	var ack struct{ OK bool `json:"ok"` }
+	return json.Unmarshal(ackData, &ack)
+}
+
+func TestQuestionBridge_TakeReport_ByAgentID_AfterNonceArmed(t *testing.T) {
+	// WP12/J34-reports: ReportSignal(agentID, nonce) records agentID → nonce
+	// internally so TakeReport(agentID) — the unchanged ReportStore interface
+	// every call site uses — resolves the CURRENT invocation's nonce-keyed
+	// report without ever threading a nonce through step.go/report_harvest.go.
+	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-nonce-corr-%d.sock", os.Getpid()))
 	defer os.Remove(sockPath)
 	bridge := NewQuestionBridge(sockPath)
 
@@ -247,38 +270,40 @@ func TestQuestionBridge_TakeReport_ByAgentID_AfterSessionRegistered(t *testing.T
 	runBridge(t, ctx, bridge, sockPath)
 
 	const agentID = "architect"
-	const sessionID = "sess-real-xyz"
+	const nonce = "inv-1234-1"
 	const reportText = "## Goal\nShip it.\n## Work Packages\n- one"
 
-	// Supervisor observed EventSessionStart and re-armed the slot with the real id.
-	bridge.RegisterSession(agentID, sessionID)
+	// The supervisor arms BEFORE starting the subprocess — no session
+	// correlation, no re-arming.
+	sig := bridge.ReportSignal(agentID, nonce)
 
-	// ReportSignal keyed by agentID must arm the waiter for the session key.
-	sig := bridge.ReportSignal(agentID)
-
-	if err := sendReport(sockPath, agentID, reportText, ""); err != nil {
-		t.Fatalf("sendReport: %v", err)
+	if err := sendReportNonce(sockPath, agentID, nonce, reportText, ""); err != nil {
+		t.Fatalf("sendReportNonce: %v", err)
 	}
 
 	select {
 	case <-sig:
 	case <-time.After(2 * time.Second):
-		t.Fatal("ReportSignal(agentID) did not fire after a report stored under the session key")
+		t.Fatal("ReportSignal(agentID, nonce) did not fire after a report stored under the nonce key")
 	}
 
-	// Harvest by agentID — resolves sessions[agentID] internally; no RunResult.SessionID needed.
+	// Harvest by agentID — resolves agentNonce[agentID] internally; no
+	// RunResult.SessionID or nonce needed by the caller.
 	got, ok := bridge.TakeReport(agentID)
 	if !ok {
-		t.Fatal("expected TakeReport(agentID) to find the session-keyed report")
+		t.Fatal("expected TakeReport(agentID) to find the nonce-keyed report")
 	}
 	if got != reportText {
 		t.Errorf("report = %q, want %q", got, reportText)
 	}
 }
 
-func TestQuestionBridge_RegisterSessionClearsStaleReport(t *testing.T) {
-	// Run() no longer clears stale state. RegisterSession does.
-	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-stale-%d.sock", os.Getpid()))
+func TestQuestionBridge_TakeReport_FallsBackToAgentIDWithoutArming(t *testing.T) {
+	// If ReportSignal was never called for agentID (no supervisor arm — e.g.
+	// a bridge-less test, or an old-style envelope with no InvocationID),
+	// TakeReport(agentID) must still resolve via the agentID fallback key,
+	// matching handleReport's own missing-nonce fallback.
+	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-nonce-fallback-%d.sock", os.Getpid()))
 	defer os.Remove(sockPath)
 	bridge := NewQuestionBridge(sockPath)
 
@@ -286,26 +311,30 @@ func TestQuestionBridge_RegisterSessionClearsStaleReport(t *testing.T) {
 	defer cancel()
 	runBridge(t, ctx, bridge, sockPath)
 
-	// Deliver report for "critic" and let it sit (simulate cancelled-before-TakeReport run).
 	if err := sendReport(sockPath, "critic", "stale report", ""); err != nil {
 		t.Fatalf("sendReport: %v", err)
 	}
-	// Verify it's there.
-	if _, ok := bridge.TakeReport("critic"); !ok {
-		t.Fatal("expected report to be stored initially")
+	got, ok := bridge.TakeReport("critic")
+	if !ok {
+		t.Fatal("expected TakeReport to fall back to the agentID key when unarmed")
+	}
+	if got != "stale report" {
+		t.Errorf("report = %q, want %q", got, "stale report")
 	}
 
-	// Simulate the next run: deliver again without taking, then RegisterSession.
+	// A second, un-taken delivery followed by a fresh TakeReport must return
+	// exactly that new report — no stale-clearing step exists (or is needed)
+	// with nonce correlation: each invocation's key is unique, so nothing
+	// ever needs to be manually cleared.
 	if err := sendReport(sockPath, "critic", "stale report 2", ""); err != nil {
 		t.Fatalf("sendReport 2: %v", err)
 	}
-
-	// RegisterSession (no sessionID → agentID key) must clear the stale report.
-	bridge.RegisterSession("critic", "")
-
-	_, ok := bridge.TakeReport("critic")
-	if ok {
-		t.Error("expected stale report to be cleared by RegisterSession")
+	got2, ok := bridge.TakeReport("critic")
+	if !ok {
+		t.Fatal("expected second report to be stored")
+	}
+	if got2 != "stale report 2" {
+		t.Errorf("report = %q, want %q", got2, "stale report 2")
 	}
 }
 
@@ -318,7 +347,8 @@ func TestReportSignal_OpenBeforeDelivery(t *testing.T) {
 	defer cancel()
 	runBridge(t, ctx, bridge, sockPath)
 
-	sig := bridge.ReportSignal("architect")
+	const nonce = "inv-open-1"
+	sig := bridge.ReportSignal("architect", nonce)
 
 	// Signal must be open (not yet closed) before delivery.
 	select {
@@ -328,8 +358,8 @@ func TestReportSignal_OpenBeforeDelivery(t *testing.T) {
 	}
 
 	// Deliver the report.
-	if err := sendReport(sockPath, "architect", "# Plan\n## Goal\nTest.", ""); err != nil {
-		t.Fatalf("sendReport: %v", err)
+	if err := sendReportNonce(sockPath, "architect", nonce, "# Plan\n## Goal\nTest.", ""); err != nil {
+		t.Fatalf("sendReportNonce: %v", err)
 	}
 
 	// Signal must close promptly after delivery.
@@ -349,13 +379,14 @@ func TestReportSignal_PreClosedWhenReportExists(t *testing.T) {
 	defer cancel()
 	runBridge(t, ctx, bridge, sockPath)
 
+	const nonce = "inv-pre-1"
 	// Deliver the report first.
-	if err := sendReport(sockPath, "researcher", "## Goal\nTest.", ""); err != nil {
-		t.Fatalf("sendReport: %v", err)
+	if err := sendReportNonce(sockPath, "researcher", nonce, "## Goal\nTest.", ""); err != nil {
+		t.Fatalf("sendReportNonce: %v", err)
 	}
 
 	// ReportSignal called after delivery must return a pre-closed channel.
-	sig := bridge.ReportSignal("researcher")
+	sig := bridge.ReportSignal("researcher", nonce)
 	select {
 	case <-sig:
 	default:
@@ -363,8 +394,13 @@ func TestReportSignal_PreClosedWhenReportExists(t *testing.T) {
 	}
 }
 
-func TestReportSignal_ReArmedAfterTakeReport(t *testing.T) {
-	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-sig-rearm-%d.sock", os.Getpid()))
+func TestReportSignal_TwoInvocationsSameAgentID_DoNotCollide(t *testing.T) {
+	// WP12/J34-reports gate (c): two sequential invocations of the SAME
+	// agentID — the exact scenario that collided under the old session-based
+	// correlation (RegisterSession(agentID, "") re-armed the SAME fallback
+	// key for both invocations whenever no session ID was known yet) — must
+	// each get their own report via a distinct nonce, with no cross-talk.
+	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-sig-two-inv-%d.sock", os.Getpid()))
 	defer os.Remove(sockPath)
 	bridge := NewQuestionBridge(sockPath)
 
@@ -372,89 +408,65 @@ func TestReportSignal_ReArmedAfterTakeReport(t *testing.T) {
 	defer cancel()
 	runBridge(t, ctx, bridge, sockPath)
 
-	// First delivery.
-	if err := sendReport(sockPath, "architect", "# Plan\n## Goal\nFirst.", ""); err != nil {
-		t.Fatalf("sendReport 1: %v", err)
-	}
-	bridge.TakeReport("architect") // consume first report
+	const agentID = "architect"
+	const nonce1 = "inv-100-1"
+	const nonce2 = "inv-100-2"
 
-	// Re-arm: signal for a second delivery should be open again.
-	sig2 := bridge.ReportSignal("architect")
+	// Invocation 1 arms first (matches the supervisor arming before starting
+	// its subprocess).
+	sig1 := bridge.ReportSignal(agentID, nonce1)
+
+	// Invocation 2 starts before invocation 1's report arrives (e.g.
+	// invocation 1 is slow) and arms its OWN nonce — never touching
+	// invocation 1's slot.
+	sig2 := bridge.ReportSignal(agentID, nonce2)
+
+	// Invocation 1's report arrives, late.
+	if err := sendReportNonce(sockPath, agentID, nonce1, "invocation-1 report", ""); err != nil {
+		t.Fatalf("sendReportNonce 1: %v", err)
+	}
+
+	select {
+	case <-sig1:
+	case <-time.After(time.Second):
+		t.Fatal("invocation-1's own signal did not fire from its own report")
+	}
+	// Invocation 2's signal must NOT have fired — no cross-invocation collision.
 	select {
 	case <-sig2:
-		t.Fatal("re-armed signal should be open before second delivery")
+		t.Fatal("invocation-2's ReportSignal incorrectly fired from invocation-1's report")
 	default:
 	}
 
-	// Second delivery closes the re-armed signal.
-	if err := sendReport(sockPath, "architect", "# Plan\n## Goal\nSecond.", ""); err != nil {
-		t.Fatalf("sendReport 2: %v", err)
+	// agentNonce currently points at nonce2 (the LAST arm) — TakeReport(agentID)
+	// resolves invocation 2's key, which has no report yet.
+	if _, ok := bridge.TakeReport(agentID); ok {
+		t.Fatal("TakeReport(agentID) should resolve invocation-2's (still empty) slot, not invocation-1's stray report")
+	}
+
+	// Invocation 2's own report arrives and is retrievable, uncontaminated.
+	if err := sendReportNonce(sockPath, agentID, nonce2, "invocation-2 report", ""); err != nil {
+		t.Fatalf("sendReportNonce 2: %v", err)
 	}
 	select {
 	case <-sig2:
 	case <-time.After(time.Second):
-		t.Fatal("re-armed signal did not close after second delivery")
+		t.Fatal("invocation-2's signal did not fire from its own report")
+	}
+	got, ok := bridge.TakeReport(agentID)
+	if !ok {
+		t.Fatal("expected invocation-2's report to be retrievable")
+	}
+	if got != "invocation-2 report" {
+		t.Errorf("report = %q, want %q", got, "invocation-2 report")
 	}
 }
 
-func TestReportSignal_ReArmedAfterRegisterSession(t *testing.T) {
-	// RegisterSession (not Run) is the re-arm trigger.
-	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-sig-restart-%d.sock", os.Getpid()))
-	defer os.Remove(sockPath)
-	bridge := NewQuestionBridge(sockPath)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	runBridge(t, ctx, bridge, sockPath)
-
-	// Subscribe before the first run completes — simulates a run that was cancelled
-	// before the agent ever submitted a report.
-	sigBefore := bridge.ReportSignal("architect")
-	select {
-	case <-sigBefore:
-		t.Fatal("signal should be open before delivery")
-	default:
-	}
-
-	// RegisterSession re-arms the slot: sigBefore is orphaned (never closed; the old
-	// supervisor goroutine already exited when the run was cancelled).
-	bridge.RegisterSession("architect", "")
-
-	// New subscription must return a fresh open channel.
-	sigAfter := bridge.ReportSignal("architect")
-	select {
-	case <-sigAfter:
-		t.Fatal("re-armed signal after RegisterSession should be open, not pre-closed")
-	default:
-	}
-
-	// sigBefore is still open — it was orphaned, not closed.
-	select {
-	case <-sigBefore:
-		t.Fatal("orphaned signal should remain open after RegisterSession")
-	default:
-	}
-
-	// Delivery on the new run closes sigAfter.
-	if err := sendReport(sockPath, "architect", "# Plan\n## Goal\nAfter restart.", ""); err != nil {
-		t.Fatalf("sendReport: %v", err)
-	}
-	select {
-	case <-sigAfter:
-	case <-time.After(time.Second):
-		t.Fatal("re-armed signal did not close after delivery")
-	}
-	// sigBefore must remain open.
-	select {
-	case <-sigBefore:
-		t.Fatal("orphaned signal must not fire on second run's delivery")
-	default:
-	}
-}
-
-func TestReportSignal_TwoDeliveriesSameAgentNoPanic(t *testing.T) {
-	// Two SubmitReport calls for the same agentID across a TakeReport must not
-	// double-close the waiter channel (which would panic).
+func TestReportSignal_SameKeyReuseNoDoubleClosePanic(t *testing.T) {
+	// Defensive robustness: even if a key were ever reused (nonces are unique
+	// per invocation by construction, so this should not happen operationally),
+	// arm → deliver → take → re-arm-same-key → deliver again must never panic
+	// from a double-close of the waiter channel.
 	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-sig-dup-%d.sock", os.Getpid()))
 	defer os.Remove(sockPath)
 	bridge := NewQuestionBridge(sockPath)
@@ -463,26 +475,33 @@ func TestReportSignal_TwoDeliveriesSameAgentNoPanic(t *testing.T) {
 	defer cancel()
 	runBridge(t, ctx, bridge, sockPath)
 
-	// Subscribe before first delivery.
-	sig := bridge.ReportSignal("critic")
+	const agentID = "critic"
+	const nonce = "inv-dup-1"
 
-	// First delivery — closes the waiter.
-	if err := sendReport(sockPath, "critic", "## Critic Report\n### Blockers Found\nNone.", ""); err != nil {
-		t.Fatalf("sendReport 1: %v", err)
+	sig := bridge.ReportSignal(agentID, nonce)
+	if err := sendReportNonce(sockPath, agentID, nonce, "## Critic Report\n### Blockers Found\nNone.", ""); err != nil {
+		t.Fatalf("sendReportNonce 1: %v", err)
 	}
 	select {
 	case <-sig:
 	case <-time.After(time.Second):
 		t.Fatal("signal did not close after first delivery")
 	}
-	bridge.TakeReport("critic")
+	bridge.TakeReport(agentID)
 
-	// Second delivery must not panic (no open waiter to double-close).
-	if err := sendReport(sockPath, "critic", "## Critic Report\n### Blockers Found\nNone again.", ""); err != nil {
-		t.Fatalf("sendReport 2: %v", err)
+	// Re-arm the SAME key. Must not panic even though delivery closes a
+	// brand-new channel this time (the old one was already deleted from
+	// reportWaiters by handleReport, so there is nothing to double-close).
+	sig2 := bridge.ReportSignal(agentID, nonce)
+	if err := sendReportNonce(sockPath, agentID, nonce, "## Critic Report\n### Blockers Found\nNone again.", ""); err != nil {
+		t.Fatalf("sendReportNonce 2: %v", err)
 	}
-	// Verify second report is stored correctly.
-	got, ok := bridge.TakeReport("critic")
+	select {
+	case <-sig2:
+	case <-time.After(time.Second):
+		t.Fatal("second signal did not close")
+	}
+	got, ok := bridge.TakeReport(agentID)
 	if !ok {
 		t.Fatal("expected second report to be stored")
 	}

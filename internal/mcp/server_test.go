@@ -18,7 +18,7 @@ func TestHandleMCPRequest_Initialize(t *testing.T) {
 		ID:      json.RawMessage(`1`),
 		Method:  "initialize",
 	}
-	resp := handleMCPRequest(req, testSock, "researcher")
+	resp := handleMCPRequest(req, testSock, "researcher", "")
 	if resp == nil {
 		t.Fatal("expected response, got nil")
 	}
@@ -48,7 +48,7 @@ func TestHandleMCPRequest_ToolsList(t *testing.T) {
 		ID:      json.RawMessage(`2`),
 		Method:  "tools/list",
 	}
-	resp := handleMCPRequest(req, testSock, "researcher")
+	resp := handleMCPRequest(req, testSock, "researcher", "")
 	if resp == nil {
 		t.Fatal("expected response")
 	}
@@ -128,7 +128,7 @@ func TestHandleMCPRequest_Notification(t *testing.T) {
 		JSONRPC: "2.0",
 		Method:  "notifications/initialized",
 	}
-	resp := handleMCPRequest(req, testSock, "researcher")
+	resp := handleMCPRequest(req, testSock, "researcher", "")
 	if resp != nil {
 		t.Error("expected nil for notification, got response")
 	}
@@ -140,7 +140,7 @@ func TestHandleMCPRequest_UnknownMethod(t *testing.T) {
 		ID:      json.RawMessage(`3`),
 		Method:  "bogus/method",
 	}
-	resp := handleMCPRequest(req, testSock, "researcher")
+	resp := handleMCPRequest(req, testSock, "researcher", "")
 	if resp == nil {
 		t.Fatal("expected error response")
 	}
@@ -201,7 +201,7 @@ func TestAskUserQuestion(t *testing.T) {
 		Method:  "tools/call",
 		Params:  json.RawMessage(`{"name":"AskUserQuestion","arguments":{"question":"What is the answer?"}}`),
 	}
-	resp := handleMCPRequest(req, sockPath, "researcher")
+	resp := handleMCPRequest(req, sockPath, "researcher", "")
 	if resp == nil || resp.Error != nil {
 		t.Fatalf("AskUserQuestion error: %v", resp)
 	}
@@ -227,6 +227,69 @@ func TestAskUserQuestion(t *testing.T) {
 	}
 	if len(result.Content) == 0 || result.Content[0].Text != "User's answer: 42" {
 		t.Errorf("result = %+v, want 'User's answer: 42'", result)
+	}
+}
+
+// TestHandleMCPRequest_ThreadsInvocationIDIntoEnvelope is the WP12/J34-reports
+// wire-level gate: RunServer's invocationID parameter must reach the bridge
+// envelope unchanged, for both tool calls — SubmitReport's correlation
+// depends on it, and AskUserQuestion carries it for symmetry/future use.
+func TestHandleMCPRequest_ThreadsInvocationIDIntoEnvelope(t *testing.T) {
+	const wantInvocationID = "inv-42-7"
+
+	sockPath := filepath.Join("/tmp", fmt.Sprintf("orq-test-invid-%d.sock", os.Getpid()))
+	defer os.Remove(sockPath)
+
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	envCh := make(chan bridgeEnvelope, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer conn.Close()
+		data, err := readFrame(conn)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		var env bridgeEnvelope
+		if err := json.Unmarshal(data, &env); err != nil {
+			errCh <- err
+			return
+		}
+		envCh <- env
+		ack, _ := json.Marshal(map[string]bool{"ok": true})
+		_ = writeFrame(conn, ack)
+	}()
+
+	req := jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`9`),
+		Method:  "tools/call",
+		Params:  json.RawMessage(`{"name":"SubmitReport","arguments":{"report":"## Goal\nTest."}}`),
+	}
+	resp := handleMCPRequest(req, sockPath, "worker", wantInvocationID)
+	if resp == nil || resp.Error != nil {
+		t.Fatalf("SubmitReport error: %v", resp)
+	}
+
+	select {
+	case env := <-envCh:
+		if env.InvocationID != wantInvocationID {
+			t.Errorf("envelope InvocationID = %q, want %q", env.InvocationID, wantInvocationID)
+		}
+	case err := <-errCh:
+		t.Fatalf("bridge-side error: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for envelope")
 	}
 }
 

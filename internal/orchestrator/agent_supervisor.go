@@ -3,6 +3,9 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/xiii/orqestra/internal/harness"
@@ -15,16 +18,68 @@ var errReportArrived = errors.New("supervisor: report arrived")
 // ReportSignaler is satisfied by *mcp.QuestionBridge.
 // Defined here so the orchestrator package does not need to import mcp beyond
 // what engine_types.go already has.
+//
+// WP12/RC3,J34-reports: correlation is by per-invocation nonce, not session
+// ID. There is no re-arming step — every invocation gets its own nonce, so a
+// fresh call can never collide with a still-pending earlier one, even for the
+// same agentID (the old session-based correlation could and did collide —
+// see agent_supervisor_test.go / bridge_test.go's WP12 coverage).
 type ReportSignaler interface {
-	// RegisterSession re-arms the correlation slot for agentID with the given
-	// sessionID. Call on EventSessionStart, before calling ReportSignal.
-	RegisterSession(agentID, sessionID string)
-	// ReportSignal returns a channel closed when a report arrives for agentID.
-	// The bridge resolves the correlation key from the agent's registered session
-	// internally, so the supervisor never threads a session ID through this path.
-	// Returns a pre-closed channel if the report has already arrived. Callers must
-	// not close the channel.
-	ReportSignal(agentID string) <-chan struct{}
+	// ReportSignal arms the report-correlation slot for one invocation,
+	// identified by (agentID, nonce), and returns a channel closed when a
+	// report arrives for it. Call BEFORE starting the subprocess. Returns a
+	// pre-closed channel if the report has already arrived. Callers must not
+	// close the returned channel.
+	ReportSignal(agentID, nonce string) <-chan struct{}
+}
+
+// invocationSeq generates the per-invocation nonce counter component. A
+// process-wide atomic counter combined with the PID (nextInvocationID) is
+// sufficient uniqueness: the bridge these nonces correlate against is itself
+// scoped to one orqestra process (WP4b/J5,J41 made QuestionBridge.Run a
+// once-per-process lifetime), so cross-process collision is not a concern.
+var invocationSeq atomic.Uint64
+
+// nextInvocationID returns a fresh, process-unique invocation nonce
+// (WP12/J34-reports). AgentSupervisor.Run calls this once per Run call and
+// injects the result into the "orqestra" inline MCP server's
+// --invocation-id arg (see withInvocationNonce) — the bridge then keys
+// SubmitReport correlation by this value instead of session ID or agentID
+// alone, so two invocations of the same agentID (sequential retries, or a
+// role whose model never emits a session_id) can never cross-contaminate.
+func nextInvocationID() string {
+	return fmt.Sprintf("inv-%d-%d", os.Getpid(), invocationSeq.Add(1))
+}
+
+// withInvocationNonce returns a COPY of spec with --invocation-id nonce
+// appended to the "orqestra" inline MCP server's args, if present. It never
+// mutates spec.Inline or any InlineMCP.Args slice in place: spec.Inline is
+// shared (by slice-header value) across every invocation built from the same
+// ProcessSpecs.Architect/.Critic/.Worker value (e.g. every deliberation round
+// reuses DeliberateStep.ArchSpec) — an in-place append that happened to reuse
+// backing-array capacity would silently corrupt a sibling invocation's args
+// (a concurrent retry, or the next round's copy taken before this one
+// returns). Allocating fresh slices here means the caller's original spec is
+// never touched, satisfying "two identical specs run identical processes"
+// (ProcessSpec's own value-type contract, exec.go) for every OTHER call site
+// that still holds the pre-nonce spec.
+func withInvocationNonce(spec harness.ProcessSpec, nonce string) harness.ProcessSpec {
+	if nonce == "" || len(spec.Inline) == 0 {
+		return spec
+	}
+	inline := make([]harness.InlineMCP, len(spec.Inline))
+	copy(inline, spec.Inline)
+	for i, m := range inline {
+		if m.Name != "orqestra" {
+			continue
+		}
+		args := make([]string, len(m.Args), len(m.Args)+2)
+		copy(args, m.Args)
+		m.Args = append(args, "--invocation-id", nonce)
+		inline[i] = m
+	}
+	spec.Inline = inline
+	return spec
 }
 
 // AgentSupervisor is the single owner of the agent lifecycle.
@@ -65,6 +120,14 @@ func (s *AgentSupervisor) Run(
 		return harness.RunResult{}, err
 	}
 
+	// Per-invocation nonce (WP12/J34-reports): generated once per Run call,
+	// injected into the "orqestra" inline MCP server's args (a fresh spec
+	// value — see withInvocationNonce), and armed on the bridge BEFORE the
+	// subprocess starts. Every invocation gets a unique nonce, so report
+	// correlation never depends on session ID or agentID reuse.
+	nonce := nextInvocationID()
+	spec = withInvocationNonce(spec, nonce)
+
 	var ctx context.Context
 	var cancelCause context.CancelCauseFunc
 	if spec.Timeout > 0 {
@@ -80,9 +143,35 @@ func (s *AgentSupervisor) Run(
 
 	policies := buildPolicies(spec)
 
-	// reportSig starts nil; it is lazily bound in the supervise loop when
-	// EventSessionStart delivers a session ID via sessionC. A nil channel never
-	// fires in select, so the case is a no-op until bound.
+	// expectsReport mirrors the report-machinery guard below: a bridge-less
+	// ExpectsReport spec should not enter the input plane (spec.Prompt would
+	// be seeded into msgs and cleared, changing the subprocess invocation
+	// mode) or arm a signal nothing will ever deliver.
+	expectsReport := spec.ExpectsReport && s.reports != nil && spec.AgentID != ""
+
+	// reportSigCh arms the BRIDGE's correlation slot BEFORE the subprocess
+	// starts (WP12/J34-reports) — no re-arming, no session correlation on the
+	// bridge side: the nonce above is unique per invocation, so this call can
+	// never collide with any other invocation's slot, past or concurrent,
+	// even for the same agentID.
+	//
+	// The supervise loop's OWN reaction to it is deliberately deferred: the
+	// local reportSig variable used in the select below starts nil (a nil
+	// channel never fires in select) and is only assigned reportSigCh once
+	// this invocation's EventSessionStart has been observed (see the events
+	// case). This preserves a DETERMINISTIC guarantee — capturedSID is always
+	// set before a report-arrival stop can occur — that a bare race between
+	// reportSigCh and the events channel could not offer: EventSessionStart
+	// is always the very first thing a real Claude stream emits (long before
+	// SubmitReport could ever fire in practice), but without this gate a
+	// pathologically fast/pre-fired signal could win the select before the
+	// executor goroutine had even been scheduled to emit it. Gating is purely
+	// local bookkeeping — it changes nothing about when or how the BRIDGE is
+	// armed or correlates reports.
+	var reportSigCh <-chan struct{}
+	if expectsReport {
+		reportSigCh = s.reports.ReportSignal(spec.AgentID, nonce)
+	}
 	var reportSig <-chan struct{}
 
 	// capturedSID holds the session ID observed from EventSessionStart. When the
@@ -92,18 +181,19 @@ func (s *AgentSupervisor) Run(
 	// TUI log viewer) regardless of how the run ended.
 	var capturedSID string
 
-	// Decide whether to open an input plane.
-	// Pure passthrough: no policies, no caller-supplied in, and no report machinery —
-	// preserves the single-shot -p behaviour of the original merge path.
-	// The report condition mirrors the sessionC creation guard below; a bridge-less
-	// ExpectsReport spec should not enter the input plane (spec.Prompt would be
-	// seeded into msgs and cleared, changing the subprocess invocation mode).
-	needsInputPlane := len(policies) > 0 || in != nil || (spec.ExpectsReport && s.reports != nil && spec.AgentID != "")
+	// Decide whether to open an input plane. WP13/J6: this is now a ROLE-CLASS
+	// property (spec.InputPlane, set once by the spec builder per role) plus
+	// the pre-existing in!=nil/expectsReport terms — it NO LONGER depends on
+	// policy presence (len(policies) > 0). Before WP13, configuring a
+	// SilenceGuard/LoopGuard/PreTimeoutNudge on an otherwise one-shot spec
+	// silently flipped it into interactive stream-json mode — action at a
+	// distance. Pure passthrough (none of these true) preserves the
+	// single-shot -p behaviour.
+	needsInputPlane := spec.InputPlane || in != nil || expectsReport
 
 	var msgs chan harness.Message
 	var baseIn <-chan harness.Message
 	var events chan harness.Event
-	var sessionC chan string
 	var runSink harness.Sink
 
 	if needsInputPlane {
@@ -137,11 +227,7 @@ func (s *AgentSupervisor) Run(
 		baseIn = msgs
 
 		events = make(chan harness.Event, 64)
-		if spec.ExpectsReport && s.reports != nil && spec.AgentID != "" {
-			// 1-slot buffer: EventSessionStart fires once; duplicates dropped.
-			sessionC = make(chan string, 1)
-		}
-		runSink = &fanoutSink{inner: sink, events: events, sessionC: sessionC}
+		runSink = &fanoutSink{inner: sink, events: events}
 	} else {
 		baseIn = in
 		runSink = sink
@@ -172,6 +258,27 @@ func (s *AgentSupervisor) Run(
 	deadline, hasDeadline := ctx.Deadline()
 	lastEvent := time.Now()
 
+	// msgsClosed guards the graceful-stdin-close mechanism below (WP13.0
+	// spike CONFIRMED: closing the input channel closes the subprocess's
+	// stdin, which ends a `--input-format stream-json` process cleanly after
+	// its current turn — see the spike evidence quoted in the WP13 report).
+	// Once true, applyResult must never attempt msgs <- again (a send on a
+	// closed channel panics).
+	msgsClosed := false
+
+	// reportSignaled reports whether a report has already arrived for this
+	// invocation, without consuming/blocking — receiving from a channel that
+	// may be nil (not yet bound, see reportSig above) or already closed is
+	// always safe via a non-blocking select.
+	reportSignaled := func() bool {
+		select {
+		case <-reportSig:
+			return true
+		default:
+			return false
+		}
+	}
+
 	applyResult := func(r policyResult) {
 		if r.stop {
 			cause := r.err
@@ -181,7 +288,7 @@ func (s *AgentSupervisor) Run(
 			cancelCause(cause)
 			return
 		}
-		if r.text != "" {
+		if r.text != "" && !msgsClosed {
 			select {
 			case msgs <- harness.Message{Text: r.text}:
 			default: // buffer full — drop nudge
@@ -200,13 +307,6 @@ func (s *AgentSupervisor) Run(
 			s.recordUsage(spec.AgentID, oc.res)
 			return s.resolveErr(ctx, oc.res, oc.err)
 
-		case sid := <-sessionC:
-			// Session ID arrived non-lossily. Remember it, re-arm the bridge slot,
-			// and bind reportSig. After this, the case below becomes live.
-			capturedSID = sid
-			s.reports.RegisterSession(spec.AgentID, sid)
-			reportSig = s.reports.ReportSignal(spec.AgentID)
-
 		case <-reportSig:
 			// Report arrived: cancel with the report sentinel so resolveErr
 			// can swallow context.Canceled and return nil to the caller.
@@ -215,6 +315,56 @@ func (s *AgentSupervisor) Run(
 
 		case ev := <-events:
 			lastEvent = time.Now()
+			// First-wins session ID capture (matches stream_event.go:220's
+			// first-wins parse and J34): a subagent spawned mid-run may emit
+			// its own EventSessionStart later — capturedSID must stay pinned
+			// to the FIRST one, this invocation's own session. Captured
+			// directly here instead of via a dedicated sessionC channel
+			// (WP12) — the events channel already delivers every event in
+			// order, so no separate plumbing is needed. Binding reportSig
+			// here (not at arm time) is what makes capturedSID-before-
+			// report-stop deterministic — see the reportSigCh comment above.
+			if ev.Kind == harness.EventSessionStart && ev.SessionID != "" && capturedSID == "" {
+				capturedSID = ev.SessionID
+				reportSig = reportSigCh
+			}
+
+			// WP13/J6, WP13.0 spike CONFIRMED: EventSessionDone marks the end
+			// of one conversation turn (the "result" stream event) — NOT
+			// necessarily the end of the whole invocation, since a nudge
+			// policy may still send another message into msgs, starting a
+			// new turn that ends in its own later EventSessionDone. Close the
+			// input plane (ending the subprocess's stdin, which the spike
+			// confirmed lets it exit cleanly on its own) ONLY when there is
+			// nothing left to wait for: either this spec never expected a
+			// report, or one has already arrived. Otherwise leave msgs open
+			// so silence/pre-timeout/drift nudges still have a chance to
+			// prompt a forgotten SubmitReport — the owner's "drift nudges are
+			// intentional and stay" constraint (report §0) takes priority
+			// over an early close here. early-stop-on-report (the case above)
+			// remains the primary, faster path when a report DOES arrive
+			// mid-turn — this is belt-and-braces for the natural-end-with-no-
+			// report case, avoiding a full wall-clock timeout + SIGKILL for
+			// a process that is simply sitting idle with nothing more to do.
+			// Guarded to in == nil: an upstream in still forwards through a
+			// dedicated goroutine (see below) that would race a direct close.
+			if ev.Kind == harness.EventSessionDone && !msgsClosed && in == nil {
+				if !expectsReport || reportSignaled() {
+					close(msgs)
+					msgsClosed = true
+					// Hand off entirely to the natural-exit path (the case
+					// oc := <-runDone branch below): if a report had already
+					// arrived (reportSignaled() above), reportSig would stay
+					// permanently ready and could otherwise win a LATER
+					// select iteration too, triggering a redundant
+					// cancelCause(errReportArrived) that would race the
+					// subprocess's own graceful exit with a ctx-cancellation
+					// SIGKILL instead of just letting it finish (which the
+					// spike showed happens promptly once stdin is closed).
+					reportSig = nil
+				}
+			}
+
 			for _, p := range policies {
 				applyResult(p.observe(ev))
 			}
@@ -314,28 +464,23 @@ func buildPolicies(spec harness.ProcessSpec) []supervisorPolicy {
 	return ps
 }
 
-// fanoutSink forwards every event to both the real sink and the events channel.
-// Observe is called from the harness sink goroutine — the events channel send
-// is non-blocking to avoid stalling the sink.
+// fanoutSink forwards every event to both the real sink and the events
+// channel. Observe is called from the harness sink goroutine — the events
+// channel send is non-blocking to avoid stalling the sink.
 //
-// sessionC is a dedicated 1-slot channel for EventSessionStart delivery.
-// It is non-lossy within a single session (only the first session_id is sent;
-// duplicates are silently dropped by the default: branch).
+// WP12/RC3: EventSessionStart capture used to require a dedicated sessionC
+// channel here, feeding the supervise loop's lazy report-signal bind. Report
+// correlation is now nonce-based and armed before the subprocess even starts
+// (see AgentSupervisor.Run), so fanoutSink no longer needs to single out
+// EventSessionStart at all — the supervise loop reads it directly off events.
 type fanoutSink struct {
-	inner    harness.Sink
-	events   chan<- harness.Event
-	sessionC chan<- string
+	inner  harness.Sink
+	events chan<- harness.Event
 }
 
 func (f *fanoutSink) Observe(ev harness.Event) {
 	if f.inner != nil {
 		f.inner.Observe(ev)
-	}
-	if ev.Kind == harness.EventSessionStart && ev.SessionID != "" && f.sessionC != nil {
-		select {
-		case f.sessionC <- ev.SessionID:
-		default: // first session_id already delivered; duplicates dropped
-		}
 	}
 	select {
 	case f.events <- ev:

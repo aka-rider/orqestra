@@ -85,16 +85,15 @@ func (c *blockingCapturingPlayer) hasMessage(text string) bool {
 // preFiredSignaler returns a pre-closed channel for any key.
 type preFiredSignaler struct{}
 
-func (preFiredSignaler) RegisterSession(_, _ string) {}
-
-func (preFiredSignaler) ReportSignal(_ string) <-chan struct{} {
+func (preFiredSignaler) ReportSignal(_, _ string) <-chan struct{} {
 	ch := make(chan struct{})
 	close(ch)
 	return ch
 }
 
 // sessionEmittingBlocker emits EventSessionStart with sessionID via the sink,
-// then blocks until ctx is cancelled. Used to exercise the lazy-bind path.
+// then blocks until ctx is cancelled. Used to exercise the session-ID capture
+// path (WP12: captured directly in the supervise loop's events case).
 type sessionEmittingBlocker struct {
 	sessionID string
 }
@@ -229,7 +228,8 @@ func TestSupervisor_LoopEscalation(t *testing.T) {
 	defer cancel()
 
 	spec := harness.ProcessSpec{
-		Prompt: "work",
+		Prompt:     "work",
+		InputPlane: true, // WP13: loop policy evaluation requires the supervise loop
 		LoopGuard: harness.LoopGuardSpec{
 			RepeatThreshold: 3, MaxNudges: 1, CooldownTurns: 1,
 		},
@@ -253,7 +253,8 @@ func TestSupervisor_SilenceEscalation(t *testing.T) {
 	defer cancel()
 
 	spec := harness.ProcessSpec{
-		Prompt: "revise",
+		Prompt:     "revise",
+		InputPlane: true, // WP13: silence policy evaluation requires the supervise loop
 		SilenceGuard: harness.SilenceGuardSpec{
 			SilenceSecs: 1,
 			NudgeText:   "wake up",
@@ -279,7 +280,8 @@ func TestSupervisor_SilenceGuardDoesNotAffectCleanExit(t *testing.T) {
 	defer cancel()
 
 	spec := harness.ProcessSpec{
-		Prompt: "work",
+		Prompt:     "work",
+		InputPlane: true, // WP13: silence policy evaluation requires the supervise loop
 		SilenceGuard: harness.SilenceGuardSpec{
 			SilenceSecs: 1,
 			NudgeText:   "wake up",
@@ -294,9 +296,10 @@ func TestSupervisor_SilenceGuardDoesNotAffectCleanExit(t *testing.T) {
 }
 
 func TestSupervisor_ReportArrivalStopsRun(t *testing.T) {
-	// sessionEmittingBlocker fires EventSessionStart → fanoutSink delivers sessionID
-	// to sessionC → supervisor lazy-binds reportSig via RegisterSession+ReportSignal
-	// → preFiredSignaler returns pre-closed channel → supervisor stops cleanly (nil).
+	// The supervisor arms reportSig via ReportSignal(agentID, nonce) BEFORE
+	// starting the base executor (WP12) — preFiredSignaler returns a
+	// pre-closed channel regardless of the nonce, so the report-arrival case
+	// fires immediately and the supervisor stops cleanly (nil).
 	player := &sessionEmittingBlocker{sessionID: "test-sid"}
 	guard := NewBudgetGuard(NewRunUsage(0))
 	sup := NewAgentSupervisor(player, preFiredSignaler{}, guard)
@@ -387,7 +390,8 @@ func TestSupervisor_NudgeSentOnLoop(t *testing.T) {
 	defer cancel()
 
 	spec := harness.ProcessSpec{
-		Prompt: "work",
+		Prompt:     "work",
+		InputPlane: true, // WP13: loop policy evaluation requires the supervise loop
 		LoopGuard: harness.LoopGuardSpec{
 			RepeatThreshold: 3, MaxNudges: 3, CooldownTurns: 2,
 		},

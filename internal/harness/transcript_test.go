@@ -161,10 +161,11 @@ func TestParseStream_SessionID_SurvivesMissingResult(t *testing.T) {
 // TestParseStream_SessionID_FirstWins verifies that when a stream carries more
 // than one distinct session_id (e.g. a subagent spawned mid-run emits its own
 // system/init event), RunResult.SessionID stays pinned to the FIRST session_id
-// seen — matching the supervisor's fanoutSink, which delivers only the first
-// session_id and drops duplicates (agent_supervisor.go). Before the fix,
-// session_id was overwritten on every event that carried one, so the LAST
-// session_id won instead.
+// seen — matching the supervisor's own first-wins capturedSID logic
+// (agent_supervisor.go's supervise loop, WP12), which keeps only the first
+// EventSessionStart it observes and drops the rest. Before the fix, session_id
+// was overwritten on every event that carried one, so the LAST session_id won
+// instead.
 func TestParseStream_SessionID_FirstWins(t *testing.T) {
 	// INV-H2-SESSIONID: session_id is first-wins, not last-wins.
 	const twoSessions = `{"type":"system","subtype":"init","session_id":"sess-outer-first","model":"qwen3.6","tools":["Read"]}

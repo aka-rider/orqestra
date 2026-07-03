@@ -7,10 +7,23 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/xiii/orqestra/internal/harness"
 	"github.com/xiii/orqestra/internal/rundir"
 )
+
+// bridgeReadyTimeout bounds how long a run waits for the QuestionBridge's
+// Unix listener to bind (WP12/J36) before proceeding anyway. The bridge
+// starter (tui.Run) spawns QuestionBridge.Run in its own goroutine, so
+// binding races the caller by construction; waiting here — instead of
+// launching agents that might dial before the listener exists — removes the
+// ECONNREFUSED window. A bound is required so a genuinely wedged bridge
+// (misconfigured socket path, permissions) degrades to "questions/reports
+// unavailable" rather than hanging every run forever — matching the existing
+// "MCP bridge failures degrade, never block" classification (root CLAUDE.md
+// §5.3).
+const bridgeReadyTimeout = 2 * time.Second
 
 // startNew is the RunPipeline-based pipeline path. It wires the WP9 emitter
 // directly behind an eventObserver (no snapshot-store/gate-control
@@ -140,6 +153,22 @@ func (e *Engine) startNew(ctx context.Context, input Input) RunHandle {
 			}
 		}
 		logger.Info("run started (pipeline)", "prompt_len", len(input.Prompt))
+
+		// Readiness handshake (WP12/J36): wait for the bridge's listener to be
+		// bound before launching any agent that might dial it (AskUserQuestion,
+		// SubmitReport). Bounded — a bridge that is absent (nil, see below) or
+		// unexpectedly slow to bind degrades to "proceed without waiting
+		// further", logged, rather than hanging this run; the bridge itself
+		// already fails safe when nil (see e.QuestionBridge != nil guards
+		// throughout this function).
+		if e.QuestionBridge != nil {
+			select {
+			case <-e.QuestionBridge.Ready():
+			case <-time.After(bridgeReadyTimeout):
+				logger.Warn("question bridge not ready within timeout; proceeding without waiting further (J36)",
+					"timeout", bridgeReadyTimeout)
+			}
+		}
 
 		// Write prompt artifact.
 		if session.Path != "" {

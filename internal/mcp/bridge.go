@@ -13,21 +13,17 @@ import (
 
 // bridgeEnvelope is the framed wire format for bridge messages.
 // Kind is "question" or "report"; AgentID identifies the sending role.
+// InvocationID (WP12/J34-reports) is the per-invocation nonce
+// AgentSupervisor.Run generates and injects into the "orqestra" inline MCP
+// server's --invocation-id arg; it is the report/question correlation key.
+// Empty when the subprocess was launched without the flag (no Inline
+// "orqestra" entry, or an older/degraded caller) — handleReport falls back to
+// keying by AgentID in that case, logged as a fail-safe degradation.
 type bridgeEnvelope struct {
-	Kind    string          `json:"kind"`
-	AgentID string          `json:"agent_id"`
-	Payload json.RawMessage `json:"payload"`
-}
-
-// reportKey returns the bridge correlation key for an agent invocation.
-// When sessionID is non-empty (Claude models emit it in the stream) it is used
-// directly — unique per process. When empty (local models, no session_id), the
-// agentID is used as fallback; RegisterSession re-arms the slot on each new run.
-func reportKey(agentID, sessionID string) string {
-	if sessionID != "" {
-		return sessionID
-	}
-	return agentID
+	Kind         string          `json:"kind"`
+	AgentID      string          `json:"agent_id"`
+	InvocationID string          `json:"invocation_id,omitempty"`
+	Payload      json.RawMessage `json:"payload"`
 }
 
 // ReportSubmission holds a report delivered by an agent via SubmitReport.
@@ -44,19 +40,41 @@ type ReportSubmission struct {
 //	TUI answer → orchestrator → SendAnswer() → channel → QuestionBridge → socket → MCP server
 //
 // Lifetime: call Run(ctx) exactly ONCE, for the whole engine/TUI-session
-// lifetime (WP4b/J5,J41) — not per pipeline run. It blocks until ctx is
-// cancelled and then cleans up. Report/waiter maps survive across runs —
-// RegisterSession re-arms the per-slot state at the start of each new agent
-// invocation.
+// lifetime (WP4b/J5,J41) — not per pipeline run.  It blocks until ctx is
+// cancelled and then cleans up.
+//
+// Report correlation (WP12/RC3,J34-reports): reports and their waiters are
+// keyed by the per-invocation nonce AgentSupervisor.Run generates and arms
+// via ReportSignal BEFORE starting each subprocess — never by session ID or
+// agentID alone. Because every invocation gets a fresh, unique nonce, two
+// invocations of the same agentID (sequential retries, or a role with no
+// session ID at all) can never collide, and there is no re-arming step: a new
+// invocation's key has never been used before.
 type QuestionBridge struct {
 	socketPath    string
 	questions     chan ToolCall
 	pendingAnswer chan Answer
 	questionSeq   atomic.Uint64 // generates unique ToolCall.ID values (WP5/J17,J25)
+
 	reportsMu     sync.Mutex
-	sessions      map[string]string          // agentID → current sessionID
-	reports       map[string]ReportSubmission // key (sessionID or agentID) → report
+	reports       map[string]ReportSubmission // key: invocation nonce (fallback agentID) → report
 	reportWaiters map[string]chan struct{}    // key → signal channel
+	// agentNonce resolves an agentID to the nonce (or fallback key) most
+	// recently armed for it via ReportSignal. It exists SOLELY so
+	// TakeReport(agentID) — the ReportStore interface every existing call
+	// site (step.go, report_harvest.go) already uses — keeps working
+	// unchanged: those callers know their agentID but not the nonce
+	// AgentSupervisor.Run generated for the invocation currently in flight.
+	// ReportSignal updates this mapping at arm time, which always happens
+	// BEFORE that agentID's subprocess can possibly submit a report, so
+	// TakeReport always resolves the CURRENT invocation's key.
+	agentNonce map[string]string
+
+	// ready is closed once the Unix listener is bound (WP12/J36) — before
+	// Run() begins ready to accept connections. Callers that must not race
+	// the bind (an agent dialing immediately after starting the bridge)
+	// wait on Ready().
+	ready chan struct{}
 }
 
 // NewQuestionBridge creates a bridge that will listen on the given socket path.
@@ -65,16 +83,18 @@ func NewQuestionBridge(socketPath string) *QuestionBridge {
 		socketPath:    socketPath,
 		questions:     make(chan ToolCall, 1),
 		pendingAnswer: make(chan Answer, 1),
-		sessions:      make(map[string]string),
 		reports:       make(map[string]ReportSubmission),
 		reportWaiters: make(map[string]chan struct{}),
+		agentNonce:    make(map[string]string),
+		ready:         make(chan struct{}),
 	}
 }
 
 // Run starts listening on the Unix socket and blocks until ctx is cancelled.
-// It cleans up the socket on return. Safe to call sequentially for multiple runs.
-// Per-slot state (reports, waiters) is NOT cleared here; RegisterSession re-arms
-// individual slots at the start of each new agent invocation.
+// It cleans up the socket on return. The listener is bound SYNCHRONOUSLY,
+// before Ready() closes and before the accept loop starts (WP12/J36) — a
+// caller that waits on Ready() before dialing or launching an agent can never
+// see ECONNREFUSED from a bind that hasn't happened yet.
 func (b *QuestionBridge) Run(ctx context.Context) error {
 	_ = os.Remove(b.socketPath) // fire-and-forget: stale socket from a prior run
 
@@ -85,12 +105,22 @@ func (b *QuestionBridge) Run(ctx context.Context) error {
 	defer func() { _ = os.Remove(b.socketPath) }() // fire-and-forget: best-effort cleanup
 	defer ln.Close()
 
+	close(b.ready)
+
 	// Close listener when ctx is cancelled to unblock any in-progress ln.Accept().
 	stopAfter := context.AfterFunc(ctx, func() { ln.Close() })
 	defer stopAfter()
 
 	b.acceptLoop(ctx, ln)
 	return nil
+}
+
+// Ready returns a channel that is closed once the bridge's Unix listener is
+// bound and accepting connections (WP12/J36). Waiting on this before dialing
+// — or before launching the first agent that will dial — removes the
+// bind-vs-dial race that otherwise requires bounded polling.
+func (b *QuestionBridge) Ready() <-chan struct{} {
+	return b.ready
 }
 
 func (b *QuestionBridge) acceptLoop(ctx context.Context, ln net.Listener) {
@@ -112,7 +142,12 @@ func (b *QuestionBridge) acceptLoop(ctx context.Context, ln net.Listener) {
 			}
 		}
 
-		b.handleConnection(ctx, conn)
+		// Per-connection goroutine (WP12/J16): a blocking AskUserQuestion
+		// exchange on one connection must never delay a SubmitReport (or any
+		// other message) arriving on a different connection. The accept loop
+		// itself stays single-threaded and non-blocking — only handling the
+		// connection's request/response is concurrent.
+		go b.handleConnection(ctx, conn)
 	}
 }
 
@@ -193,12 +228,16 @@ func (b *QuestionBridge) handleReport(conn net.Conn, env bridgeEnvelope) {
 		slog.Debug("question bridge report unmarshal error", "err", err)
 		return
 	}
+
+	key := env.InvocationID
+	if key == "" {
+		// Fail-safe: no --invocation-id was threaded through (a degraded or
+		// pre-WP12 caller) — fall back to keying by agentID, and say so.
+		key = env.AgentID
+		slog.Debug("question bridge report envelope missing invocation_id; falling back to agent_id key", "agent_id", env.AgentID)
+	}
+
 	b.reportsMu.Lock()
-	// Translate agentID → current sessionID, then derive the correlation key.
-	// sessions[agentID] is "" when no RegisterSession has been called yet (e.g. local
-	// models that emit no session_id); reportKey falls back to agentID in that case.
-	sessionID := b.sessions[env.AgentID]
-	key := reportKey(env.AgentID, sessionID)
 	b.reports[key] = sub
 	if ch, ok := b.reportWaiters[key]; ok {
 		close(ch)
@@ -212,40 +251,35 @@ func (b *QuestionBridge) handleReport(conn net.Conn, env bridgeEnvelope) {
 	}
 }
 
-// RegisterSession associates agentID with sessionID for the current invocation
-// and re-arms the correlation slot for the new key. The supervisor calls it when
-// it observes EventSessionStart from the agent's stream.
+// ReportSignal arms the report-correlation slot for one agent invocation,
+// identified by nonce (the value AgentSupervisor.Run injected into the
+// subprocess's --invocation-id arg), and returns a channel that closes when a
+// report arrives for it. Call this BEFORE starting the subprocess — there is
+// no re-arming step (WP12/J34-reports): nonce is unique per invocation by
+// construction, so a fresh invocation's key has never been used before and
+// can never collide with a still-pending earlier one, even for the same
+// agentID.
 //
-// Re-arming clears the slot for reportKey(agentID, sessionID): if a prior run
-// used the same key (same session ID on --resume, or same agentID for local
-// models without session IDs), any stale report or open waiter is removed.
-// If the prior run used a different key (a fresh session ID), its waiter is
-// orphaned in the map but harmless: the old supervisor goroutine has already
-// exited, and the waiter is never closed or double-closed.
+// It also records agentID → nonce in agentNonce so TakeReport(agentID) can
+// resolve the CURRENT invocation's key without the caller ever threading a
+// nonce through the ReportStore interface (see the agentNonce field comment).
 //
-// RegisterSession is safe to call before any SubmitReport arrives because
-// EventSessionStart fires before the model can invoke any tools.
-func (b *QuestionBridge) RegisterSession(agentID, sessionID string) {
-	key := reportKey(agentID, sessionID)
-	b.reportsMu.Lock()
-	b.sessions[agentID] = sessionID
-	delete(b.reportWaiters, key)
-	delete(b.reports, key)
-	b.reportsMu.Unlock()
-}
+// nonce == "" (no --invocation-id, a degraded/pre-WP12 caller) falls back to
+// keying directly by agentID — the same fallback handleReport applies.
+// If a report has already arrived under this key, the returned channel is
+// pre-closed. Callers must not close it.
+func (b *QuestionBridge) ReportSignal(agentID, nonce string) <-chan struct{} {
+	key := nonce
+	if key == "" {
+		key = agentID
+	}
 
-// ReportSignal returns a channel that is closed when a report arrives for agentID.
-// The correlation key is resolved internally from the agent's current session
-// (reportKey(agentID, sessions[agentID])) — the same derivation handleReport uses
-// to store — so callers never thread a session ID through this path. If a report
-// has already arrived, the returned channel is pre-closed. Callers must not close
-// it. Call RegisterSession before ReportSignal to ensure the slot is fresh.
-func (b *QuestionBridge) ReportSignal(agentID string) <-chan struct{} {
 	b.reportsMu.Lock()
 	defer b.reportsMu.Unlock()
-	key := reportKey(agentID, b.sessions[agentID])
+
+	b.agentNonce[agentID] = key
+
 	if _, ok := b.reports[key]; ok {
-		// Report already in hand — return a pre-closed channel.
 		ch := make(chan struct{})
 		close(ch)
 		return ch
@@ -259,14 +293,26 @@ func (b *QuestionBridge) ReportSignal(agentID string) <-chan struct{} {
 }
 
 // TakeReport returns and removes the report submitted by agentID, if any.
-// The correlation key is resolved internally from the agent's current session
-// (reportKey(agentID, sessions[agentID])) — identical to handleReport's storage
-// derivation — so report harvesting never depends on a separately-captured
-// RunResult.SessionID that may be empty after an early stop.
+// The correlation key is resolved internally via agentNonce (the nonce most
+// recently armed for agentID by ReportSignal) — identical to handleReport's
+// storage derivation — so report harvesting never depends on a separately
+// captured session ID or the caller knowing the invocation's nonce. See the
+// agentNonce field comment for why this indirection exists: it is what keeps
+// every pre-WP12 ReportStore.TakeReport(agentID) call site unchanged.
+//
+// If ReportSignal was never called for agentID (e.g. a bridge-less test, or a
+// role that never arms report correlation), TakeReport falls back to keying
+// directly by agentID — matching handleReport's own fallback for a
+// missing-nonce envelope.
 func (b *QuestionBridge) TakeReport(agentID string) (string, bool) {
 	b.reportsMu.Lock()
 	defer b.reportsMu.Unlock()
-	key := reportKey(agentID, b.sessions[agentID])
+
+	key, ok := b.agentNonce[agentID]
+	if !ok {
+		key = agentID
+	}
+
 	sub, ok := b.reports[key]
 	if !ok {
 		return "", false

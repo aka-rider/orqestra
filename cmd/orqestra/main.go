@@ -32,12 +32,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	// Subcommand: mcp-bridge (invoked by Claude CLI as MCP server)
 	if len(args) >= 2 && args[1] == "mcp-bridge" {
-		socketPath, agentID, ok := parseMCPBridgeArgs(args[2:])
+		socketPath, agentID, invocationID, ok := parseMCPBridgeArgs(args[2:])
 		if !ok {
-			fmt.Fprintf(stderr, "Usage: orqestra mcp-bridge --socket <path> --agent-id <id>\n")
+			fmt.Fprintf(stderr, "Usage: orqestra mcp-bridge --socket <path> --agent-id <id> [--invocation-id <nonce>]\n")
 			return exitInvalidInput
 		}
-		if err := mcp.RunServer(socketPath, agentID); err != nil {
+		if err := mcp.RunServer(socketPath, agentID, invocationID); err != nil {
 			slog.Error("mcp-bridge failed", "err", err)
 			return exitDomainFailure
 		}
@@ -252,6 +252,7 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 	}
 	archSpec.AgentID = "architect"
 	archSpec.ExpectsReport = true
+	archSpec.InputPlane = true // WP13/J6: reporter role class — always interactive
 	archSpec.PlanMode = cfg.Architect.PermissionMode == "plan"
 	archSpec.Timeout = cfg.Architect.Timeout.Duration
 	archSpec.LoopGuard = harness.LoopGuardSpec{
@@ -273,6 +274,7 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 	}
 	criticSpec.AgentID = "critic"
 	criticSpec.ExpectsReport = true
+	criticSpec.InputPlane = true // WP13/J6: reporter role class — always interactive
 	criticSpec.Timeout = cfg.Critic.Timeout.Duration
 	criticSpec.LoopGuard = harness.LoopGuardSpec{
 		RepeatThreshold: cfg.Critic.LoopGuard.RepeatThreshold,
@@ -304,6 +306,7 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 	}
 	workerSpec.AgentID = "worker"
 	workerSpec.ExpectsReport = true
+	workerSpec.InputPlane = true // WP13/J6: executor role class — always interactive
 	workerSpec.Timeout = cfg.Worker.Timeout.Duration
 	workerSpec.LoopGuard = harness.LoopGuardSpec{
 		RepeatThreshold: cfg.Worker.LoopGuard.RepeatThreshold,
@@ -533,8 +536,12 @@ func stringSliceContains(s []string, v string) bool {
 	return false
 }
 
-// parseMCPBridgeArgs extracts --socket and --agent-id from the mcp-bridge subcommand args.
-func parseMCPBridgeArgs(args []string) (socketPath, agentID string, ok bool) {
+// parseMCPBridgeArgs extracts --socket, --agent-id, and --invocation-id from
+// the mcp-bridge subcommand args. --invocation-id (WP12/J34-reports) is
+// optional: AgentSupervisor.Run injects it per invocation, but a missing flag
+// (a degraded/pre-WP12 launch) is not a usage error — RunServer falls back to
+// agent_id correlation and logs the degradation, never fails closed here.
+func parseMCPBridgeArgs(args []string) (socketPath, agentID, invocationID string, ok bool) {
 	for i := 0; i+1 < len(args); i++ {
 		switch args[i] {
 		case "--socket":
@@ -543,7 +550,10 @@ func parseMCPBridgeArgs(args []string) (socketPath, agentID string, ok bool) {
 		case "--agent-id":
 			agentID = args[i+1]
 			i++
+		case "--invocation-id":
+			invocationID = args[i+1]
+			i++
 		}
 	}
-	return socketPath, agentID, socketPath != ""
+	return socketPath, agentID, invocationID, socketPath != ""
 }

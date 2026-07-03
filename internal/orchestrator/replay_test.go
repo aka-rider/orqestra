@@ -126,7 +126,8 @@ func emitUserEvents(msgRaw json.RawMessage, sink harness.Sink) {
 // newReplaySpec returns a ProcessSpec tuned for replay tests.
 func newReplaySpec(prompt string) harness.ProcessSpec {
 	return harness.ProcessSpec{
-		Prompt: prompt,
+		Prompt:     prompt,
+		InputPlane: true, // WP13: loop policy evaluation requires the supervise loop
 		LoopGuard: harness.LoopGuardSpec{
 			RepeatThreshold: 3,
 			MaxNudges:       3,

@@ -128,8 +128,18 @@ type Answer struct {
 // RunServer starts a minimal MCP JSON-RPC 2.0 server on stdin/stdout.
 // It connects to the QuestionBridge via the given Unix socket path.
 // agentID identifies which pipeline role this server is serving.
+// invocationID (WP12/J34-reports) is the per-invocation nonce
+// AgentSupervisor.Run generates and passes via --invocation-id; it correlates
+// this invocation's reports/questions on the bridge side, independent of
+// session ID or agentID reuse. Empty when the caller did not supply the flag
+// (a degraded/pre-WP12 launch) — every envelope this process sends then omits
+// InvocationID too, and the bridge fails safe by keying on agentID alone.
 // The server exits cleanly when stdin is closed (MCP lifecycle).
-func RunServer(socketPath, agentID string) error {
+func RunServer(socketPath, agentID, invocationID string) error {
+	if invocationID == "" {
+		slog.Warn("mcp-bridge: no --invocation-id supplied; falling back to agent_id correlation", "agent_id", agentID)
+	}
+
 	scanner := bufio.NewScanner(os.Stdin)
 	// Bounded to maxFrameBytes (frame.go) so a large tools/call request (e.g. a
 	// SubmitReport whose "report" argument approaches the bridge frame cap) is
@@ -148,7 +158,7 @@ func RunServer(socketPath, agentID string) error {
 			continue
 		}
 
-		resp := handleMCPRequest(req, socketPath, agentID)
+		resp := handleMCPRequest(req, socketPath, agentID, invocationID)
 		if resp == nil {
 			continue // notification, no response needed
 		}
@@ -164,7 +174,7 @@ func RunServer(socketPath, agentID string) error {
 	return scanner.Err()
 }
 
-func handleMCPRequest(req jsonRPCRequest, socketPath, agentID string) *jsonRPCResponse {
+func handleMCPRequest(req jsonRPCRequest, socketPath, agentID, invocationID string) *jsonRPCResponse {
 	switch req.Method {
 	case "initialize":
 		return respondMCP(req.ID, map[string]any{
@@ -198,7 +208,7 @@ func handleMCPRequest(req jsonRPCRequest, socketPath, agentID string) *jsonRPCRe
 		})
 
 	case "tools/call":
-		return handleToolCall(req, socketPath, agentID)
+		return handleToolCall(req, socketPath, agentID, invocationID)
 
 	default:
 		if req.ID == nil {
@@ -212,7 +222,7 @@ func handleMCPRequest(req jsonRPCRequest, socketPath, agentID string) *jsonRPCRe
 	}
 }
 
-func handleToolCall(req jsonRPCRequest, socketPath, agentID string) *jsonRPCResponse {
+func handleToolCall(req jsonRPCRequest, socketPath, agentID, invocationID string) *jsonRPCResponse {
 	var params struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -227,9 +237,9 @@ func handleToolCall(req jsonRPCRequest, socketPath, agentID string) *jsonRPCResp
 
 	switch params.Name {
 	case "AskUserQuestion":
-		return handleAskUserQuestion(req, params.Arguments, socketPath, agentID)
+		return handleAskUserQuestion(req, params.Arguments, socketPath, agentID, invocationID)
 	case "SubmitReport":
-		return handleSubmitReport(req, params.Arguments, socketPath, agentID)
+		return handleSubmitReport(req, params.Arguments, socketPath, agentID, invocationID)
 	default:
 		return &jsonRPCResponse{
 			JSONRPC: "2.0",
@@ -239,7 +249,7 @@ func handleToolCall(req jsonRPCRequest, socketPath, agentID string) *jsonRPCResp
 	}
 }
 
-func handleAskUserQuestion(req jsonRPCRequest, arguments json.RawMessage, socketPath, agentID string) *jsonRPCResponse {
+func handleAskUserQuestion(req jsonRPCRequest, arguments json.RawMessage, socketPath, agentID, invocationID string) *jsonRPCResponse {
 	var toolCall ToolCall
 	if err := json.Unmarshal(arguments, &toolCall); err != nil {
 		return &jsonRPCResponse{
@@ -253,7 +263,7 @@ func handleAskUserQuestion(req jsonRPCRequest, arguments json.RawMessage, socket
 		return respondMCPToolResult(req.ID, true, "Error: question is required")
 	}
 
-	answer, err := sendQuestionToBridge(socketPath, agentID, toolCall)
+	answer, err := sendQuestionToBridge(socketPath, agentID, invocationID, toolCall)
 	if err != nil {
 		return respondMCPToolResult(req.ID, true, fmt.Sprintf("Error communicating with Orqestra: %v", err))
 	}
@@ -262,7 +272,7 @@ func handleAskUserQuestion(req jsonRPCRequest, arguments json.RawMessage, socket
 	return respondMCPToolResult(req.ID, false, text)
 }
 
-func handleSubmitReport(req jsonRPCRequest, arguments json.RawMessage, socketPath, agentID string) *jsonRPCResponse {
+func handleSubmitReport(req jsonRPCRequest, arguments json.RawMessage, socketPath, agentID, invocationID string) *jsonRPCResponse {
 	var call ReportCall
 	if err := json.Unmarshal(arguments, &call); err != nil {
 		return &jsonRPCResponse{
@@ -274,13 +284,13 @@ func handleSubmitReport(req jsonRPCRequest, arguments json.RawMessage, socketPat
 	if call.Report == "" {
 		return respondMCPToolResult(req.ID, true, "Error: report is required and must not be empty")
 	}
-	if err := sendReportToBridge(socketPath, agentID, call); err != nil {
+	if err := sendReportToBridge(socketPath, agentID, invocationID, call); err != nil {
 		return respondMCPToolResult(req.ID, true, fmt.Sprintf("Error delivering report to Orqestra: %v", err))
 	}
 	return respondMCPToolResult(req.ID, false, "Report submitted successfully.")
 }
 
-func sendReportToBridge(socketPath, agentID string, call ReportCall) error {
+func sendReportToBridge(socketPath, agentID, invocationID string, call ReportCall) error {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
 		return fmt.Errorf("dial bridge socket %s: %w", socketPath, err)
@@ -292,7 +302,7 @@ func sendReportToBridge(socketPath, agentID string, call ReportCall) error {
 		return fmt.Errorf("marshal report: %w", err)
 	}
 
-	env := bridgeEnvelope{Kind: "report", AgentID: agentID, Payload: payload}
+	env := bridgeEnvelope{Kind: "report", AgentID: agentID, InvocationID: invocationID, Payload: payload}
 	envData, err := json.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("marshal report envelope: %w", err)
@@ -315,7 +325,7 @@ func sendReportToBridge(socketPath, agentID string, call ReportCall) error {
 	return nil
 }
 
-func sendQuestionToBridge(socketPath, agentID string, toolCall ToolCall) (Answer, error) {
+func sendQuestionToBridge(socketPath, agentID, invocationID string, toolCall ToolCall) (Answer, error) {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
 		return Answer{}, fmt.Errorf("dial bridge socket: %w", err)
@@ -327,7 +337,7 @@ func sendQuestionToBridge(socketPath, agentID string, toolCall ToolCall) (Answer
 		return Answer{}, fmt.Errorf("marshal question: %w", err)
 	}
 
-	env := bridgeEnvelope{Kind: "question", AgentID: agentID, Payload: payload}
+	env := bridgeEnvelope{Kind: "question", AgentID: agentID, InvocationID: invocationID, Payload: payload}
 	envData, err := json.Marshal(env)
 	if err != nil {
 		return Answer{}, fmt.Errorf("marshal envelope: %w", err)
