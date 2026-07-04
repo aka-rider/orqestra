@@ -1,3 +1,5 @@
+//go:build darwin
+
 package main
 
 import (
@@ -9,15 +11,14 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/xiii/orqestra/internal/config"
 	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
-	"github.com/xiii/orqestra/internal/sandbox"
 )
 
 // runHeadlessCommand drives one pipeline run to completion without the TUI
-// (WP16/J18): it builds the engine exactly as the TUI path does (buildEngine
-// is untouched — a sibling refactor owns that function), starts the
+// (WP16/J18): it receives the engine the caller (run()) already built — both
+// the headless and TUI paths share one construction chokepoint (buildEngine
+// is called exactly once, in cmd/orqestra/main.go's run()) — starts the
 // QuestionBridge the same way tui.Run does, and consumes the run's events
 // itself since no human is present to drive a Bubble Tea program.
 //
@@ -26,14 +27,16 @@ import (
 // an unattended human gate are both distinguishable stop reasons attributed
 // via context.Cause (root CLAUDE.md §1.3), the same mechanism
 // engine_pipeline.go already uses to classify ErrUserCancelled.
-func runHeadlessCommand(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPath, prompt string, autoApprove, planOnly, verboseStream bool, stdout, stderr io.Writer) int {
+func runHeadlessCommand(engine *orchestrator.Engine, prompt string, autoApprove, planOnly, verboseStream bool, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 
 	// SIGINT/SIGTERM cancel the run context with a distinguishable cause so a
 	// headless run is always interruptible — the harness's own process-group
-	// kill on cancel (sandbox.go) is unchanged; this only triggers it. The
-	// goroutine exits via ctx.Done(), so it never outlives this call.
+	// kill on cancel (internal/harness/exec.go's startDirect, or leash's own
+	// internal group-kill for a sandboxed spec) is unchanged; this only
+	// triggers it. The goroutine exits via ctx.Done(), so it never outlives
+	// this call.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -44,8 +47,6 @@ func runHeadlessCommand(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, 
 		case <-ctx.Done():
 		}
 	}()
-
-	engine := buildEngine(cfg, sandboxProfiles, repoPath)
 
 	// Mirror tui.Run's QuestionBridge wiring (mcp.StartBridgeAsync — bridge
 	// Run started exactly once). Scoped to ctx rather than a separate

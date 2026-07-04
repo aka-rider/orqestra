@@ -1,9 +1,5 @@
 package harness
 
-import (
-	"github.com/xiii/orqestra/internal/sandbox"
-)
-
 // ModelSpec is a harness-internal model specification.
 // No dependency on config.ResolvedModel — decouples config format from harness.
 type ModelSpec struct {
@@ -22,14 +18,30 @@ type InlineMCP struct {
 	Args    []string `json:"args"`
 }
 
-// SandboxConfig configures seatbelt sandboxing.
-// Zero value = no sandboxing (direct execution).
+// SandboxConfig configures per-role leash sandboxing. Zero value = no
+// sandboxing (direct execution) — RepoPath is the discriminator Run checks.
+//
+// RepoPath is the sandbox's primary grant: writable when Writable is true,
+// read-only otherwise. WorktreePath, when set, is always granted write
+// (worktree isolation keeps the repo read-only while the worktree stays
+// writable). Reads/Writes/Execs carry additional grants translated from
+// config.SandboxConfig's allow_read/allow_write/allow_exec plus role-specific
+// extras (the orqestra self-exec grant, worktree .git-internals writes).
+// FutureWrites grants write on paths that don't exist yet but may be created
+// by the child inside the sandbox (git's packed-refs lock in worktree mode).
+// Env carries the harness-computed model-routing env (unchanged from today);
+// ExtraEnv/ProxyEnv carry the user's sandbox.extra_env/proxy_env config.
 type SandboxConfig struct {
 	RepoPath     string
 	WorktreePath string
-	Profiles     []sandbox.Snapshot
-	Env          []string
 	Writable     bool
+	Reads        []string
+	Writes       []string
+	Execs        []string
+	FutureWrites []string
+	Env          []string
+	ExtraEnv     map[string]string
+	ProxyEnv     []string
 }
 
 // LoopGuardSpec configures the LoopBreaker middleware's loop-detection thresholds.

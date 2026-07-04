@@ -7,6 +7,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.6
 	charm.land/glamour/v2 v2.0.0
 	charm.land/lipgloss/v2 v2.0.3
+	github.com/aka-rider/leash v0.0.0
 	github.com/mattn/go-runewidth v0.0.24
 	github.com/yuin/goldmark v1.8.2
 	gopkg.in/yaml.v3 v3.0.1
@@ -47,5 +48,7 @@ require (
 )
 
 replace rune => /Users/xiii/Developer/rune
+
+replace github.com/aka-rider/leash => /Users/xiii/Developer/leash
 
 replace github.com/charmbracelet/ultraviolet => github.com/aka-rider/ultraviolet v0.0.0-20260609174938-741f673d89ce

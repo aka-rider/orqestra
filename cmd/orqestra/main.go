@@ -1,3 +1,5 @@
+//go:build darwin
+
 package main
 
 import (
@@ -6,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -14,8 +17,6 @@ import (
 	"github.com/xiii/orqestra/internal/mcp"
 	"github.com/xiii/orqestra/internal/orchestrator"
 	"github.com/xiii/orqestra/internal/project"
-	"github.com/xiii/orqestra/internal/sandbox"
-	"github.com/xiii/orqestra/internal/sandbox/detect"
 	"github.com/xiii/orqestra/internal/tui"
 )
 
@@ -106,43 +107,46 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitInvalidInput
 	}
 
-	// Detect seatbelt profiles at startup.
-	home := os.Getenv("HOME")
-	if home == "" {
-		fmt.Fprintf(stderr, "Error: HOME environment variable is not set\n")
+	// Fail fast, before the TUI launches, when claude isn't on PATH — leash
+	// resolves everything else (HOME, sandbox-exec, tool detection) itself
+	// internally and fails closed the same way sandbox.New used to if
+	// something required is missing.
+	if _, err := exec.LookPath("claude"); err != nil {
+		fmt.Fprintf(stderr, "Error: claude CLI not found in PATH: %v\n", err)
 		return exitInvalidInput
 	}
-	sandboxProfiles, profileErr := detect.AllProfiles(home, "claude", cfg.Sandbox)
-	if profileErr != nil {
-		fmt.Fprintf(stderr, "Error: sandbox profile detection failed: %v\n", profileErr)
+
+	switch {
+	case promptFlag != "" && len(cmdArgs) > 0:
+		fmt.Fprintf(stderr, "Error: --prompt cannot be combined with a subcommand (%q)\n", cmdArgs[0])
+		return exitInvalidInput
+	case promptFlag == "" && len(cmdArgs) > 0:
+		fmt.Fprintf(stderr, "Unknown command: %s\n", cmdArgs[0])
+		fmt.Fprintf(stderr, "Available commands: init\n")
 		return exitInvalidInput
 	}
+
+	// Chokepoint: the only place in production code that builds the engine.
+	// Both the headless and TUI paths below share this one construction — a
+	// future change to per-role sandbox/spec wiring has exactly one call site
+	// to find and touch, not several that can silently drift (which is
+	// precisely what happened here: the original draft of this migration
+	// missed headless.go's now-removed independent buildEngine call entirely).
+	engine := buildEngine(cfg, repoPath)
 
 	// Headless path (WP16/J18): --prompt bypasses the TUI entirely.
 	if promptFlag != "" {
-		if len(cmdArgs) > 0 {
-			fmt.Fprintf(stderr, "Error: --prompt cannot be combined with a subcommand (%q)\n", cmdArgs[0])
-			return exitInvalidInput
-		}
-		return runHeadlessCommand(cfg, sandboxProfiles, repoPath, promptFlag, autoApprove, planOnly, verboseStream, stdout, stderr)
+		return runHeadlessCommand(engine, promptFlag, autoApprove, planOnly, verboseStream, stdout, stderr)
 	}
 
-	if len(cmdArgs) == 0 {
-		engine := buildEngine(cfg, sandboxProfiles, repoPath)
+	// Silence slog during TUI mode — stderr leaks through the alt screen buffer.
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-		// Silence slog during TUI mode — stderr leaks through the alt screen buffer.
-		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-
-		if err := tui.Run(engine, filepath.Base(configPath)); err != nil {
-			slog.Error("TUI error", "err", err)
-			return exitDomainFailure
-		}
-		return exitOK
+	if err := tui.Run(engine, filepath.Base(configPath)); err != nil {
+		slog.Error("TUI error", "err", err)
+		return exitDomainFailure
 	}
-
-	fmt.Fprintf(stderr, "Unknown command: %s\n", cmdArgs[0])
-	fmt.Fprintf(stderr, "Available commands: init\n")
-	return exitInvalidInput
+	return exitOK
 }
 
 func main() {
@@ -174,7 +178,7 @@ func runInitCommand(baseDir string, stderr io.Writer) error {
 // harness.SpecForRole per role — adding a role is one YAML block
 // (config.Config.ExtraRoles) plus one such call, not ~200 lines of
 // per-role option-function assembly.
-func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPath string) *orchestrator.Engine {
+func buildEngine(cfg *config.Config, repoPath string) *orchestrator.Engine {
 	// Question bridge for AskUserQuestion/SubmitReport MCP tools.
 	socketPath := filepath.Join("/tmp", fmt.Sprintf("orqestra-q-%d.sock", os.Getpid()))
 	bridge := mcp.NewQuestionBridge(socketPath)
@@ -213,24 +217,42 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 		os.Exit(exitInvalidInput)
 	}
 
+	// Resolve the user's allow_read/allow_write/allow_exec + proxy_env config
+	// once, into the flat grant lists harness.SandboxConfig wants.
+	home := os.Getenv("HOME")
+	userReads, userWrites, userExecs, grantErr := resolveSandboxGrants(home, cfg.Sandbox)
+	if grantErr != nil {
+		slog.Error("invalid sandbox configuration", "err", grantErr)
+		os.Exit(exitInvalidInput)
+	}
+	proxyEnv := resolveProxyEnv(cfg.Sandbox.ProxyEnv)
+
+	// Allow the exact orqestra binary's directory to exec inside the sandbox.
+	// This is required for the mcp-bridge subprocess (AskUserQuestion) to start.
+	bridgeExecs := userExecs
+	if selfDir, selfDirErr := selfExecDir(); selfDirErr == nil {
+		bridgeExecs = append([]string{selfDir}, userExecs...)
+	} else {
+		slog.Error("cannot allow orqestra binary in sandbox; AskUserQuestion unavailable", "err", selfDirErr)
+		os.Exit(exitInvalidInput)
+	}
+
 	// The four sandbox tiers (config.SandboxTierReadOnly/WorkerWritable/
 	// Worktree/Conflict), built once at startup.
-	roSandboxCfg := harness.SandboxConfig{RepoPath: repoPath, Profiles: sandboxProfiles, Writable: false}
-	workerSandboxCfg := harness.SandboxConfig{RepoPath: repoPath, Profiles: sandboxProfiles, Env: modelEnv, Writable: true}
-	worktreeSandboxCfg := harness.SandboxConfig{RepoPath: repoPath, Profiles: sandboxProfiles, Env: modelEnv, Writable: false}
-
-	// Allow the exact orqestra binary to exec inside the read-only planning sandbox.
-	// This is required for the mcp-bridge subprocess (AskUserQuestion) to start.
-	if selfBin != "" {
-		home := os.Getenv("HOME")
-		orqProfile := sandbox.NewToolProfile("orqestra-bridge", home)
-		if err := orqProfile.Allow(selfBin, sandbox.Exec); err != nil {
-			slog.Error("cannot allow orqestra binary in sandbox; AskUserQuestion unavailable", "err", err)
-			os.Exit(exitInvalidInput)
-		}
-		roSandboxCfg.Profiles = append(roSandboxCfg.Profiles, orqProfile.Snapshot())
-		workerSandboxCfg.Profiles = append(workerSandboxCfg.Profiles, orqProfile.Snapshot())
-		worktreeSandboxCfg.Profiles = append(worktreeSandboxCfg.Profiles, orqProfile.Snapshot())
+	roSandboxCfg := harness.SandboxConfig{
+		RepoPath: repoPath, Writable: false,
+		Reads: userReads, Writes: userWrites, Execs: bridgeExecs,
+		ExtraEnv: cfg.Sandbox.ExtraEnv, ProxyEnv: proxyEnv,
+	}
+	workerSandboxCfg := harness.SandboxConfig{
+		RepoPath: repoPath, Writable: true,
+		Reads: userReads, Writes: userWrites, Execs: bridgeExecs,
+		Env: modelEnv, ExtraEnv: cfg.Sandbox.ExtraEnv, ProxyEnv: proxyEnv,
+	}
+	worktreeSandboxCfg := harness.SandboxConfig{
+		RepoPath: repoPath, Writable: false,
+		Reads: userReads, Writes: userWrites, Execs: bridgeExecs,
+		Env: modelEnv, ExtraEnv: cfg.Sandbox.ExtraEnv, ProxyEnv: proxyEnv,
 	}
 
 	// specInput returns the shared per-role invocation input: work dir at the
@@ -265,11 +287,17 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 
 	// wtSpecFn scopes the already-built worker spec to a worktree — a plain
 	// value copy (infallible, matches ProcessSpecs.WorktreeSpecFn's
-	// no-error signature), not a second SpecForRole call.
+	// no-error signature), not a second SpecForRole call. It also widens the
+	// worktree sandbox's Writes/FutureWrites with the .git-internals grants a
+	// linked worktree needs for the worker's own Bash tool to run git
+	// successfully (best-effort — see worktreeGitGrants).
 	wtSpecFn := func(wtPath string) harness.ProcessSpec {
 		spec := workerSpec
 		sc := worktreeSandboxCfg
 		sc.WorktreePath = wtPath
+		gitWrites, gitFutureWrites := worktreeGitGrants(repoPath, wtPath)
+		sc.Writes = append(sc.Writes, gitWrites...)
+		sc.FutureWrites = append(sc.FutureWrites, gitFutureWrites...)
 		spec.Sandbox = sc
 		spec.WorkDir = wtPath
 		return spec
@@ -289,13 +317,15 @@ func buildEngine(cfg *config.Config, sandboxProfiles []sandbox.Snapshot, repoPat
 	// ToolsOverride). A build error is returned (never a zero ProcessSpec,
 	// J19) — the caller (IntegrateStep.handleConflict) treats it as
 	// give-up-and-preserve, carrying this error in the give-up reason.
+	// Deliberately does NOT get bridgeExecs (the self-exec/MCP-bridge grant)
+	// — conflict mode never wires the MCP bridge, matching today's asymmetry.
 	integratorConflictSpecFn := func(wtPath string) (harness.ProcessSpec, error) {
+		gitWrites, gitFutureWrites := worktreeGitGrants(repoPath, wtPath)
 		conflictSandboxCfg := harness.SandboxConfig{
-			RepoPath:     repoPath,
-			Profiles:     sandboxProfiles,
-			Env:          integratorEnv,
-			Writable:     false,
-			WorktreePath: wtPath,
+			RepoPath: repoPath, Writable: false, WorktreePath: wtPath,
+			Reads: userReads, Writes: append(append([]string{}, userWrites...), gitWrites...),
+			Execs: userExecs, FutureWrites: gitFutureWrites,
+			Env: integratorEnv, ExtraEnv: cfg.Sandbox.ExtraEnv, ProxyEnv: proxyEnv,
 		}
 		in := specInput("integrator")
 		in.WorkDir = wtPath

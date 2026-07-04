@@ -120,12 +120,15 @@ type PipelineConfig struct {
 	BlockMergeOnValidationFail bool `yaml:"block_merge_on_validation_fail"`
 }
 
-// SandboxConfig configures macOS-native sandbox (sandbox-exec) agent sandboxing.
+// SandboxConfig configures macOS-native sandbox (sandbox-exec) agent
+// sandboxing, enforced via the leash library (internal/harness).
 type SandboxConfig struct {
-	MaxLifetime Duration `yaml:"max_lifetime"`
-	AllowRead   []string `yaml:"allow_read"`
-	AllowWrite  []string `yaml:"allow_write"`
-	AllowExec   []string `yaml:"allow_exec"`
+	MaxLifetime Duration          `yaml:"max_lifetime"` // parsed, still unread anywhere — pre-existing, out of scope
+	AllowRead   []string          `yaml:"allow_read"`
+	AllowWrite  []string          `yaml:"allow_write"`
+	AllowExec   []string          `yaml:"allow_exec"`
+	ExtraEnv    map[string]string `yaml:"extra_env"` // was silently ignored (non-strict YAML) before leash
+	ProxyEnv    []string          `yaml:"proxy_env"` // same
 }
 
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {

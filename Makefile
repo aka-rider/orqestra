@@ -2,7 +2,7 @@
 .PHONY: build run test test-unit test-integration lint clean e2e sandbox-image test-sandbox test-fuzzy
 
 THIS_MAKEFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
-ORQESTRA := "$(dir $(THIS_MAKEFILE_PATH))orqestra"
+ORQESTRA := "$(dir $(THIS_MAKEFILE_PATH))bin/orqestra"
 
 
 build:
@@ -30,7 +30,7 @@ test-integration:
 
 # Requires: macOS with sandbox-exec.
 test-sandbox:
-	go test -tags 'darwin integration' -race -v ./internal/sandbox/...
+	go test -tags 'darwin integration' -race -v ./internal/harness/...
 
 # Live e2e (real claude + API) is NOT yet implemented — there is no TestE2E, so
 # the old `go test -run TestE2E` recipe passed by vacuity (zero tests = green).
@@ -56,6 +56,6 @@ test-all: test test-integration test-sandbox test-e2e lint
 
 
 clean:
-	rm -f $(BINARY)
+	rm -rf $(dir $(THIS_MAKEFILE_PATH))bin
 
 

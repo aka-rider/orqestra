@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/xiii/orqestra/internal/harness"
-	"github.com/xiii/orqestra/internal/sandbox"
 )
 
 // countingSink is a concurrency-safe harness.Sink for tests. Observe is called
@@ -74,13 +73,6 @@ func driveReplayRun(t *testing.T, grace time.Duration) (returned bool, events in
 		t.Fatalf("write recording: %v", err)
 	}
 
-	// Exec-allow-list the stub's directory (Exec requires a dir).
-	prof := sandbox.NewToolProfile("replayclaude", home)
-	if err := prof.Allow(binDir, sandbox.Exec); err != nil {
-		t.Fatalf("allow stub exec: %v", err)
-	}
-	snap := prof.Snapshot()
-
 	spec := harness.ProcessSpec{
 		Model:   harness.ModelSpec{Provider: "native"}, // no model-env override
 		Binary:  stub,
@@ -89,7 +81,7 @@ func driveReplayRun(t *testing.T, grace time.Duration) (returned bool, events in
 		Sandbox: harness.SandboxConfig{
 			RepoPath: workspace,
 			Writable: true,
-			Profiles: []sandbox.Snapshot{snap},
+			Execs:    []string{binDir},
 		},
 	}
 

@@ -1,3 +1,5 @@
+//go:build darwin
+
 package main
 
 import (
@@ -96,7 +98,7 @@ func buildGoldenEngine(t *testing.T) *goldenEngineResult {
 	if err != nil {
 		t.Fatalf("load fixture config: %v", err)
 	}
-	engine := buildEngine(cfg, nil, "/fixture/repo")
+	engine := buildEngine(cfg, "/fixture/repo")
 
 	conflictSpec, err := engine.Specs.IntegratorConflictSpecFn("/fixture/worktree")
 	if err != nil {

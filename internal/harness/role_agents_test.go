@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/xiii/orqestra/internal/harness"
-	"github.com/xiii/orqestra/internal/sandbox"
 )
 
 // roleSink is a concurrency-safe harness.Sink (Observe runs on harness.Run's
@@ -99,11 +98,6 @@ func driveReadOnlyRoleRun(t *testing.T, role string) (events int, sessionID stri
 		t.Fatalf("write recording: %v", err)
 	}
 
-	prof := sandbox.NewToolProfile("replayclaude", home)
-	if err := prof.Allow(binDir, sandbox.Exec); err != nil {
-		t.Fatalf("allow stub exec: %v", err)
-	}
-
 	spec := harness.ProcessSpec{
 		Model:   harness.ModelSpec{Provider: "native"},
 		Binary:  stub,
@@ -112,7 +106,7 @@ func driveReadOnlyRoleRun(t *testing.T, role string) (events int, sessionID stri
 		Sandbox: harness.SandboxConfig{
 			RepoPath: workspace,
 			Writable: false, // read-only role (researcher / critic)
-			Profiles: []sandbox.Snapshot{prof.Snapshot()},
+			Execs:    []string{binDir},
 		},
 	}
 

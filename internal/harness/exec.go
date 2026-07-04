@@ -11,8 +11,6 @@ import (
 	"os/exec"
 	"syscall"
 	"time"
-
-	"github.com/xiii/orqestra/internal/sandbox"
 )
 
 // OutputMode controls the output format passed to the claude CLI.
@@ -139,96 +137,21 @@ func Run(ctx context.Context, spec ProcessSpec, in <-chan Message, sink Sink) (R
 		return RunResult{}, fmt.Errorf("exec: build spec args: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, binary, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	// Group-kill on cancel (J32/J15): exec.CommandContext's default Cancel only
-	// kills cmd.Process (the direct child / process-group leader, often
-	// sandbox-exec). If claude spawns node/bash/MCP grandchildren, they inherit
-	// the group set up by Setpgid above; killing only the leader leaves them
-	// holding stdout open forever — parseStream never sees EOF and Run wedges
-	// (the very hang this contract promises not to cause, see :98-100). SIGKILL
-	// the whole process group instead. Cancel only fires after a successful
-	// Start, so cmd.Process is guaranteed non-nil here; the nil check is
-	// belt-and-braces.
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrProcessDone) {
-				return nil // already gone — nothing left to kill
-			}
-			return fmt.Errorf("exec: kill process group %d: %w", cmd.Process.Pid, err)
-		}
-		return nil
-	}
-	// Bound cmd.Wait(): even after the group kill above, cmd.Wait can block on
-	// I/O held by an orphan that hasn't finished dying yet. WaitDelay forces
-	// the pipes closed after this grace period so Wait always returns.
-	cmd.WaitDelay = 5 * time.Second
-
-	env, err := buildEnvFromSpec(spec)
-	if err != nil {
-		return RunResult{}, fmt.Errorf("exec: build env: %w", err)
-	}
-	cmd.Env = env
-
-	if spec.WorkDir != "" {
-		cmd.Dir = spec.WorkDir
-	}
-
-	// Sandbox wrapping (before opening pipes).
-	var sb *sandbox.Sandbox
-	if spec.Sandbox.RepoPath != "" || len(spec.Sandbox.Profiles) > 0 {
-		mEnv, mEnvErr := buildModelEnvFromSpec(spec)
-		if mEnvErr != nil {
-			return RunResult{}, fmt.Errorf("exec: sandbox model env: %w", mEnvErr)
-		}
-		sb, err = sandbox.New(sandbox.Config{
-			RepoPath:     spec.Sandbox.RepoPath,
-			WorktreePath: spec.Sandbox.WorktreePath,
-			RepoWritable: spec.Sandbox.Writable,
-			Profiles:     spec.Sandbox.Profiles,
-			HarnessEnv:   append(mEnv, spec.Sandbox.Env...),
-		})
-		if err != nil {
-			return RunResult{}, fmt.Errorf("exec: sandbox: %w", err)
-		}
-		if err := sb.Wrap(cmd); err != nil {
-			_ = sb.Close()
-			return RunResult{}, fmt.Errorf("exec: sandbox wrap: %w", err)
-		}
-	}
-
-	var stdinPipe io.WriteCloser
-	if hasInputPlane {
-		stdinPipe, err = cmd.StdinPipe()
-		if err != nil {
-			if sb != nil {
-				_ = sb.Close()
-			}
-			return RunResult{}, fmt.Errorf("exec: stdin pipe: %w", err)
-		}
-	}
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		if sb != nil {
-			_ = sb.Close()
-		}
-		return RunResult{}, fmt.Errorf("exec: stdout pipe: %w", err)
-	}
-
 	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
-
-	if err := cmd.Start(); err != nil {
-		if sb != nil {
-			_ = sb.Close()
+	var proc *runningProcess
+	if spec.Sandbox.RepoPath != "" {
+		proc, err = startSandboxed(ctx, spec, binary, args, hasInputPlane, &stderrBuf)
+	} else {
+		var env []string
+		if env, err = buildEnvFromSpec(spec); err == nil {
+			proc, err = startDirect(ctx, spec, binary, args, env, hasInputPlane, &stderrBuf)
 		}
+	}
+	if err != nil {
 		return RunResult{}, fmt.Errorf("exec: start: %w", err)
 	}
+
+	stdout, stdinPipe := proc.stdout, proc.stdin
 
 	// runDone is closed when the process exits. The stdin writer goroutine
 	// selects on both in and runDone so it exits cleanly on process termination.
@@ -329,12 +252,17 @@ func Run(ctx context.Context, spec ProcessSpec, in <-chan Message, sink Sink) (R
 		close(sinkCh)
 		<-sinkDone
 	}
-	if sb != nil {
-		_ = sb.Close()
+
+	// drainStdout, when set (sandboxed path only), MUST run after parseStream
+	// returns and before wait() — see startSandboxed's doc comment
+	// (exec_sandbox.go) for the io.Pipe deadlock this prevents on an early
+	// parseStream return. No-op for startDirect (drainStdout is nil there).
+	if proc.drainStdout != nil {
+		proc.drainStdout()
 	}
 
 	// Reap the process.
-	cmdErr := cmd.Wait()
+	cmdErr := proc.wait() // was cmd.Wait()
 
 	if ctx.Err() != nil {
 		return RunResult{
@@ -368,15 +296,34 @@ func Run(ctx context.Context, spec ProcessSpec, in <-chan Message, sink Sink) (R
 	}
 
 	if cmdErr != nil {
-		code := exitCode(cmdErr)
+		if _, ok := cmdErr.(*exec.ExitError); ok {
+			code := exitCode(cmdErr)
+			return RunResult{
+				Output:       rawResult,
+				SessionID:    sessionID,
+				PlanFilePath: planFilePath,
+				Usage:        usage,
+				ExitCode:     code,
+				Stderr:       stderrBuf.String(),
+			}, &NonZeroExitError{Code: code, Stderr: stderrBuf.String()}
+		}
+		// Not an *exec.ExitError: unreachable for startDirect (Start's own
+		// failures already short-circuited above, and by the time we reach
+		// here ctx.Err() == nil, stdin is already closed, and stdout is
+		// already fully drained by parseStream, so cmd.WaitDelay's forced-
+		// pipe-closure path — the only way Wait returns a non-ExitError here
+		// — cannot trigger). Reachable for startSandboxed — leash.Execute
+		// conflates setup failures (bad grant, missing sandbox-exec, LookPath
+		// failure) with os/exec Start failures into one non-ExitError return,
+		// since it owns Start+Wait internally. Wrap plainly instead of
+		// claiming the subprocess ran and exited non-zero.
 		return RunResult{
 			Output:       rawResult,
 			SessionID:    sessionID,
 			PlanFilePath: planFilePath,
 			Usage:        usage,
-			ExitCode:     code,
 			Stderr:       stderrBuf.String(),
-		}, &NonZeroExitError{Code: code, Stderr: stderrBuf.String()}
+		}, fmt.Errorf("exec: sandbox: %w", cmdErr)
 	}
 
 	return RunResult{
@@ -385,6 +332,67 @@ func Run(ctx context.Context, spec ProcessSpec, in <-chan Message, sink Sink) (R
 		PlanFilePath: planFilePath,
 		Usage:        usage,
 	}, nil
+}
+
+// startDirect starts binary as a plain, unsandboxed subprocess — moved out
+// of Run's body verbatim, not redesigned (leash has no unsandboxed mode, so
+// this is the only implementation for SandboxConfig{}'s zero-value "direct
+// execution" contract; exec_cancel_test.go exercises it directly, no build
+// tag, and must keep behaving identically).
+func startDirect(ctx context.Context, spec ProcessSpec, binary string, args, env []string, hasInputPlane bool, stderrBuf *bytes.Buffer) (*runningProcess, error) {
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// Group-kill on cancel (J32/J15): exec.CommandContext's default Cancel only
+	// kills cmd.Process (the direct child / process-group leader, often
+	// sandbox-exec). If claude spawns node/bash/MCP grandchildren, they inherit
+	// the group set up by Setpgid above; killing only the leader leaves them
+	// holding stdout open forever — parseStream never sees EOF and Run wedges
+	// (the very hang this contract promises not to cause, see Run's doc
+	// comment above). SIGKILL the whole process group instead. Cancel only
+	// fires after a successful Start, so cmd.Process is guaranteed non-nil
+	// here; the nil check is belt-and-braces.
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrProcessDone) {
+				return nil // already gone — nothing left to kill
+			}
+			return fmt.Errorf("exec: kill process group %d: %w", cmd.Process.Pid, err)
+		}
+		return nil
+	}
+	// Bound cmd.Wait(): even after the group kill above, cmd.Wait can block on
+	// I/O held by an orphan that hasn't finished dying yet. WaitDelay forces
+	// the pipes closed after this grace period so Wait always returns.
+	cmd.WaitDelay = 5 * time.Second
+	cmd.Env = env
+	if spec.WorkDir != "" {
+		cmd.Dir = spec.WorkDir
+	}
+
+	var stdinPipe io.WriteCloser
+	if hasInputPlane {
+		var perr error
+		if stdinPipe, perr = cmd.StdinPipe(); perr != nil {
+			return nil, fmt.Errorf("stdin pipe: %w", perr)
+		}
+	}
+
+	stdout, serr := cmd.StdoutPipe()
+	if serr != nil {
+		return nil, fmt.Errorf("stdout pipe: %w", serr)
+	}
+
+	cmd.Stderr = stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start: %w", err)
+	}
+
+	return &runningProcess{stdout: stdout, stdin: stdinPipe, wait: cmd.Wait}, nil
 }
 
 // exitCode extracts the exit code from an *exec.ExitError; returns 1 otherwise.

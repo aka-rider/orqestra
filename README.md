@@ -357,7 +357,7 @@ Yes, but.
 
 ```bash
 make test
-go test ./internal/sandbox/ -tags integration -run TestClaudeCLI_InSandbox -v
+go test ./internal/harness/ -tags 'darwin integration' -run TestClaudeCLI_InSandbox -v
 make clean
 ```
 
@@ -368,12 +368,11 @@ cmd/orqestra/       Entry point and CLI flag handling
 internal/
   agent/            Agent-facing contracts, raw plans, validation, and session helpers
   config/           YAML config loading, embedded defaults, and validation
-  harness/          Claude CLI runners, stream parsing, model env routing, and usage stats
+  harness/          Claude CLI runners, stream parsing, model env routing, leash-backed seatbelt sandboxing, and usage stats
   mcp/              AskUserQuestion MCP bridge between Claude Code and Orqestra
   orchestrator/     Pipeline engine, gates, events, token usage, and budget guard
   plan/             Markdown plan artifacts and plan history adapters
   project/          Project root detection and initialization
-  sandbox/          macOS sandbox-exec profile generation and enforcement
   scheduler/        Experimental DAG execution support
   tui/              Bubble Tea terminal UI
   worktree/         Git worktree lifecycle management
