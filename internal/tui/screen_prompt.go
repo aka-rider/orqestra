@@ -106,7 +106,7 @@ func (s PromptScreen) Update(msg tea.Msg) (PromptScreen, tea.Cmd) {
 	// micro-key, never the Submit binding). Other enters already returned above.
 	if keyMsg.Code == tea.KeyEnter {
 		off := s.input.CursorOffset()
-		s.input.Model = s.input.Model.ReplaceRange(off, off, "\n")
+		s.input.Model, _ = s.input.Model.ReplaceRange(off, off, "\n") // safe: cursor offset always valid
 		return s, nil
 	}
 
@@ -181,7 +181,7 @@ func (s PromptScreen) handleFilePickerKey(msg tea.KeyPressMsg) (PromptScreen, te
 		s.fpActive = false
 		// Remove '@' + query from the buffer.
 		removeEnd := s.fpAtStart + 1 + len(s.fpQuery)
-		s.input.Model = s.input.Model.ReplaceRange(s.fpAtStart, removeEnd, "")
+		s.input.Model, _ = s.input.Model.ReplaceRange(s.fpAtStart, removeEnd, "") // safe: range derived from cursor
 		s.fpQuery = ""
 		return s, nil
 
@@ -192,7 +192,7 @@ func (s PromptScreen) handleFilePickerKey(msg tea.KeyPressMsg) (PromptScreen, te
 		if sel != "" {
 			// Replace '@' + query with the selected path.
 			removeEnd := s.fpAtStart + 1 + len(s.fpQuery)
-			s.input.Model = s.input.Model.ReplaceRange(s.fpAtStart, removeEnd, sel+" ")
+			s.input.Model, _ = s.input.Model.ReplaceRange(s.fpAtStart, removeEnd, sel+" ") // safe: range derived from cursor
 		}
 		s.fpQuery = ""
 		return s, nil
@@ -215,14 +215,14 @@ func (s PromptScreen) handleFilePickerKey(msg tea.KeyPressMsg) (PromptScreen, te
 			runes := []rune(s.fpQuery)
 			lastRuneLen := len(s.fpQuery) - len(string(runes[:len(runes)-1]))
 			cursor := s.input.CursorOffset()
-			s.input.Model = s.input.Model.ReplaceRange(cursor-lastRuneLen, cursor, "")
+			s.input.Model, _ = s.input.Model.ReplaceRange(cursor-lastRuneLen, cursor, "") // safe: range derived from cursor
 			s.fpQuery = string(runes[:len(runes)-1])
 			s.fp.refilter(s.fpQuery)
 		} else {
 			// No query: remove '@' from buffer and deactivate.
 			s.fp.stopScan()
 			s.fpActive = false
-			s.input.Model = s.input.Model.ReplaceRange(s.fpAtStart, s.fpAtStart+1, "")
+			s.input.Model, _ = s.input.Model.ReplaceRange(s.fpAtStart, s.fpAtStart+1, "") // safe: range derived from cursor
 		}
 		return s, nil
 

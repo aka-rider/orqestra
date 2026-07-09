@@ -9,6 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 
+	"rune/pkg/editor/display"
 	"rune/pkg/ui/components/textedit"
 	"rune/pkg/ui/styles"
 )
@@ -150,14 +151,14 @@ func (p PromptInput) Update(msg tea.Msg) (PromptInput, tea.Cmd) {
 				// of this chip's sentinel, remove the entire chip.
 				if cursor > c.start && cursor <= c.end {
 					delete(p.pastes, c.id)
-					p.Model = p.Model.ReplaceRange(c.start, c.end, "")
+					p.Model, _ = p.Model.ReplaceRange(c.start, c.end, "") // safe: range derived from live buffer scan
 					return p, nil
 				}
 			case km.Code == tea.KeyDelete:
 				// Delete removes char at cursor; if cursor is on any sentinel byte, remove chip.
 				if cursor >= c.start && cursor < c.end {
 					delete(p.pastes, c.id)
-					p.Model = p.Model.ReplaceRange(c.start, c.end, "")
+					p.Model, _ = p.Model.ReplaceRange(c.start, c.end, "") // safe: range derived from live buffer scan
 					return p, nil
 				}
 			default:
@@ -188,9 +189,9 @@ func (p PromptInput) handlePaste(content string) (PromptInput, tea.Cmd) {
 	lines := strings.Count(content, "\n") + 1
 	if lines <= pasteThreshold {
 		off := p.CursorOffset()
-		p.Model = p.Model.ReplaceRange(off, off, content)
+		p.Model, _ = p.Model.ReplaceRange(off, off, content) // safe: cursor offset always valid
 		if utf8.RuneCountInString(content) != len(content) {
-			p.Model = p.Model.ReplaceRange(off+len(content), off+len(content), "")
+			p.Model, _ = p.Model.ReplaceRange(off+len(content), off+len(content), "") // safe: cursor fixup
 		}
 		return p, nil
 	}
@@ -199,9 +200,9 @@ func (p PromptInput) handlePaste(content string) (PromptInput, tea.Cmd) {
 	p.pastes[id] = content
 	sentinel := string(sentinelStart) + id + string(sentinelEnd)
 	off := p.CursorOffset()
-	p.Model = p.Model.ReplaceRange(off, off, sentinel)
+	p.Model, _ = p.Model.ReplaceRange(off, off, sentinel) // safe: cursor offset always valid
 	// Fix cursor: sentinel runes are multi-byte, so runeCount != byteLen.
-	p.Model = p.Model.ReplaceRange(off+len(sentinel), off+len(sentinel), "")
+	p.Model, _ = p.Model.ReplaceRange(off+len(sentinel), off+len(sentinel), "") // safe: cursor fixup
 	return p, nil
 }
 
@@ -279,84 +280,18 @@ func (p PromptInput) View() string {
 			Render(strings.Join(rendered, "\n"))
 	}
 
+	// Delegate to textedit's render pipeline with a chip-aware cell builder.
+	// RenderView handles: cursor overlay, selection overlay, horizontal scroll,
+	// tilde fill, dim-when-unfocused, and outer dimension wrap.
 	chips := p.findChips()
-	snap := p.Snapshot()
-	vp := p.Viewport()
-	contentH := p.ContentHeight()
-
-	lines := snap.Slice(vp.TopRow, contentH)
-
-	cursorStyle := lipgloss.NewStyle().Reverse(true)
-	selStyle := p.st.Selection
-	cursorOffsets := make(map[int]bool)
-	var selections []textedit.SelInterval
-
-	if p.Focused() {
-		for off := range p.CursorOffsets() {
-			cursorOffsets[off] = true
+	cellBuilder := func(sp display.DisplaySpan) []textedit.Cell {
+		if cr := chipForSpan(sp.BufferStart, chips); cr != nil {
+			label := pillLabelFor(cr.id, p.pastes)
+			return chipCells(label, cr.start, pillStyle)
 		}
-		selections = p.Selections()
+		return textedit.SpanToCells(sp, lipgloss.NewStyle())
 	}
-
-	var renderedLines []string
-	for i, l := range lines {
-		var lineCells []textedit.Cell
-		for _, sp := range l.Spans {
-			if cr := chipForSpan(sp.BufferStart, chips); cr != nil {
-				// Render a styled pill label in place of the sentinel bytes.
-				label := pillLabelFor(cr.id, p.pastes)
-				lineCells = append(lineCells, chipCells(label, cr.start, pillStyle)...)
-			} else {
-				lineCells = append(lineCells, textedit.SpanToCells(sp, lipgloss.NewStyle())...)
-			}
-		}
-
-		// EOL cursor cell.
-		if p.Focused() {
-			lineEnd := 0
-			if len(l.Spans) > 0 {
-				last := l.Spans[len(l.Spans)-1]
-				lineEnd = last.BufferEnd
-			}
-			for off := range cursorOffsets {
-				if off == lineEnd {
-					isLastVisible := i+1 >= len(lines) || lines[i+1].ModelLine != l.ModelLine
-					if isLastVisible {
-						lineCells = append(lineCells, textedit.Cell{
-							Rune:      ' ',
-							Width:     1,
-							Style:     lipgloss.NewStyle(),
-							BufOffset: lineEnd,
-						})
-					}
-					break
-				}
-			}
-		}
-
-		lineCells = textedit.SliceCells(lineCells, vp.ScrollCol, p.Width())
-		if p.Focused() && (len(cursorOffsets) > 0 || len(selections) > 0) {
-			textedit.ApplyOverlays(lineCells, cursorOffsets, selections)
-		}
-		// matchStyle/activeMatchStyle are no-ops here: the prompt input has no
-		// search-match highlighting (mirrors rune's own no-search callers).
-		renderedLines = append(renderedLines, textedit.CellsToString(lineCells, selStyle, cursorStyle, lipgloss.NewStyle(), lipgloss.NewStyle(), false))
-	}
-
-	for len(renderedLines) < contentH {
-		renderedLines = append(renderedLines, "~")
-	}
-
-	composed := strings.Join(renderedLines, "\n")
-	if !p.Focused() {
-		composed = lipgloss.NewStyle().Faint(true).Render(composed)
-	}
-	return lipgloss.NewStyle().
-		MaxWidth(p.Width()).
-		MaxHeight(p.Height()).
-		Width(p.Width()).
-		Height(p.Height()).
-		Render(composed)
+	return p.Model.RenderView(cellBuilder, nil)
 }
 
 // chipForSpan returns the chipRange whose sentinel byte range contains bufStart, or nil.

@@ -16,7 +16,9 @@
       "Bash(go list *)",
       "Bash(xargs ls -la)",
       "Bash(xargs ls -lt)",
-      "Read(//Users/xiii/.claude/agents/**)"
+      "Read(//Users/xiii/.claude/agents/**)",
+      "mcp__MCP_DOCKER__browser_navigate",
+      "mcp__MCP_DOCKER__browser_close"
     ]
   }
 }
